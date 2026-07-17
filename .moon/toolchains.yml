@@ -1,0 +1,17 @@
+$schema: ./cache/schemas/toolchains.json
+
+javascript:
+  dependencyVersionFormat: "workspace"
+  inferTasksFromScripts: false
+  packageManager: bun
+  syncProjectWorkspaceDependencies: true
+
+bun:
+  version: latest
+
+typescript:
+  routeOutDirToCache: true
+  syncProjectReferences: true
+  includeProjectReferenceSources: false
+  pruneProjectReferences: true
+

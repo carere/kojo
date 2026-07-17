@@ -1,0 +1,21 @@
+# moon
+.moon/cache
+.moon/docker
+
+# dependencies
+node_modules
+
+# platform specifics
+.DS_Store
+
+# cache
+*.tsbuildinfo
+.tanstack
+
+# environment
+.env*
+!**/.env.example
+
+# build
+dist
+

@@ -1,0 +1,42 @@
+branch_whitelist = ["main"]
+monorepo_version_separator = "@"
+pre_bump_hooks = [
+  "bun pm version {{version}} --no-git-tag-version",
+  "git add package.json",
+]
+pre_package_bump_hooks = [
+  "bun pm version {{version}} --no-git-tag-version",
+  "git add package.json",
+]
+post_bump_hooks = ["git push origin HEAD:$GITHUB_REF_NAME", "git push --tags"]
+
+[commit_types.build]
+bump_patch = true
+
+[commit_types.chore]
+bump_patch = true
+
+[commit_types.perf]
+bump_patch = true
+
+[commit_types.refactor]
+bump_patch = true
+
+[commit_types.revert]
+bump_patch = true
+
+[commit_types.style]
+bump_patch = true
+
+[monorepo]
+resolver = "Npm"
+
+[monorepo.packages]
+cli = { path = "apps/cli", public_api = false }
+visualizer = { path = "apps/visualizer", public_api = false }
+domain = { path = "packages/domain", public_api = false }
+
+[[changelog.authors]]
+signature = "abatan.k@gmail.com"
+username = "carere"
+

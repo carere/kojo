@@ -1,0 +1,13 @@
+$schema: "../../.moon/cache/schemas/project.json"
+
+tasks:
+  test:
+    command: bun test
+    description: Run domain tests
+    inputs:
+      - "@group(configs)"
+      - "@group(sources)"
+      - "@group(tests)"
+      - "@group(workspace)"
+    type: test
+

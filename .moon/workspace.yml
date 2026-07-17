@@ -1,0 +1,11 @@
+$schema: ./cache/schemas/workspace.json
+
+projects:
+  globs:
+    - "apps/*"
+    - "packages/*"
+
+vcs:
+  defaultBranch: "main"
+  provider: "github"
+

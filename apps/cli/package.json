@@ -1,0 +1,18 @@
+{
+  "name": "@kojo/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "kojo": "./main.ts"
+  },
+  "dependencies": {
+    "@effect/platform-bun": "4.0.0-beta.98",
+    "@kojo/domain": "workspace:*",
+    "effect": "4.0.0-beta.98"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "latest"
+  }
+}

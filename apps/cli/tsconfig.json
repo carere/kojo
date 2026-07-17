@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["bun"],
+    "outDir": "../../.moon/cache/types/apps/cli"
+  },
+  "include": ["src/**/*", "tests/**/*", "main.ts"],
+  "references": [
+    {
+      "path": "../../packages/domain"
+    }
+  ]
+}

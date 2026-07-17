@@ -1,0 +1,28 @@
+$schema: "../../.moon/cache/schemas/project.json"
+
+tasks:
+  serve:
+    command: bun run apps/cli/main.ts serve
+    description: Start the Kojo webhook and visualizer server
+    options:
+      runFromWorkspaceRoot: true
+    preset: server
+
+  delivery:
+    command: bun run apps/cli/main.ts delivery
+    description: Run the delivery workflow directly
+    options:
+      runFromWorkspaceRoot: true
+    preset: utility
+
+  test:
+    command: bun test
+    description: Run CLI tests
+    inputs:
+      - "@group(configs)"
+      - "@group(sources)"
+      - "@group(tests)"
+      - "@group(workspace)"
+      - "project://domain?group=configs"
+      - "project://domain?group=sources"
+    type: test

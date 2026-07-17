@@ -1,0 +1,23 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowJs": true,
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
+    "exactOptionalPropertyTypes": true,
+    "stripInternal": true,
+    "lib": ["esnext", "dom", "dom.iterable"],
+    "types": ["node", "vite/client"],
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+    "outDir": "../../.moon/cache/types/apps/visualizer"
+  },
+  "include": ["../../packages/domain/src/**/*", "src/**/*", "*.ts", "*.tsx"],
+  "references": [
+    {
+      "path": "../../packages/domain"
+    }
+  ]
+}
