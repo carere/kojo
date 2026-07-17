@@ -1,0 +1,994 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="A research-backed explanation of software factories and their agentic extension."
+    />
+    <title>Software Factory — Research Report</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #161616;
+        --muted: #66625c;
+        --paper: #f7f5f0;
+        --card: #fffdfa;
+        --line: #d9d4cb;
+        --soft: #ebe7de;
+        --accent: #d6502d;
+        --accent-soft: #f8e5dd;
+        --positive: #1d684b;
+        --positive-soft: #e2f0e9;
+        --radius: 18px;
+        --shadow: 0 18px 55px rgb(32 26 20 / 8%);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at 86% 4%, rgb(214 80 45 / 10%), transparent 26rem),
+          var(--paper);
+        color: var(--ink);
+        font-family:
+          Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        line-height: 1.65;
+        text-rendering: optimizeLegibility;
+      }
+
+      a {
+        color: inherit;
+        text-decoration-color: var(--accent);
+        text-decoration-thickness: 1px;
+        text-underline-offset: 0.2em;
+      }
+
+      a:hover {
+        color: var(--accent);
+      }
+
+      code {
+        border: 1px solid var(--line);
+        border-radius: 0.35rem;
+        background: var(--soft);
+        padding: 0.08rem 0.35rem;
+        font-size: 0.9em;
+      }
+
+      .shell {
+        width: min(1180px, calc(100% - 40px));
+        margin: 0 auto;
+      }
+
+      .masthead {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 2rem;
+        padding: 28px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .brand,
+      .eyebrow {
+        margin: 0;
+        font-size: 0.73rem;
+        font-weight: 750;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+
+      .brand-mark {
+        display: inline-grid;
+        width: 2rem;
+        height: 2rem;
+        place-items: center;
+        border-radius: 50%;
+        background: var(--ink);
+        color: var(--card);
+        font-size: 0.75rem;
+        letter-spacing: 0;
+      }
+
+      .masthead a {
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1.5fr) minmax(240px, 0.5fr);
+        gap: clamp(2.5rem, 7vw, 7rem);
+        padding: clamp(64px, 10vw, 128px) 0 76px;
+        align-items: end;
+      }
+
+      .eyebrow {
+        color: var(--accent);
+      }
+
+      h1,
+      h2,
+      h3 {
+        margin-top: 0;
+        line-height: 1.1;
+        letter-spacing: -0.035em;
+      }
+
+      h1 {
+        max-width: 12ch;
+        margin-bottom: 1.5rem;
+        font-size: clamp(4rem, 10vw, 8.5rem);
+        font-weight: 690;
+      }
+
+      h2 {
+        margin-bottom: 1rem;
+        font-size: clamp(2rem, 4.4vw, 3.9rem);
+        font-weight: 680;
+      }
+
+      h3 {
+        margin-bottom: 0.7rem;
+        font-size: 1.2rem;
+        font-weight: 720;
+        letter-spacing: -0.02em;
+      }
+
+      .hero-summary {
+        max-width: 68ch;
+        margin: 0;
+        color: var(--muted);
+        font-size: clamp(1.05rem, 2vw, 1.3rem);
+      }
+
+      .meta {
+        margin: 0;
+        border-top: 1px solid var(--line);
+      }
+
+      .meta div {
+        display: grid;
+        grid-template-columns: 6.5rem 1fr;
+        gap: 1rem;
+        padding: 0.8rem 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .meta dt,
+      .meta dd {
+        margin: 0;
+        font-size: 0.8rem;
+      }
+
+      .meta dt {
+        color: var(--muted);
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .definition {
+        display: grid;
+        grid-template-columns: 0.35fr 1.65fr;
+        gap: clamp(2rem, 6vw, 6rem);
+        margin-bottom: 72px;
+        padding: clamp(32px, 5vw, 58px);
+        border: 1px solid var(--ink);
+        border-radius: var(--radius);
+        background: var(--ink);
+        color: var(--card);
+        box-shadow: var(--shadow);
+      }
+
+      .definition .eyebrow {
+        color: #ef9b82;
+      }
+
+      .definition blockquote {
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: clamp(1.6rem, 3.5vw, 3rem);
+        line-height: 1.28;
+        letter-spacing: -0.025em;
+      }
+
+      .section {
+        padding: 76px 0;
+        border-top: 1px solid var(--line);
+      }
+
+      .section-heading {
+        display: grid;
+        grid-template-columns: minmax(0, 0.8fr) minmax(300px, 1.2fr);
+        gap: clamp(2rem, 7vw, 7rem);
+        margin-bottom: 42px;
+      }
+
+      .section-heading p {
+        max-width: 66ch;
+        margin: 0;
+        color: var(--muted);
+        font-size: 1.05rem;
+      }
+
+      .hierarchy {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 1px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--line);
+        box-shadow: var(--shadow);
+      }
+
+      .hierarchy article {
+        min-height: 220px;
+        padding: 28px;
+        background: var(--card);
+      }
+
+      .step-number {
+        display: inline-grid;
+        width: 2rem;
+        height: 2rem;
+        margin-bottom: 3.5rem;
+        place-items: center;
+        border: 1px solid var(--line);
+        border-radius: 50%;
+        color: var(--muted);
+        font-size: 0.75rem;
+        font-weight: 750;
+      }
+
+      .hierarchy p,
+      .actor p,
+      .panel p {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .actors {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 18px;
+      }
+
+      .actor {
+        padding: 30px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--card);
+      }
+
+      .actor .tag {
+        display: inline-block;
+        margin-bottom: 2.5rem;
+        padding: 0.32rem 0.65rem;
+        border-radius: 999px;
+        background: var(--soft);
+        font-size: 0.68rem;
+        font-weight: 760;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .actor:nth-child(2) .tag {
+        background: var(--accent-soft);
+        color: #8d2e15;
+      }
+
+      .actor:nth-child(3) .tag {
+        background: var(--positive-soft);
+        color: var(--positive);
+      }
+
+      .flow {
+        display: grid;
+        grid-template-columns: repeat(8, minmax(120px, 1fr));
+        gap: 10px;
+        overflow-x: auto;
+        padding: 6px 2px 18px;
+        scrollbar-color: var(--line) transparent;
+      }
+
+      .flow div {
+        position: relative;
+        min-height: 116px;
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--card);
+        font-size: 0.86rem;
+        font-weight: 690;
+      }
+
+      .flow div:not(:last-child)::after {
+        position: absolute;
+        top: 50%;
+        right: -11px;
+        z-index: 1;
+        width: 11px;
+        height: 1px;
+        background: var(--accent);
+        content: "";
+      }
+
+      .flow small {
+        display: block;
+        margin-bottom: 0.5rem;
+        color: var(--accent);
+        font-size: 0.65rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .note {
+        margin-top: 22px;
+        padding-left: 18px;
+        border-left: 3px solid var(--accent);
+        color: var(--muted);
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--card);
+      }
+
+      table {
+        width: 100%;
+        min-width: 720px;
+        border-collapse: collapse;
+      }
+
+      th,
+      td {
+        padding: 20px 22px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        color: var(--muted);
+        font-size: 0.69rem;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+      }
+
+      tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .assessment,
+      .requirements {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 20px;
+      }
+
+      .panel {
+        padding: 32px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--card);
+      }
+
+      .panel ul,
+      .adoption ol {
+        margin: 1.25rem 0 0;
+        padding-left: 1.25rem;
+      }
+
+      .panel li,
+      .adoption li {
+        margin: 0.7rem 0;
+        padding-left: 0.35rem;
+      }
+
+      .adoption {
+        counter-reset: adoption;
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 14px;
+      }
+
+      .adoption article {
+        min-height: 230px;
+        padding: 26px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--card);
+      }
+
+      .adoption article::before {
+        display: block;
+        margin-bottom: 3rem;
+        color: var(--accent);
+        content: "0" counter(adoption);
+        counter-increment: adoption;
+        font-size: 0.72rem;
+        font-weight: 780;
+        letter-spacing: 0.1em;
+      }
+
+      .adoption p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      .sources {
+        display: grid;
+        gap: 1px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--line);
+      }
+
+      .source {
+        display: grid;
+        grid-template-columns: 2rem minmax(180px, 0.6fr) 1.4fr;
+        gap: 1.25rem;
+        padding: 20px 24px;
+        background: var(--card);
+      }
+
+      .source-index {
+        color: var(--accent);
+        font-weight: 760;
+      }
+
+      .source p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .conclusion {
+        padding: 84px 0 100px;
+        text-align: center;
+      }
+
+      .conclusion p {
+        max-width: 28ch;
+        margin: 1.5rem auto 0;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: clamp(1.8rem, 4vw, 3.5rem);
+        line-height: 1.3;
+        letter-spacing: -0.025em;
+      }
+
+      footer {
+        display: flex;
+        justify-content: space-between;
+        gap: 1.5rem;
+        padding: 28px 0 40px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 0.75rem;
+      }
+
+      @media (max-width: 880px) {
+        .hero,
+        .definition,
+        .section-heading {
+          grid-template-columns: 1fr;
+        }
+
+        .hero {
+          align-items: start;
+        }
+
+        .meta {
+          max-width: 32rem;
+        }
+
+        .hierarchy,
+        .actors,
+        .assessment,
+        .requirements {
+          grid-template-columns: 1fr;
+        }
+
+        .adoption {
+          grid-template-columns: repeat(2, 1fr);
+        }
+
+        .source {
+          grid-template-columns: 2rem 1fr;
+        }
+
+        .source p {
+          grid-column: 2;
+        }
+      }
+
+      @media (max-width: 560px) {
+        .shell {
+          width: min(100% - 28px, 1180px);
+        }
+
+        .masthead {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        h1 {
+          font-size: clamp(3.5rem, 20vw, 5.5rem);
+        }
+
+        .definition {
+          padding: 28px;
+        }
+
+        .adoption {
+          grid-template-columns: 1fr;
+        }
+
+        footer {
+          flex-direction: column;
+        }
+      }
+
+      @media print {
+        body {
+          background: white;
+        }
+
+        .shell {
+          width: 100%;
+        }
+
+        .masthead a {
+          display: none;
+        }
+
+        .hero,
+        .section,
+        .conclusion {
+          padding-top: 32px;
+          padding-bottom: 32px;
+        }
+
+        .definition,
+        .hierarchy,
+        .actor,
+        .panel,
+        .adoption article,
+        .table-wrap {
+          box-shadow: none;
+          break-inside: avoid;
+        }
+
+        a {
+          text-decoration: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="shell masthead">
+      <p class="brand"><span class="brand-mark">工</span> Kojo research</p>
+      <a href="../research/software-factory.md">Read the Markdown source →</a>
+    </header>
+
+    <main>
+      <section class="shell hero">
+        <div>
+          <p class="eyebrow">Research report · July 2026</p>
+          <h1>Software factory</h1>
+          <p class="hero-summary">
+            A practical model for turning engineering intent into validated software through
+            reusable workflows that coordinate people, agents, deterministic tools, and delivery
+            infrastructure.
+          </p>
+        </div>
+        <dl class="meta">
+          <div>
+            <dt>Subject</dt>
+            <dd>Agentic software delivery</dd>
+          </div>
+          <div>
+            <dt>Scope</dt>
+            <dd>Concept, architecture, risks</dd>
+          </div>
+          <div>
+            <dt>Primary lens</dt>
+            <dd>IndyDevDan’s workflow model</dd>
+          </div>
+          <div>
+            <dt>Reading time</dt>
+            <dd>8 minutes</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="shell definition" aria-labelledby="definition-label">
+        <p class="eyebrow" id="definition-label">Working definition</p>
+        <blockquote>
+          A software factory is a versioned, observable, policy-controlled production system that
+          turns intent into validated software through reusable, task-specific workflows.
+        </blockquote>
+      </section>
+
+      <section class="shell section" aria-labelledby="thesis-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">01 · Core thesis</p>
+            <h2 id="thesis-heading">The loop is not the system.</h2>
+          </div>
+          <p>
+            The video argues that “loop engineering” names only a retry mechanism. The meaningful
+            design object is the complete developer workflow; a portfolio of routed, reusable
+            workflows becomes the factory.
+          </p>
+        </div>
+
+        <div class="hierarchy">
+          <article>
+            <span class="step-number">01</span>
+            <h3>Feedback loop</h3>
+            <p>Retries or repairs one step when a deterministic or semantic check fails.</p>
+          </article>
+          <article>
+            <span class="step-number">02</span>
+            <h3>Developer workflow</h3>
+            <p>Coordinates planning, implementation, validation, review, and delivery for a task.</p>
+          </article>
+          <article>
+            <span class="step-number">03</span>
+            <h3>Software factory</h3>
+            <p>Selects, executes, governs, measures, and improves many specialized workflows.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="shell section" aria-labelledby="actors-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">02 · Value creation</p>
+            <h2 id="actors-heading">Three actors, different jobs.</h2>
+          </div>
+          <p>
+            Reliability comes from composition. Humans establish intent and accountability,
+            agents perform semantic work, and code enforces reproducible rules. Replacing every
+            step with an agent makes the factory slower, costlier, and harder to verify.
+          </p>
+        </div>
+
+        <div class="actors">
+          <article class="actor">
+            <span class="tag">Judgment</span>
+            <h3>Engineers</h3>
+            <p>
+              Own goals, architecture, risk decisions, exceptions, final accountability, and the
+              design of the factory itself.
+            </p>
+          </article>
+          <article class="actor">
+            <span class="tag">Reasoning</span>
+            <h3>Agents</h3>
+            <p>
+              Investigate, plan, generate, review, and repair when the work requires contextual or
+              probabilistic reasoning.
+            </p>
+          </article>
+          <article class="actor">
+            <span class="tag">Determinism</span>
+            <h3>Code &amp; tools</h3>
+            <p>
+              Format, type-check, test, scan, build, route, record, and deploy with predictable,
+              testable behavior.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="shell section" aria-labelledby="workflow-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">03 · Reference flow</p>
+            <h2 id="workflow-heading">From ticket to evidence.</h2>
+          </div>
+          <p>
+            A factory does not need this exact topology. Its defining property is that every
+            transition has an owner, an interface, evidence, and a failure path.
+          </p>
+        </div>
+
+        <div class="flow" aria-label="Example software factory workflow">
+          <div><small>Input</small>Ticket or incident</div>
+          <div><small>Route</small>Classify risk and task</div>
+          <div><small>Isolate</small>Create sandbox</div>
+          <div><small>Plan</small>Produce acceptance plan</div>
+          <div><small>Build</small>Implement change</div>
+          <div><small>Verify</small>Run objective gates</div>
+          <div><small>Decide</small>Review or escalate</div>
+          <div><small>Deliver</small>Merge, deploy, observe</div>
+        </div>
+        <p class="note">
+          Failures should return structured evidence to the responsible step. High-risk or
+          ambiguous decisions should stop at an explicit human gate.
+        </p>
+      </section>
+
+      <section class="shell section" aria-labelledby="comparison-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">04 · Boundaries</p>
+            <h2 id="comparison-heading">Related, but not equivalent.</h2>
+          </div>
+          <p>
+            “Factory” is a system-level concept. CI/CD, agents, and feedback loops are components
+            that may participate in it, but none constitutes a factory by itself.
+          </p>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Concept</th>
+                <th>Primary scope</th>
+                <th>What it does not provide alone</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Feedback loop</strong></td>
+                <td>Retry, repair, or refinement of one operation</td>
+                <td>End-to-end delivery, governance, or workflow selection</td>
+              </tr>
+              <tr>
+                <td><strong>CI/CD pipeline</strong></td>
+                <td>Build, integration, verification, and deployment</td>
+                <td>Product intent, task decomposition, implementation, or risk routing</td>
+              </tr>
+              <tr>
+                <td><strong>AI coding agent</strong></td>
+                <td>Contextual reasoning and actions toward one goal</td>
+                <td>Reproducibility, organizational policy, or complete quality evidence</td>
+              </tr>
+              <tr>
+                <td><strong>Developer workflow</strong></td>
+                <td>Execution path for one class of engineering work</td>
+                <td>Portfolio routing and factory-wide optimization</td>
+              </tr>
+              <tr>
+                <td><strong>Software factory</strong></td>
+                <td>Operating system for many governed delivery workflows</td>
+                <td>It still depends on sound goals, architecture, tests, and human ownership</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="shell section" aria-labelledby="assessment-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">05 · Assessment</p>
+            <h2 id="assessment-heading">Useful model, bounded autonomy.</h2>
+          </div>
+          <p>
+            The video’s systems framing is strong. Its claims about removing engineers from the
+            middle—and eventually from final review—require more qualification.
+          </p>
+        </div>
+
+        <div class="assessment">
+          <article class="panel">
+            <h3>What holds up</h3>
+            <ul>
+              <li>Use deterministic tools wherever behavior can be specified precisely.</li>
+              <li>Separate planning, building, and independent validation.</li>
+              <li>Isolate concurrent work in worktrees or ephemeral sandboxes.</li>
+              <li>Encode organizational expertise into reusable workflow templates.</li>
+              <li>Route work by risk, cost, latency, and required confidence.</li>
+            </ul>
+          </article>
+          <article class="panel">
+            <h3>What needs caution</h3>
+            <ul>
+              <li>Tests only prove the properties they encode; the specification may be wrong.</li>
+              <li>Multiple agents may reproduce the same correlated model failure.</li>
+              <li>Ambiguous tickets are not automatically implementation-ready requirements.</li>
+              <li>Autonomy must be proportional to impact, reversibility, and observability.</li>
+              <li>The factory itself becomes production software that can fail at scale.</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section class="shell section" aria-labelledby="requirements-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">06 · Production bar</p>
+            <h2 id="requirements-heading">Confidence needs infrastructure.</h2>
+          </div>
+          <p>
+            Production readiness is not the number of agents. It is the quality of the control
+            surface around them and the evidence available when behavior diverges from intent.
+          </p>
+        </div>
+
+        <div class="requirements">
+          <article class="panel">
+            <h3>Control</h3>
+            <ul>
+              <li>Versioned workflow, prompts, policies, tools, and model configuration</li>
+              <li>Least-privilege identities, secret isolation, and network boundaries</li>
+              <li>Risk-tiered approvals, escalation paths, and rollback mechanisms</li>
+              <li>Budgets for tokens, compute, wall-clock time, and parallelism</li>
+            </ul>
+          </article>
+          <article class="panel">
+            <h3>Evidence</h3>
+            <ul>
+              <li>Structured logs, traces, artifacts, decisions, and approval records</li>
+              <li>Representative evaluations for probabilistic workflow steps</li>
+              <li>Fast deterministic tests and independent integration checks</li>
+              <li>Lead time, accepted-change cost, intervention, rollback, and defect metrics</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section class="shell section" aria-labelledby="adoption-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">07 · Adoption path</p>
+            <h2 id="adoption-heading">Start with one line.</h2>
+          </div>
+          <p>
+            The safest route is to productionize one narrow, frequent workflow before building a
+            router, an agent fleet, or a generalized orchestration platform.
+          </p>
+        </div>
+
+        <div class="adoption">
+          <article>
+            <h3>Observe</h3>
+            <p>
+              Pick a recurring, well-understood task. Execute it end to end and document the
+              decisions, inputs, checks, and failure modes.
+            </p>
+          </article>
+          <article>
+            <h3>Codify</h3>
+            <p>
+              Convert objective operations into deterministic programs. Define explicit inputs,
+              outputs, acceptance criteria, and evidence.
+            </p>
+          </article>
+          <article>
+            <h3>Delegate</h3>
+            <p>
+              Add one agent where semantic reasoning adds value. Run it in isolation, constrain its
+              tools, and retain risk-appropriate review.
+            </p>
+          </article>
+          <article>
+            <h3>Scale</h3>
+            <p>
+              Measure quality and cost. Add specialization, routing, and concurrency only after the
+              simpler workflow is dependable.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="shell section" aria-labelledby="sources-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">08 · Primary sources</p>
+            <h2 id="sources-heading">Where the model comes from.</h2>
+          </div>
+          <p>
+            The agentic framing is recent, but the factory metaphor has long described repeatable,
+            automated, domain-aware software production.
+          </p>
+        </div>
+
+        <div class="sources">
+          <article class="source">
+            <span class="source-index">01</span>
+            <strong
+              ><a href="https://www.youtube.com/watch?v=VQy50fuxI34"
+                >IndyDevDan — Agentic Engineering</a
+              ></strong
+            >
+            <p>
+              The primary video: three actors, specialized workflows, sandboxes, routing, and the
+              argument that workflows—not loops—are the useful abstraction.
+            </p>
+          </article>
+          <article class="source">
+            <span class="source-index">02</span>
+            <strong
+              ><a
+                href="https://www.sei.cmu.edu/blog/the-role-of-devsecops-in-continuous-authority-to-operate/"
+                >CMU SEI — DevSecOps and the Software Factory</a
+              ></strong
+            >
+            <p>
+              Defines a modern factory as people, processes, and tools enabling continuous
+              improvement and incremental delivery.
+            </p>
+          </article>
+          <article class="source">
+            <span class="source-index">03</span>
+            <strong
+              ><a
+                href="https://news.microsoft.com/source/2004/10/26/microsoft-grows-partner-ecosystem-around-visual-studio-2005-team-system/"
+                >Microsoft — Software Factories</a
+              ></strong
+            >
+            <p>
+              Describes domain-specific tools, processes, architectures, reuse, and automation as a
+              route to faster and more reliable development.
+            </p>
+          </article>
+          <article class="source">
+            <span class="source-index">04</span>
+            <strong
+              ><a
+                href="https://aws.amazon.com/blogs/devops/open-sourcing-adaptive-workflows-for-ai-driven-development-life-cycle-ai-dlc/"
+                >AWS — Adaptive AI development workflows</a
+              ></strong
+            >
+            <p>
+              Supports adaptive workflow depth, human ownership at meaningful checkpoints, and
+              traceability instead of one-size-fits-all autonomy.
+            </p>
+          </article>
+          <article class="source">
+            <span class="source-index">05</span>
+            <strong
+              ><a href="https://www.anthropic.com/engineering/multi-agent-research-system"
+                >Anthropic — Multi-agent system engineering</a
+              ></strong
+            >
+            <p>
+              Documents orchestration, specialization, parallelism, observability, evaluation, and
+              failure modes in a production multi-agent system.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="shell conclusion" aria-labelledby="conclusion-heading">
+        <p class="eyebrow" id="conclusion-heading">Conclusion</p>
+        <p>
+          Do not build a pile of agents. Build an inspectable production system in which every
+          actor does the work it can perform and verify best.
+        </p>
+      </section>
+    </main>
+
+    <footer class="shell">
+      <span>Kojo · Delivery workflow factory</span>
+      <span>Research report · 17 July 2026</span>
+    </footer>
+  </body>
+</html>

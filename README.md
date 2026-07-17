@@ -9,16 +9,28 @@ server for issue-tracker webhooks and the visualizer.
 - `apps/visualizer`: SolidJS SPA using TanStack Router, TanStack Query, Tailwind CSS, and Zaidan
 - `packages/domain`: runtime-independent domain models and typed HTTP contracts
 
-## Tooling
+## Development
 
-The workspace uses Bun, Moon, Proto, TypeScript, and Biome.
+Install [proto](https://moonrepo.dev/docs/proto/install) and [cocogitto](https://docs.cocogitto.io/#installation)
+and verify that they are available in your `PATH`:
 
-Install the toolchain and dependencies:
+```sh
+proto --version && cog --version
+```
+
+Install the monorepo toolchain:
 
 ```sh
 proto install
+```
+
+Install the monorepo dependencies:
+
+```sh
 bun install
 ```
+
+## Launch apps
 
 Run the server for a project:
 
@@ -49,4 +61,3 @@ when the Sandcastle customization is extracted:
 ```sh
 moon run cli:delivery -- .
 ```
-

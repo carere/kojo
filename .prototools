@@ -1,10 +1,8 @@
 bun = "latest"
 moon = "latest"
-"cargo:cocogitto" = "7.0.0"
 
 [settings]
 detect-strategy = "only-prototools"
 auto-clean = true
 auto-install = true
 unstable-lockfile = true
-
