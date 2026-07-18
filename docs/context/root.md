@@ -52,6 +52,36 @@ creates the next numbered Execution Attempt without changing the Workflow Run's 
 earlier evidence.
 _Avoid_: Workflow Run, retry
 
+**Execution Evidence**:
+The durable history needed to reconstruct and debug what a Workflow Run did and why. It consists of
+immutable Evidence Events and referenced Execution Artifacts rather than diagnostic telemetry.
+_Avoid_: Log stream, compliance attestation
+
+**Evidence Event**:
+An immutable fact about a meaningful execution boundary or execution-shaping decision, ordered
+within its Workflow Run and linked to its parent and cause.
+_Avoid_: Log line, arbitrary code branch
+
+**Execution Decision**:
+An Evidence Event that records a choice which changes subsequent execution, such as selecting a
+Route, continuing a Loop, retrying an Activity, or accepting a lifecycle request.
+_Avoid_: Arbitrary code branch, agent reasoning
+
+**Execution Span**:
+The grouping of Evidence Events for one durational action in an Execution Trace. Attempts are child
+spans of their logical action so failures, interruption, and uncertain outcomes remain visible.
+_Avoid_: OpenTelemetry span, Activity result
+
+**Execution Artifact**:
+Immutable fingerprinted content produced or consumed during execution and referenced by Evidence
+Events, such as command output, an agent transcript, a patch, or a review report.
+_Avoid_: Live Sandbox state, log line
+
+**Execution Trace**:
+The read-only reconstruction of a Workflow Run from its Execution Evidence, preserving actual
+nesting, concurrency, attempts, decisions, and linked Child Workflows.
+_Avoid_: Statically inferred workflow graph, telemetry export
+
 **Unsuccessful Result**:
 An observed step result that domain policy may inspect and act on without failing the Effect. For
 example, a nonzero command exit is an Unsuccessful Result unless workflow code deliberately turns it
@@ -96,6 +126,13 @@ or prepares state in a new Execution Attempt before execution continues, without
 inside the failure value.
 _Avoid_: Activity Retry, compensation
 
+**Propagated Child Failure**:
+A parent Workflow Run failure caused by an unhandled Typed Failure or Defect from a Child Workflow.
+It retains a durable link to the child's original cause rather than creating an independent copy.
+If the child has a Recovery Handler, root resumption recovers the child before replaying the parent;
+the parent does not need to register the same handler again.
+_Avoid_: Independent parent failure, copied child failure
+
 **Workflow Run Interruption**:
 Unexpected loss of execution ownership through process exit, crash, or lease loss. It moves the
 Workflow Run to Interrupted and is distinct from Effect's internal fiber interruption or an
@@ -115,6 +152,12 @@ its Kojo-generated source fingerprint identifies the replay-relevant executable 
 must match for resumption; the same name and declared version with another fingerprint is a
 different Workflow Revision.
 _Avoid_: Workflow version, latest workflow
+
+**Workflow Revision Snapshot**:
+The immutable mapping from the Workflow Registry's stable names to the exact Workflow Revisions
+available when a root Workflow Run starts. Every descendant in its Workflow Run Tree selects its
+revision from this snapshot, so resuming an older run cannot introduce newer Child Workflow code.
+_Avoid_: Latest revisions, live registry
 
 **Agent Step**:
 A workflow step whose work is delegated to an AI agent in an isolated execution environment.
@@ -148,8 +191,43 @@ _Avoid_: Long-lived container, agent session
 **Child Workflow**:
 The role of an ordinary Developer Workflow when another Developer Workflow invokes it durably. It
 is not a separate workflow kind or public primitive. Its Workflow Run remains linked to its parent
-while retaining its own input, state, evidence, and outcome.
+while retaining its own input, state, evidence, and outcome. A Child Workflow Run has exactly one
+parent, though a Developer Workflow may invoke its own definition recursively because every
+invocation creates a distinct Run ID and the Workflow Run Tree remains acyclic.
 _Avoid_: Separate workflow type, subroutine, workflow step
+
+**Child Workflow Invocation**:
+A durable call from a parent Workflow Run to a Child Workflow, identified by an author-chosen stable
+key within the parent's durable path. Replay of the same call rejoins the same child run; that key
+cannot later name different input or another Developer Workflow, and a new child requires a new key
+or durable path. Completion returns the child's typed value, while its Typed Failure or Defect
+composes through the ordinary Effect channels. A parent may handle that failure and Complete while
+the child remains Failed. The child owns its result and Execution Evidence; the parent retains the
+child Run ID and exact result it observed rather than copying the child's history. Once the root
+Completes, a Failed child is historical and can no longer be resumed or discarded.
+_Avoid_: Child Workflow Run, detached execution
+
+**Workflow Run Tree**:
+A root Workflow Run and all of its descendant Child Workflow Runs. Every run is independently
+inspectable, but suspension, resumption, and discard are requested through the root and propagated
+to the descendants needed to preserve the tree's lifecycle invariants. A lifecycle request is
+durable and convergent rather than one transaction across the tree: descendants settle first, the
+root changes state last, and an interruption resumes the unfinished propagation. Discard changes
+Running, Suspended, Interrupted, and Failed descendants to Discarded while leaving Completed and
+already Discarded descendants unchanged. Resumption preflights every required descendant before
+starting another Execution Attempt, then recovers the deepest children first; independent siblings
+may recover concurrently.
+_Avoid_: Detached run collection, workflow graph
+
+**Child Workflow Cancellation**:
+The safe termination of an unfinished Child Workflow when its parent stops awaiting that child
+because workflow-authored concurrency is ending with a non-resumable parent failure. The child
+completes its Compensation and becomes Failed with a non-resumable Typed Failure that retains the
+parent Run ID and cause before the parent becomes terminal. It consumes no Activity Retry and is
+distinct from Workflow Run Interruption and Discard. A Resumable Failure instead suspends active
+children after their current Activities settle, without running Compensation, so they can continue
+when the root resumes.
+_Avoid_: Workflow Run Interruption, discard, forced interruption
 
 **Route**:
 A transition selected by a Developer Workflow from a Workflow Run's input or accumulated results.
@@ -174,5 +252,9 @@ _Avoid_: Specialized Review Loop primitive, Review retry, reviewer repair
 A workflow-authored, idempotent, evidenced effect registered through Effect Workflow after a
 compensable effect succeeds. It runs when the Workflow later ends in terminal failure, not when the
 Workflow Run is Suspended, Interrupted, or Discarded, and Kojo does not define a separate
-compensation primitive.
+compensation primitive. Compensation belongs to one Workflow Run: a Completed Child Workflow is
+never reopened by a later parent failure, so the parent must register its own Compensation when the
+child's completed result needs to be undone. Failure settles the deepest descendants first;
+independent siblings may settle concurrently, and every child finishes Compensation before its
+parent begins Compensation.
 _Avoid_: Activity Retry, cleanup, rollback guarantee
