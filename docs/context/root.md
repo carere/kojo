@@ -17,6 +17,12 @@ input handling, scheduling, routing, loops, and outcome through ordinary TypeScr
 composition rather than belonging to a predefined workflow category or graph DSL.
 _Avoid_: Pipeline, workflow template, implementation workflow
 
+**Workflow Acceptance Test**:
+A deterministic test that runs a Developer Workflow through its public entry point with controlled
+in-memory adapters and checks its outcome, Workflow Run State, meaningful Execution Evidence, and
+observable external calls. It proves the workflow's behavior, not the production adapter wiring.
+_Avoid_: System end-to-end test, adapter contract test
+
 **Workflow Registry**:
 The validated, explicitly configured set of Developer Workflows available from one repository.
 Every member has a unique repository-scoped stable name; Kojo never discovers members by scanning
@@ -79,7 +85,8 @@ _Avoid_: Live Sandbox state, log line
 
 **Execution Trace**:
 The read-only reconstruction of a Workflow Run from its Execution Evidence, preserving actual
-nesting, concurrency, attempts, decisions, and linked Child Workflows.
+nesting, concurrency, attempts, decisions, and linked Child Workflows. Sandbox and Agent Steps show
+the explicitly safe provider name, model, and adapter version recorded when they ran.
 _Avoid_: Statically inferred workflow graph, telemetry export
 
 **Unsuccessful Result**:
@@ -153,15 +160,49 @@ must match for resumption; the same name and declared version with another finge
 different Workflow Revision.
 _Avoid_: Workflow version, latest workflow
 
+**Workflow ABI**:
+Kojo's opaque, monotonically changing compatibility identity for replay, durable encoding, kernel
+adaptation, and author-facing orchestration semantics. It is independent of package versions,
+participates in every Workflow Revision's source fingerprint, and must match exactly for resumption.
+_Avoid_: Package version, declared workflow version
+
 **Workflow Revision Snapshot**:
 The immutable mapping from the Workflow Registry's stable names to the exact Workflow Revisions
 available when a root Workflow Run starts. Every descendant in its Workflow Run Tree selects its
 revision from this snapshot, so resuming an older run cannot introduce newer Child Workflow code.
 _Avoid_: Latest revisions, live registry
 
+**Runtime Configuration Snapshot**:
+The append-only durable record of the provider identities, models, and safe public configuration
+used by a Workflow Run. A Sandbox or Agent Step records its entry when it first reaches its durable
+boundary; another attempt at that same Step must match it, while a new Step may add another entry.
+Each entry contains the provider name, model when applicable, adapter version, explicitly safe
+public fields, and a fingerprint of the remaining non-secret configuration. Secret values, secret
+names not explicitly marked safe, and secret fingerprints never belong to the snapshot. Rotating a
+secret does not make an otherwise matching run incompatible.
+_Avoid_: Workflow Revision, secret snapshot
+
+**Runtime Configuration Compatibility**:
+The derived diagnosis of whether the currently supplied Sandbox Providers and Agent Providers match
+the Runtime Configuration Snapshot entries needed to continue an unfinished Workflow Run. A
+mismatch preserves the Workflow Run State but prevents the affected Step from resuming, separately
+from Workflow Revision compatibility. Kojo diagnoses and safely explains a mismatch before creating
+a Sandbox or running an agent; inability to start an otherwise matching provider is instead a Typed
+Failure.
+_Avoid_: Workflow Revision compatibility, Workflow Run State
+
 **Agent Step**:
 A workflow step whose work is delegated to an AI agent in an isolated execution environment.
 _Avoid_: Agent, task
+
+**Agent Provider**:
+The runtime capability that supplies a configured Sandcastle agent implementation and model to an
+Agent Step. The Developer Workflow chooses this capability and may replace it within a narrower
+scope, including using different Agent Providers for different Agent Steps in one Sandbox. The CLI
+supplies configuration sources but does not choose an agent. Kojo pairs the process-local provider
+object with a stable name and explicitly safe description; only that description may enter the
+Runtime Configuration Snapshot and Execution Evidence.
+_Avoid_: Agent, model name, durable provider
 
 **Reviewer Step**:
 A read-only Agent Step that evaluates the cumulative change and reports structured P1, P2, or P3
@@ -182,6 +223,14 @@ A provider-independent isolated execution environment created through Sandcastle
 more Agent Steps or Code Steps. Its boundary and name are chosen by the workflow author, and it may
 be backed by a local container, cloud compute, or another provider.
 _Avoid_: Container, worker
+
+**Sandbox Provider**:
+The runtime capability that creates a Sandbox through a configured Sandcastle provider. Kojo's CLI
+supplies a local Docker fallback, while a Developer Workflow may replace that capability within a
+narrower scope. One Sandbox keeps the Sandbox Provider it was created with for its entire lifetime;
+Kojo pairs the process-local provider object with a stable name and explicitly safe description;
+only that description may enter the Runtime Configuration Snapshot and Execution Evidence.
+_Avoid_: Container runtime setting, provider name string, durable provider
 
 **Reusable Sandbox**:
 A Sandbox created once and used for multiple agent runs so they share the same branch, filesystem,
