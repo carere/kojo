@@ -1,6 +1,15 @@
 $schema: "../../.moon/cache/schemas/project.json"
 
 tasks:
+  prototype-reusable-sandbox:
+    command: bun run prototypes/reusable-sandbox/tui.ts
+    description: Drive the throwaway Reusable Sandbox lifecycle prototype
+    inputs:
+      - "prototypes/reusable-sandbox/**/*"
+      - "@group(configs)"
+      - "@group(workspace)"
+    type: run
+
   test:
     command: bun test
     description: Run domain tests
@@ -10,4 +19,3 @@ tasks:
       - "@group(tests)"
       - "@group(workspace)"
     type: test
-

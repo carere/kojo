@@ -3,6 +3,6 @@
   "root": false,
   "extends": "//",
   "files": {
-    "includes": ["src/**/*", "tests/**/*", "*.ts"]
+    "includes": ["src/**/*", "tests/**/*", "prototypes/**/*", "*.ts"]
   }
 }
