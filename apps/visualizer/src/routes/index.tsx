@@ -1,75 +1,120 @@
 import { createQuery } from "@tanstack/solid-query";
 import { createFileRoute } from "@tanstack/solid-router";
-import { Show } from "solid-js";
-import { Button } from "@/components/ui/button";
+import { onCleanup, onMount } from "solid-js";
 import { healthQueryOptions } from "@/features/health/queries/get-health";
+import { RunVisualizerPrototype } from "@/features/run-visualizer-prototype/RunVisualizerPrototype";
+
+type PrototypeVariant = "A" | "B" | "C";
+
+function isPrototypeVariant(value: unknown): value is PrototypeVariant {
+  return value === "A" || value === "B" || value === "C";
+}
 
 export const Route = createFileRoute("/")({
+  validateSearch: (search: Record<string, unknown>) => ({
+    variant: isPrototypeVariant(search.variant) ? search.variant : "A",
+  }),
   component: VisualizerHome,
 });
 
+// PROTOTYPE — Three read-only Workflow Run visualizer variants on the existing `/` route.
+// Switch with `?variant=A`, `?variant=B`, or `?variant=C`. This code is intentionally throwaway.
 function VisualizerHome() {
   const health = createQuery(() => healthQueryOptions());
+  const search = Route.useSearch();
+  const navigate = Route.useNavigate();
+
+  const variants: PrototypeVariant[] = ["A", "B", "C"];
+  const currentVariant = () => search().variant;
+
+  const setVariant = (variant: PrototypeVariant) => {
+    navigate({
+      search: { variant },
+      replace: true,
+    });
+  };
+
+  const cycleVariant = (direction: -1 | 1) => {
+    const currentIndex = variants.indexOf(currentVariant());
+    const nextIndex = (currentIndex + direction + variants.length) % variants.length;
+    setVariant(variants[nextIndex]);
+  };
+
+  onMount(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.matches("input, textarea, select, [contenteditable='true']") ||
+        (event.key !== "ArrowLeft" && event.key !== "ArrowRight")
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      cycleVariant(event.key === "ArrowLeft" ? -1 : 1);
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    onCleanup(() => window.removeEventListener("keydown", handleKeyDown));
+  });
 
   return (
-    <main class="mx-auto flex min-h-svh max-w-5xl flex-col justify-between px-6 py-10 sm:px-10 sm:py-14">
-      <header class="flex items-center justify-between border-b pb-5">
-        <div>
-          <p class="font-medium text-muted-foreground text-xs uppercase tracking-[0.24em]">
-            Delivery workflow factory
-          </p>
-          <h1 class="mt-2 font-semibold text-2xl tracking-tight">Kojo Visualizer</h1>
-        </div>
-        <div class="flex items-center gap-2 rounded-full border bg-card px-3 py-1.5 font-medium text-xs">
-          <span
-            class="size-2 rounded-full"
-            classList={{
-              "bg-amber-500": health.isPending,
-              "bg-emerald-500": health.isSuccess,
-              "bg-red-500": health.isError,
-            }}
-          />
-          <Show when={health.isPending}>Connecting</Show>
-          <Show when={health.isSuccess}>Server connected</Show>
-          <Show when={health.isError}>Server unavailable</Show>
-        </div>
-      </header>
+    <>
+      <RunVisualizerPrototype
+        serverState={
+          health.isPending ? "connecting" : health.isSuccess ? "connected" : "unavailable"
+        }
+        variant={currentVariant()}
+      />
+      {import.meta.env.DEV && (
+        <PrototypeSwitcher
+          current={currentVariant()}
+          onNext={() => cycleVariant(1)}
+          onPrevious={() => cycleVariant(-1)}
+        />
+      )}
+    </>
+  );
+}
 
-      <section class="grid gap-10 py-16 lg:grid-cols-[1.4fr_0.6fr] lg:items-end">
-        <div>
-          <p class="font-medium text-primary text-sm">工場 · factory</p>
-          <h2 class="mt-4 max-w-3xl font-semibold text-5xl tracking-[-0.04em] sm:text-7xl">
-            See delivery work as it happens.
-          </h2>
-          <p class="mt-6 max-w-2xl text-base text-muted-foreground leading-7">
-            Kojo will expose sandbox activity, workflow progress, and completed work from one local
-            control surface.
-          </p>
-        </div>
+const variantNames: Record<PrototypeVariant, string> = {
+  A: "Trace inspector",
+  B: "Run story",
+  C: "Evidence ledger",
+};
 
-        <aside class="rounded-xl border bg-card p-5 shadow-sm">
-          <p class="font-medium text-muted-foreground text-xs uppercase tracking-wider">
-            Runtime status
-          </p>
-          <p class="mt-3 font-medium text-lg">
-            <Show when={health.data} fallback="Waiting for Kojo">
-              {(data) => `${data().service} is ${data().status}`}
-            </Show>
-          </p>
-          <p class="mt-2 text-muted-foreground text-sm leading-6">
-            Start the server with <code class="text-foreground">kojo serve &lt;project&gt;</code>.
-          </p>
-          <Show when={health.isError}>
-            <Button class="mt-5" variant="outline" onClick={() => health.refetch()}>
-              Retry connection
-            </Button>
-          </Show>
-        </aside>
-      </section>
-
-      <footer class="border-t pt-5 text-muted-foreground text-xs">
-        Direct delivery and webhook execution share the same Kojo runtime.
-      </footer>
-    </main>
+function PrototypeSwitcher(props: {
+  current: PrototypeVariant;
+  onNext: () => void;
+  onPrevious: () => void;
+}) {
+  return (
+    <nav
+      aria-label="Prototype variants"
+      class="fixed bottom-5 left-1/2 z-50 flex -translate-x-1/2 items-center gap-1 rounded-full border border-white/15 bg-zinc-950 p-1.5 text-white shadow-2xl shadow-black/35"
+    >
+      <button
+        aria-label="Previous prototype variant"
+        class="grid size-9 place-items-center rounded-full text-lg hover:bg-white/12"
+        onClick={props.onPrevious}
+        type="button"
+      >
+        ←
+      </button>
+      <div class="min-w-48 px-3 text-center">
+        <p class="font-semibold text-xs">
+          {props.current} — {variantNames[props.current]}
+        </p>
+        <p class="mt-0.5 text-[10px] text-zinc-400">prototype · use ← →</p>
+      </div>
+      <button
+        aria-label="Next prototype variant"
+        class="grid size-9 place-items-center rounded-full text-lg hover:bg-white/12"
+        onClick={props.onNext}
+        type="button"
+      >
+        →
+      </button>
+    </nav>
   );
 }
