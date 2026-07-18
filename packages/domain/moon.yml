@@ -1,6 +1,15 @@
 $schema: "../../.moon/cache/schemas/project.json"
 
 tasks:
+  prototype-orchestration-api:
+    command: bun run prototypes/orchestration-api/tui.ts
+    description: Compare throwaway Effect-native orchestration API shapes
+    inputs:
+      - "prototypes/orchestration-api/**/*"
+      - "@group(configs)"
+      - "@group(workspace)"
+    type: run
+
   prototype-reusable-sandbox:
     command: bun run prototypes/reusable-sandbox/tui.ts
     description: Drive the throwaway Reusable Sandbox lifecycle prototype
