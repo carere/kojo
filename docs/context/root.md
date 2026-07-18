@@ -35,6 +35,56 @@ creates the next numbered Execution Attempt without changing the Workflow Run's 
 earlier evidence.
 _Avoid_: Workflow Run, retry
 
+**Unsuccessful Result**:
+An observed step result that domain policy may inspect and act on without failing the Effect. For
+example, a nonzero command exit is an Unsuccessful Result unless workflow code deliberately turns it
+into a Typed Failure.
+_Avoid_: Error, exception
+
+**Typed Failure**:
+An expected operational or domain failure represented in Effect's typed error channel. Workflow code
+may handle it; an unhandled Typed Failure ends the current execution and moves the Workflow Run to
+Failed with its tagged data, cause chain, and durable boundary retained as evidence.
+_Avoid_: Defect, interruption, unsuccessful result
+
+**Defect**:
+An unexpected programming or invariant failure represented as an Effect defect. A Defect is never
+retried automatically and, when unhandled, moves the Workflow Run to Failed as a cause distinct from
+a Typed Failure.
+_Avoid_: Typed failure, exception
+
+**Activity Retry**:
+An author-selected re-execution of the same logical Activity after a Typed Failure, preserving its
+stable identity and idempotency key while recording a new attempt ordinal against a budget that
+persists across Execution Attempts. Typed Failures are not retried by default, and an Uncertain
+Activity Outcome must be reconciled before an Activity Retry.
+_Avoid_: Execution Attempt, Loop iteration
+
+**Uncertain Activity Outcome**:
+The durable diagnosis that an Activity's external effect may have happened but its result was not
+recorded. The attempt remains evidence and consumes its ordinal; a reconciliation Activity must
+establish the outcome before the boundary can continue, and only confirmed non-occurrence permits
+an Activity Retry.
+_Avoid_: Typed Failure, failed attempt
+
+**Resumable Failure**:
+A Typed Failure explicitly designated by the Developer Workflow as permitting a Failed Workflow Run
+to resume through failure-specific preparation or reconciliation. Resumption creates an Execution
+Attempt without replenishing Activity Retry budgets, and Defects are not resumable.
+_Avoid_: Activity Retry, Resume Compatibility
+
+**Recovery Handler**:
+Developer Workflow logic registered against a Resumable Failure's stable tag. It durably reconciles
+or prepares state in a new Execution Attempt before execution continues, without placing behavior
+inside the failure value.
+_Avoid_: Activity Retry, compensation
+
+**Workflow Run Interruption**:
+Unexpected loss of execution ownership through process exit, crash, or lease loss. It moves the
+Workflow Run to Interrupted and is distinct from Effect's internal fiber interruption or an
+intentional cooperative suspension.
+_Avoid_: Suspension, Effect interruption
+
 **Resume Compatibility**:
 The derived diagnosis of whether the currently discovered Developer Workflow exactly matches a
 Workflow Run's pinned stable name, declared version, and source fingerprint. An incompatible run
@@ -89,11 +139,22 @@ _Avoid_: Branch
 
 **Loop**:
 Workflow control that repeats a defined portion of a Developer Workflow until an exit condition or a
-configured limit is reached.
+positive configured limit is reached. `Loop.run(name, options)` requires an explicit stable name
+whose nested path supplies durable identity; ordinary bindings such as `reviewLoop` communicate
+domain intent but are not replay identity, and every Loop uses the same
+`Loop.MaximumLimitReached` Typed Failure.
 _Avoid_: Agent iteration, retry
 
 **Review Loop**:
-A bounded Loop in which a reviewer evaluates the latest implementation and the implementer addresses
-the review findings in a Reusable Sandbox. It succeeds only when the reviewer reports no P1, P2, or
-P3 finding, and stops unsuccessfully when its configured iteration limit is reached.
-_Avoid_: Review retry, reviewer repair
+A Developer Workflow's ordinary, named use of `Loop.run(...)` in which a reviewer evaluates the
+latest implementation and the implementer addresses the review findings in a Reusable Sandbox. It
+succeeds only when the reviewer reports no P1, P2, or P3 finding, and fails with the same
+`Loop.MaximumLimitReached` Typed Failure as every other Loop when its configured limit is reached.
+_Avoid_: Specialized Review Loop primitive, Review retry, reviewer repair
+
+**Compensation**:
+A workflow-authored, idempotent, evidenced effect registered through Effect Workflow after a
+compensable effect succeeds. It runs when the Workflow later ends in terminal failure, not when the
+Workflow Run is Suspended, Interrupted, or Discarded, and Kojo does not define a separate
+compensation primitive.
+_Avoid_: Activity Retry, cleanup, rollback guarantee
