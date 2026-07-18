@@ -17,11 +17,28 @@ input handling, scheduling, routing, loops, and outcome through ordinary TypeScr
 composition rather than belonging to a predefined workflow category or graph DSL.
 _Avoid_: Pipeline, workflow template, implementation workflow
 
+**Workflow Registry**:
+The validated, explicitly configured set of Developer Workflows available from one repository.
+Every member has a unique repository-scoped stable name; Kojo never discovers members by scanning
+for files.
+_Avoid_: Workflow catalog, auto-discovered workflows
+
+**Workflow Entry Point**:
+The repository-local TypeScript module declared by a Developer Workflow as the root of its
+replay-relevant static source closure. Kojo uses it to compute that workflow's source fingerprint;
+it is provenance, not the workflow's stable identity.
+_Avoid_: Workflow name, CLI selector
+
 **Workflow Run**:
 A durable execution of a Developer Workflow for a specific input, with its own state, evidence, and
 outcome. It executes on the host where Kojo was invoked, is pinned to one Workflow Revision, and can
 be resumed after failure or deliberately discarded.
 _Avoid_: Job, workflow
+
+**Workflow Run ID**:
+The opaque identity assigned to a Workflow Run when it is durably created. CLI operations use this
+identity rather than a workflow path, declared version, or latest-run selector.
+_Avoid_: Workflow name, execution number
 
 **Workflow Run State**:
 The single persisted lifecycle state of a Workflow Run: Running, Suspended, Interrupted, Failed,
@@ -129,9 +146,10 @@ installed dependencies, and accumulated changes.
 _Avoid_: Long-lived container, agent session
 
 **Child Workflow**:
-A Developer Workflow invoked durably by another Developer Workflow. Its Workflow Run remains linked
-to its parent while retaining its own input, state, evidence, and outcome.
-_Avoid_: Subroutine, workflow step
+The role of an ordinary Developer Workflow when another Developer Workflow invokes it durably. It
+is not a separate workflow kind or public primitive. Its Workflow Run remains linked to its parent
+while retaining its own input, state, evidence, and outcome.
+_Avoid_: Separate workflow type, subroutine, workflow step
 
 **Route**:
 A transition selected by a Developer Workflow from a Workflow Run's input or accumulated results.

@@ -5,6 +5,12 @@ Discarded—and diagnose Resume Compatibility separately. Resumption preserves t
 identity and evidence, starts a new Execution Attempt, and requires an exact match of the pinned
 Workflow Revision's stable name, declared version, and replay-relevant source fingerprint.
 
+The first local CLI stores UUIDv7-identified Workflow Runs in `.kojo/state.sqlite` at the Git
+worktree root. The store is local and ignored, initialized lazily, protected with owner-only
+permissions, and intentionally not shared across linked worktrees. Run inspection and discard open
+this store without requiring currently valid workflow source; starting and resuming still require a
+valid Workflow Registry, and resuming additionally requires exact Resume Compatibility.
+
 This separation keeps operational history truthful: restoring or changing available source cannot
 rewrite whether a run failed or was interrupted. Exact revision matching also prevents completed
 Activity results from being replayed through changed control flow.
