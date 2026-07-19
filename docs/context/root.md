@@ -94,6 +94,68 @@ input handling, scheduling, routing, loops, and outcome through ordinary TypeScr
 composition rather than belonging to a predefined workflow category or graph DSL.
 _Avoid_: Pipeline, workflow template, implementation workflow
 
+**Workflow Schedule**:
+A repository-authored, Project-scoped rule that names cron-based root starts of one Developer
+Workflow with fixed input, an explicit timezone, and a missed-time policy. Its stable name keeps
+installation-local identity across Project Source Revisions and cannot be retargeted to another
+Developer Workflow.
+_Avoid_: Cron job, timer
+
+**Schedule Definition Fingerprint**:
+The SHA-256 identity of one Workflow Schedule's versioned canonical semantics: its name, target
+Developer Workflow, parsed cron fields, timezone, encoded input, and missed-time policy. It excludes
+the Project Source Revision so unrelated source changes do not change the fingerprint.
+_Avoid_: Workflow Revision, Project Source Revision
+
+**Schedule Enablement**:
+The installation-local Enabled or Disabled setting for one Workflow Schedule. New Schedules start
+Disabled; Project Registration State separately gates whether an Enabled Schedule may start work,
+without changing the Schedule's own setting. Disabling a Schedule cancels its pending Schedule
+Catch-up without stopping an existing Workflow Run.
+_Avoid_: Project Registration State, configuration toggle
+
+**Schedule Overlap Identity**:
+The Project ID and Developer Workflow stable name shared by root Workflow Runs that a scheduled
+start considers the same work for overlap purposes. Schedule name, input, trigger type, and Workflow
+Revision do not change that identity, while Child Workflow Runs do not participate in it.
+_Avoid_: Schedule name, Workflow Revision
+
+**Schedule Overlap**:
+The condition in which an eligible scheduled start finds a Running root Workflow Run with the same
+Schedule Overlap Identity. Only scheduled starts are suppressed; direct starts and explicit resumes
+remain operator-controlled, and non-Running Workflow Run States do not cause overlap.
+_Avoid_: Workflow Run failure, global concurrency limit
+
+**Missed Schedule Time**:
+A time at which an Enabled Workflow Schedule under an Enabled Project could not start because the
+system was stopped or asleep, the Project was Unavailable, start validation failed, or Schedule
+Overlap existed. Disabled or absent Schedules and Disabled Projects do not accumulate missed times.
+_Avoid_: Disabled schedule time, failed Workflow Run
+
+**Schedule Occurrence**:
+A cron-selected UTC instant for one Workflow Schedule, identified by Project ID, Schedule name, and
+that instant. Its identity makes evaluation idempotent across system crashes and restarts.
+_Avoid_: Workflow Run, evaluation attempt
+
+**Schedule Cursor**:
+The durable UTC instant through which one Workflow Schedule has been evaluated. It advances
+monotonically across restarts and wall-clock changes so later evaluation can find missed times
+without duplicating an earlier Schedule Occurrence.
+_Avoid_: Next run time, system clock
+
+**Schedule Catch-up**:
+The single durable pending start that a `catch-up-once` Workflow Schedule uses to coalesce one or
+more Missed Schedule Times. It records the earliest time, latest time, and count, then uses the
+current Schedule definition and active Project Source Revision when it can start.
+_Avoid_: Backfill, replayed Workflow Run
+
+**Schedule History**:
+The append-only, durable, source-independent record of Schedule Occurrences, compact missed-time
+ranges, evaluation outcomes, reasons, and links to created Workflow Runs. It exists outside
+Execution Evidence because many scheduling outcomes create no Workflow Run; current Schedule
+status is a projection of its events.
+_Avoid_: Execution Evidence, system log
+
 **Workflow Acceptance Test**:
 A deterministic test that runs a Developer Workflow through its public entry point with controlled
 in-memory adapters and checks its outcome, Workflow Run State, meaningful Execution Evidence, and
@@ -117,6 +179,12 @@ A durable execution of a Developer Workflow for a specific input, with its own s
 outcome. It executes on the host where Kojo was invoked, is pinned to one Workflow Revision, and can
 be resumed after failure or deliberately discarded.
 _Avoid_: Job, workflow
+
+**Workflow Run Trigger**:
+The immutable cause of a root Workflow Run: either a Direct start or a Scheduled start linked to
+its Workflow Schedule, Schedule Occurrence, scheduled time, and optional catch-up range. Child
+Workflow Runs instead retain their Child Workflow Invocation as their cause.
+_Avoid_: Workflow Revision, CLI command
 
 **Workflow Run ID**:
 The opaque identity assigned to a Workflow Run when it is durably created. CLI operations use this
