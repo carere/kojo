@@ -1,3 +1,5 @@
+When you ask questions, use simple english and avoid terms that are not part of the domain context.
+
 ## Agent skills
 
 ### Issue tracker

@@ -43,7 +43,9 @@ _Avoid_: Project `.kojo` directory, workflow configuration
 **Kojo System Process**:
 The single long-running operating-system process for one Kojo Home. It coordinates registered
 Projects, schedules, local interfaces, and Workflow Run execution without loading repository-local
-Developer Workflow code into its own runtime. It is the only active authority for that Kojo Home.
+Developer Workflow code into its own runtime. It is the only active authority for that Kojo Home
+and the only process that mutates its durable state; Project Runtime Processes submit typed,
+execution-scoped storage commands through its private local interface.
 _Avoid_: Project Runtime Process, Workflow Run
 
 **Kojo CLI Launcher**:
@@ -57,7 +59,7 @@ A transient child operating-system process whose project-local Kojo version matc
 Process, which uses the Project's exact compatible Effect and Bun stack and owns the active
 Execution Attempts of exactly one root Workflow Run Tree. The Kojo System Process creates another
 Project Runtime Process from a Runtime Source Checkout or Checkout Source Snapshot when that tree
-executes again.
+executes again. It never opens Kojo Home's database directly.
 _Avoid_: Project, Workflow Run, Effect Fiber
 
 **Project Source Revision**:
@@ -132,6 +134,13 @@ One period in which a process owns and executes a Workflow Run. Resuming an unfi
 creates the next numbered Execution Attempt without changing the Workflow Run's identity or erasing
 earlier evidence.
 _Avoid_: Workflow Run, retry
+
+**Execution Lease**:
+The temporary, generation-numbered authority held by one Project Runtime Process session to execute
+one Workflow Run's current Execution Attempt. It expires unless renewed; a write from an expired or
+superseded lease is rejected, and losing the lease leaves the Workflow Run to be reconciled as
+Interrupted without changing its identity or history.
+_Avoid_: Database lock, Project Runtime Process lifetime
 
 **Execution Evidence**:
 The durable history needed to reconstruct and debug what a Workflow Run did and why. It consists of
@@ -332,15 +341,15 @@ Completes, a Failed child is historical and can no longer be resumed or discarde
 _Avoid_: Child Workflow Run, detached execution
 
 **Workflow Run Tree**:
-A root Workflow Run and all of its descendant Child Workflow Runs. Every run is independently
-inspectable, but suspension, resumption, and discard are requested through the root and propagated
-to the descendants needed to preserve the tree's lifecycle invariants. A lifecycle request is
-durable and convergent rather than one transaction across the tree: descendants settle first, the
-root changes state last, and an interruption resumes the unfinished propagation. Discard changes
-Running, Suspended, Interrupted, and Failed descendants to Discarded while leaving Completed and
-already Discarded descendants unchanged. Resumption preflights every required descendant before
-starting another Execution Attempt, then recovers the deepest children first; independent siblings
-may recover concurrently.
+A root Workflow Run and all of its descendant Child Workflow Runs, all belonging to the same
+Project. Every run is independently inspectable, but suspension, resumption, and discard are
+requested through the root and propagated to the descendants needed to preserve the tree's
+lifecycle invariants. A lifecycle request is durable and convergent rather than one transaction
+across the tree: descendants settle first, the root changes state last, and an interruption resumes
+the unfinished propagation. Discard changes Running, Suspended, Interrupted, and Failed descendants
+to Discarded while leaving Completed and already Discarded descendants unchanged. Resumption
+preflights every required descendant before starting another Execution Attempt, then recovers the
+deepest children first; independent siblings may recover concurrently.
 _Avoid_: Detached run collection, workflow graph
 
 **Child Workflow Cancellation**:
