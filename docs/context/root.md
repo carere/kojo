@@ -40,6 +40,52 @@ The user-scoped home of one local Kojo installation. It holds installation-wide 
 Workflow Run state rather than repository-authored workflow behavior or secrets.
 _Avoid_: Project `.kojo` directory, workflow configuration
 
+**Kojo System Process**:
+The single long-running operating-system process for one Kojo Home. It coordinates registered
+Projects, schedules, local interfaces, and Workflow Run execution without loading repository-local
+Developer Workflow code into its own runtime. It is the only active authority for that Kojo Home.
+_Avoid_: Project Runtime Process, Workflow Run
+
+**Kojo CLI Launcher**:
+The short-lived user-facing `kojo` process. It sends system operations to the Kojo System Process
+and delegates operations that load repository-local code to the matching project-local CLI without
+loading Developer Workflow modules itself.
+_Avoid_: Kojo System Process, Project Runtime Process, global workflow runtime
+
+**Project Runtime Process**:
+A transient child operating-system process whose project-local Kojo version matches the Kojo System
+Process, which uses the Project's exact compatible Effect and Bun stack and owns the active
+Execution Attempts of exactly one root Workflow Run Tree. The Kojo System Process creates another
+Project Runtime Process from a Runtime Source Checkout or Checkout Source Snapshot when that tree
+executes again.
+_Avoid_: Project, Workflow Run, Effect Fiber
+
+**Project Source Revision**:
+The validated default-branch commit selected for a Project's future root Workflow Runs, together
+with its source provenance, freshness, Workflow Registry, and compatible toolchain evidence. Kojo
+activates a candidate revision atomically; existing Workflow Runs remain pinned to their own
+Workflow Revisions. It is a durable selection and validation record, not a retained source folder.
+_Avoid_: Workflow Revision, Project, persistent checkout
+
+**Runtime Source Checkout**:
+A temporary clean checkout materialized from a Project Source Revision for one Project Runtime
+Process. It supplies the project-local CLI and Workflow Registry without changing the developer
+checkout and is deleted when the Execution Attempt stops.
+_Avoid_: Project, Reusable Sandbox, Checkout Source Snapshot
+
+**Project Source Policy**:
+The installation-local rule selecting the Project Source Revision for a new root Workflow Run.
+`LocalWithFreshnessWarning` uses the registered repository's local default branch and diagnoses
+remote freshness without changing it. `RemoteLatest` requires the latest fetched remote default
+branch. Neither policy changes the source pinned to an existing Workflow Run.
+_Avoid_: Workflow Revision, Project Registration State, Git pull
+
+**Checkout Source Snapshot**:
+An ephemeral Kojo-controlled copy of the exact replay-relevant source selected by an explicit
+direct `--from-checkout` start. It includes reachable dirty and untracked files, remains fixed for
+one Execution Attempt, and is deleted when that attempt stops rather than retained for resumption.
+_Avoid_: Runtime Source Checkout, developer checkout, retained Workflow Revision snapshot
+
 **Developer Workflow**:
 A software-engineer-authored Effect program that coordinates a class of developer work. It owns its
 input handling, scheduling, routing, loops, and outcome through ordinary TypeScript and Effect
