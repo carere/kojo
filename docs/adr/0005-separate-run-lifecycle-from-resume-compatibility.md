@@ -11,6 +11,10 @@ permissions, and intentionally not shared across linked worktrees. Run inspectio
 this store without requiring currently valid workflow source; starting and resuming still require a
 valid Workflow Registry, and resuming additionally requires exact Resume Compatibility.
 
+The worktree-local storage-location part of this decision is superseded by
+[Centralize Project and Workflow Run state in Kojo Home](./0010-centralize-project-and-run-state-in-kojo-home.md).
+The separation of Workflow Run State from Resume Compatibility remains accepted.
+
 This separation keeps operational history truthful: restoring or changing available source cannot
 rewrite whether a run failed or was interrupted. Exact revision matching also prevents completed
 Activity results from being replayed through changed control flow.

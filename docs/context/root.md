@@ -11,6 +11,35 @@ A Developer Workflow that receives developer work and coordinates code, agents, 
 and other Developer Workflows to produce governed outcomes.
 _Avoid_: Workflow catalog, CI pipeline
 
+**Project**:
+A Git repository folder registered with one local Kojo installation. It is the unit from which
+Developer Workflows are loaded and under which Workflow Runs are grouped. Linked Git worktrees are
+execution resources associated with Workflow Runs and Sandboxes, not separate Projects.
+_Avoid_: Git worktree, Workflow Registry
+
+**Project ID**:
+The opaque identity assigned to a Project by one local Kojo installation. A Project keeps this
+identity when its folder moves; its path, Git remote, folder name, branch, and commit are metadata
+rather than identity.
+_Avoid_: Project path, repository URL
+
+**Project Registration State**:
+The user's installation-local intent for a Project: Enabled, Disabled, or Archived. Enabled permits
+new root Workflow Runs; Disabled prevents future root starts without stopping a currently Running
+Workflow Run Tree; Archived retains identity and history without remaining an active registration.
+_Avoid_: Project Availability, Workflow Run State
+
+**Project Availability**:
+The derived diagnosis of whether an Enabled or Disabled Project can currently start a root Workflow
+Run from its registered folder and compatible Workflow Registry. Availability reports structured
+reasons without changing Project Registration State.
+_Avoid_: Project Registration State, Resume Compatibility
+
+**Kojo Home**:
+The user-scoped home of one local Kojo installation. It holds installation-wide Project and
+Workflow Run state rather than repository-authored workflow behavior or secrets.
+_Avoid_: Project `.kojo` directory, workflow configuration
+
 **Developer Workflow**:
 A software-engineer-authored Effect program that coordinates a class of developer work. It owns its
 input handling, scheduling, routing, loops, and outcome through ordinary TypeScript and Effect
