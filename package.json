@@ -2,7 +2,7 @@
   "name": "kojo",
   "version": "0.1.0",
   "private": true,
-  "description": "A delivery workflow factory",
+  "description": "An Open-source software factory",
   "author": "Kevin Abatan <contact@carere.dev> (https://github.com/carere)",
   "type": "module",
   "workspaces": [
