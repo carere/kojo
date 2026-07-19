@@ -4,10 +4,10 @@ import { onCleanup, onMount } from "solid-js";
 import { healthQueryOptions } from "@/features/health/queries/get-health";
 import { RunVisualizerPrototype } from "@/features/run-visualizer-prototype/RunVisualizerPrototype";
 
-type PrototypeVariant = "A" | "B" | "C";
+type PrototypeVariant = "A" | "B" | "C" | "D";
 
 function isPrototypeVariant(value: unknown): value is PrototypeVariant {
-  return value === "A" || value === "B" || value === "C";
+  return value === "A" || value === "B" || value === "C" || value === "D";
 }
 
 export const Route = createFileRoute("/")({
@@ -18,13 +18,14 @@ export const Route = createFileRoute("/")({
 });
 
 // PROTOTYPE — Three read-only Workflow Run visualizer variants on the existing `/` route.
-// Switch with `?variant=A`, `?variant=B`, or `?variant=C`. This code is intentionally throwaway.
+// Switch with `?variant=A`, `?variant=B`, `?variant=C`, or `?variant=D`.
+// This code is intentionally throwaway.
 function VisualizerHome() {
   const health = createQuery(() => healthQueryOptions());
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
 
-  const variants: PrototypeVariant[] = ["A", "B", "C"];
+  const variants: PrototypeVariant[] = ["A", "B", "C", "D"];
   const currentVariant = () => search().variant;
 
   const setVariant = (variant: PrototypeVariant) => {
@@ -81,6 +82,7 @@ const variantNames: Record<PrototypeVariant, string> = {
   A: "Trace inspector",
   B: "Run story",
   C: "Evidence ledger",
+  D: "Dense inspector",
 };
 
 function PrototypeSwitcher(props: {

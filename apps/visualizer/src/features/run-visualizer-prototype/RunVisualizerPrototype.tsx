@@ -1,6 +1,6 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
 
-type PrototypeVariant = "A" | "B" | "C";
+type PrototypeVariant = "A" | "B" | "C" | "D";
 type ServerState = "connected" | "connecting" | "unavailable";
 type TraceStatus = "completed" | "failed" | "running" | "waiting" | "info";
 
@@ -322,9 +322,9 @@ export function RunVisualizerPrototype(props: {
 
   return (
     <Show
-      when={props.variant !== "A"}
+      when={props.variant !== "D"}
       fallback={
-        <TraceInspector
+        <DenseTraceInspector
           selectedId={selectedId()}
           selectedNode={selectedNode()}
           serverState={props.serverState}
@@ -333,9 +333,9 @@ export function RunVisualizerPrototype(props: {
       }
     >
       <Show
-        when={props.variant === "B"}
+        when={props.variant !== "A"}
         fallback={
-          <EvidenceLedger
+          <TraceInspector
             selectedId={selectedId()}
             selectedNode={selectedNode()}
             serverState={props.serverState}
@@ -343,12 +343,24 @@ export function RunVisualizerPrototype(props: {
           />
         }
       >
-        <RunStory
-          selectedId={selectedId()}
-          selectedNode={selectedNode()}
-          serverState={props.serverState}
-          setSelectedId={setSelectedId}
-        />
+        <Show
+          when={props.variant === "B"}
+          fallback={
+            <EvidenceLedger
+              selectedId={selectedId()}
+              selectedNode={selectedNode()}
+              serverState={props.serverState}
+              setSelectedId={setSelectedId}
+            />
+          }
+        >
+          <RunStory
+            selectedId={selectedId()}
+            selectedNode={selectedNode()}
+            serverState={props.serverState}
+            setSelectedId={setSelectedId}
+          />
+        </Show>
       </Show>
     </Show>
   );
@@ -611,6 +623,281 @@ function DetailRow(props: { label: string; value: string }) {
     <div class="flex items-start justify-between gap-4">
       <dt class="text-zinc-400">{props.label}</dt>
       <dd class="max-w-40 text-right font-medium text-zinc-700">{props.value}</dd>
+    </div>
+  );
+}
+
+function DenseTraceInspector(props: VariantProps) {
+  return (
+    <main class="min-h-svh bg-[#f4f2ec] pb-24 font-mono text-[#22221f]">
+      <header class="flex h-12 items-center justify-between border-[#292923] border-b-2 px-4">
+        <div class="flex items-center gap-4 text-[10px]">
+          <span class="bg-[#292923] px-2 py-1 font-bold text-[#f4f2ec]">KOJO / TRACE</span>
+          <span class="text-[#77766d]">READ-ONLY EXECUTION EVIDENCE</span>
+        </div>
+        <ServerBadge state={props.serverState} />
+      </header>
+
+      <div class="grid min-h-[calc(100svh-3rem)] grid-cols-[220px_minmax(470px,1fr)_300px] xl:grid-cols-[250px_minmax(620px,1fr)_330px]">
+        <aside class="border-[#b8b6ad] border-r">
+          <section class="border-[#b8b6ad] border-b">
+            <div class="flex items-center justify-between border-[#b8b6ad] border-b bg-[#dedcd4] px-3 py-2">
+              <p class="font-bold text-[9px]">WORKFLOW REGISTRY</p>
+              <span class="text-[#77766d] text-[9px]">3 DISCOVERED</span>
+            </div>
+            <div class="p-3">
+              <For each={workflows}>
+                {(workflow) => (
+                  <button
+                    class={`grid w-full grid-cols-[1fr_auto] items-center border-b px-2 py-2 text-left text-[10px] last:border-b-0 ${
+                      workflow.selected
+                        ? "border-[#292923] bg-[#292923] text-white"
+                        : "border-[#d2d0c7] hover:bg-[#e7e5dd]"
+                    }`}
+                    type="button"
+                  >
+                    <span>
+                      <strong class="font-bold">{workflow.name}</strong>
+                      <span
+                        class={`mt-0.5 block text-[9px] ${
+                          workflow.selected ? "text-[#aaa89f]" : "text-[#77766d]"
+                        }`}
+                      >
+                        {workflow.detail}
+                      </span>
+                    </span>
+                    <span
+                      class={`text-[9px] ${
+                        workflow.selected ? "text-[#aaa89f]" : "text-[#77766d]"
+                      }`}
+                    >
+                      {workflow.revision}
+                    </span>
+                  </button>
+                )}
+              </For>
+            </div>
+          </section>
+
+          <section>
+            <div class="flex items-center justify-between border-[#b8b6ad] border-b bg-[#dedcd4] px-3 py-2">
+              <p class="font-bold text-[9px]">WORKFLOW RUNS</p>
+              <span class="text-[#77766d] text-[9px]">NEWEST</span>
+            </div>
+            <div class="p-3">
+              <For each={runs}>
+                {(run, index) => (
+                  <button
+                    class={`w-full border-b px-2 py-2.5 text-left text-[10px] last:border-b-0 ${
+                      index() === 0
+                        ? "border-[#292923] bg-[#fff8ca]"
+                        : "border-[#d2d0c7] hover:bg-[#e7e5dd]"
+                    }`}
+                    type="button"
+                  >
+                    <div class="flex items-start justify-between gap-2">
+                      <strong class="font-bold leading-4">{run.label}</strong>
+                      <span class="text-[#77766d] text-[9px]">{run.age}</span>
+                    </div>
+                    <div class="mt-1 flex items-center justify-between text-[9px]">
+                      <span
+                        class={
+                          run.state === "Failed"
+                            ? "font-bold text-[#c7392f]"
+                            : run.state === "Completed"
+                              ? "text-emerald-700"
+                              : "text-[#77766d]"
+                        }
+                      >
+                        {run.state.toUpperCase()}
+                      </span>
+                      <span class="text-[#77766d]">{run.id}</span>
+                    </div>
+                  </button>
+                )}
+              </For>
+            </div>
+          </section>
+        </aside>
+
+        <section class="min-w-0 border-[#b8b6ad] border-r">
+          <div class="border-[#292923] border-b-2 px-4 py-3">
+            <div class="flex items-center justify-between gap-6">
+              <div class="min-w-0">
+                <div class="flex items-center gap-2 text-[#77766d] text-[9px]">
+                  <span>DELIVERY@2026.07</span>
+                  <span>/</span>
+                  <span>REV A8C41F2</span>
+                  <span>/</span>
+                  <span class="truncate">RUN 01JY7AW4Y4K8P38MN4D</span>
+                </div>
+                <div class="mt-2 flex items-center gap-3">
+                  <h1 class="truncate font-sans font-semibold text-xl tracking-tight">
+                    Deliver product search
+                  </h1>
+                  <span class="shrink-0 bg-[#c7392f] px-2 py-0.5 font-bold text-[9px] text-white">
+                    FAILED
+                  </span>
+                </div>
+              </div>
+              <RunActions />
+            </div>
+          </div>
+
+          <dl class="grid grid-cols-4 border-[#b8b6ad] border-b bg-[#e7e5dd] text-[9px]">
+            <DenseRunFact label="RUN.STATE" value="FAILED" danger />
+            <DenseRunFact label="RESUME.REVISION" value="EXACT MATCH" />
+            <DenseRunFact label="RESUME.CONFIG" value="COMPATIBLE" />
+            <DenseRunFact label="ATTEMPT.CURRENT" value="1" />
+          </dl>
+
+          <nav class="flex items-center justify-between border-[#b8b6ad] border-b px-4">
+            <div class="flex gap-5">
+              <button class="border-[#292923] border-b-2 py-2.5 font-bold text-[9px]" type="button">
+                ACTUAL TRACE [14]
+              </button>
+              <button class="py-2.5 text-[#77766d] text-[9px]" type="button">
+                RUN TREE [2]
+              </button>
+              <button class="py-2.5 text-[#77766d] text-[9px]" type="button">
+                ARTIFACTS [6]
+              </button>
+            </div>
+            <span class="text-[#77766d] text-[9px]">CHRONOLOGICAL / ASC</span>
+          </nav>
+
+          <div class="grid grid-cols-[42px_38px_72px_minmax(250px,1fr)_82px] border-[#292923] border-b bg-[#dedcd4] px-3 py-2 font-bold text-[9px]">
+            <span>ORD</span>
+            <span>ATT</span>
+            <span>TIME</span>
+            <span>EVENT / SUBJECT</span>
+            <span>RESULT</span>
+          </div>
+
+          <div>
+            <For each={traceNodes}>
+              {(node) => (
+                <button
+                  class={`grid w-full grid-cols-[42px_38px_72px_minmax(250px,1fr)_82px] items-center border-[#d2d0c7] border-b px-3 py-2 text-left text-[9px] hover:bg-[#ebe9e2] ${
+                    props.selectedId === node.id ? "bg-[#fff8ca]" : ""
+                  }`}
+                  onClick={() => props.setSelectedId(node.id)}
+                  type="button"
+                >
+                  <span class="text-[#77766d]">{String(node.ordinal).padStart(3, "0")}</span>
+                  <span>{node.attempt}</span>
+                  <span class="text-[#77766d]">{node.time.slice(0, 8)}</span>
+                  <span class="min-w-0 truncate" style={{ "padding-left": `${node.depth * 12}px` }}>
+                    {node.depth ? "└─ " : ""}
+                    <strong>{node.kind.toUpperCase()}</strong>
+                    <span class="mx-1.5 text-[#aaa89f]">/</span>
+                    {node.title}
+                  </span>
+                  <span
+                    class={
+                      node.status === "failed"
+                        ? "font-bold text-[#c7392f]"
+                        : node.status === "completed"
+                          ? "text-emerald-700"
+                          : "text-sky-700"
+                    }
+                  >
+                    {statusLabel[node.status].toUpperCase()}
+                  </span>
+                </button>
+              )}
+            </For>
+          </div>
+        </section>
+
+        <aside class="bg-[#e7e5dd]">
+          <div class="border-[#b8b6ad] border-b bg-[#dedcd4] px-4 py-2">
+            <p class="font-bold text-[9px]">SELECTED EVIDENCE</p>
+          </div>
+          <div class="p-4">
+            <div class="flex items-center justify-between">
+              <span
+                class={`px-2 py-0.5 font-bold text-[9px] ${
+                  props.selectedNode.status === "failed"
+                    ? "bg-[#c7392f] text-white"
+                    : "bg-emerald-700 text-white"
+                }`}
+              >
+                {statusLabel[props.selectedNode.status].toUpperCase()}
+              </span>
+              <span class="text-[#77766d] text-[9px]">
+                EVT-{String(props.selectedNode.ordinal).padStart(3, "0")}
+              </span>
+            </div>
+            <p class="mt-3 text-[#77766d] text-[9px]">{props.selectedNode.kind.toUpperCase()}</p>
+            <h2 class="mt-1 font-sans font-semibold text-lg leading-6">
+              {props.selectedNode.title}
+            </h2>
+            <p class="mt-3 font-sans text-[#55544e] text-xs leading-5">
+              {props.selectedNode.detail}
+            </p>
+
+            <dl class="mt-5 border-[#b8b6ad] border-t pt-4 text-[9px]">
+              <DenseDetailRow
+                label="EXECUTION.ATTEMPT"
+                value={String(props.selectedNode.attempt)}
+              />
+              <DenseDetailRow label="ACTOR" value={props.selectedNode.actor} />
+              <DenseDetailRow label="STARTED" value={props.selectedNode.time} />
+              <DenseDetailRow label="DURATION" value={props.selectedNode.duration} />
+              <DenseDetailRow
+                label="CAUSED.BY"
+                value={`EVT-${String(Math.max(1, props.selectedNode.ordinal - 1)).padStart(3, "0")}`}
+              />
+              <DenseDetailRow label="PARENT.SPAN" value="PRODUCT-SEARCH" />
+            </dl>
+
+            <Show when={props.selectedNode.id === "publish-uncertain"}>
+              <div class="mt-5 border-2 border-[#d4a81e] bg-[#fff8ca] p-3">
+                <p class="font-bold text-[9px]">RECONCILIATION REQUIRED</p>
+                <p class="mt-2 font-sans text-[#55544e] text-[11px] leading-4">
+                  Resume checks whether the remote branch exists before this Activity may retry.
+                </p>
+              </div>
+            </Show>
+
+            <div class="mt-5 border-[#b8b6ad] border-t pt-4">
+              <div class="flex items-center justify-between">
+                <p class="font-bold text-[9px]">REFERENCED ARTIFACTS</p>
+                <span class="text-[#77766d] text-[9px]">1</span>
+              </div>
+              <button
+                class="mt-3 w-full border border-[#b8b6ad] bg-[#f4f2ec] p-3 text-left text-[9px] hover:border-[#292923]"
+                type="button"
+              >
+                <span class="flex items-center justify-between">
+                  <strong>activity-output.txt</strong>
+                  <span>↗</span>
+                </span>
+                <span class="mt-1 block text-[#77766d]">SHA256 71d8…93a</span>
+              </button>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </main>
+  );
+}
+
+function DenseRunFact(props: { danger?: boolean; label: string; value: string }) {
+  return (
+    <div class="border-[#b8b6ad] border-r px-3 py-2 last:border-r-0">
+      <dt class="text-[#77766d]">{props.label}</dt>
+      <dd class={`mt-1 font-bold ${props.danger ? "text-[#c7392f]" : ""}`}>{props.value}</dd>
+    </div>
+  );
+}
+
+function DenseDetailRow(props: { label: string; value: string }) {
+  return (
+    <div class="flex items-start justify-between gap-3 border-[#d2d0c7] border-b py-2 last:border-b-0">
+      <dt class="text-[#77766d]">{props.label}</dt>
+      <dd class="max-w-36 text-right font-bold">{props.value}</dd>
     </div>
   );
 }
