@@ -28,6 +28,7 @@ describe("Kojo CLI", () => {
     expect(help).toContain("status");
     expect(help).toContain("logs");
     expect(help).toContain("project");
+    expect(help).toContain("workflow");
   });
 
   test("documents versioned Project operations", async () => {
@@ -39,5 +40,13 @@ describe("Kojo CLI", () => {
     expect(help).toContain("disable");
     expect(help).toContain("relink");
     expect(help).toContain("archive");
+  });
+
+  test("documents typed Workflow Run start and source-independent inspection", async () => {
+    const help = await runCommand(["workflow", "--help"]);
+
+    expect(help).toContain("start");
+    expect(help).toContain("inspect");
+    expect(await runCommand(["workflow", "start", "--help"])).toContain("--from-checkout");
   });
 });
