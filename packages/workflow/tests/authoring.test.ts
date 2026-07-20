@@ -179,6 +179,39 @@ describe("defineConfig", () => {
     );
   });
 
+  test("rejects missing definitions in sparse registry arrays", () => {
+    const morning = Schedule.make("MorningHello", {
+      workflow: hello,
+      input: { name: "Kojo" },
+      cron: Cron.parseUnsafe("0 9 * * *"),
+      timezone: "Europe/Paris",
+      missedTimePolicy: "skip",
+    });
+    const workflows: Array<typeof hello> = [hello];
+    const schedules: Array<typeof morning> = [morning];
+    workflows.length = 2;
+    schedules.length = 2;
+
+    try {
+      defineConfig({ workflows, schedules });
+      throw new Error("Expected defineConfig to reject sparse registry arrays");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RegistryValidationError);
+      expect((error as RegistryValidationError).diagnostics).toEqual([
+        {
+          code: "InvalidWorkflowDefinition",
+          path: "workflows[1]",
+          message: "Expected a Developer Workflow created with Workflow.make.",
+        },
+        {
+          code: "InvalidScheduleDefinition",
+          path: "schedules[1]",
+          message: "Expected a Workflow Schedule created with Schedule.make.",
+        },
+      ]);
+    }
+  });
+
   test("rejects an unsupported schedule missed-time policy", () => {
     const invalidPolicy = Schedule.make("InvalidPolicy", {
       workflow: hello,

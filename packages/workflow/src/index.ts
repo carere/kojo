@@ -302,8 +302,8 @@ export const defineConfig = <
     );
   }
 
-  workflows.forEach((workflow, index) => {
-    if (!validateWorkflow(workflow, index, diagnostics)) return;
+  for (const [index, workflow] of workflows.entries()) {
+    if (!validateWorkflow(workflow, index, diagnostics)) continue;
     validWorkflows.add(workflow);
     const previous = workflowNames.get(workflow.name);
     if (previous !== undefined) {
@@ -316,7 +316,7 @@ export const defineConfig = <
     } else {
       workflowNames.set(workflow.name, index);
     }
-  });
+  }
 
   const schedulesValue = input?.schedules === undefined ? [] : input.schedules;
   const schedules: ReadonlyArray<unknown> = Array.isArray(schedulesValue) ? schedulesValue : [];
@@ -331,7 +331,7 @@ export const defineConfig = <
   }
 
   const scheduleNames = new Map<string, number>();
-  schedules.forEach((schedule, index) => {
+  for (const [index, schedule] of schedules.entries()) {
     const path = `schedules[${index}]`;
     if (!isSchedule(schedule)) {
       diagnostic(
@@ -340,7 +340,7 @@ export const defineConfig = <
         path,
         "Expected a Workflow Schedule created with Schedule.make.",
       );
-      return;
+      continue;
     }
     if (!isStableName(schedule.name)) {
       diagnostic(
@@ -411,7 +411,7 @@ export const defineConfig = <
         );
       }
     }
-  });
+  }
 
   if (diagnostics.length > 0) {
     throw new RegistryValidationError(Object.freeze(diagnostics));
