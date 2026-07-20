@@ -26,6 +26,14 @@ const projects = sqliteTable("projects", {
   updatedAt: text("updated_at").notNull(),
 });
 
+const projectSourceState = sqliteTable("project_source_state", {
+  activeRevision: text("active_revision"),
+  diagnostics: text("diagnostics").notNull(),
+  projectId: text("project_id").primaryKey(),
+  sourcePolicy: text("source_policy").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 const migrations = [
   {
     id: 1,
@@ -49,6 +57,22 @@ const migrations = [
       )`,
     ],
   },
+  {
+    id: 3,
+    statements: [
+      `CREATE TABLE project_source_state (
+        project_id TEXT PRIMARY KEY NOT NULL REFERENCES projects(id),
+        source_policy TEXT NOT NULL CHECK (source_policy IN ('LocalWithFreshnessWarning', 'RemoteLatest')),
+        active_revision TEXT,
+        diagnostics TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK (
+          (active_revision IS NOT NULL AND diagnostics = '[]') OR
+          (active_revision IS NULL AND diagnostics <> '[]')
+        )
+      )`,
+    ],
+  },
 ] as const;
 
 const migrationChecksum = (statements: ReadonlyArray<string>) =>
@@ -67,6 +91,7 @@ const chmodIfPresent = async (path: string) => {
 export interface SystemStore {
   readonly close: () => void;
   readonly projects: ProjectRepository;
+  readonly projectSources: ProjectSourceRepository;
 }
 
 export type ProjectRegistrationState = "Archived" | "Disabled" | "Enabled";
@@ -89,6 +114,30 @@ export interface ProjectRepository {
     id: string,
     changes: Partial<Pick<StoredProject, "metadata" | "path" | "registrationState">>,
   ) => StoredProject | undefined;
+}
+
+export type StoredProjectSourcePolicy = "LocalWithFreshnessWarning" | "RemoteLatest";
+
+export interface StoredProjectSourceState {
+  readonly activeRevision: string | null;
+  readonly diagnostics: string;
+  readonly projectId: string;
+  readonly sourcePolicy: StoredProjectSourcePolicy;
+  readonly updatedAt: string;
+}
+
+export interface ProjectSourceRepository {
+  readonly activate: (
+    projectId: string,
+    sourcePolicy: StoredProjectSourcePolicy,
+    revision: string,
+  ) => StoredProjectSourceState;
+  readonly findByProjectId: (projectId: string) => StoredProjectSourceState | undefined;
+  readonly reject: (
+    projectId: string,
+    sourcePolicy: StoredProjectSourcePolicy,
+    diagnostics: string,
+  ) => StoredProjectSourceState;
 }
 
 export const openSystemStore = async (home: string): Promise<SystemStore> => {
@@ -238,7 +287,64 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
       },
     };
 
-    return { close: () => sqlite.close(), projects: projectRepository };
+    const selectProjectSource = {
+      activeRevision: projectSourceState.activeRevision,
+      diagnostics: projectSourceState.diagnostics,
+      projectId: projectSourceState.projectId,
+      sourcePolicy: projectSourceState.sourcePolicy,
+      updatedAt: projectSourceState.updatedAt,
+    };
+    const decodeProjectSource = (
+      source: typeof projectSourceState.$inferSelect,
+    ): StoredProjectSourceState => ({
+      ...source,
+      sourcePolicy: source.sourcePolicy as StoredProjectSourcePolicy,
+    });
+    const writeProjectSource = (
+      projectId: string,
+      sourcePolicy: StoredProjectSourcePolicy,
+      activeRevision: string | null,
+      diagnostics: string,
+    ) =>
+      database.transaction((transaction) => {
+        const updatedAt = new Date().toISOString();
+        transaction
+          .insert(projectSourceState)
+          .values({ activeRevision, diagnostics, projectId, sourcePolicy, updatedAt })
+          .onConflictDoUpdate({
+            set: { activeRevision, diagnostics, sourcePolicy, updatedAt },
+            target: projectSourceState.projectId,
+          })
+          .run();
+        const stored = transaction
+          .select(selectProjectSource)
+          .from(projectSourceState)
+          .where(eq(projectSourceState.projectId, projectId))
+          .get();
+        if (stored === undefined)
+          throw new Error(`Project source state for ${projectId} was not stored`);
+        return decodeProjectSource(stored);
+      });
+    const projectSourceRepository: ProjectSourceRepository = {
+      activate: (projectId, sourcePolicy, revision) =>
+        writeProjectSource(projectId, sourcePolicy, revision, "[]"),
+      findByProjectId: (projectId) => {
+        const source = database
+          .select(selectProjectSource)
+          .from(projectSourceState)
+          .where(eq(projectSourceState.projectId, projectId))
+          .get();
+        return source === undefined ? undefined : decodeProjectSource(source);
+      },
+      reject: (projectId, sourcePolicy, diagnostics) =>
+        writeProjectSource(projectId, sourcePolicy, null, diagnostics),
+    };
+
+    return {
+      close: () => sqlite.close(),
+      projects: projectRepository,
+      projectSources: projectSourceRepository,
+    };
   } catch (error) {
     sqlite.close();
     throw error;
