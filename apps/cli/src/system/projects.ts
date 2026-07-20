@@ -10,7 +10,8 @@ export interface ProjectAvailabilityReason {
     | "NOT_GIT_REPOSITORY"
     | "NOT_REPOSITORY_ROOT"
     | "PATH_NOT_DIRECTORY"
-    | "PATH_NOT_FOUND";
+    | "PATH_NOT_FOUND"
+    | "PATH_UNAVAILABLE";
   readonly message: string;
   readonly path: string;
 }
@@ -76,6 +77,22 @@ const unavailable = (
   path: string,
 ): ProjectAvailability => ({ reasons: [{ code, message, path }], status: "Unavailable" });
 
+const unavailableInspection = (
+  path: string,
+  code: "PATH_NOT_FOUND" | "PATH_UNAVAILABLE",
+): Inspection => ({
+  availability: unavailable(
+    code,
+    code === "PATH_NOT_FOUND"
+      ? "The registered Project path does not currently exist"
+      : "The registered Project path could not be inspected",
+    path,
+  ),
+  canonicalPath: path,
+  linkedWorktree: false,
+  metadata: emptyMetadata(path),
+});
+
 const runGit = async (path: string, ...arguments_: ReadonlyArray<string>) => {
   const child = Bun.spawn(["git", "-C", path, ...arguments_], {
     stderr: "pipe",
@@ -100,134 +117,130 @@ const inspectProjectPath = async (requestedPath: string): Promise<Inspection> =>
   try {
     canonicalPath = await realpath(absolutePath);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+    const errorCode = (error as NodeJS.ErrnoException).code;
+    return unavailableInspection(
+      absolutePath,
+      errorCode === "ENOENT" || errorCode === "ENOTDIR" ? "PATH_NOT_FOUND" : "PATH_UNAVAILABLE",
+    );
+  }
+
+  try {
+    if (!(await stat(canonicalPath)).isDirectory()) {
       return {
         availability: unavailable(
-          "PATH_NOT_FOUND",
-          "The registered Project path does not currently exist",
-          absolutePath,
+          "PATH_NOT_DIRECTORY",
+          "The registered Project path is not a directory",
+          canonicalPath,
         ),
-        canonicalPath: absolutePath,
+        canonicalPath,
         linkedWorktree: false,
-        metadata: emptyMetadata(absolutePath),
+        metadata: emptyMetadata(canonicalPath),
       };
     }
-    throw error;
-  }
 
-  if (!(await stat(canonicalPath)).isDirectory()) {
-    return {
-      availability: unavailable(
-        "PATH_NOT_DIRECTORY",
-        "The registered Project path is not a directory",
+    const bare = await runGit(canonicalPath, "rev-parse", "--is-bare-repository");
+    if (bare.exitCode !== 0) {
+      return {
+        availability: unavailable(
+          "NOT_GIT_REPOSITORY",
+          "The registered Project path is not a Git repository",
+          canonicalPath,
+        ),
         canonicalPath,
-      ),
-      canonicalPath,
-      linkedWorktree: false,
-      metadata: emptyMetadata(canonicalPath),
-    };
-  }
+        linkedWorktree: false,
+        metadata: emptyMetadata(canonicalPath),
+      };
+    }
+    if (bare.stdout === "true") {
+      return {
+        availability: unavailable(
+          "BARE_REPOSITORY",
+          "A bare Git repository cannot be registered as a Project",
+          canonicalPath,
+        ),
+        canonicalPath,
+        linkedWorktree: false,
+        metadata: emptyMetadata(canonicalPath),
+      };
+    }
 
-  const bare = await runGit(canonicalPath, "rev-parse", "--is-bare-repository");
-  if (bare.exitCode !== 0) {
-    return {
-      availability: unavailable(
-        "NOT_GIT_REPOSITORY",
-        "The registered Project path is not a Git repository",
+    const topLevelValue = await gitValue(canonicalPath, "rev-parse", "--show-toplevel");
+    if (topLevelValue === undefined) {
+      return {
+        availability: unavailable(
+          "NOT_GIT_REPOSITORY",
+          "The registered Project path is not a Git repository",
+          canonicalPath,
+        ),
         canonicalPath,
-      ),
-      canonicalPath,
-      linkedWorktree: false,
-      metadata: emptyMetadata(canonicalPath),
-    };
-  }
-  if (bare.stdout === "true") {
-    return {
-      availability: unavailable(
-        "BARE_REPOSITORY",
-        "A bare Git repository cannot be registered as a Project",
-        canonicalPath,
-      ),
-      canonicalPath,
-      linkedWorktree: false,
-      metadata: emptyMetadata(canonicalPath),
-    };
-  }
+        linkedWorktree: false,
+        metadata: emptyMetadata(canonicalPath),
+      };
+    }
+    const topLevel = await realpath(topLevelValue);
+    const gitDirectoryValue = await gitValue(
+      topLevel,
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-dir",
+    );
+    const commonDirectoryValue = await gitValue(
+      topLevel,
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    );
+    const linkedWorktree =
+      gitDirectoryValue !== undefined &&
+      commonDirectoryValue !== undefined &&
+      (await realpath(gitDirectoryValue)) !== (await realpath(commonDirectoryValue));
 
-  const topLevelValue = await gitValue(canonicalPath, "rev-parse", "--show-toplevel");
-  if (topLevelValue === undefined) {
-    return {
-      availability: unavailable(
-        "NOT_GIT_REPOSITORY",
-        "The registered Project path is not a Git repository",
+    if (canonicalPath !== topLevel) {
+      return {
+        availability: unavailable(
+          "NOT_REPOSITORY_ROOT",
+          `The registered path is inside the Git repository rooted at ${topLevel}`,
+          canonicalPath,
+        ),
         canonicalPath,
-      ),
-      canonicalPath,
-      linkedWorktree: false,
-      metadata: emptyMetadata(canonicalPath),
-    };
-  }
-  const topLevel = await realpath(topLevelValue);
-  const gitDirectoryValue = await gitValue(
-    topLevel,
-    "rev-parse",
-    "--path-format=absolute",
-    "--git-dir",
-  );
-  const commonDirectoryValue = await gitValue(
-    topLevel,
-    "rev-parse",
-    "--path-format=absolute",
-    "--git-common-dir",
-  );
-  const linkedWorktree =
-    gitDirectoryValue !== undefined &&
-    commonDirectoryValue !== undefined &&
-    (await realpath(gitDirectoryValue)) !== (await realpath(commonDirectoryValue));
+        linkedWorktree,
+        metadata: emptyMetadata(canonicalPath),
+      };
+    }
 
-  if (canonicalPath !== topLevel) {
+    const remoteNames = (await gitValue(topLevel, "remote"))?.split("\n").filter(Boolean) ?? [];
+    const remotes = await Promise.all(
+      remoteNames.map(async (name) => ({
+        name,
+        url: (await gitValue(topLevel, "remote", "get-url", name)) ?? "",
+      })),
+    );
+    const branches =
+      (await gitValue(topLevel, "for-each-ref", "--format=%(refname:short)", "refs/heads"))
+        ?.split("\n")
+        .filter(Boolean) ?? [];
+
     return {
-      availability: unavailable(
-        "NOT_REPOSITORY_ROOT",
-        `The registered path is inside the Git repository rooted at ${topLevel}`,
-        canonicalPath,
-      ),
-      canonicalPath,
+      availability: linkedWorktree
+        ? unavailable(
+            "LINKED_WORKTREE",
+            "A linked Git worktree is an execution resource and not a Project",
+            topLevel,
+          )
+        : { status: "Available" },
+      canonicalPath: topLevel,
       linkedWorktree,
-      metadata: emptyMetadata(canonicalPath),
+      metadata: {
+        branches,
+        currentBranch: (await gitValue(topLevel, "symbolic-ref", "--short", "HEAD")) ?? null,
+        folderName: basename(topLevel),
+        headCommit: (await gitValue(topLevel, "rev-parse", "HEAD")) ?? null,
+        remotes,
+      },
     };
+  } catch {
+    return unavailableInspection(canonicalPath, "PATH_UNAVAILABLE");
   }
-
-  const remoteNames = (await gitValue(topLevel, "remote"))?.split("\n").filter(Boolean) ?? [];
-  const remotes = await Promise.all(
-    remoteNames.map(async (name) => ({
-      name,
-      url: (await gitValue(topLevel, "remote", "get-url", name)) ?? "",
-    })),
-  );
-  const branches =
-    (await gitValue(topLevel, "for-each-ref", "--format=%(refname:short)", "refs/heads"))
-      ?.split("\n")
-      .filter(Boolean) ?? [];
-
-  return {
-    availability: linkedWorktree
-      ? unavailable(
-          "LINKED_WORKTREE",
-          "A linked Git worktree is an execution resource and not a Project",
-          topLevel,
-        )
-      : { status: "Available" },
-    canonicalPath: topLevel,
-    linkedWorktree,
-    metadata: {
-      branches,
-      currentBranch: (await gitValue(topLevel, "symbolic-ref", "--short", "HEAD")) ?? null,
-      folderName: basename(topLevel),
-      headCommit: (await gitValue(topLevel, "rev-parse", "HEAD")) ?? null,
-      remotes,
-    },
-  };
 };
 
 const uuidV7 = () => {
@@ -251,6 +264,22 @@ const parseMetadata = (stored: StoredProject): ProjectMetadata => {
 };
 
 export const makeProjectService = (store: SystemStore) => {
+  const findByCanonicalPath = async (canonicalPath: string, excludedId?: string) => {
+    for (const stored of store.projects.list()) {
+      if (stored.id === excludedId) {
+        continue;
+      }
+      if (stored.path === canonicalPath) {
+        return stored;
+      }
+      const existingInspection = await inspectProjectPath(stored.path);
+      if (existingInspection.canonicalPath === canonicalPath) {
+        return stored;
+      }
+    }
+    return undefined;
+  };
+
   const project = async (stored: StoredProject, refresh: boolean): Promise<Project> => {
     const inspection = await inspectProjectPath(stored.path);
     const metadata =
@@ -309,7 +338,7 @@ export const makeProjectService = (store: SystemStore) => {
           "A linked Git worktree is an execution resource and cannot be registered as a Project",
         );
       }
-      if (store.projects.findByPath(inspection.canonicalPath) !== undefined) {
+      if ((await findByCanonicalPath(inspection.canonicalPath)) !== undefined) {
         throw new ProjectOperationError(
           "PROJECT_ALREADY_REGISTERED",
           `Project path ${inspection.canonicalPath} is already registered`,
@@ -339,8 +368,8 @@ export const makeProjectService = (store: SystemStore) => {
           "A linked Git worktree is an execution resource and cannot be registered as a Project",
         );
       }
-      const existing = store.projects.findByPath(inspection.canonicalPath);
-      if (existing !== undefined && existing.id !== id) {
+      const existing = await findByCanonicalPath(inspection.canonicalPath, id);
+      if (existing !== undefined) {
         throw new ProjectOperationError(
           "PROJECT_ALREADY_REGISTERED",
           `Project path ${inspection.canonicalPath} is already registered`,

@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { access, mkdir, mkdtemp, rename, rm, stat } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rename, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -213,6 +213,13 @@ describe("Kojo System Process", () => {
     expect(listed.json).toMatchObject({
       projects: [{ id: projectId, registrationState: "Archived" }],
     });
+
+    expect(runCli(home, "restart", "--timeout", "2").exitCode).toBe(0);
+    const listedAfterRestart = runCli(home, "project", "list");
+    expect(listedAfterRestart.exitCode).toBe(0);
+    expect(listedAfterRestart.json).toMatchObject({
+      projects: [{ id: projectId, registrationState: "Archived" }],
+    });
   }, 20_000);
 
   test("records unavailable Projects and validates them before enabling", async () => {
@@ -221,7 +228,9 @@ describe("Kojo System Process", () => {
     cleanupPaths.add(repositories);
     const missing = join(repositories, "missing");
     const invalid = join(repositories, "not-a-repository");
+    const invalidParent = join(repositories, "not-a-directory");
     await mkdir(invalid);
+    await Bun.write(invalidParent, "not a directory");
     expect(runCli(home, "start").exitCode).toBe(0);
 
     const invalidAdded = runCli(home, "project", "add", invalid);
@@ -231,6 +240,21 @@ describe("Kojo System Process", () => {
       project: {
         availability: {
           reasons: [{ code: "NOT_GIT_REPOSITORY", path: invalid }],
+          status: "Unavailable",
+        },
+        registrationState: "Disabled",
+      },
+      status: "created",
+    });
+
+    const invalidChild = join(invalidParent, "child");
+    const invalidChildAdded = runCli(home, "project", "add", invalidChild);
+    expect(invalidChildAdded.exitCode).toBe(0);
+    expect(invalidChildAdded.json).toMatchObject({
+      command: "project.add",
+      project: {
+        availability: {
+          reasons: [{ code: "PATH_NOT_FOUND", path: invalidChild }],
           status: "Unavailable",
         },
         registrationState: "Disabled",
@@ -274,6 +298,36 @@ describe("Kojo System Process", () => {
     expect(enabled.json).toMatchObject({
       project: { id: projectId, registrationState: "Enabled" },
     });
+  }, 20_000);
+
+  test("rejects a canonical repository already recorded through a path alias", async () => {
+    const home = await makeHome();
+    const repositories = await mkdtemp(join(tmpdir(), "kojo-canonical-project-test-"));
+    cleanupPaths.add(repositories);
+    const actualParent = join(repositories, "actual");
+    const aliasParent = join(repositories, "alias");
+    await mkdir(actualParent);
+    await symlink(actualParent, aliasParent, "dir");
+    expect(runCli(home, "start").exitCode).toBe(0);
+
+    const aliasedPath = join(aliasParent, "project");
+    const unavailable = runCli(home, "project", "add", aliasedPath);
+    expect(unavailable.exitCode).toBe(0);
+
+    const canonicalPath = await makeRepository(actualParent, "project");
+    const duplicate = runCli(home, "project", "add", canonicalPath);
+    expect(duplicate.exitCode).not.toBe(0);
+    expect(duplicate.json).toMatchObject({
+      command: "project.add",
+      error: { code: "PROJECT_ALREADY_REGISTERED" },
+      schemaVersion: 1,
+      status: "failed",
+    });
+
+    const listed = runCli(home, "project", "list");
+    expect((listed.json as unknown as { projects: ReadonlyArray<unknown> }).projects).toHaveLength(
+      1,
+    );
   }, 20_000);
 
   test("rejects linked worktrees while allowing a separate full clone", async () => {
