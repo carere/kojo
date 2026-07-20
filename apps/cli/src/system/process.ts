@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { chmod, link, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { makeProjectService, type Project, ProjectOperationError } from "./projects";
 import { openSystemStore } from "./storage";
 
 export interface ProcessDetails {
@@ -150,6 +151,7 @@ export const runSystemProcess = async (home: string): Promise<void> => {
   let server: ReturnType<typeof Bun.serve> | undefined;
   let endpointReady = false;
   let lockToken: string | undefined;
+  let projectService: ReturnType<typeof makeProjectService> | undefined;
   let resolveStopped: (() => void) | undefined;
 
   const stopped = new Promise<void>((resolve) => {
@@ -174,6 +176,7 @@ export const runSystemProcess = async (home: string): Promise<void> => {
     ownsLock = true;
     try {
       store = await openSystemStore(home);
+      projectService = makeProjectService(store);
     } catch (error) {
       throw new Error(
         `state.sqlite initialization failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -184,7 +187,7 @@ export const runSystemProcess = async (home: string): Promise<void> => {
     }
     await rm(paths.endpoint, { force: true });
     server = Bun.serve({
-      fetch(request) {
+      async fetch(request) {
         if (!endpointReady) {
           return Response.json({ status: "starting" }, { status: 503 });
         }
@@ -195,6 +198,89 @@ export const runSystemProcess = async (home: string): Promise<void> => {
         if (url.pathname === "/stop" && request.method === "POST") {
           setTimeout(() => resolveStopped?.(), 10);
           return Response.json({ status: "stopping" });
+        }
+        const projectMatch = url.pathname.match(
+          /^\/v1\/projects\/([^/]+)\/(enable|disable|relink|archive)$/,
+        );
+        if (url.pathname === "/v1/projects" && request.method === "GET") {
+          const projects = await projectService?.list();
+          return Response.json({
+            command: "project.list",
+            projects: projects ?? [],
+            schemaVersion: 1,
+            status: "succeeded",
+          });
+        }
+        if (url.pathname === "/v1/projects" && request.method === "POST") {
+          try {
+            const body = (await request.json()) as { path?: unknown };
+            if (typeof body.path !== "string" || body.path.length === 0) {
+              return Response.json(
+                {
+                  command: "project.add",
+                  error: { code: "INVALID_REQUEST", message: "Project path is required" },
+                  schemaVersion: 1,
+                  status: "failed",
+                },
+                { status: 400 },
+              );
+            }
+            const project = await projectService?.add(body.path);
+            return Response.json({
+              command: "project.add",
+              project,
+              schemaVersion: 1,
+              status: "created",
+            });
+          } catch (error) {
+            return projectFailure("project.add", error);
+          }
+        }
+        if (projectMatch !== null && request.method === "POST") {
+          const [, encodedId, operation] = projectMatch;
+          const id = decodeURIComponent(encodedId ?? "");
+          const command = `project.${operation}`;
+          try {
+            const service = projectService;
+            if (service === undefined) {
+              throw new Error("Project service is unavailable");
+            }
+            let project: Project;
+            if (operation === "relink") {
+              const body = (await request.json()) as { path?: unknown };
+              if (typeof body.path !== "string" || body.path.length === 0) {
+                return Response.json(
+                  {
+                    command,
+                    error: { code: "INVALID_REQUEST", message: "Project path is required" },
+                    schemaVersion: 1,
+                    status: "failed",
+                  },
+                  { status: 400 },
+                );
+              }
+              project = await service.relink(id, body.path);
+            } else if (operation === "enable") {
+              project = await service.enable(id);
+            } else if (operation === "disable") {
+              project = await service.disable(id);
+            } else {
+              project = await service.archive(id);
+            }
+            return Response.json({
+              command,
+              project,
+              schemaVersion: 1,
+              status:
+                operation === "enable"
+                  ? "enabled"
+                  : operation === "relink"
+                    ? "relinked"
+                    : `${operation}d`,
+            });
+          } catch (error) {
+            return projectFailure(command, error);
+          }
         }
         return new Response("Not found", { status: 404 });
       },
@@ -239,4 +325,24 @@ export const runSystemProcess = async (home: string): Promise<void> => {
       await cleanup();
     }
   }
+};
+
+const projectFailure = (command: string, error: unknown) => {
+  const operationError = error instanceof ProjectOperationError ? error : undefined;
+  const code = operationError?.code ?? "PROJECT_COMMAND_FAILED";
+  const status =
+    code === "PROJECT_NOT_FOUND" ? 404 : code === "PROJECT_ALREADY_REGISTERED" ? 409 : 400;
+  return Response.json(
+    {
+      command,
+      error: {
+        code,
+        message: error instanceof Error ? error.message : String(error),
+        ...(operationError?.reasons === undefined ? {} : { reasons: operationError.reasons }),
+      },
+      schemaVersion: 1,
+      status: "failed",
+    },
+    { status },
+  );
 };

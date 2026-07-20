@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { access, mkdtemp, rm, stat } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rename, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -17,6 +17,7 @@ interface CommandResult {
 
 const cli = resolve(import.meta.dir, "../main.ts");
 const homes = new Set<string>();
+const cleanupPaths = new Set<string>();
 
 const makeHome = async () => {
   const home = await mkdtemp(join(tmpdir(), "kojo-system-test-"));
@@ -59,15 +60,261 @@ const runCliAsync = async (home: string, ...arguments_: ReadonlyArray<string>) =
   };
 };
 
+const runGit = (directory: string, ...arguments_: ReadonlyArray<string>) => {
+  const result = Bun.spawnSync(["git", "-C", directory, ...arguments_], {
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr.toString());
+  }
+  return result.stdout.toString().trim();
+};
+
+const makeRepository = async (parent: string, name: string) => {
+  const repository = join(parent, name);
+  await mkdir(repository);
+  runGit(repository, "init", "--initial-branch=main");
+  runGit(repository, "config", "user.email", "kojo@example.test");
+  runGit(repository, "config", "user.name", "Kojo Test");
+  await Bun.write(join(repository, "README.md"), `# ${name}\n`);
+  runGit(repository, "add", "README.md");
+  runGit(repository, "commit", "-m", "initial");
+  return repository;
+};
+
 afterEach(async () => {
   for (const home of homes) {
     runCli(home, "stop", "--timeout", "2");
     await rm(home, { force: true, recursive: true });
   }
+  for (const path of cleanupPaths) {
+    await rm(path, { force: true, recursive: true });
+  }
   homes.clear();
+  cleanupPaths.clear();
 });
 
 describe("Kojo System Process", () => {
+  test("preserves Project identity across path, availability, and registration changes", async () => {
+    const home = await makeHome();
+    const repositories = await mkdtemp(join(tmpdir(), "kojo-project-test-"));
+    cleanupPaths.add(repositories);
+    const original = await makeRepository(repositories, "original-name");
+    expect(runCli(home, "start").exitCode).toBe(0);
+
+    const added = runCli(home, "project", "add", original);
+    expect(added.exitCode).toBe(0);
+    expect(added.json).toMatchObject({
+      command: "project.add",
+      project: {
+        availability: { status: "Available" },
+        metadata: { folderName: "original-name" },
+        path: original,
+        registrationState: "Disabled",
+      },
+      schemaVersion: 1,
+      status: "created",
+    });
+    const projectId = (added.json as unknown as { project: { id: string } }).project.id;
+    expect(projectId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+
+    const duplicate = runCli(home, "project", "add", original);
+    expect(duplicate.exitCode).not.toBe(0);
+    expect(duplicate.json).toMatchObject({
+      command: "project.add",
+      error: { code: "PROJECT_ALREADY_REGISTERED" },
+      schemaVersion: 1,
+      status: "failed",
+    });
+
+    await Bun.write(join(original, "README.md"), "# changed metadata\n");
+    runGit(original, "add", "README.md");
+    runGit(original, "commit", "-m", "change metadata");
+    runGit(original, "branch", "mutable-branch");
+    runGit(original, "remote", "add", "origin", "https://example.test/kojo.git");
+    const changedCommit = runGit(original, "rev-parse", "HEAD");
+    const metadataChanged = runCli(home, "project", "list");
+    expect(metadataChanged.exitCode).toBe(0);
+    expect(metadataChanged.json).toMatchObject({
+      projects: [
+        {
+          id: projectId,
+          metadata: {
+            branches: ["main", "mutable-branch"],
+            headCommit: changedCommit,
+            remotes: [{ name: "origin", url: "https://example.test/kojo.git" }],
+          },
+        },
+      ],
+    });
+
+    const moved = join(repositories, "moved-name");
+    await rename(original, moved);
+    const unavailable = runCli(home, "project", "list");
+    expect(unavailable.exitCode).toBe(0);
+    expect(unavailable.json).toMatchObject({
+      command: "project.list",
+      projects: [
+        {
+          availability: {
+            reasons: [{ code: "PATH_NOT_FOUND" }],
+            status: "Unavailable",
+          },
+          id: projectId,
+          path: original,
+        },
+      ],
+      schemaVersion: 1,
+      status: "succeeded",
+    });
+
+    const relinked = runCli(home, "project", "relink", projectId, moved);
+    expect(relinked.exitCode).toBe(0);
+    expect(relinked.json).toMatchObject({
+      command: "project.relink",
+      project: {
+        availability: { status: "Available" },
+        id: projectId,
+        metadata: { folderName: "moved-name" },
+        path: moved,
+        registrationState: "Disabled",
+      },
+      schemaVersion: 1,
+      status: "relinked",
+    });
+
+    const enabled = runCli(home, "project", "enable", projectId);
+    expect(enabled.exitCode).toBe(0);
+    expect(enabled.json).toMatchObject({
+      command: "project.enable",
+      project: { id: projectId, registrationState: "Enabled" },
+      status: "enabled",
+    });
+    const disabled = runCli(home, "project", "disable", projectId);
+    expect(disabled.exitCode).toBe(0);
+    expect(disabled.json).toMatchObject({
+      command: "project.disable",
+      project: { id: projectId, registrationState: "Disabled" },
+      status: "disabled",
+    });
+    const archived = runCli(home, "project", "archive", projectId);
+    expect(archived.exitCode).toBe(0);
+    expect(archived.json).toMatchObject({
+      command: "project.archive",
+      project: { id: projectId, registrationState: "Archived" },
+      status: "archived",
+    });
+
+    const listed = runCli(home, "project", "list");
+    expect(listed.exitCode).toBe(0);
+    expect(listed.json).toMatchObject({
+      projects: [{ id: projectId, registrationState: "Archived" }],
+    });
+  }, 20_000);
+
+  test("records unavailable Projects and validates them before enabling", async () => {
+    const home = await makeHome();
+    const repositories = await mkdtemp(join(tmpdir(), "kojo-unavailable-project-test-"));
+    cleanupPaths.add(repositories);
+    const missing = join(repositories, "missing");
+    const invalid = join(repositories, "not-a-repository");
+    await mkdir(invalid);
+    expect(runCli(home, "start").exitCode).toBe(0);
+
+    const invalidAdded = runCli(home, "project", "add", invalid);
+    expect(invalidAdded.exitCode).toBe(0);
+    expect(invalidAdded.json).toMatchObject({
+      command: "project.add",
+      project: {
+        availability: {
+          reasons: [{ code: "NOT_GIT_REPOSITORY", path: invalid }],
+          status: "Unavailable",
+        },
+        registrationState: "Disabled",
+      },
+      status: "created",
+    });
+
+    const added = runCli(home, "project", "add", missing);
+    expect(added.exitCode).toBe(0);
+    expect(added.json).toMatchObject({
+      command: "project.add",
+      project: {
+        availability: {
+          reasons: [{ code: "PATH_NOT_FOUND", path: missing }],
+          status: "Unavailable",
+        },
+        path: missing,
+        registrationState: "Disabled",
+      },
+      status: "created",
+    });
+    const projectId = (added.json as unknown as { project: { id: string } }).project.id;
+
+    const enableFailed = runCli(home, "project", "enable", projectId);
+    expect(enableFailed.exitCode).not.toBe(0);
+    expect(enableFailed.json).toMatchObject({
+      command: "project.enable",
+      error: { code: "PROJECT_UNAVAILABLE", reasons: [{ code: "PATH_NOT_FOUND" }] },
+      schemaVersion: 1,
+      status: "failed",
+    });
+
+    const repository = await makeRepository(repositories, "available");
+    const relinked = runCli(home, "project", "relink", projectId, repository);
+    expect(relinked.exitCode).toBe(0);
+    expect(relinked.json).toMatchObject({
+      project: { availability: { status: "Available" }, id: projectId },
+    });
+    const enabled = runCli(home, "project", "enable", projectId);
+    expect(enabled.exitCode).toBe(0);
+    expect(enabled.json).toMatchObject({
+      project: { id: projectId, registrationState: "Enabled" },
+    });
+  }, 20_000);
+
+  test("rejects linked worktrees while allowing a separate full clone", async () => {
+    const home = await makeHome();
+    const repositories = await mkdtemp(join(tmpdir(), "kojo-git-identity-test-"));
+    cleanupPaths.add(repositories);
+    const repository = await makeRepository(repositories, "source");
+    const linkedWorktree = join(repositories, "linked-worktree");
+    const clone = join(repositories, "full-clone");
+    runGit(repository, "worktree", "add", "-b", "linked", linkedWorktree);
+    const cloneResult = Bun.spawnSync(["git", "clone", repository, clone], {
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+    expect(cloneResult.exitCode).toBe(0);
+    expect(runCli(home, "start").exitCode).toBe(0);
+
+    const first = runCli(home, "project", "add", repository);
+    expect(first.exitCode).toBe(0);
+
+    const linked = runCli(home, "project", "add", linkedWorktree);
+    expect(linked.exitCode).not.toBe(0);
+    expect(linked.json).toMatchObject({
+      command: "project.add",
+      error: { code: "LINKED_WORKTREE_NOT_PROJECT" },
+      schemaVersion: 1,
+      status: "failed",
+    });
+
+    const cloned = runCli(home, "project", "add", clone);
+    expect(cloned.exitCode).toBe(0);
+    expect((cloned.json as unknown as { project: { id: string } }).project.id).not.toBe(
+      (first.json as unknown as { project: { id: string } }).project.id,
+    );
+
+    const listed = runCli(home, "project", "list");
+    expect((listed.json as unknown as { projects: ReadonlyArray<unknown> }).projects).toHaveLength(
+      2,
+    );
+  }, 20_000);
+
   test("provides idempotent lifecycle, status, and log commands for one Kojo Home", async () => {
     const home = await makeHome();
 
@@ -182,6 +429,10 @@ describe("Kojo System Process", () => {
         {
           checksum: expect.stringMatching(/^[a-f0-9]{64}$/),
           id: 1,
+        },
+        {
+          checksum: expect.stringMatching(/^[a-f0-9]{64}$/),
+          id: 2,
         },
       ]);
     } finally {
