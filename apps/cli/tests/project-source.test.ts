@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,7 +9,7 @@ import {
   materializeRuntimeSourceCheckout,
   ProjectSourceValidationError,
 } from "../src/system/project-source";
-import { makeProjectService } from "../src/system/projects";
+import { makeProjectService, ProjectOperationError } from "../src/system/projects";
 import { openSystemStore } from "../src/system/storage";
 
 const cleanup = new Set<string>();
@@ -59,7 +59,8 @@ const makeRepository = async () => {
         "@kojo/workflow": ["@kojo/workflow@0.1.0", "", {}, "sha512-workflow"],
         "@types/bun": ["@types/bun@1.3.14", "", {}, "sha512-types-bun"],
         effect: ["effect@4.0.0-beta.98", "", {}, "sha512-effect"],
-        library: ["library@1.0.0", "", { dependencies: { transitive: "2.0.0" } }, "sha512-library"],
+        library: ["library@1.0.0", "", { dependencies: { transitive: "3.0.0" } }, "sha512-library"],
+        "library/transitive": ["transitive@3.0.0", "", {}, "sha512-library-transitive"],
         transitive: ["transitive@2.0.0", "", {}, "sha512-transitive"],
         typescript: ["typescript@7.0.2", "", {}, "sha512-typescript"],
       },
@@ -123,6 +124,29 @@ describe("Project Source Revision adapter", () => {
     expect(git(local, "rev-parse", "refs/heads/main")).toBe(localCommit);
   });
 
+  test("RemoteLatest follows the current remote default branch instead of stale origin HEAD", async () => {
+    const remote = await makeRepository();
+    const local = await mkdtemp(join(tmpdir(), "kojo-source-clone-"));
+    cleanup.add(local);
+    await rm(local, { recursive: true });
+    git(remote, "clone", remote, local);
+    git(remote, "branch", "-m", "main", "trunk");
+    await write(join(remote, "workflows/beta.ts"), "export const beta = 'trunk'\n");
+    git(remote, "add", ".");
+    git(remote, "commit", "-m", "move remote default");
+    const remoteCommit = git(remote, "rev-parse", "HEAD");
+
+    const revision = await activateProjectSource({
+      loadRegistry: async () => registry(),
+      policy: "RemoteLatest",
+      repository: local,
+    });
+
+    expect(git(local, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")).toBe("origin/main");
+    expect(revision.commit).toBe(remoteCommit);
+    expect(revision.provenance.defaultBranch).toBe("trunk");
+  });
+
   test("checks the exact project-local stack before loading configuration", async () => {
     const repository = await makeRepository();
     const manifest = JSON.parse(await Bun.file(join(repository, "package.json")).text());
@@ -146,6 +170,30 @@ describe("Project Source Revision adapter", () => {
     expect(failure.diagnostics).toContainEqual(
       expect.objectContaining({ code: "INCOMPATIBLE_EFFECT" }),
     );
+  });
+
+  test("rejects an invalid Schedule with the complete registry", async () => {
+    const repository = await makeRepository();
+    const failure = await activateProjectSource({
+      loadRegistry: async () => ({
+        ...registry(),
+        schedules: [
+          {
+            cron: "Cron({seconds:[0]})",
+            input: {},
+            missedTimePolicy: "skip",
+            name: "daily",
+            timezone: "+01:00",
+            workflow: "alpha",
+          },
+        ],
+      }),
+      policy: "LocalWithFreshnessWarning",
+      repository,
+    }).catch((error) => error);
+
+    expect(failure).toBeInstanceOf(ProjectSourceValidationError);
+    expect(failure.diagnostics).toContainEqual(expect.objectContaining({ code: "INVALID_CONFIG" }));
   });
 
   test("fingerprints each workflow static closure independently", async () => {
@@ -177,11 +225,54 @@ describe("Project Source Revision adapter", () => {
     ]);
     expect(
       first.workflows[0]?.manifest.lockfileResolutions.map(({ package: name }) => name),
-    ).toEqual(["library", "transitive"]);
+    ).toEqual(["library", "library/transitive"]);
+  });
+
+  test("uses each reachable workspace package dependency scope", async () => {
+    const repository = await makeRepository();
+    const manifest = JSON.parse(await Bun.file(join(repository, "package.json")).text());
+    manifest.dependencies["workspace-library"] = "workspace:*";
+    await write(join(repository, "package.json"), JSON.stringify(manifest));
+    await mkdir(join(repository, "packages", "workspace-library"), { recursive: true });
+    await write(
+      join(repository, "packages", "workspace-library", "package.json"),
+      JSON.stringify({
+        dependencies: { transitive: "2.0.0" },
+        exports: { "./feature": "./src/actual.ts" },
+        name: "workspace-library",
+        type: "module",
+      }),
+    );
+    await mkdir(join(repository, "packages", "workspace-library", "src"));
+    await write(
+      join(repository, "packages", "workspace-library", "src", "actual.ts"),
+      "import 'transitive'\nexport const workspaceValue = true\n",
+    );
+    await write(
+      join(repository, "workflows/alpha.ts"),
+      "import 'workspace-library/feature'\nexport const alpha = true\n",
+    );
+    git(repository, "add", ".");
+    git(repository, "commit", "-m", "add workspace dependency");
+
+    const revision = await activateProjectSource({
+      loadRegistry: async () => registry(),
+      policy: "LocalWithFreshnessWarning",
+      repository,
+    });
+
+    expect(revision.workflows[0]?.manifest.modules.map(({ path }) => path)).toEqual([
+      "packages/workspace-library/src/actual.ts",
+      "workflows/alpha.ts",
+    ]);
+    expect(
+      revision.workflows[0]?.manifest.lockfileResolutions.map(({ package: name }) => name),
+    ).toEqual(["transitive"]);
   });
 
   test.each([
     ["COMPUTED_IMPORT", "const target = './shared.ts'; import(target)"],
+    ["COMPUTED_IMPORT", "const target = './shared.ts'; import /* comment */ (target)"],
     ["AUTHORED_COMMONJS", "const shared = require('./shared.ts')"],
     ["REMOTE_IMPORT", "import 'https://example.test/workflow.ts'"],
     ["NATIVE_ADDON", "import './binding.node'"],
@@ -257,6 +348,76 @@ describe("Project Source Revision adapter", () => {
     expect(git(repository, "status", "--short")).toBe(before);
     await checkout.dispose();
     expect(await Bun.file(checkout.path).exists()).toBe(false);
+  });
+
+  test("rejects symlinks outside the worktree without changing their targets", async () => {
+    const repository = await makeRepository();
+    const external = await mkdtemp(join(tmpdir(), "kojo-external-source-"));
+    cleanup.add(external);
+    const externalModule = join(external, "shared.ts");
+    await write(externalModule, "export const message = 'external'\n");
+    await rm(join(repository, "workflows/shared.ts"));
+    await symlink(externalModule, join(repository, "workflows/shared.ts"));
+    git(repository, "add", ".");
+    git(repository, "commit", "-m", "add escaping symlink");
+
+    const failure = await activateProjectSource({
+      loadRegistry: async () => registry(),
+      policy: "LocalWithFreshnessWarning",
+      repository,
+    }).catch((error) => error);
+    expect(failure).toBeInstanceOf(ProjectSourceValidationError);
+    expect(failure.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "LOCAL_DEPENDENCY_OUTSIDE_WORKTREE" }),
+    );
+
+    const beforeMode = (await stat(externalModule)).mode;
+    await expect(
+      materializeRuntimeSourceCheckout(repository, {
+        commit: git(repository, "rev-parse", "HEAD"),
+      }),
+    ).rejects.toBeInstanceOf(ProjectSourceValidationError);
+    expect((await stat(externalModule)).mode).toBe(beforeMode);
+  });
+
+  test("validates source while adding and enabling a Project", async () => {
+    const repository = await makeRepository();
+    const home = await mkdtemp(join(tmpdir(), "kojo-source-service-test-"));
+    cleanup.add(home);
+    const store = await openSystemStore(home);
+    const service = makeProjectService(store, (sourceStore, projectId, options) =>
+      activateStoredProjectSource(sourceStore, projectId, {
+        ...options,
+        loadRegistry: async () => registry(),
+      }),
+    );
+    try {
+      const added = await service.add(repository);
+      expect(added.availability).toEqual({ status: "Available" });
+      expect(added.source?.revision?.workflows.map(({ name }) => name)).toEqual(["alpha", "beta"]);
+
+      const manifest = JSON.parse(await Bun.file(join(repository, "package.json")).text());
+      manifest.dependencies.effect = "4.0.0-beta.99";
+      await write(join(repository, "package.json"), JSON.stringify(manifest));
+      git(repository, "add", ".");
+      git(repository, "commit", "-m", "break source compatibility");
+
+      const failure = await service.enable(added.id).catch((error) => error);
+      expect(failure).toBeInstanceOf(ProjectOperationError);
+      expect(failure).toMatchObject({
+        code: "PROJECT_UNAVAILABLE",
+        reasons: [
+          {
+            code: "PROJECT_SOURCE_INVALID",
+            diagnostics: [expect.objectContaining({ code: "INCOMPATIBLE_EFFECT" })],
+          },
+        ],
+      });
+      expect(store.projects.findById(added.id)?.registrationState).toBe("Disabled");
+      expect(store.projectSources.findByProjectId(added.id)?.activeRevision).toBeNull();
+    } finally {
+      store.close();
+    }
   });
 
   test("atomically replaces a valid source with an unavailable invalid candidate", async () => {

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { chmod, mkdtemp, readdir, readFile, realpath, rm, stat } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readdir, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -42,6 +42,7 @@ export type ProjectSourceDiagnosticCode =
   | "REMOTE_FETCH_FAILED"
   | "REMOTE_IMPORT"
   | "REMOTE_NOT_CONFIGURED"
+  | "SOURCE_NOT_ACTIVATED"
   | "UNSUPPORTED_MODULE";
 
 export interface ProjectSourceDiagnostic {
@@ -186,15 +187,17 @@ const diagnostic = (
   details: Pick<ProjectSourceDiagnostic, "path" | "specifier"> = {},
 ): ProjectSourceDiagnostic => ({ code, message, ...details });
 
-const defaultBranch = async (repository: string) => {
-  const remoteHead = await runGitResult(
-    repository,
-    "symbolic-ref",
-    "--short",
-    "refs/remotes/origin/HEAD",
-  );
-  if (remoteHead.exitCode === 0 && remoteHead.stdout.startsWith("origin/")) {
-    return remoteHead.stdout.slice("origin/".length);
+const localDefaultBranch = async (repository: string, remote: string | null) => {
+  if (remote !== null) {
+    const remoteHead = await runGitResult(
+      repository,
+      "symbolic-ref",
+      "--short",
+      `refs/remotes/${remote}/HEAD`,
+    );
+    if (remoteHead.exitCode === 0 && remoteHead.stdout.startsWith(`${remote}/`)) {
+      return remoteHead.stdout.slice(`${remote}/`.length);
+    }
   }
   for (const candidate of ["main", "master"]) {
     if (
@@ -212,6 +215,36 @@ const defaultBranch = async (repository: string) => {
       "The repository default branch could not be determined.",
     ),
   ]);
+};
+
+const remoteDefaultBranch = async (repository: string, remote: string) => {
+  const result = await runGitResult(repository, "ls-remote", "--symref", remote, "HEAD");
+  if (result.exitCode !== 0) {
+    throw new ProjectSourceValidationError([
+      diagnostic(
+        "REMOTE_FETCH_FAILED",
+        `The current default branch could not be read from ${remote}.`,
+      ),
+    ]);
+  }
+  const lines = result.stdout.split("\n");
+  const symbolic = lines.find(
+    (line) => line.startsWith("ref: refs/heads/") && line.endsWith("\tHEAD"),
+  );
+  const head = lines.find(
+    (line) => line.endsWith("\tHEAD") && /^(?:[a-f0-9]{40}|[a-f0-9]{64})\tHEAD$/.test(line),
+  );
+  const branch = symbolic?.slice("ref: refs/heads/".length, -"\tHEAD".length);
+  const commit = head?.slice(0, -"\tHEAD".length);
+  if (branch === undefined || branch.length === 0 || commit === undefined) {
+    throw new ProjectSourceValidationError([
+      diagnostic(
+        "DEFAULT_BRANCH_NOT_FOUND",
+        `The current default branch could not be determined from ${remote}.`,
+      ),
+    ]);
+  }
+  return { branch, commit };
 };
 
 const relation = async (repository: string, local: string, remote: string) => {
@@ -235,10 +268,10 @@ const relation = async (repository: string, local: string, remote: string) => {
 };
 
 const selectSource = async (repository: string, policy: ProjectSourcePolicy) => {
-  const branch = await defaultBranch(repository);
-  const localCommit = await runGit(repository, "rev-parse", `refs/heads/${branch}`);
   const remotes = (await runGit(repository, "remote")).split("\n").filter(Boolean);
   const remote = remotes.includes("origin") ? "origin" : (remotes[0] ?? null);
+  const branch = await localDefaultBranch(repository, remote);
+  const localCommit = await runGit(repository, "rev-parse", `refs/heads/${branch}`);
   if (remote === null) {
     if (policy === "RemoteLatest") {
       throw new ProjectSourceValidationError([
@@ -261,10 +294,7 @@ const selectSource = async (repository: string, policy: ProjectSourcePolicy) => 
   if (fetch.exitCode !== 0) {
     if (policy === "RemoteLatest") {
       throw new ProjectSourceValidationError([
-        diagnostic(
-          "REMOTE_FETCH_FAILED",
-          `RemoteLatest could not fetch ${remote}: ${fetch.stderr}`,
-        ),
+        diagnostic("REMOTE_FETCH_FAILED", `RemoteLatest could not fetch ${remote}.`),
       ]);
     }
     return {
@@ -278,14 +308,52 @@ const selectSource = async (repository: string, policy: ProjectSourcePolicy) => 
       remote,
     };
   }
+
+  if (policy === "RemoteLatest") {
+    const latest = await remoteDefaultBranch(repository, remote);
+    const commitAvailable = await runGitResult(
+      repository,
+      "cat-file",
+      "-e",
+      `${latest.commit}^{commit}`,
+    );
+    if (commitAvailable.exitCode !== 0) {
+      throw new ProjectSourceValidationError([
+        diagnostic(
+          "REMOTE_FETCH_FAILED",
+          `The fetched source does not contain current ${remote}/${latest.branch} commit ${latest.commit}.`,
+        ),
+      ]);
+    }
+    const matchingLocal = await runGitResult(
+      repository,
+      "rev-parse",
+      `refs/heads/${latest.branch}`,
+    );
+    const freshness =
+      matchingLocal.exitCode === 0
+        ? {
+            localCommit: matchingLocal.stdout,
+            remoteCommit: latest.commit,
+            status: await relation(repository, matchingLocal.stdout, latest.commit),
+          }
+        : {
+            localCommit,
+            remoteCommit: latest.commit,
+            status: "Unknown" as const,
+            warning: `The current remote default branch ${latest.branch} has no matching local branch.`,
+          };
+    return {
+      branch: latest.branch,
+      commit: latest.commit,
+      freshness,
+      remote,
+    };
+  }
+
   const remoteReference = `refs/remotes/${remote}/${branch}`;
   const remoteResult = await runGitResult(repository, "rev-parse", "--verify", remoteReference);
   if (remoteResult.exitCode !== 0) {
-    if (policy === "RemoteLatest") {
-      throw new ProjectSourceValidationError([
-        diagnostic("REMOTE_FETCH_FAILED", `RemoteLatest requires ${remoteReference}.`),
-      ]);
-    }
     return {
       branch,
       commit: localCommit,
@@ -300,7 +368,7 @@ const selectSource = async (repository: string, policy: ProjectSourcePolicy) => 
   const remoteCommit = remoteResult.stdout;
   return {
     branch,
-    commit: policy === "RemoteLatest" ? remoteCommit : localCommit,
+    commit: localCommit,
     freshness: {
       localCommit,
       remoteCommit,
@@ -338,6 +406,8 @@ interface PackageManifest {
   readonly main?: string;
   readonly module?: string;
   readonly name?: string;
+  readonly optionalDependencies?: Record<string, string>;
+  readonly peerDependencies?: Record<string, string>;
   readonly type?: string;
   readonly version?: string;
 }
@@ -346,14 +416,22 @@ const readJson = async <A>(path: string, code: ProjectSourceDiagnosticCode): Pro
   try {
     return JSON.parse(await readFile(path, "utf8")) as A;
   } catch {
+    const logicalPath = path.slice(path.lastIndexOf(sep) + 1);
     throw new ProjectSourceValidationError([
-      diagnostic(code, `${relative(process.cwd(), path)} is missing or invalid.`),
+      diagnostic(code, `${logicalPath} is missing or invalid.`, { path: logicalPath }),
     ]);
   }
 };
 
 const dependencyVersion = (manifest: PackageManifest, name: string) =>
   manifest.dependencies?.[name] ?? manifest.devDependencies?.[name];
+
+const manifestDependencies = (manifest: PackageManifest) => ({
+  ...manifest.dependencies,
+  ...manifest.devDependencies,
+  ...manifest.optionalDependencies,
+  ...manifest.peerDependencies,
+});
 
 const validateToolchain = async (checkout: string) => {
   const manifest = await readJson<PackageManifest>(
@@ -455,6 +533,31 @@ const defaultLoadRegistry = async (
     if (!config || !Object.isFrozen(config) || !Object.isFrozen(config.workflows) || !Object.isFrozen(config.schedules) || !Array.isArray(config.workflows) || !Array.isArray(config.schedules)) {
       throw new Error("kojo.config.ts must default-export defineConfig({ workflows, schedules })");
     }
+    const hasMarker = (value, description) => value && typeof value === "object" && Object.isFrozen(value) && Object.getOwnPropertySymbols(value).some((symbol) => symbol.description === description && value[symbol] === symbol);
+    if (!config.workflows.every((workflow) => hasMarker(workflow, "@kojo/workflow/WorkflowDefinition")) || !config.schedules.every((schedule) => hasMarker(schedule, "@kojo/workflow/ScheduleDefinition"))) {
+      throw new Error("kojo.config.ts must contain definitions created by @kojo/workflow");
+    }
+    const { Cron, Schema } = await import("effect");
+    const workflowSet = new Set(config.workflows);
+    const validTimezone = (timezone) => {
+      try {
+        const resolved = new Intl.DateTimeFormat("en", { timeZone: timezone }).resolvedOptions().timeZone;
+        return !/^[+-]\\d{2}:\\d{2}$/.test(resolved);
+      } catch {
+        return false;
+      }
+    };
+    const validInput = (schedule) => {
+      try {
+        Schema.decodeUnknownSync(Schema.toType(schedule.workflow.input))(schedule.input);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if (!config.workflows.every((workflow) => typeof workflow.name === "string" && workflow.name.length > 0 && typeof workflow.version === "string" && workflow.version.length > 0 && typeof workflow.entryPoint === "string" && Schema.isSchema(workflow.input) && Schema.isSchema(workflow.success) && Schema.isSchema(workflow.failure) && typeof workflow.run === "function") || !config.schedules.every((schedule) => workflowSet.has(schedule.workflow) && Cron.isCron(schedule.cron) && schedule.cron.seconds.size === 1 && schedule.cron.seconds.has(0) && typeof schedule.timezone === "string" && validTimezone(schedule.timezone) && (schedule.missedTimePolicy === "skip" || schedule.missedTimePolicy === "catch-up-once") && validInput(schedule))) {
+      throw new Error("kojo.config.ts contains an invalid Workflow Registry or Schedule");
+    }
     const workflows = config.workflows.map(({ name, version, entryPoint }) => ({ name, version, entryPoint }));
     const schedules = config.schedules.map((schedule) => ({
       name: schedule.name,
@@ -471,14 +574,14 @@ const defaultLoadRegistry = async (
     stderr: "pipe",
     stdout: "pipe",
   });
-  const [exitCode, stderr, stdout] = await Promise.all([
+  const [exitCode, , stdout] = await Promise.all([
     child.exited,
     new Response(child.stderr).text(),
     new Response(child.stdout).text(),
   ]);
   if (exitCode !== 0) {
     throw new ProjectSourceValidationError([
-      diagnostic("CONFIG_LOAD_FAILED", stderr.trim() || "kojo.config.ts could not be loaded.", {
+      diagnostic("CONFIG_LOAD_FAILED", "kojo.config.ts could not be loaded.", {
         path: configPath,
       }),
     ]);
@@ -499,7 +602,7 @@ const installProjectDependencies = async (checkout: string) => {
     [process.execPath, "install", "--frozen-lockfile", "--ignore-scripts", "--no-progress"],
     { cwd: checkout, stderr: "pipe", stdout: "pipe" },
   );
-  const [exitCode, stderr] = await Promise.all([
+  const [exitCode] = await Promise.all([
     child.exited,
     new Response(child.stderr).text(),
     new Response(child.stdout).text(),
@@ -508,7 +611,7 @@ const installProjectDependencies = async (checkout: string) => {
     throw new ProjectSourceValidationError([
       diagnostic(
         "DEPENDENCY_INSTALL_FAILED",
-        stderr.trim() || "The exact project-local dependencies could not be materialized.",
+        "The exact project-local dependencies could not be materialized.",
         { path: "bun.lock" },
       ),
     ]);
@@ -569,25 +672,25 @@ interface ClosureContext {
 }
 
 const collectLockResolution = (
-  name: string,
+  key: string,
   context: ClosureContext,
   path: string,
   specifier: string,
   visited = new Set<string>(),
 ) => {
-  if (visited.has(name)) return;
-  visited.add(name);
-  const resolution = context.lockfile[name];
+  if (visited.has(key)) return;
+  visited.add(key);
+  const resolution = context.lockfile[key];
   if (resolution === undefined) {
     context.diagnostics.push(
-      diagnostic("INVALID_LOCKFILE", `bun.lock has no exact resolution for '${name}'.`, {
+      diagnostic("INVALID_LOCKFILE", `bun.lock has no exact resolution for '${key}'.`, {
         path,
         specifier,
       }),
     );
     return;
   }
-  context.packages.set(name, resolution);
+  context.packages.set(key, resolution);
   if (!Array.isArray(resolution)) return;
   const metadata = resolution[2];
   if (metadata === null || typeof metadata !== "object") return;
@@ -596,8 +699,10 @@ const collectLockResolution = (
     const dependencies = record[field];
     if (dependencies === null || typeof dependencies !== "object") continue;
     for (const dependency of Object.keys(dependencies as Record<string, unknown>).sort()) {
-      if (context.lockfile[dependency] !== undefined) {
-        collectLockResolution(dependency, context, path, dependency, visited);
+      const nestedKey = `${key}/${dependency}`;
+      const dependencyKey = context.lockfile[nestedKey] === undefined ? dependency : nestedKey;
+      if (context.lockfile[dependencyKey] !== undefined) {
+        collectLockResolution(dependencyKey, context, path, dependency, visited);
       }
     }
   }
@@ -639,6 +744,26 @@ const exportedEntry = (value: unknown): string | undefined => {
   return undefined;
 };
 
+const packageExport = (exports: unknown, subpath: string | undefined) => {
+  if (subpath === undefined) return exportedEntry(exports);
+  if (exports === null || typeof exports !== "object") return undefined;
+  const entries = Object.entries(exports as Record<string, unknown>);
+  const exact = entries.find(([key]) => key === `./${subpath}`);
+  if (exact !== undefined) return exportedEntry(exact[1]);
+  for (const [key, value] of entries) {
+    const wildcard = key.indexOf("*");
+    if (wildcard === -1) continue;
+    const prefix = key.slice(0, wildcard);
+    const suffix = key.slice(wildcard + 1);
+    const requested = `./${subpath}`;
+    if (!requested.startsWith(prefix) || !requested.endsWith(suffix)) continue;
+    const match = requested.slice(prefix.length, requested.length - suffix.length);
+    const target = exportedEntry(value);
+    return target?.replace("*", match);
+  }
+  return undefined;
+};
+
 const scanLocalPackage = async (
   name: string,
   specifier: string,
@@ -648,7 +773,11 @@ const scanLocalPackage = async (
 ) => {
   const subpath = specifier === name ? undefined : specifier.slice(name.length + 1);
   const declaredEntry =
-    subpath ?? exportedEntry(manifest.exports) ?? manifest.module ?? manifest.main ?? "index.ts";
+    packageExport(manifest.exports, subpath) ??
+    subpath ??
+    manifest.module ??
+    manifest.main ??
+    "index.ts";
   const entry = await resolveModule(
     join(packagePath, "package.json"),
     `./${declaredEntry.replace(/^\.\//, "")}`,
@@ -666,10 +795,24 @@ const scanLocalPackage = async (
     );
     return;
   }
-  await scanModule(entry, context);
+  if (/\.jsx?$/i.test(entry) && manifest.type !== "module") {
+    context.diagnostics.push(
+      diagnostic(
+        "AUTHORED_COMMONJS",
+        `Local package '${name}' does not declare its JavaScript entry point as ESM.`,
+        { path: relative(context.checkout, entry).split(sep).join("/"), specifier },
+      ),
+    );
+    return;
+  }
+  await scanModule(entry, context, manifestDependencies(manifest));
 };
 
-const scanModule = async (path: string, context: ClosureContext): Promise<void> => {
+const scanModule = async (
+  path: string,
+  context: ClosureContext,
+  dependencies: Record<string, string> = context.dependencies,
+): Promise<void> => {
   const logicalPath = relative(context.checkout, path).split(sep).join("/");
   if (context.modules.has(logicalPath)) return;
   if (!within(context.checkout, path)) {
@@ -680,6 +823,37 @@ const scanModule = async (path: string, context: ClosureContext): Promise<void> 
         {
           path: logicalPath,
         },
+      ),
+    );
+    return;
+  }
+  let resolvedPath: string;
+  try {
+    resolvedPath = await realpath(path);
+  } catch {
+    context.diagnostics.push(
+      diagnostic("MODULE_NOT_FOUND", `Module ${logicalPath} could not be resolved.`, {
+        path: logicalPath,
+      }),
+    );
+    return;
+  }
+  if (!within(context.checkout, resolvedPath)) {
+    context.diagnostics.push(
+      diagnostic(
+        "LOCAL_DEPENDENCY_OUTSIDE_WORKTREE",
+        "A repository module resolves outside the Git worktree.",
+        { path: logicalPath },
+      ),
+    );
+    return;
+  }
+  if ((await lstat(path)).isSymbolicLink()) {
+    context.diagnostics.push(
+      diagnostic(
+        "UNSUPPORTED_MODULE",
+        "Symbolic-linked repository modules are not supported in Workflow closures.",
+        { path: logicalPath },
       ),
     );
     return;
@@ -733,7 +907,8 @@ const scanModule = async (path: string, context: ClosureContext): Promise<void> 
   const literalDynamicImports = scannedImports.filter(
     ({ kind }) => kind === "dynamic-import",
   ).length;
-  const dynamicImportTokens = contents.match(/\bimport\s*\(/g)?.length ?? 0;
+  const dynamicImportTokens =
+    contents.match(/\bimport(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*(?:\r?\n|$))*\(/g)?.length ?? 0;
   if (dynamicImportTokens > literalDynamicImports) {
     context.diagnostics.push(
       diagnostic("COMPUTED_IMPORT", "Computed import specifiers cannot be reproduced.", {
@@ -783,12 +958,12 @@ const scanModule = async (path: string, context: ClosureContext): Promise<void> 
           }),
         );
       } else {
-        await scanModule(resolved, context);
+        await scanModule(resolved, context, dependencies);
       }
       continue;
     }
     const name = packageName(specifier);
-    const requested = context.dependencies[name];
+    const requested = dependencies[name];
     if (requested === undefined) {
       context.diagnostics.push(
         diagnostic("UNSUPPORTED_MODULE", `Package '${name}' is not declared by the Project.`, {
@@ -881,6 +1056,27 @@ const findNativeAddon = async (directory: string): Promise<string | undefined> =
   return undefined;
 };
 
+const lockedPackageName = (resolution: unknown) => {
+  if (!Array.isArray(resolution) || typeof resolution[0] !== "string") return undefined;
+  const separator = resolution[0].lastIndexOf("@");
+  return separator > 0 ? resolution[0].slice(0, separator) : undefined;
+};
+
+const installedPackagePath = (
+  checkout: string,
+  key: string,
+  lockfile: Record<string, unknown>,
+): string | undefined => {
+  const name = lockedPackageName(lockfile[key]);
+  if (name === undefined) return undefined;
+  if (key === name) return join(checkout, "node_modules", name);
+  const suffix = `/${name}`;
+  if (!key.endsWith(suffix)) return undefined;
+  const parentKey = key.slice(0, -suffix.length);
+  const parent = installedPackagePath(checkout, parentKey, lockfile);
+  return parent === undefined ? undefined : join(parent, "node_modules", name);
+};
+
 const fingerprintWorkflow = async (
   checkout: string,
   workflow: LoadedWorkflow,
@@ -906,7 +1102,7 @@ const fingerprintWorkflow = async (
   const localPackages = await collectLocalPackages(checkout);
   await scanModule(path, {
     checkout,
-    dependencies: { ...manifest.dependencies, ...manifest.devDependencies },
+    dependencies: manifestDependencies(manifest),
     diagnostics,
     lockfile,
     localPackages,
@@ -914,7 +1110,9 @@ const fingerprintWorkflow = async (
     packages,
   });
   for (const name of packages.keys()) {
-    const nativeAddon = await findNativeAddon(join(checkout, "node_modules", name));
+    const packagePath = installedPackagePath(checkout, name, lockfile);
+    if (packagePath === undefined) continue;
+    const nativeAddon = await findNativeAddon(packagePath);
     if (nativeAddon !== undefined) {
       diagnostics.push(
         diagnostic("NATIVE_ADDON", `Package '${name}' contains a native add-on.`, {
@@ -949,7 +1147,7 @@ const validateConfigClosure = async (
   const diagnostics: Array<ProjectSourceDiagnostic> = [];
   await scanModule(resolve(checkout, configPath), {
     checkout,
-    dependencies: { ...manifest.dependencies, ...manifest.devDependencies },
+    dependencies: manifestDependencies(manifest),
     diagnostics,
     localPackages: await collectLocalPackages(checkout),
     lockfile,
@@ -958,6 +1156,23 @@ const validateConfigClosure = async (
   });
   if (diagnostics.length > 0) throw new ProjectSourceValidationError(diagnostics);
 };
+
+const validTimeZone = (timezone: string) => {
+  try {
+    const resolved = new Intl.DateTimeFormat("en", { timeZone: timezone }).resolvedOptions()
+      .timeZone;
+    return !/^[+-]\d{2}:\d{2}$/.test(resolved);
+  } catch {
+    return false;
+  }
+};
+
+const validEntryPoint = (entryPoint: unknown): entryPoint is string =>
+  typeof entryPoint === "string" &&
+  entryPoint.length > 0 &&
+  !isAbsolute(entryPoint) &&
+  entryPoint.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..") &&
+  /\.(?:ts|mts)$/.test(entryPoint);
 
 const validateLoadedRegistry = (registry: LoadedRegistry, configPath: string) => {
   const diagnostics: Array<ProjectSourceDiagnostic> = [];
@@ -975,8 +1190,7 @@ const validateLoadedRegistry = (registry: LoadedRegistry, configPath: string) =>
         workflow.name.length === 0 ||
         typeof workflow.version !== "string" ||
         workflow.version.length === 0 ||
-        typeof workflow.entryPoint !== "string" ||
-        workflow.entryPoint.length === 0
+        !validEntryPoint(workflow.entryPoint)
       ) {
         diagnostics.push(
           diagnostic(
@@ -996,7 +1210,25 @@ const validateLoadedRegistry = (registry: LoadedRegistry, configPath: string) =>
     }
     const scheduleNames = new Set<string>();
     for (const schedule of registry.schedules) {
-      if (scheduleNames.has(schedule.name)) {
+      if (
+        typeof schedule.name !== "string" ||
+        schedule.name.length === 0 ||
+        typeof schedule.workflow !== "string" ||
+        schedule.workflow.length === 0 ||
+        typeof schedule.cron !== "string" ||
+        schedule.cron.length === 0 ||
+        typeof schedule.timezone !== "string" ||
+        !validTimeZone(schedule.timezone) ||
+        (schedule.missedTimePolicy !== "skip" && schedule.missedTimePolicy !== "catch-up-once")
+      ) {
+        diagnostics.push(
+          diagnostic(
+            "INVALID_CONFIG",
+            "Every Workflow Schedule requires a name, target, Effect Cron, IANA timezone, and missed-time policy.",
+            { path: configPath },
+          ),
+        );
+      } else if (scheduleNames.has(schedule.name)) {
         diagnostics.push(
           diagnostic("INVALID_CONFIG", `Workflow Schedule '${schedule.name}' is duplicated.`, {
             path: configPath,
@@ -1100,14 +1332,29 @@ export const activateStoredProjectSource = async (
   }
 };
 
-const chmodTree = async (path: string, writable: boolean): Promise<void> => {
-  const information = await stat(path);
+const chmodTree = async (root: string, path: string, writable: boolean): Promise<void> => {
+  const information = await lstat(path);
+  if (information.isSymbolicLink()) {
+    if (!writable) {
+      const target = await realpath(path);
+      if (!within(root, target)) {
+        throw new ProjectSourceValidationError([
+          diagnostic(
+            "LOCAL_DEPENDENCY_OUTSIDE_WORKTREE",
+            "An immutable Runtime Source Checkout cannot contain a symlink outside the worktree.",
+            { path: relative(root, path).split(sep).join("/") },
+          ),
+        ]);
+      }
+    }
+    return;
+  }
   if (!information.isDirectory()) {
     await chmod(path, writable ? 0o600 : 0o400);
     return;
   }
   if (writable) await chmod(path, 0o700);
-  for (const entry of await readdir(path)) await chmodTree(join(path, entry), writable);
+  for (const entry of await readdir(path)) await chmodTree(root, join(path, entry), writable);
   if (!writable) await chmod(path, 0o500);
 };
 
@@ -1123,7 +1370,13 @@ export const materializeRuntimeSourceCheckout = async (
 ): Promise<RuntimeSourceCheckout> => {
   const repository = await realpath(requestedRepository);
   const checkout = await makeMutableCheckout(repository, revision.commit);
-  await chmodTree(checkout.path, false);
+  try {
+    await chmodTree(checkout.path, checkout.path, false);
+  } catch (error) {
+    await chmodTree(checkout.path, checkout.path, true).catch(() => undefined);
+    await checkout.dispose();
+    throw error;
+  }
   let disposed = false;
   return {
     commit: revision.commit,
@@ -1131,7 +1384,7 @@ export const materializeRuntimeSourceCheckout = async (
     dispose: async () => {
       if (disposed) return;
       disposed = true;
-      await chmodTree(checkout.path, true).catch(() => undefined);
+      await chmodTree(checkout.path, checkout.path, true).catch(() => undefined);
       await checkout.dispose();
     },
   };

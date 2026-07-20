@@ -1,10 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
-import type {
-  ProjectSourceDiagnostic,
-  ProjectSourcePolicy,
-  ProjectSourceRevision,
+import {
+  activateStoredProjectSource,
+  type ProjectSourceDiagnostic,
+  type ProjectSourcePolicy,
+  type ProjectSourceRevision,
+  ProjectSourceValidationError,
 } from "./project-source";
 import type { ProjectRegistrationState, StoredProject, SystemStore } from "./storage";
 
@@ -284,7 +286,24 @@ const parseSourceJson = <A>(encoded: string | null, fallback: A): A => {
   }
 };
 
-export const makeProjectService = (store: SystemStore) => {
+export const makeProjectService = (
+  store: SystemStore,
+  activateSource: typeof activateStoredProjectSource = activateStoredProjectSource,
+) => {
+  const refreshSource = async (stored: StoredProject) => {
+    const policy =
+      store.projectSources.findByProjectId(stored.id)?.sourcePolicy ??
+      ("LocalWithFreshnessWarning" as const);
+    try {
+      await activateSource(store, stored.id, {
+        policy,
+        repository: stored.path,
+      });
+    } catch (error) {
+      if (!(error instanceof ProjectSourceValidationError)) throw error;
+    }
+  };
+
   const findByCanonicalPath = async (canonicalPath: string, excludedId?: string) => {
     for (const stored of store.projects.list()) {
       if (stored.id === excludedId) {
@@ -305,11 +324,19 @@ export const makeProjectService = (store: SystemStore) => {
     const inspection = await inspectProjectPath(stored.path);
     const source = store.projectSources.findByProjectId(stored.id);
     let availability = inspection.availability;
-    if (availability.status === "Available" && source?.activeRevision === null) {
-      const diagnostics = parseSourceJson<ReadonlyArray<ProjectSourceDiagnostic>>(
-        source.diagnostics,
-        [],
-      );
+    if (
+      availability.status === "Available" &&
+      (source === undefined || source.activeRevision === null)
+    ) {
+      const diagnostics =
+        source === undefined
+          ? [
+              {
+                code: "SOURCE_NOT_ACTIVATED" as const,
+                message: "No Project Source Revision has been activated.",
+              },
+            ]
+          : parseSourceJson<ReadonlyArray<ProjectSourceDiagnostic>>(source.diagnostics, []);
       availability = {
         reasons: [
           {
@@ -361,6 +388,10 @@ export const makeProjectService = (store: SystemStore) => {
       throw new ProjectOperationError("PROJECT_ARCHIVED", `Project ${id} is Archived`);
     }
     if (registrationState === "Enabled") {
+      const pathInspection = await inspectProjectPath(stored.path);
+      if (pathInspection.availability.status === "Available") {
+        await refreshSource(stored);
+      }
       const inspected = await project(stored, true);
       if (inspected.availability.status === "Unavailable") {
         throw new ProjectOperationError(
@@ -401,6 +432,7 @@ export const makeProjectService = (store: SystemStore) => {
         registrationState: "Disabled",
         updatedAt: now,
       });
+      await refreshSource(stored);
       return project(stored, false);
     },
     archive: (id: string) => changeState(id, "Archived"),
@@ -430,6 +462,7 @@ export const makeProjectService = (store: SystemStore) => {
       if (updated === undefined) {
         throw new ProjectOperationError("PROJECT_NOT_FOUND", `Project ${id} was not found`);
       }
+      await refreshSource(updated);
       return project(updated, false);
     },
   };

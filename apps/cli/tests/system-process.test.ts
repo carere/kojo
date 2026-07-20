@@ -108,7 +108,15 @@ describe("Kojo System Process", () => {
     expect(added.json).toMatchObject({
       command: "project.add",
       project: {
-        availability: { status: "Available" },
+        availability: {
+          reasons: [
+            {
+              code: "PROJECT_SOURCE_INVALID",
+              diagnostics: [expect.objectContaining({ code: "INVALID_PACKAGE_MANIFEST" })],
+            },
+          ],
+          status: "Unavailable",
+        },
         metadata: { folderName: "original-name" },
         path: original,
         registrationState: "Disabled",
@@ -176,7 +184,15 @@ describe("Kojo System Process", () => {
     expect(relinked.json).toMatchObject({
       command: "project.relink",
       project: {
-        availability: { status: "Available" },
+        availability: {
+          reasons: [
+            {
+              code: "PROJECT_SOURCE_INVALID",
+              diagnostics: [expect.objectContaining({ code: "INVALID_PACKAGE_MANIFEST" })],
+            },
+          ],
+          status: "Unavailable",
+        },
         id: projectId,
         metadata: { folderName: "moved-name" },
         path: moved,
@@ -187,11 +203,14 @@ describe("Kojo System Process", () => {
     });
 
     const enabled = runCli(home, "project", "enable", projectId);
-    expect(enabled.exitCode).toBe(0);
+    expect(enabled.exitCode).not.toBe(0);
     expect(enabled.json).toMatchObject({
       command: "project.enable",
-      project: { id: projectId, registrationState: "Enabled" },
-      status: "enabled",
+      error: {
+        code: "PROJECT_UNAVAILABLE",
+        reasons: [{ code: "PROJECT_SOURCE_INVALID" }],
+      },
+      status: "failed",
     });
     const disabled = runCli(home, "project", "disable", projectId);
     expect(disabled.exitCode).toBe(0);
@@ -291,12 +310,21 @@ describe("Kojo System Process", () => {
     const relinked = runCli(home, "project", "relink", projectId, repository);
     expect(relinked.exitCode).toBe(0);
     expect(relinked.json).toMatchObject({
-      project: { availability: { status: "Available" }, id: projectId },
+      project: {
+        availability: {
+          reasons: [{ code: "PROJECT_SOURCE_INVALID" }],
+          status: "Unavailable",
+        },
+        id: projectId,
+      },
     });
     const enabled = runCli(home, "project", "enable", projectId);
-    expect(enabled.exitCode).toBe(0);
+    expect(enabled.exitCode).not.toBe(0);
     expect(enabled.json).toMatchObject({
-      project: { id: projectId, registrationState: "Enabled" },
+      error: {
+        code: "PROJECT_UNAVAILABLE",
+        reasons: [{ code: "PROJECT_SOURCE_INVALID" }],
+      },
     });
   }, 20_000);
 
