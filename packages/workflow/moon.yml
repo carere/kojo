@@ -1,0 +1,53 @@
+$schema: "../../.moon/cache/schemas/project.json"
+
+tasks:
+  check:
+    command: bun run ../../node_modules/.bin/biome check --no-errors-on-unmatched .
+    options:
+      mergeArgs: replace
+
+  build-js:
+    command: bun build src/index.ts --outdir dist --sourcemap=external --target bun --external effect
+    description: Build workflow authoring ESM JavaScript
+    inputs:
+      - "@group(configs)"
+      - "@group(sources)"
+      - "@group(workspace)"
+    outputs:
+      - "dist/index.js"
+      - "dist/index.js.map"
+
+  build-types:
+    command: bun node_modules/typescript/bin/tsc --project tsconfig.json --emitDeclarationOnly --outDir dist --tsBuildInfoFile ../../.moon/cache/types/packages/workflow/build.tsbuildinfo
+    description: Build workflow authoring declarations
+    inputs:
+      - "@group(configs)"
+      - "@group(sources)"
+      - "@group(workspace)"
+    outputs:
+      - "dist/index.d.ts"
+      - "dist/index.d.ts.map"
+
+  build:
+    command: bun -e "void 0"
+    description: Build the workflow authoring package
+    deps:
+      - build-js
+      - build-types
+
+  test:
+    command: bun test
+    description: Run workflow authoring contract tests
+    deps:
+      - build
+    inputs:
+      - "@group(configs)"
+      - "@group(sources)"
+      - "@group(tests)"
+      - "@group(workspace)"
+    type: test
+
+  tsc:
+    command: bun node_modules/typescript/bin/tsc --build --verbose
+    options:
+      mergeArgs: replace

@@ -12,6 +12,9 @@
       "path": "./packages/domain"
     },
     {
+      "path": "./packages/workflow"
+    },
+    {
       "path": ".sandcastle"
     }
   ]
