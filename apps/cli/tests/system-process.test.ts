@@ -265,6 +265,7 @@ describe("Kojo System Process", () => {
   test("reports actionable lock and availability failures", async () => {
     const lockedHome = await makeHome();
     await Bun.write(join(lockedHome, "system.lock"), "invalid lock owner");
+    await Bun.write(join(lockedHome, "system.log"), '{"event":"startup-diagnostic"}\n');
 
     const lockedStatus = runCli(lockedHome, "status");
     expect(lockedStatus.exitCode).not.toBe(0);
@@ -290,6 +291,17 @@ describe("Kojo System Process", () => {
       },
       schemaVersion: 1,
       status: "failed",
+    });
+
+    const lockedLogs = runCli(lockedHome, "logs", "--lines", "20");
+    expect(lockedLogs.exitCode).toBe(0);
+    expect(lockedLogs.json).toMatchObject({
+      command: "logs",
+      home: lockedHome,
+      lines: ['{"event":"startup-diagnostic"}'],
+      process: null,
+      schemaVersion: 1,
+      status: "available",
     });
 
     const unavailableHome = await makeHome();

@@ -299,11 +299,12 @@ export const systemLogs = async (lineCount: number) => {
     .split("\n")
     .filter((line) => line.length > 0)
     .slice(-lineCount);
+  const running = await inspectSystem(home).catch(() => undefined);
   return {
     command: "logs" as const,
     home,
     lines,
-    process: (await inspectSystem(home)) ?? null,
+    process: running ?? null,
     schemaVersion,
     status: contents.length === 0 ? "empty" : "available",
   };
