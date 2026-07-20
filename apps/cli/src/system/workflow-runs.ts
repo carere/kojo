@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { SystemStore } from "./storage";
+import type { ExecutionWriteScope, SystemStore } from "./storage";
 
 export type WorkflowStartErrorCode =
   | "INVALID_CONFIGURATION"
@@ -20,7 +20,7 @@ export class WorkflowStartError extends Error {
   }
 }
 
-export interface WorkflowRevisionSnapshot {
+export interface PinnedWorkflowRevision {
   readonly declaredVersion: string;
   readonly fingerprint: string;
   readonly source: {
@@ -31,6 +31,12 @@ export interface WorkflowRevisionSnapshot {
   };
   readonly stableName: string;
   readonly workflowAbi: string;
+}
+
+export interface WorkflowRevisionSnapshot {
+  readonly rootWorkflow: string;
+  readonly source: PinnedWorkflowRevision["source"];
+  readonly workflows: ReadonlyArray<Omit<PinnedWorkflowRevision, "source">>;
 }
 
 export type WorkflowTerminalOutcome =
@@ -47,7 +53,8 @@ export interface PreparedWorkflowRun {
     readonly rootRunId: string;
     readonly runId: string;
   }) => Promise<WorkflowTerminalOutcome>;
-  readonly revision: WorkflowRevisionSnapshot;
+  readonly revision: PinnedWorkflowRevision;
+  readonly revisionSnapshot: WorkflowRevisionSnapshot;
 }
 
 export interface WorkflowRuntimeAdapter {
@@ -64,11 +71,16 @@ export interface WorkflowStartRequest {
 const encoded = (value: unknown) => JSON.stringify({ encodingVersion: 1, value });
 const decoded = <A>(value: string | null): A | null =>
   value === null ? null : (JSON.parse(value) as A);
+const decodedValue = <A>(value: string): A => (JSON.parse(value) as { readonly value: A }).value;
 
 export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRuntimeAdapter) => {
   const settlements = new Map<string, Promise<void>>();
 
-  const finalize = (runId: string, outcome: WorkflowTerminalOutcome) => {
+  const finalize = (
+    runId: string,
+    outcome: WorkflowTerminalOutcome,
+    scope: ExecutionWriteScope,
+  ) => {
     const inspected = store.workflowRuns.find(runId);
     if (inspected === undefined) throw new Error(`Workflow Run ${runId} was not found`);
     const now = new Date().toISOString();
@@ -102,13 +114,20 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
         runId,
         state: outcome.state,
       },
-      1,
+      scope,
     );
   };
 
   const inspect = (runId: string) => {
     const stored = store.workflowRuns.find(runId);
     if (stored === undefined) return undefined;
+    const revisionSnapshot =
+      stored.revisionSnapshot === undefined
+        ? undefined
+        : decodedValue<WorkflowRevisionSnapshot>(stored.revisionSnapshot.snapshot);
+    const pinnedRevision = revisionSnapshot?.workflows.find(
+      ({ stableName }) => stableName === revisionSnapshot.rootWorkflow,
+    );
     return {
       attempts: stored.attempts.map((attempt) => ({
         finishedAt: attempt.finishedAt,
@@ -139,12 +158,13 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
       outcome: decoded(stored.run.outcome),
       projectId: stored.run.projectId,
       revision: {
-        declaredVersion: stored.revision.declaredVersion,
-        fingerprint: stored.revision.fingerprint,
-        source: JSON.parse(stored.revision.source) as unknown,
-        stableName: stored.revision.stableName,
-        workflowAbi: stored.revision.workflowAbi,
+        declaredVersion: pinnedRevision?.declaredVersion ?? stored.revision.declaredVersion,
+        fingerprint: pinnedRevision?.fingerprint ?? stored.revision.fingerprint,
+        source: revisionSnapshot?.source ?? (JSON.parse(stored.revision.source) as unknown),
+        stableName: pinnedRevision?.stableName ?? stored.revision.stableName,
+        workflowAbi: pinnedRevision?.workflowAbi ?? stored.revision.workflowAbi,
       },
+      revisionSnapshot: revisionSnapshot ?? null,
       rootRunId: stored.run.rootRunId,
       runId: stored.run.runId,
       state: stored.run.state,
@@ -155,6 +175,41 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
 
   return {
     inspect,
+    claimActivity: (request: {
+      readonly attempt: number;
+      readonly completionIdempotencyKey: string;
+      readonly idempotencyKey: string;
+      readonly leaseGeneration: number;
+      readonly leaseHolder: string;
+      readonly payload: unknown;
+      readonly projectId: string;
+      readonly rootRunId: string;
+      readonly runId: string;
+      readonly subject: string;
+    }) => {
+      const result = store.workflowRuns.claimActivity({
+        ...request,
+        details: encoded(request.payload),
+        operation: "Activity.Started",
+      });
+      return result.status === "replay"
+        ? { payload: decodedValue(result.payload), status: result.status }
+        : result;
+    },
+    readBoundary: (
+      scope: {
+        readonly attempt: number;
+        readonly leaseGeneration: number;
+        readonly leaseHolder: string;
+        readonly projectId: string;
+        readonly rootRunId: string;
+        readonly runId: string;
+      },
+      idempotencyKey: string,
+    ) => {
+      const entry = store.workflowRuns.readBoundary(scope, idempotencyKey);
+      return entry === undefined ? undefined : decodedValue(entry.payload);
+    },
     recordBoundary: (request: {
       readonly attempt: number;
       readonly idempotencyKey: string;
@@ -162,6 +217,8 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
       readonly leaseHolder: string;
       readonly operation: string;
       readonly payload: unknown;
+      readonly projectId: string;
+      readonly rootRunId: string;
       readonly runId: string;
       readonly subject: string;
     }) =>
@@ -230,6 +287,11 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
           stableName: prepared.revision.stableName,
           workflowAbi: prepared.revision.workflowAbi,
         },
+        revisionSnapshot: {
+          createdAt: now,
+          rootRunId: runId,
+          snapshot: encoded(prepared.revisionSnapshot),
+        },
         run: {
           createdAt: now,
           input: encoded(prepared.encodedInput),
@@ -244,25 +306,42 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
         },
       });
 
-      const settlement = Promise.resolve()
-        .then(() =>
-          prepared.execute({
-            attempt: 1,
-            leaseGeneration: 1,
-            leaseHolder,
-            projectId: request.projectId,
-            rootRunId: runId,
-            runId,
-          }),
-        )
-        .catch((error) => ({
-          state: "Failed" as const,
-          value: {
-            _tag: "RuntimeDefect",
-            message: error instanceof Error ? error.message : String(error),
-          },
-        }))
-        .then((outcome) => finalize(runId, outcome));
+      const executionScope = {
+        attempt: 1 as const,
+        leaseGeneration: 1 as const,
+        leaseHolder,
+        projectId: request.projectId,
+        rootRunId: runId,
+        runId,
+      };
+      const settlement = Promise.resolve().then(async () => {
+        const heartbeat = setInterval(() => {
+          try {
+            store.workflowRuns.renewLease(
+              executionScope,
+              new Date(Date.now() + 5 * 60_000).toISOString(),
+            );
+          } catch {
+            // The next fenced write or finalization will reconcile lost authority.
+          }
+        }, 60_000);
+        heartbeat.unref();
+        let outcome: WorkflowTerminalOutcome;
+        try {
+          outcome = await prepared.execute(executionScope);
+        } catch (error) {
+          outcome = {
+            state: "Failed",
+            value: {
+              _tag: "RuntimeDefect",
+              message: error instanceof Error ? error.message : String(error),
+            },
+          };
+        } finally {
+          clearInterval(heartbeat);
+        }
+        finalize(runId, outcome, executionScope);
+      });
       settlements.set(runId, settlement);
       void settlement.catch(() => undefined);
 

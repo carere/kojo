@@ -1,13 +1,16 @@
-import { Cause, Effect, Exit, Layer, Option, Schema } from "effect";
+import { Cause, Duration, Effect, Exit, Layer, Option, Schema } from "effect";
 import { Workflow as EffectWorkflow, WorkflowEngine } from "effect/unstable/workflow";
 
 interface RuntimeRequest {
+  readonly attempt?: number;
   readonly configPath: string;
   readonly input: unknown;
   readonly endpoint?: string;
   readonly leaseGeneration?: number;
   readonly leaseHolder?: string;
   readonly mode: "execute" | "validate";
+  readonly projectId?: string;
+  readonly rootRunId?: string;
   readonly runId?: string;
   readonly workflowName: string;
 }
@@ -50,28 +53,41 @@ const executeWorkflow = async (
   input: unknown,
 ) => {
   if (
+    request.attempt === undefined ||
     request.endpoint === undefined ||
     request.leaseGeneration === undefined ||
     request.leaseHolder === undefined ||
+    request.projectId === undefined ||
+    request.rootRunId === undefined ||
     request.runId === undefined
   ) {
     throw new Error("Project Runtime execution scope is incomplete");
   }
   const runtimeRunId = request.runId;
+  const executionScope = {
+    attempt: request.attempt,
+    leaseGeneration: request.leaseGeneration,
+    leaseHolder: request.leaseHolder,
+    projectId: request.projectId,
+    rootRunId: request.rootRunId,
+  };
   const recordActivity = async (
+    executionId: string,
     name: string,
     attempt: number,
     operation: "Activity.Completed" | "Activity.Started",
     result: unknown,
   ) => {
+    const activityKey = `${runtimeRunId}:activity:${executionId}:${name}:${attempt}`;
     const response = await fetch(
       `http://localhost/v1/workflow-runs/${encodeURIComponent(runtimeRunId)}/boundaries`,
       {
         body: JSON.stringify({
-          attempt: 1,
-          idempotencyKey: `${runtimeRunId}:activity:${name}:${attempt}:${operation}`,
-          leaseGeneration: request.leaseGeneration,
-          leaseHolder: request.leaseHolder,
+          ...executionScope,
+          ...(operation === "Activity.Started"
+            ? { completionIdempotencyKey: `${activityKey}:Activity.Completed` }
+            : {}),
+          idempotencyKey: `${activityKey}:${operation}`,
           operation,
           payload: result,
           subject: name,
@@ -82,6 +98,49 @@ const executeWorkflow = async (
       },
     );
     if (!response.ok) throw new Error(`System Process rejected durable Activity '${name}'`);
+    return (await response.json()) as {
+      readonly payload?: unknown;
+      readonly status: "execute" | "recorded" | "replay" | "uncertain";
+    };
+  };
+  const readBoundary = async (idempotencyKey: string) => {
+    const response = await fetch(
+      `http://localhost/v1/workflow-runs/${encodeURIComponent(runtimeRunId)}/journal/read`,
+      {
+        body: JSON.stringify({ ...executionScope, idempotencyKey }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+        unix: request.endpoint,
+      },
+    );
+    if (!response.ok) throw new Error("System Process rejected a Workflow Journal read");
+    return (await response.json()) as {
+      readonly payload?: unknown;
+      readonly status: "found" | "missing";
+    };
+  };
+  const recordKernelBoundary = async (
+    idempotencyKey: string,
+    operation: string,
+    payload: unknown,
+    subject: string,
+  ) => {
+    const response = await fetch(
+      `http://localhost/v1/workflow-runs/${encodeURIComponent(runtimeRunId)}/boundaries`,
+      {
+        body: JSON.stringify({
+          ...executionScope,
+          idempotencyKey,
+          operation,
+          payload,
+          subject,
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+        unix: request.endpoint,
+      },
+    );
+    if (!response.ok) throw new Error(`System Process rejected durable boundary '${operation}'`);
   };
   const kernel = EffectWorkflow.make(`kojo:${workflow.name}`, {
     error: workflow.failure,
@@ -89,7 +148,11 @@ const executeWorkflow = async (
     payload: { input: workflow.input },
     success: workflow.success,
   });
-  const engineLayer = makeDurableEngineLayer(recordActivity);
+  const engineLayer = makeDurableEngineLayer({
+    readBoundary,
+    recordActivity,
+    recordKernelBoundary,
+  });
   const handlerLayer = kernel
     .toLayer(({ input }) => workflow.run(input) as Effect.Effect<unknown, unknown>)
     .pipe(Layer.provide(engineLayer));
@@ -116,14 +179,27 @@ const executeWorkflow = async (
   };
 };
 
-const makeDurableEngineLayer = (
-  recordActivity: (
+const makeDurableEngineLayer = (journal: {
+  readonly readBoundary: (
+    idempotencyKey: string,
+  ) => Promise<{ readonly payload?: unknown; readonly status: "found" | "missing" }>;
+  readonly recordActivity: (
+    executionId: string,
     name: string,
     attempt: number,
     operation: "Activity.Completed" | "Activity.Started",
     result: unknown,
-  ) => Promise<void>,
-) =>
+  ) => Promise<{
+    readonly payload?: unknown;
+    readonly status: "execute" | "recorded" | "replay" | "uncertain";
+  }>;
+  readonly recordKernelBoundary: (
+    idempotencyKey: string,
+    operation: string,
+    payload: unknown,
+    subject: string,
+  ) => Promise<void>;
+}) =>
   Layer.effect(
     WorkflowEngine.WorkflowEngine,
     Effect.sync(() => {
@@ -131,7 +207,7 @@ const makeDurableEngineLayer = (
         string,
         (payload: object, executionId: string) => Effect.Effect<unknown, unknown, unknown>
       >();
-      const deferred = new Map<string, Exit.Exit<unknown, unknown>>();
+      const scheduledClocks = new Set<string>();
       let engine: WorkflowEngine.WorkflowEngine["Service"];
       engine = WorkflowEngine.makeUnsafe({
         activityExecute: (activity, attempt) =>
@@ -141,28 +217,57 @@ const makeDurableEngineLayer = (
               parent.workflow,
               parent.executionId,
             );
-            yield* Effect.promise(() =>
-              recordActivity(activity.name, attempt, "Activity.Started", { attempt }),
+            const claimed = yield* Effect.promise(() =>
+              journal.recordActivity(
+                parent.executionId,
+                activity.name,
+                attempt,
+                "Activity.Started",
+                { attempt },
+              ),
             );
+            if (claimed.status === "replay") {
+              return claimed.payload as EffectWorkflow.Result<unknown, unknown>;
+            }
+            if (claimed.status !== "execute") {
+              return yield* Effect.die(
+                `Activity '${activity.name}' has an Uncertain Activity Outcome`,
+              );
+            }
             const result = yield* activity.executeEncoded.pipe(
               EffectWorkflow.intoResult,
               Effect.provideService(WorkflowEngine.WorkflowInstance, activityInstance),
               Effect.provideService(WorkflowEngine.WorkflowEngine, engine),
             );
             yield* Effect.promise(() =>
-              recordActivity(activity.name, attempt, "Activity.Completed", result),
+              journal.recordActivity(
+                parent.executionId,
+                activity.name,
+                attempt,
+                "Activity.Completed",
+                result,
+              ),
             );
             return result;
           }),
         deferredDone: ({ deferredName, executionId, exit }) =>
-          Effect.sync(() => {
-            deferred.set(`${executionId}:${deferredName}`, exit);
-          }),
+          Effect.promise(() =>
+            journal.recordKernelBoundary(
+              `${executionId}:deferred:${deferredName}`,
+              "Deferred.Completed",
+              exit,
+              deferredName,
+            ),
+          ),
         deferredResult: (value) =>
           Effect.gen(function* () {
             const instance = yield* WorkflowEngine.WorkflowInstance;
-            const stored = deferred.get(`${instance.executionId}:${value.name}`);
-            return stored === undefined ? Option.none() : Option.some(stored);
+            const stored = yield* Effect.promise(() =>
+              journal.readBoundary(`${instance.executionId}:deferred:${value.name}`),
+            );
+            return stored.status === "missing"
+              ? Option.none()
+              : Option.some(stored.payload as Exit.Exit<unknown, unknown>);
           }),
         execute: ((definition, options) => {
           const handler = workflows.get(definition._tag);
@@ -184,7 +289,38 @@ const makeDurableEngineLayer = (
             workflows.set(definition._tag, execute as never);
           }),
         resume: () => Effect.void,
-        scheduleClock: () => Effect.void,
+        scheduleClock: (_workflow, { clock, executionId }) =>
+          Effect.gen(function* () {
+            const idempotencyKey = `${executionId}:clock:${clock.name}`;
+            const stored = yield* Effect.promise(() => journal.readBoundary(idempotencyKey));
+            const deadline =
+              stored.status === "found"
+                ? (stored.payload as { readonly deadline: number }).deadline
+                : Date.now() + Duration.toMillis(clock.duration);
+            if (stored.status === "missing") {
+              yield* Effect.promise(() =>
+                journal.recordKernelBoundary(
+                  idempotencyKey,
+                  "DurableClock.Scheduled",
+                  { deadline },
+                  clock.name,
+                ),
+              );
+            }
+            if (scheduledClocks.has(idempotencyKey)) return;
+            scheduledClocks.add(idempotencyKey);
+            const remaining = Math.max(0, deadline - Date.now());
+            setTimeout(() => {
+              void Effect.runPromise(
+                engine.deferredDone(clock.deferred, {
+                  deferredName: clock.deferred.name,
+                  executionId,
+                  exit: Exit.void,
+                  workflowName: _workflow._tag,
+                }),
+              ).catch(() => undefined);
+            }, remaining);
+          }),
       });
       return engine;
     }),

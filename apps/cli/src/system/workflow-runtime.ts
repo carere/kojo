@@ -41,11 +41,14 @@ const invokeRuntime = async (
   checkout: string,
   configPath: string,
   request: {
+    readonly attempt?: number;
     readonly endpoint?: string;
     readonly input: unknown;
     readonly leaseGeneration?: number;
     readonly leaseHolder?: string;
     readonly mode: "execute" | "validate";
+    readonly projectId?: string;
+    readonly rootRunId?: string;
     readonly runId?: string;
     readonly workflowName: string;
   },
@@ -172,14 +175,17 @@ export const makeProjectWorkflowRuntime = (
       const fixed = prepared;
       return {
         encodedInput: validation.encodedInput,
-        execute: async ({ leaseGeneration, leaseHolder, runId }) => {
+        execute: async ({ attempt, leaseGeneration, leaseHolder, projectId, rootRunId, runId }) => {
           try {
             const result = await invokeRuntime(fixed.checkout.path, fixed.revision.configPath, {
+              attempt,
               endpoint,
               input: validation.encodedInput,
               leaseGeneration,
               leaseHolder,
               mode: "execute",
+              projectId,
+              rootRunId,
               runId,
               workflowName: request.workflowName,
             });
@@ -197,6 +203,16 @@ export const makeProjectWorkflowRuntime = (
           source: fixed.source,
           stableName: workflow.name,
           workflowAbi: fixed.revision.toolchain.workflowAbi,
+        },
+        revisionSnapshot: {
+          rootWorkflow: workflow.name,
+          source: fixed.source,
+          workflows: fixed.revision.workflows.map((candidate) => ({
+            declaredVersion: candidate.version,
+            fingerprint: candidate.fingerprint,
+            stableName: candidate.name,
+            workflowAbi: fixed.revision.toolchain.workflowAbi,
+          })),
         },
       };
     } catch (error) {

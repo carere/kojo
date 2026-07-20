@@ -125,6 +125,22 @@ describe("Kojo System Process", () => {
           stableName: "greet",
           workflowAbi: "1",
         },
+        revisionSnapshot: {
+          rootWorkflow: "greet",
+          source: {
+            commit: "d".repeat(40),
+            dirty: false,
+            kind: "ProjectSourceRevision",
+          },
+          workflows: [
+            {
+              declaredVersion: "v1",
+              fingerprint: "source-independent-fingerprint",
+              stableName: "greet",
+              workflowAbi: "1",
+            },
+          ],
+        },
       }),
     });
     const started = await runs.start({
@@ -583,6 +599,10 @@ describe("Kojo System Process", () => {
         {
           checksum: expect.stringMatching(/^[a-f0-9]{64}$/),
           id: 4,
+        },
+        {
+          checksum: expect.stringMatching(/^[a-f0-9]{64}$/),
+          id: 5,
         },
       ]);
     } finally {

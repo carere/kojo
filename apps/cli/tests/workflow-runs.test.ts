@@ -23,6 +23,29 @@ const makeStore = async () => {
   return store;
 };
 
+const preparedRevision = (stableName: string, fingerprint: string, commit: string) => {
+  const source = {
+    commit: commit.repeat(40),
+    dirty: false,
+    kind: "ProjectSourceRevision" as const,
+  };
+  const revision = {
+    declaredVersion: "v1",
+    fingerprint,
+    source,
+    stableName,
+    workflowAbi: "1",
+  };
+  return {
+    revision,
+    revisionSnapshot: {
+      rootWorkflow: stableName,
+      source,
+      workflows: [{ declaredVersion: "v1", fingerprint, stableName, workflowAbi: "1" }],
+    },
+  };
+};
+
 afterEach(async () => {
   for (const home of homes) await rm(home, { force: true, recursive: true });
   homes.clear();
@@ -52,17 +75,26 @@ describe("Workflow Run service", () => {
   test("atomically creates attempt one, its lease, trigger, journal, and initial evidence", async () => {
     const store = await makeStore();
     const service = makeWorkflowRunService(store, {
-      prepare: async () => ({
-        encodedInput: { message: "hello" },
-        execute: async () => new Promise(() => undefined),
-        revision: {
-          declaredVersion: "v1",
-          fingerprint: "fingerprint-1",
-          source: { commit: "a".repeat(40), dirty: false, kind: "ProjectSourceRevision" },
-          stableName: "example",
-          workflowAbi: "1",
-        },
-      }),
+      prepare: async () => {
+        const prepared = preparedRevision("example", "fingerprint-1", "a");
+        return {
+          encodedInput: { message: "hello" },
+          execute: async () => new Promise(() => undefined),
+          ...prepared,
+          revisionSnapshot: {
+            ...prepared.revisionSnapshot,
+            workflows: [
+              ...prepared.revisionSnapshot.workflows,
+              {
+                declaredVersion: "child-v2",
+                fingerprint: "child-fingerprint",
+                stableName: "child",
+                workflowAbi: "1",
+              },
+            ],
+          },
+        };
+      },
     });
 
     const started = await service.start({
@@ -83,6 +115,13 @@ describe("Workflow Run service", () => {
         declaredVersion: "v1",
         fingerprint: "fingerprint-1",
         stableName: "example",
+      },
+      revisionSnapshot: {
+        rootWorkflow: "example",
+        workflows: [
+          { fingerprint: "fingerprint-1", stableName: "example" },
+          { fingerprint: "child-fingerprint", stableName: "child" },
+        ],
       },
       state: "Running",
       trigger: { type: "Direct" },
@@ -107,13 +146,7 @@ describe("Workflow Run service", () => {
           if (outcome === undefined) throw new Error("test outcome was not configured");
           return outcome;
         },
-        revision: {
-          declaredVersion: "v1",
-          fingerprint: `fingerprint-${workflowName}`,
-          source: { commit: "b".repeat(40), dirty: false, kind: "ProjectSourceRevision" },
-          stableName: workflowName,
-          workflowAbi: "1",
-        },
+        ...preparedRevision(workflowName, `fingerprint-${workflowName}`, "b"),
       }),
     });
 
@@ -160,13 +193,7 @@ describe("Workflow Run service", () => {
           new Promise((resolve) => {
             finish = resolve;
           }),
-        revision: {
-          declaredVersion: "v1",
-          fingerprint: "activity-fingerprint",
-          source: { commit: "c".repeat(40), dirty: false, kind: "ProjectSourceRevision" },
-          stableName: "activity",
-          workflowAbi: "1",
-        },
+        ...preparedRevision("activity", "activity-fingerprint", "c"),
       }),
     });
     const started = await service.start({
@@ -179,29 +206,78 @@ describe("Workflow Run service", () => {
     const stored = store.workflowRuns.find(started.runId);
     if (stored?.lease === undefined) throw new Error("start did not create an Execution Lease");
 
-    service.recordBoundary({
+    const scope = {
       attempt: 1,
-      idempotencyKey: `${started.runId}:activity:echo:1`,
       leaseGeneration: 1,
       leaseHolder: stored.lease.holder,
+      projectId: "project-1",
+      rootRunId: started.runId,
+      runId: started.runId,
+    };
+    const startedKey = `${started.runId}:activity:echo:1:Activity.Started`;
+    const completedKey = `${started.runId}:activity:echo:1:Activity.Completed`;
+    expect(
+      service.claimActivity({
+        ...scope,
+        completionIdempotencyKey: completedKey,
+        idempotencyKey: startedKey,
+        payload: { attempt: 1 },
+        subject: "echo",
+      }),
+    ).toMatchObject({ status: "execute" });
+    const completed = service.recordBoundary({
+      ...scope,
+      idempotencyKey: completedKey,
       operation: "Activity.Completed",
       payload: { _tag: "Complete", exit: { _tag: "Success", value: "hello" } },
-      runId: started.runId,
       subject: "echo",
     });
+    expect(
+      service.recordBoundary({
+        ...scope,
+        idempotencyKey: completedKey,
+        operation: "Activity.Completed",
+        payload: { _tag: "Complete", exit: { _tag: "Success", value: "hello" } },
+        subject: "echo",
+      }).eventId,
+    ).toBe(completed.eventId);
+    expect(
+      service.claimActivity({
+        ...scope,
+        completionIdempotencyKey: completedKey,
+        idempotencyKey: startedKey,
+        payload: { attempt: 1 },
+        subject: "echo",
+      }),
+    ).toEqual({
+      payload: { _tag: "Complete", exit: { _tag: "Success", value: "hello" } },
+      status: "replay",
+    });
+    expect(() =>
+      service.recordBoundary({
+        ...scope,
+        idempotencyKey: `${started.runId}:wrong-root`,
+        operation: "Activity.Completed",
+        payload: {},
+        rootRunId: "another-root",
+        subject: "echo",
+      }),
+    ).toThrow("rejected a delayed execution write");
     finish?.({ state: "Completed", value: { greeting: "hello" } });
     await service.settle(started.runId);
 
     expect(service.inspect(started.runId)).toMatchObject({
       evidence: [
         { sequence: 1, type: "WorkflowRun.Started" },
-        { sequence: 2, subject: "echo", type: "Activity.Completed" },
-        { sequence: 3, type: "WorkflowRun.Completed" },
+        { sequence: 2, subject: "echo", type: "Activity.Started" },
+        { sequence: 3, subject: "echo", type: "Activity.Completed" },
+        { sequence: 4, type: "WorkflowRun.Completed" },
       ],
       state: "Completed",
     });
     expect(store.workflowJournal.list(started.runId).map(({ operation }) => operation)).toEqual([
       "WorkflowRun.Started",
+      "Activity.Started",
       "Activity.Completed",
       "WorkflowRun.Completed",
     ]);
@@ -214,13 +290,7 @@ describe("Workflow Run service", () => {
       prepare: async () => ({
         encodedInput: {},
         execute: async () => new Promise(() => undefined),
-        revision: {
-          declaredVersion: "v1",
-          fingerprint: "interrupted-fingerprint",
-          source: { commit: "e".repeat(40), dirty: false, kind: "ProjectSourceRevision" },
-          stableName: "interrupted",
-          workflowAbi: "1",
-        },
+        ...preparedRevision("interrupted", "interrupted-fingerprint", "e"),
       }),
     });
     const started = await service.start({

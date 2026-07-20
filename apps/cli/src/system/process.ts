@@ -248,6 +248,9 @@ export const runSystemProcess = async (home: string): Promise<void> => {
         const workflowBoundaryMatch = url.pathname.match(
           /^\/v1\/workflow-runs\/([^/]+)\/boundaries$/,
         );
+        const workflowJournalReadMatch = url.pathname.match(
+          /^\/v1\/workflow-runs\/([^/]+)\/journal\/read$/,
+        );
         if (url.pathname === "/v1/workflow-runs" && request.method === "POST") {
           try {
             const body = (await request.json()) as {
@@ -319,35 +322,101 @@ export const runSystemProcess = async (home: string): Promise<void> => {
             const runId = decodeURIComponent(workflowBoundaryMatch[1] ?? "");
             const body = (await request.json()) as {
               attempt?: unknown;
+              completionIdempotencyKey?: unknown;
               idempotencyKey?: unknown;
               leaseGeneration?: unknown;
               leaseHolder?: unknown;
               operation?: unknown;
               payload?: unknown;
+              projectId?: unknown;
+              rootRunId?: unknown;
               subject?: unknown;
             };
             if (
               !Number.isInteger(body.attempt) ||
+              (body.attempt as number) <= 0 ||
               !Number.isInteger(body.leaseGeneration) ||
+              (body.leaseGeneration as number) <= 0 ||
               typeof body.leaseHolder !== "string" ||
               typeof body.idempotencyKey !== "string" ||
               typeof body.operation !== "string" ||
+              typeof body.projectId !== "string" ||
+              typeof body.rootRunId !== "string" ||
               typeof body.subject !== "string" ||
               !("payload" in body)
             ) {
               return Response.json({ error: "Invalid durable boundary" }, { status: 400 });
             }
-            const event = workflowRunService?.recordBoundary({
+            const scope = {
               attempt: body.attempt as number,
               idempotencyKey: body.idempotencyKey,
               leaseGeneration: body.leaseGeneration as number,
               leaseHolder: body.leaseHolder,
-              operation: body.operation,
               payload: body.payload,
+              projectId: body.projectId,
+              rootRunId: body.rootRunId,
               runId,
               subject: body.subject,
+            };
+            if (body.operation === "Activity.Started") {
+              if (typeof body.completionIdempotencyKey !== "string") {
+                return Response.json({ error: "Invalid Activity claim" }, { status: 400 });
+              }
+              const claimed = workflowRunService?.claimActivity({
+                ...scope,
+                completionIdempotencyKey: body.completionIdempotencyKey,
+              });
+              return Response.json(claimed);
+            }
+            const event = workflowRunService?.recordBoundary({
+              ...scope,
+              operation: body.operation,
             });
             return Response.json({ event, status: "recorded" });
+          } catch (error) {
+            return Response.json(
+              { error: error instanceof Error ? error.message : String(error) },
+              { status: 409 },
+            );
+          }
+        }
+        if (workflowJournalReadMatch !== null && request.method === "POST") {
+          try {
+            const runId = decodeURIComponent(workflowJournalReadMatch[1] ?? "");
+            const body = (await request.json()) as {
+              attempt?: unknown;
+              idempotencyKey?: unknown;
+              leaseGeneration?: unknown;
+              leaseHolder?: unknown;
+              projectId?: unknown;
+              rootRunId?: unknown;
+            };
+            if (
+              !Number.isInteger(body.attempt) ||
+              (body.attempt as number) <= 0 ||
+              !Number.isInteger(body.leaseGeneration) ||
+              (body.leaseGeneration as number) <= 0 ||
+              typeof body.leaseHolder !== "string" ||
+              typeof body.idempotencyKey !== "string" ||
+              typeof body.projectId !== "string" ||
+              typeof body.rootRunId !== "string"
+            ) {
+              return Response.json({ error: "Invalid Workflow Journal read" }, { status: 400 });
+            }
+            const payload = workflowRunService?.readBoundary(
+              {
+                attempt: body.attempt as number,
+                leaseGeneration: body.leaseGeneration as number,
+                leaseHolder: body.leaseHolder,
+                projectId: body.projectId,
+                rootRunId: body.rootRunId,
+                runId,
+              },
+              body.idempotencyKey,
+            );
+            return Response.json(
+              payload === undefined ? { status: "missing" } : { payload, status: "found" },
+            );
           } catch (error) {
             return Response.json(
               { error: error instanceof Error ? error.message : String(error) },
