@@ -78,6 +78,18 @@
         "typescript": "latest",
       },
     },
+    "packages/workflow": {
+      "name": "@kojo/workflow",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@types/bun": "1.3.14",
+        "effect": "4.0.0-beta.98",
+        "typescript": "7.0.2",
+      },
+      "peerDependencies": {
+        "effect": "4.0.0-beta.98",
+      },
+    },
   },
   "packages": {
     "@ai-hero/sandcastle": ["@ai-hero/sandcastle@0.12.0", "", { "dependencies": { "@clack/prompts": "^1.1.0" }, "peerDependencies": { "@daytona/sdk": "^0.164.0", "@vercel/sandbox": ">=1.0.0" }, "optionalPeers": ["@daytona/sdk", "@vercel/sandbox"], "bin": { "sandcastle": "dist/main.js" } }, "sha512-kdQ414rM8t1QiWeqZ3Klz4KSd0PqQG4bRVuqGpRDUomWhojSZkEAc1tbcEcThVmBEaHkCt8LmYR49vqEPNIoYQ=="],
@@ -181,6 +193,8 @@
     "@kojo/domain": ["@kojo/domain@workspace:packages/domain"],
 
     "@kojo/visualizer": ["@kojo/visualizer@workspace:apps/visualizer"],
+
+    "@kojo/workflow": ["@kojo/workflow@workspace:packages/workflow"],
 
     "@msgpackr-extract/msgpackr-extract-darwin-arm64": ["@msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.4", "", { "os": "darwin", "cpu": "arm64" }, "sha512-LCkGo6JDfaBhgST7UpPWgNgLINpcpabaHfyz5OBx75nUYxBsaEPxjnyNjWpeb/xBup/682QnBfRBy2/LvPutZQ=="],
 
