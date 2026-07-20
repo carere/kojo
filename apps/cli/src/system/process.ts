@@ -148,6 +148,7 @@ export const runSystemProcess = async (home: string): Promise<void> => {
   let ownsLock = false;
   let store: Awaited<ReturnType<typeof openSystemStore>> | undefined;
   let server: ReturnType<typeof Bun.serve> | undefined;
+  let endpointReady = false;
   let lockToken: string | undefined;
   let resolveStopped: (() => void) | undefined;
 
@@ -184,6 +185,9 @@ export const runSystemProcess = async (home: string): Promise<void> => {
     await rm(paths.endpoint, { force: true });
     server = Bun.serve({
       fetch(request) {
+        if (!endpointReady) {
+          return Response.json({ status: "starting" }, { status: 503 });
+        }
         const url = new URL(request.url);
         if (url.pathname === "/status") {
           return Response.json({ service: "kojo", status: "ok" });
@@ -205,6 +209,7 @@ export const runSystemProcess = async (home: string): Promise<void> => {
     } satisfies LockRecord;
     await replaceLockRecord(paths.lock, details);
     await rm(paths.startupError, { force: true });
+    endpointReady = true;
     console.log(
       JSON.stringify({
         endpoint: details.endpoint,
