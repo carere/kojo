@@ -16,11 +16,16 @@ const runCommand = (arguments_: ReadonlyArray<string>) =>
   );
 
 describe("Kojo CLI", () => {
-  test("documents the server and direct delivery surfaces", async () => {
+  test("documents system lifecycle, server, and direct delivery surfaces", async () => {
     const help = await runCommand(["--help"]);
 
     expect(help).toContain("kojo <subcommand> [flags]");
     expect(help).toContain("serve");
     expect(help).toContain("delivery");
+    expect(help).toContain("start");
+    expect(help).toContain("stop");
+    expect(help).toContain("restart");
+    expect(help).toContain("status");
+    expect(help).toContain("logs");
   });
 });
