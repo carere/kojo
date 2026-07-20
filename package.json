@@ -7,8 +7,12 @@
   "type": "module",
   "workspaces": [
     "apps/*",
-    "packages/*"
+    "packages/*",
+    ".sandcastle"
   ],
+  "dependencies": {
+    "@ai-hero/sandcastle": "^0.12.0"
+  },
   "devDependencies": {
     "@biomejs/biome": "latest",
     "lefthook": "latest",

@@ -4,8 +4,9 @@ projects:
   globs:
     - "apps/*"
     - "packages/*"
+  sources:
+    sandcastle: ".sandcastle"
 
 vcs:
   defaultBranch: "main"
   provider: "github"
-
