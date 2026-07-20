@@ -274,6 +274,8 @@ describe("Project Source Revision adapter", () => {
     ["COMPUTED_IMPORT", "const target = './shared.ts'; import(target)"],
     ["COMPUTED_IMPORT", "const target = './shared.ts'; import /* comment */ (target)"],
     ["AUTHORED_COMMONJS", "const shared = require('./shared.ts')"],
+    ["AUTHORED_COMMONJS", "const alpha = 1; export = alpha"],
+    ["AUTHORED_COMMONJS", "const alpha = 1; module['exports'] = alpha"],
     ["REMOTE_IMPORT", "import 'https://example.test/workflow.ts'"],
     ["NATIVE_ADDON", "import './binding.node'"],
   ] as const)("rejects unreproducible closure element %s", async (code, source) => {

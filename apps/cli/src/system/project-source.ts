@@ -917,9 +917,10 @@ const scanModule = async (
     );
   }
   if (
-    /\brequire\s*\(/.test(contents) ||
-    /\bmodule\s*\.\s*exports\b/.test(contents) ||
-    /\bimport\s+[\w$]+\s*=\s*require\s*\(/.test(contents)
+    /\brequire\b/.test(contents) ||
+    /\bexport\s*=/.test(contents) ||
+    /\bexports\s*(?:\.|\[)/.test(contents) ||
+    /\bmodule\s*(?:\.\s*exports\b|\[\s*["']exports["']\s*\])/.test(contents)
   ) {
     context.diagnostics.push(
       diagnostic("AUTHORED_COMMONJS", "Repository-authored CommonJS is not supported.", {
