@@ -1,3 +1,7 @@
+When you ask questions, use simple english and avoid terms that are not part of the domain context.
+
+Use conventional commit when committing work and creating PR (for the title), you can use [cocogitto](https://docs.cocogitto.io/guide/commit.html) to performs commits.
+
 ## Agent skills
 
 ### Issue tracker

@@ -11,11 +11,150 @@ A Developer Workflow that receives developer work and coordinates code, agents, 
 and other Developer Workflows to produce governed outcomes.
 _Avoid_: Workflow catalog, CI pipeline
 
+**Project**:
+A Git repository folder registered with one local Kojo installation. It is the unit from which
+Developer Workflows are loaded and under which Workflow Runs are grouped. Linked Git worktrees are
+execution resources associated with Workflow Runs and Sandboxes, not separate Projects.
+_Avoid_: Git worktree, Workflow Registry
+
+**Project ID**:
+The opaque identity assigned to a Project by one local Kojo installation. A Project keeps this
+identity when its folder moves; its path, Git remote, folder name, branch, and commit are metadata
+rather than identity.
+_Avoid_: Project path, repository URL
+
+**Project Registration State**:
+The user's installation-local intent for a Project: Enabled, Disabled, or Archived. Enabled permits
+new root Workflow Runs; Disabled prevents future root starts without stopping a currently Running
+Workflow Run Tree; Archived retains identity and history without remaining an active registration.
+_Avoid_: Project Availability, Workflow Run State
+
+**Project Availability**:
+The derived diagnosis of whether an Enabled or Disabled Project can currently start a root Workflow
+Run from its registered folder and compatible Workflow Registry. Availability reports structured
+reasons without changing Project Registration State.
+_Avoid_: Project Registration State, Resume Compatibility
+
+**Kojo Home**:
+The user-scoped home of one local Kojo installation. It holds installation-wide Project and
+Workflow Run state rather than repository-authored workflow behavior or secrets.
+_Avoid_: Project `.kojo` directory, workflow configuration
+
+**Kojo System Process**:
+The single long-running operating-system process for one Kojo Home. It coordinates registered
+Projects, schedules, local interfaces, and Workflow Run execution without loading repository-local
+Developer Workflow code into its own runtime. It is the only active authority for that Kojo Home
+and the only process that mutates its durable state; Project Runtime Processes submit typed,
+execution-scoped storage commands through its private local interface.
+_Avoid_: Project Runtime Process, Workflow Run
+
+**Kojo CLI Launcher**:
+The short-lived user-facing `kojo` process. It sends system operations to the Kojo System Process
+and delegates operations that load repository-local code to the matching project-local CLI without
+loading Developer Workflow modules itself.
+_Avoid_: Kojo System Process, Project Runtime Process, global workflow runtime
+
+**Project Runtime Process**:
+A transient child operating-system process whose project-local Kojo version matches the Kojo System
+Process, which uses the Project's exact compatible Effect and Bun stack and owns the active
+Execution Attempts of exactly one root Workflow Run Tree. The Kojo System Process creates another
+Project Runtime Process from a Runtime Source Checkout or Checkout Source Snapshot when that tree
+executes again. It never opens Kojo Home's database directly.
+_Avoid_: Project, Workflow Run, Effect Fiber
+
+**Project Source Revision**:
+The validated default-branch commit selected for a Project's future root Workflow Runs, together
+with its source provenance, freshness, Workflow Registry, and compatible toolchain evidence. Kojo
+activates a candidate revision atomically; existing Workflow Runs remain pinned to their own
+Workflow Revisions. It is a durable selection and validation record, not a retained source folder.
+_Avoid_: Workflow Revision, Project, persistent checkout
+
+**Runtime Source Checkout**:
+A temporary clean checkout materialized from a Project Source Revision for one Project Runtime
+Process. It supplies the project-local CLI and Workflow Registry without changing the developer
+checkout and is deleted when the Execution Attempt stops.
+_Avoid_: Project, Reusable Sandbox, Checkout Source Snapshot
+
+**Project Source Policy**:
+The installation-local rule selecting the Project Source Revision for a new root Workflow Run.
+`LocalWithFreshnessWarning` uses the registered repository's local default branch and diagnoses
+remote freshness without changing it. `RemoteLatest` requires the latest fetched remote default
+branch. Neither policy changes the source pinned to an existing Workflow Run.
+_Avoid_: Workflow Revision, Project Registration State, Git pull
+
+**Checkout Source Snapshot**:
+An ephemeral Kojo-controlled copy of the exact replay-relevant source selected by an explicit
+direct `--from-checkout` start. It includes reachable dirty and untracked files, remains fixed for
+one Execution Attempt, and is deleted when that attempt stops rather than retained for resumption.
+_Avoid_: Runtime Source Checkout, developer checkout, retained Workflow Revision snapshot
+
 **Developer Workflow**:
 A software-engineer-authored Effect program that coordinates a class of developer work. It owns its
 input handling, scheduling, routing, loops, and outcome through ordinary TypeScript and Effect
 composition rather than belonging to a predefined workflow category or graph DSL.
 _Avoid_: Pipeline, workflow template, implementation workflow
+
+**Workflow Schedule**:
+A repository-authored, Project-scoped rule that names cron-based root starts of one Developer
+Workflow with fixed input, an explicit timezone, and a missed-time policy. Its stable name keeps
+installation-local identity across Project Source Revisions and cannot be retargeted to another
+Developer Workflow.
+_Avoid_: Cron job, timer
+
+**Schedule Definition Fingerprint**:
+The SHA-256 identity of one Workflow Schedule's versioned canonical semantics: its name, target
+Developer Workflow, parsed cron fields, timezone, encoded input, and missed-time policy. It excludes
+the Project Source Revision so unrelated source changes do not change the fingerprint.
+_Avoid_: Workflow Revision, Project Source Revision
+
+**Schedule Enablement**:
+The installation-local Enabled or Disabled setting for one Workflow Schedule. New Schedules start
+Disabled; Project Registration State separately gates whether an Enabled Schedule may start work,
+without changing the Schedule's own setting. Disabling a Schedule cancels its pending Schedule
+Catch-up without stopping an existing Workflow Run.
+_Avoid_: Project Registration State, configuration toggle
+
+**Schedule Overlap Identity**:
+The Project ID and Developer Workflow stable name shared by root Workflow Runs that a scheduled
+start considers the same work for overlap purposes. Schedule name, input, trigger type, and Workflow
+Revision do not change that identity, while Child Workflow Runs do not participate in it.
+_Avoid_: Schedule name, Workflow Revision
+
+**Schedule Overlap**:
+The condition in which an eligible scheduled start finds a Running root Workflow Run with the same
+Schedule Overlap Identity. Only scheduled starts are suppressed; direct starts and explicit resumes
+remain operator-controlled, and non-Running Workflow Run States do not cause overlap.
+_Avoid_: Workflow Run failure, global concurrency limit
+
+**Missed Schedule Time**:
+A time at which an Enabled Workflow Schedule under an Enabled Project could not start because the
+system was stopped or asleep, the Project was Unavailable, start validation failed, or Schedule
+Overlap existed. Disabled or absent Schedules and Disabled Projects do not accumulate missed times.
+_Avoid_: Disabled schedule time, failed Workflow Run
+
+**Schedule Occurrence**:
+A cron-selected UTC instant for one Workflow Schedule, identified by Project ID, Schedule name, and
+that instant. Its identity makes evaluation idempotent across system crashes and restarts.
+_Avoid_: Workflow Run, evaluation attempt
+
+**Schedule Cursor**:
+The durable UTC instant through which one Workflow Schedule has been evaluated. It advances
+monotonically across restarts and wall-clock changes so later evaluation can find missed times
+without duplicating an earlier Schedule Occurrence.
+_Avoid_: Next run time, system clock
+
+**Schedule Catch-up**:
+The single durable pending start that a `catch-up-once` Workflow Schedule uses to coalesce one or
+more Missed Schedule Times. It records the earliest time, latest time, and count, then uses the
+current Schedule definition and active Project Source Revision when it can start.
+_Avoid_: Backfill, replayed Workflow Run
+
+**Schedule History**:
+The append-only, durable, source-independent record of Schedule Occurrences, compact missed-time
+ranges, evaluation outcomes, reasons, and links to created Workflow Runs. It exists outside
+Execution Evidence because many scheduling outcomes create no Workflow Run; current Schedule
+status is a projection of its events.
+_Avoid_: Execution Evidence, system log
 
 **Workflow Acceptance Test**:
 A deterministic test that runs a Developer Workflow through its public entry point with controlled
@@ -41,6 +180,12 @@ outcome. It executes on the host where Kojo was invoked, is pinned to one Workfl
 be resumed after failure or deliberately discarded.
 _Avoid_: Job, workflow
 
+**Workflow Run Trigger**:
+The immutable cause of a root Workflow Run: either a Direct start or a Scheduled start linked to
+its Workflow Schedule, Schedule Occurrence, scheduled time, and optional catch-up range. Child
+Workflow Runs instead retain their Child Workflow Invocation as their cause.
+_Avoid_: Workflow Revision, CLI command
+
 **Workflow Run ID**:
 The opaque identity assigned to a Workflow Run when it is durably created. CLI operations use this
 identity rather than a workflow path, declared version, or latest-run selector.
@@ -57,6 +202,13 @@ One period in which a process owns and executes a Workflow Run. Resuming an unfi
 creates the next numbered Execution Attempt without changing the Workflow Run's identity or erasing
 earlier evidence.
 _Avoid_: Workflow Run, retry
+
+**Execution Lease**:
+The temporary, generation-numbered authority held by one Project Runtime Process session to execute
+one Workflow Run's current Execution Attempt. It expires unless renewed; a write from an expired or
+superseded lease is rejected, and losing the lease leaves the Workflow Run to be reconciled as
+Interrupted without changing its identity or history.
+_Avoid_: Database lock, Project Runtime Process lifetime
 
 **Execution Evidence**:
 The durable history needed to reconstruct and debug what a Workflow Run did and why. It consists of
@@ -257,15 +409,15 @@ Completes, a Failed child is historical and can no longer be resumed or discarde
 _Avoid_: Child Workflow Run, detached execution
 
 **Workflow Run Tree**:
-A root Workflow Run and all of its descendant Child Workflow Runs. Every run is independently
-inspectable, but suspension, resumption, and discard are requested through the root and propagated
-to the descendants needed to preserve the tree's lifecycle invariants. A lifecycle request is
-durable and convergent rather than one transaction across the tree: descendants settle first, the
-root changes state last, and an interruption resumes the unfinished propagation. Discard changes
-Running, Suspended, Interrupted, and Failed descendants to Discarded while leaving Completed and
-already Discarded descendants unchanged. Resumption preflights every required descendant before
-starting another Execution Attempt, then recovers the deepest children first; independent siblings
-may recover concurrently.
+A root Workflow Run and all of its descendant Child Workflow Runs, all belonging to the same
+Project. Every run is independently inspectable, but suspension, resumption, and discard are
+requested through the root and propagated to the descendants needed to preserve the tree's
+lifecycle invariants. A lifecycle request is durable and convergent rather than one transaction
+across the tree: descendants settle first, the root changes state last, and an interruption resumes
+the unfinished propagation. Discard changes Running, Suspended, Interrupted, and Failed descendants
+to Discarded while leaving Completed and already Discarded descendants unchanged. Resumption
+preflights every required descendant before starting another Execution Attempt, then recovers the
+deepest children first; independent siblings may recover concurrently.
 _Avoid_: Detached run collection, workflow graph
 
 **Child Workflow Cancellation**:
