@@ -129,6 +129,8 @@ export const deliverySpecificationFingerprint = (
 
 export const deliveryMergeMessage = (workstream: DeliveryWorkstream, reviewed: ReviewedIssue) =>
   [
+    `feat(delivery): integrate #${reviewed.issue.number}`,
+    "",
     `${EVIDENCE_MARKER}: integrate #${reviewed.issue.number}`,
     "",
     `${ROOT_TRAILER}: ${workstream.root.number}`,
