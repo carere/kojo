@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { closeSync, openSync } from "node:fs";
-import { chmod, mkdir, open, readFile, rm } from "node:fs/promises";
+import { chmod, link, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { inspectSystem, isProcessAlive, readLockRecord, systemPaths } from "./process";
@@ -10,6 +11,38 @@ const pollInterval = 25;
 
 const pause = (milliseconds: number) =>
   new Promise<void>((resolvePause) => setTimeout(resolvePause, milliseconds));
+
+interface LaunchLockRecord {
+  readonly pid: number;
+  readonly token: string;
+}
+
+const decodeLaunchLockRecord = (value: string): LaunchLockRecord | undefined => {
+  try {
+    const parsed = JSON.parse(value) as Partial<LaunchLockRecord>;
+    if (
+      !Number.isInteger(parsed.pid) ||
+      (parsed.pid ?? 0) <= 0 ||
+      typeof parsed.token !== "string" ||
+      parsed.token.length === 0
+    ) {
+      return undefined;
+    }
+    return parsed as LaunchLockRecord;
+  } catch {
+    return undefined;
+  }
+};
+
+const createLaunchLock = async (path: string, record: LaunchLockRecord) => {
+  const candidate = `${path}.${record.pid}.${record.token}.tmp`;
+  await writeFile(candidate, JSON.stringify(record), { flag: "wx", mode: 0o600 });
+  try {
+    await link(candidate, path);
+  } finally {
+    await rm(candidate, { force: true });
+  }
+};
 
 export const resolveKojoHome = () => {
   const configured = process.env.KOJO_HOME;
@@ -27,24 +60,34 @@ const withLaunchLock = async <A>(home: string, effect: () => Promise<A>): Promis
   await chmod(home, 0o700);
   const path = systemPaths(home).launchLock;
   const deadline = Date.now() + 10_000;
+  const record = { pid: process.pid, token: randomUUID() } satisfies LaunchLockRecord;
 
   while (true) {
     try {
-      const handle = await open(path, "wx", 0o600);
-      try {
-        return await effect();
-      } finally {
-        await handle.close();
-        await rm(path, { force: true });
-      }
+      await createLaunchLock(path, record);
+      break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
         throw error;
       }
+      const owner = decodeLaunchLockRecord(await readFile(path, "utf8").catch(() => ""));
+      if (owner === undefined || !isProcessAlive(owner.pid)) {
+        await rm(path, { force: true });
+        continue;
+      }
       if (Date.now() >= deadline) {
-        throw new Error("timed out waiting for another Kojo launcher");
+        throw new Error(`timed out waiting for Kojo launcher ${owner.pid} to release its lock`);
       }
       await pause(pollInterval);
+    }
+  }
+
+  try {
+    return await effect();
+  } finally {
+    const owner = decodeLaunchLockRecord(await readFile(path, "utf8").catch(() => ""));
+    if (owner?.token === record.token) {
+      await rm(path, { force: true });
     }
   }
 };
@@ -57,9 +100,14 @@ const waitForReady = async (home: string, timeoutSeconds: number) => {
       return details;
     }
     try {
-      const failure = JSON.parse(await readFile(systemPaths(home).startupError, "utf8")) as {
-        message?: unknown;
-      };
+      const encodedFailure = await readFile(systemPaths(home).startupError, "utf8");
+      let failure: { message?: unknown };
+      try {
+        failure = JSON.parse(encodedFailure) as { message?: unknown };
+      } catch {
+        await pause(pollInterval);
+        continue;
+      }
       if (typeof failure.message === "string") {
         throw new Error(failure.message);
       }
@@ -162,7 +210,8 @@ const stopLocked = async (home: string, timeoutSeconds: number) => {
 
   const deadline = Date.now() + timeoutSeconds * 1_000;
   while (Date.now() < deadline) {
-    if ((await inspectSystem(home)) === undefined) {
+    const owner = await readLockRecord(home);
+    if (owner === undefined) {
       return {
         command: "stop" as const,
         home,
@@ -170,6 +219,15 @@ const stopLocked = async (home: string, timeoutSeconds: number) => {
         schemaVersion,
         status: "stopped",
       };
+    }
+    if (owner.pid !== running.pid) {
+      throw new Error(
+        `Kojo Home lock authority changed while stopping System Process ${running.pid}`,
+      );
+    }
+    if (!isProcessAlive(owner.pid)) {
+      await rm(systemPaths(home).lock, { force: true });
+      continue;
     }
     await pause(pollInterval);
   }

@@ -1,4 +1,5 @@
-import { chmod, open, readFile, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { chmod, link, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { openSystemStore } from "./storage";
 
@@ -11,6 +12,7 @@ interface LockRecord {
   readonly endpoint?: string;
   readonly phase: "ready" | "starting";
   readonly pid: number;
+  readonly token: string;
 }
 
 export const systemPaths = (home: string) => ({
@@ -25,8 +27,8 @@ export const isProcessAlive = (pid: number) => {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 };
 
@@ -34,14 +36,23 @@ const decodeLockRecord = (value: string): LockRecord | undefined => {
   try {
     const parsed = JSON.parse(value) as Partial<LockRecord>;
     if (
-      typeof parsed.pid !== "number" ||
-      (parsed.phase !== "ready" && parsed.phase !== "starting")
+      !Number.isInteger(parsed.pid) ||
+      (parsed.pid ?? 0) <= 0 ||
+      typeof parsed.token !== "string" ||
+      parsed.token.length === 0 ||
+      (parsed.phase !== "ready" && parsed.phase !== "starting") ||
+      (parsed.phase === "ready" &&
+        (typeof parsed.endpoint !== "string" || parsed.endpoint.length === 0)) ||
+      (parsed.phase === "starting" && parsed.endpoint !== undefined)
     ) {
-      return undefined;
+      throw new Error("Kojo Home lock record is invalid");
     }
     return parsed as LockRecord;
-  } catch {
-    return undefined;
+  } catch (error) {
+    if (error instanceof Error && error.message === "Kojo Home lock record is invalid") {
+      throw error;
+    }
+    throw new Error("Kojo Home lock record is invalid");
   }
 };
 
@@ -77,16 +88,44 @@ export const inspectSystem = async (home: string): Promise<ProcessDetails | unde
   return (await pingSystem(details)) ? details : undefined;
 };
 
+const writeExclusiveLockRecord = async (path: string, record: LockRecord) => {
+  const candidate = `${path}.${record.pid}.${record.token}.tmp`;
+  await writeFile(candidate, JSON.stringify(record), { flag: "wx", mode: 0o600 });
+  try {
+    await link(candidate, path);
+  } finally {
+    await rm(candidate, { force: true });
+  }
+};
+
+const replaceLockRecord = async (path: string, record: LockRecord) => {
+  const candidate = `${path}.${record.pid}.${record.token}.next`;
+  await writeFile(candidate, JSON.stringify(record), { flag: "wx", mode: 0o600 });
+  try {
+    await rename(candidate, path);
+  } finally {
+    await rm(candidate, { force: true });
+  }
+};
+
+const releaseSystemLock = async (home: string, token: string) => {
+  const owner = await readLockRecord(home).catch(() => undefined);
+  if (owner?.token === token) {
+    await rm(systemPaths(home).lock, { force: true });
+  }
+};
+
 const acquireSystemLock = async (home: string) => {
   const lockPath = systemPaths(home).lock;
+  const record = {
+    phase: "starting",
+    pid: process.pid,
+    token: randomUUID(),
+  } satisfies LockRecord;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const handle = await open(lockPath, "wx", 0o600);
-      await handle.writeFile(
-        JSON.stringify({ phase: "starting", pid: process.pid } satisfies LockRecord),
-      );
-      await handle.close();
-      return;
+      await writeExclusiveLockRecord(lockPath, record);
+      return record;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
         throw error;
@@ -109,6 +148,7 @@ export const runSystemProcess = async (home: string): Promise<void> => {
   let ownsLock = false;
   let store: Awaited<ReturnType<typeof openSystemStore>> | undefined;
   let server: ReturnType<typeof Bun.serve> | undefined;
+  let lockToken: string | undefined;
   let resolveStopped: (() => void) | undefined;
 
   const stopped = new Promise<void>((resolve) => {
@@ -117,13 +157,19 @@ export const runSystemProcess = async (home: string): Promise<void> => {
 
   const cleanup = async () => {
     server?.stop(true);
-    store?.close();
-    await rm(paths.endpoint, { force: true });
-    await rm(paths.lock, { force: true });
+    try {
+      store?.close();
+    } finally {
+      await rm(paths.endpoint, { force: true });
+      if (lockToken !== undefined) {
+        await releaseSystemLock(home, lockToken);
+      }
+    }
   };
 
   try {
-    await acquireSystemLock(home);
+    const authority = await acquireSystemLock(home);
+    lockToken = authority.token;
     ownsLock = true;
     try {
       store = await openSystemStore(home);
@@ -155,10 +201,18 @@ export const runSystemProcess = async (home: string): Promise<void> => {
       endpoint: paths.endpoint,
       phase: "ready",
       pid: process.pid,
+      token: authority.token,
     } satisfies LockRecord;
-    await writeFile(paths.lock, JSON.stringify(details), { mode: 0o600 });
+    await replaceLockRecord(paths.lock, details);
     await rm(paths.startupError, { force: true });
-    console.log(JSON.stringify({ event: "system-ready", ...details }));
+    console.log(
+      JSON.stringify({
+        endpoint: details.endpoint,
+        event: "system-ready",
+        phase: details.phase,
+        pid: details.pid,
+      }),
+    );
 
     const requestStop = () => resolveStopped?.();
     process.once("SIGINT", requestStop);

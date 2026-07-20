@@ -4,11 +4,17 @@ import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
-import { sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const systemMetadata = sqliteTable("system_metadata", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
+});
+
+const kojoMigrations = sqliteTable("kojo_migrations", {
+  appliedAt: text("applied_at").notNull(),
+  checksum: text("checksum").notNull(),
+  id: integer("id").primaryKey(),
 });
 
 const migrations = [
@@ -48,19 +54,29 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
   const sqlite = new Database(databasePath, { create: true, strict: true });
 
   try {
-    sqlite.run("PRAGMA journal_mode = WAL");
-    sqlite.run("PRAGMA synchronous = FULL");
-    sqlite.run("PRAGMA foreign_keys = ON");
-    sqlite.run("PRAGMA busy_timeout = 5000");
+    const database = drizzle(sqlite);
+    database.get(sql.raw("PRAGMA journal_mode = WAL"));
+    database.run(sql.raw("PRAGMA synchronous = FULL"));
+    database.run(sql.raw("PRAGMA foreign_keys = ON"));
+    database.run(sql.raw("PRAGMA busy_timeout = 5000"));
     await chmod(databasePath, 0o600);
-    const integrity = sqlite.query("PRAGMA integrity_check").get() as {
-      integrity_check?: unknown;
-    } | null;
-    if (integrity?.integrity_check !== "ok") {
+    const configuration = {
+      foreignKeys: database.get<[unknown]>(sql.raw("PRAGMA foreign_keys"))?.[0],
+      journalMode: database.get<[unknown]>(sql.raw("PRAGMA journal_mode"))?.[0],
+      synchronous: database.get<[unknown]>(sql.raw("PRAGMA synchronous"))?.[0],
+    };
+    if (
+      configuration.foreignKeys !== 1 ||
+      configuration.journalMode !== "wal" ||
+      configuration.synchronous !== 2
+    ) {
+      throw new Error("state.sqlite could not enable its required durability settings");
+    }
+    const integrity = database.get<[unknown]>(sql.raw("PRAGMA integrity_check"))?.[0];
+    if (integrity !== "ok") {
       throw new Error("state.sqlite failed its integrity check");
     }
 
-    const database = drizzle(sqlite);
     database.run(
       sql.raw(`CREATE TABLE IF NOT EXISTS kojo_migrations (
       id INTEGER PRIMARY KEY NOT NULL,
@@ -69,15 +85,23 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
     )`),
     );
 
-    const applied = database.all<{ checksum: string; id: number }>(
-      sql`SELECT id, checksum FROM kojo_migrations ORDER BY id`,
-    );
-    const knownIds = new Set(migrations.map((migration) => migration.id));
-    const unknown = applied.find((migration) => !knownIds.has(migration.id as 1));
-    if (unknown !== undefined) {
-      throw new Error(
-        `state.sqlite schema migration ${unknown.id} is newer than this Kojo version`,
-      );
+    const applied = database
+      .select({ checksum: kojoMigrations.checksum, id: kojoMigrations.id })
+      .from(kojoMigrations)
+      .orderBy(kojoMigrations.id)
+      .all();
+    for (const [index, appliedMigration] of applied.entries()) {
+      const expected = migrations[index];
+      if (expected === undefined) {
+        throw new Error(
+          `state.sqlite schema migration ${appliedMigration.id} is newer than this Kojo version`,
+        );
+      }
+      if (appliedMigration.id !== expected.id) {
+        throw new Error(
+          `state.sqlite migrations are not an ordered prefix; expected ${expected.id} but found ${appliedMigration.id}`,
+        );
+      }
     }
 
     for (const migration of migrations) {
@@ -90,15 +114,15 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
         continue;
       }
 
-      sqlite.transaction(() => {
+      database.transaction((transaction) => {
         for (const statement of migration.statements) {
-          database.run(sql.raw(statement));
+          transaction.run(sql.raw(statement));
         }
-        database.run(
-          sql`INSERT INTO kojo_migrations (id, checksum, applied_at)
-              VALUES (${migration.id}, ${checksum}, ${new Date().toISOString()})`,
-        );
-      })();
+        transaction
+          .insert(kojoMigrations)
+          .values({ appliedAt: new Date().toISOString(), checksum, id: migration.id })
+          .run();
+      });
     }
 
     database

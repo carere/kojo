@@ -134,6 +134,7 @@ describe("Kojo System Process", () => {
       schemaVersion: 1,
       status: "stopped",
     });
+    await expect(access(join(home, "system.lock"))).rejects.toBeDefined();
     if (stopped.json === undefined) {
       throw new Error("stop did not return a machine-readable result");
     }
@@ -209,9 +210,74 @@ describe("Kojo System Process", () => {
     });
   }, 20_000);
 
+  test("refuses a changed migration with an actionable machine result", async () => {
+    const home = await makeHome();
+    const database = new Database(join(home, "state.sqlite"), { create: true });
+    try {
+      database.run(`CREATE TABLE kojo_migrations (
+        id INTEGER PRIMARY KEY NOT NULL,
+        checksum TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      )`);
+      database.run(
+        "INSERT INTO kojo_migrations (id, checksum, applied_at) VALUES (1, 'changed', 'now')",
+      );
+    } finally {
+      database.close();
+    }
+
+    const result = runCli(home, "start");
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.json).toMatchObject({
+      command: "start",
+      home,
+      error: {
+        action: expect.any(String),
+        code: "MIGRATION_FAILED",
+        message: expect.stringContaining("migration 1 checksum"),
+      },
+      process: null,
+      schemaVersion: 1,
+      status: "failed",
+    });
+  }, 20_000);
+
+  test("recovers a launch lock left by a terminated CLI Launcher", async () => {
+    const home = await makeHome();
+    await Bun.write(
+      join(home, "launch.lock"),
+      JSON.stringify({ pid: 999_999_999, token: "terminated-launcher" }),
+    );
+
+    const started = runCli(home, "start");
+
+    expect(started.exitCode).toBe(0);
+    expect(started.json).toMatchObject({
+      command: "start",
+      home,
+      schemaVersion: 1,
+      status: "started",
+    });
+    await expect(access(join(home, "launch.lock"))).rejects.toBeDefined();
+  }, 20_000);
+
   test("reports actionable lock and availability failures", async () => {
     const lockedHome = await makeHome();
     await Bun.write(join(lockedHome, "system.lock"), "invalid lock owner");
+
+    const lockedStatus = runCli(lockedHome, "status");
+    expect(lockedStatus.exitCode).not.toBe(0);
+    expect(lockedStatus.json).toMatchObject({
+      command: "status",
+      error: {
+        action: expect.any(String),
+        code: "HOME_LOCKED",
+        message: expect.stringContaining("lock"),
+      },
+      schemaVersion: 1,
+      status: "failed",
+    });
 
     const locked = runCli(lockedHome, "start");
     expect(locked.exitCode).not.toBe(0);
@@ -229,7 +295,7 @@ describe("Kojo System Process", () => {
     const unavailableHome = await makeHome();
     await Bun.write(
       join(unavailableHome, "system.lock"),
-      JSON.stringify({ phase: "starting", pid: process.pid }),
+      JSON.stringify({ phase: "starting", pid: process.pid, token: "test-authority" }),
     );
     const unavailable = runCli(unavailableHome, "status");
     expect(unavailable.exitCode).toBe(0);
@@ -244,5 +310,26 @@ describe("Kojo System Process", () => {
       status: "unavailable",
     });
     await rm(join(unavailableHome, "system.lock"), { force: true });
+  }, 20_000);
+
+  test("classifies startup failures separately from generic command failures", async () => {
+    const parent = await makeHome();
+    const home = join(parent, "nested-home-path-that-is-deliberately-long".repeat(3));
+
+    const result = runCli(home, "start");
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.json).toMatchObject({
+      command: "start",
+      home,
+      error: {
+        action: expect.any(String),
+        code: "STARTUP_FAILED",
+        message: expect.stringContaining("private local endpoint"),
+      },
+      process: null,
+      schemaVersion: 1,
+      status: "failed",
+    });
   }, 20_000);
 });

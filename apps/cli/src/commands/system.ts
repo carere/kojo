@@ -10,7 +10,7 @@ import {
 
 const printResult = (result: unknown) => Console.log(JSON.stringify(result));
 
-const failureCode = (message: string) => {
+const failureCode = (command: string, message: string) => {
   if (message.includes("KOJO_HOME")) {
     return "STARTUP_INVALID_HOME";
   }
@@ -22,6 +22,9 @@ const failureCode = (message: string) => {
   }
   if (message.includes("available") || message.includes("timed out")) {
     return "SYSTEM_UNAVAILABLE";
+  }
+  if (command === "start" || command === "restart") {
+    return "STARTUP_FAILED";
   }
   return "SYSTEM_COMMAND_FAILED";
 };
@@ -38,7 +41,7 @@ const run = <A>(command: string, operation: () => Promise<A>) =>
         error: {
           action:
             "Inspect `kojo logs`, correct the reported Kojo Home problem, and retry the command.",
-          code: failureCode(message),
+          code: failureCode(command, message),
           message,
         },
         home: process.env.KOJO_HOME ?? "",
