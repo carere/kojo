@@ -1,5 +1,7 @@
 import { Cron, type Effect, Schema } from "effect";
 
+export { WorkflowTest } from "./workflow-test";
+
 export const COMPATIBILITY = Object.freeze({
   kojo: "0.1.0",
   workflowAbi: "1",

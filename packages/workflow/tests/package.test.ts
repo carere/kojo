@@ -20,9 +20,11 @@ describe("published package", () => {
     expect(manifest.dependencies?.effect).toBeUndefined();
     expect(manifest.engines.bun).toBe("1.3.14");
     expect(manifest.devDependencies).toEqual({
+      "@effect/vitest": "4.0.0-beta.98",
       "@types/bun": "1.3.14",
       effect: "4.0.0-beta.98",
       typescript: "7.0.2",
+      vitest: "4.1.10",
     });
     expect(files).toEqual(
       expect.arrayContaining(["index.js", "index.js.map", "index.d.ts", "index.d.ts.map"]),
@@ -41,6 +43,7 @@ describe("published package", () => {
       "RegistryValidationError",
       "Schedule",
       "Workflow",
+      "WorkflowTest",
       "defineConfig",
     ]);
     expect(root).not.toHaveProperty("WorkflowEngine");
