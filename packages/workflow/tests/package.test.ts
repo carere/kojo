@@ -34,7 +34,7 @@ describe("published package", () => {
   });
 
   test("does not expose runtime or persistence internals", async () => {
-    const root = await import("../dist/index.js");
+    const root = await import("@kojo/workflow");
 
     expect(Object.keys(root).sort()).toEqual([
       "COMPATIBILITY",
@@ -46,5 +46,10 @@ describe("published package", () => {
     expect(root).not.toHaveProperty("WorkflowEngine");
     expect(root).not.toHaveProperty("WorkflowJournal");
     expect(root).not.toHaveProperty("Persistence");
+  });
+
+  test("rejects unsupported deep imports", async () => {
+    await expect(import("@kojo/workflow/dist/index.js")).rejects.toThrow();
+    await expect(import("@kojo/workflow/src/index.ts")).rejects.toThrow();
   });
 });

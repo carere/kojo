@@ -131,6 +131,95 @@ describe("defineConfig", () => {
       expect(invoked).toBe(false);
     }
   });
+
+  test.each([
+    "/workflows/absolute.ts",
+    "../workflows/parent.ts",
+    "./workflows/dot.ts",
+    "workflows//empty.ts",
+    "C:/workflows/windows.ts",
+    "https://example.com/workflow.ts",
+    "workflows/declaration.d.ts",
+    "workflows/declaration.d.mts",
+    "workflows/commonjs.cts",
+  ])("rejects non-local or non-runtime entry point %s", (entryPoint) => {
+    const invalidEntryPoint = Workflow.make("InvalidEntryPoint", {
+      version: "1",
+      entryPoint,
+      input: GreetingInput,
+      success: Greeting,
+      failure: GreetingFailure,
+      run: ({ name }) => Effect.succeed({ message: name }),
+    });
+
+    expect(() => defineConfig({ workflows: [invalidEntryPoint] })).toThrow(RegistryValidationError);
+  });
+
+  test("rejects malformed registry containers with registry diagnostics", () => {
+    expect.assertions(4);
+
+    try {
+      defineConfig({ workflows: null, schedules: {} } as never);
+      throw new Error("Expected defineConfig to reject malformed registry containers");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RegistryValidationError);
+      const diagnostics = (error as RegistryValidationError).diagnostics;
+      expect(diagnostics.map(({ code }) => code)).toEqual([
+        "InvalidWorkflowRegistry",
+        "InvalidScheduleRegistry",
+      ]);
+      expect(diagnostics.map(({ path }) => path)).toEqual(["workflows", "schedules"]);
+      expect(diagnostics).toHaveLength(2);
+    }
+  });
+
+  test("rejects null schedules when the field is explicitly supplied", () => {
+    expect(() => defineConfig({ workflows: [hello], schedules: null } as never)).toThrow(
+      RegistryValidationError,
+    );
+  });
+
+  test("rejects an unsupported schedule missed-time policy", () => {
+    const invalidPolicy = Schedule.make("InvalidPolicy", {
+      workflow: hello,
+      input: { name: "Kojo" },
+      cron: Cron.parseUnsafe("0 9 * * *"),
+      timezone: "Europe/Paris",
+      missedTimePolicy: "later" as never,
+    });
+
+    try {
+      defineConfig({ workflows: [hello], schedules: [invalidPolicy] });
+      throw new Error("Expected defineConfig to reject the schedule policy");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RegistryValidationError);
+      expect((error as RegistryValidationError).diagnostics).toEqual([
+        {
+          code: "InvalidScheduleMissedTimePolicy",
+          path: "schedules[0].missedTimePolicy",
+          message: "Expected missedTimePolicy to be 'skip' or 'catch-up-once'.",
+        },
+      ]);
+    }
+  });
+
+  test("accepts IANA timezone aliases but rejects numeric offsets", () => {
+    const withTimezone = (timezone: string) =>
+      Schedule.make(`Timezone:${timezone}`, {
+        workflow: hello,
+        input: { name: "Kojo" },
+        cron: Cron.parseUnsafe("0 9 * * *"),
+        timezone,
+        missedTimePolicy: "skip",
+      });
+
+    expect(() =>
+      defineConfig({ workflows: [hello], schedules: [withTimezone("GMT")] }),
+    ).not.toThrow();
+    expect(() => defineConfig({ workflows: [hello], schedules: [withTimezone("+01:00")] })).toThrow(
+      RegistryValidationError,
+    );
+  });
 });
 
 describe("compatibility boundary", () => {

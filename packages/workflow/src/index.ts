@@ -112,6 +112,7 @@ const makeSchedule = <const Name extends string, Definition extends AnyWorkflow>
 export const Schedule = Object.freeze({ make: makeSchedule });
 
 export type RegistryDiagnosticCode =
+  | "InvalidWorkflowRegistry"
   | "InvalidWorkflowDefinition"
   | "InvalidWorkflowName"
   | "DuplicateWorkflowName"
@@ -119,12 +120,14 @@ export type RegistryDiagnosticCode =
   | "InvalidWorkflowEntryPoint"
   | "InvalidWorkflowSchema"
   | "InvalidWorkflowRun"
+  | "InvalidScheduleRegistry"
   | "InvalidScheduleDefinition"
   | "InvalidScheduleName"
   | "DuplicateScheduleName"
   | "UnknownScheduleWorkflow"
   | "InvalidScheduleCron"
   | "InvalidScheduleTimezone"
+  | "InvalidScheduleMissedTimePolicy"
   | "InvalidScheduleInput";
 
 export interface RegistryDiagnostic {
@@ -162,7 +165,29 @@ export interface ConfigInput<
   readonly schedules?: Schedules;
 }
 
-const entryPointPattern = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*\\).+\.(?:ts|mts)$/;
+const schemeOrDrivePattern = /^[a-z][a-z\d+.-]*:/i;
+const declarationFilePattern = /\.d\.(?:ts|mts)$/;
+
+const isRepositoryEntryPoint = (value: unknown): value is string => {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value !== value.trim() ||
+    value.startsWith("/") ||
+    value.includes("\\") ||
+    value.includes("\0") ||
+    schemeOrDrivePattern.test(value) ||
+    declarationFilePattern.test(value)
+  ) {
+    return false;
+  }
+
+  const segments = value.split("/");
+  return (
+    segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..") &&
+    /\.(?:ts|mts)$/.test(segments.at(-1) ?? "")
+  );
+};
 
 const isStableName = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0;
@@ -218,7 +243,7 @@ const validateWorkflow = (
       "Expected a non-empty opaque declared version.",
     );
   }
-  if (typeof value.entryPoint !== "string" || !entryPointPattern.test(value.entryPoint)) {
+  if (!isRepositoryEntryPoint(value.entryPoint)) {
     diagnostic(
       diagnostics,
       "InvalidWorkflowEntryPoint",
@@ -249,8 +274,9 @@ const validateWorkflow = (
 
 const validTimeZone = (timezone: string): boolean => {
   try {
-    new Intl.DateTimeFormat("en", { timeZone: timezone }).format();
-    return timezone.includes("/") || timezone === "UTC";
+    const resolved = new Intl.DateTimeFormat("en", { timeZone: timezone }).resolvedOptions()
+      .timeZone;
+    return !/^[+-]\d{2}:\d{2}$/.test(resolved);
   } catch {
     return false;
   }
@@ -265,8 +291,18 @@ export const defineConfig = <
   const diagnostics: Array<RegistryDiagnostic> = [];
   const workflowNames = new Map<string, number>();
   const validWorkflows = new Set<AnyWorkflow>();
+  const workflows: ReadonlyArray<unknown> = Array.isArray(input?.workflows) ? input.workflows : [];
 
-  input.workflows.forEach((workflow, index) => {
+  if (!Array.isArray(input?.workflows)) {
+    diagnostic(
+      diagnostics,
+      "InvalidWorkflowRegistry",
+      "workflows",
+      "Expected workflows to be an array of explicitly imported Developer Workflows.",
+    );
+  }
+
+  workflows.forEach((workflow, index) => {
     if (!validateWorkflow(workflow, index, diagnostics)) return;
     validWorkflows.add(workflow);
     const previous = workflowNames.get(workflow.name);
@@ -282,7 +318,18 @@ export const defineConfig = <
     }
   });
 
-  const schedules = (input.schedules ?? []) as unknown as Schedules;
+  const schedulesValue = input?.schedules === undefined ? [] : input.schedules;
+  const schedules: ReadonlyArray<unknown> = Array.isArray(schedulesValue) ? schedulesValue : [];
+
+  if (!Array.isArray(schedulesValue)) {
+    diagnostic(
+      diagnostics,
+      "InvalidScheduleRegistry",
+      "schedules",
+      "Expected schedules to be an array of explicitly imported Workflow Schedules.",
+    );
+  }
+
   const scheduleNames = new Map<string, number>();
   schedules.forEach((schedule, index) => {
     const path = `schedules[${index}]`;
@@ -342,6 +389,14 @@ export const defineConfig = <
         "Expected a valid IANA timezone.",
       );
     }
+    if (schedule.missedTimePolicy !== "skip" && schedule.missedTimePolicy !== "catch-up-once") {
+      diagnostic(
+        diagnostics,
+        "InvalidScheduleMissedTimePolicy",
+        `${path}.missedTimePolicy`,
+        "Expected missedTimePolicy to be 'skip' or 'catch-up-once'.",
+      );
+    }
     if (validWorkflows.has(schedule.workflow) && Schema.isSchema(schedule.workflow.input)) {
       try {
         Schema.decodeUnknownSync(
@@ -363,7 +418,7 @@ export const defineConfig = <
   }
 
   return Object.freeze({
-    workflows: Object.freeze([...input.workflows]) as unknown as Workflows,
+    workflows: Object.freeze([...workflows]) as unknown as Workflows,
     schedules: Object.freeze([...schedules]) as unknown as Schedules,
   });
 };
