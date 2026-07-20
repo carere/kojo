@@ -1,11 +1,11 @@
 # Kojo
 
-Kojo is a delivery workflow factory. The same executable can run a workflow directly or expose a
-server for issue-tracker webhooks and the visualizer.
+Kojo is a software-factory builder. Its project-local CLI controls one Kojo System Process for a
+Kojo Home and runs Developer Workflows.
 
 ## Projects
 
-- `apps/cli`: Bun and Effect executable with `serve` and `delivery` commands
+- `apps/cli`: Bun and Effect executable with system lifecycle, `serve`, and `delivery` commands
 - `apps/visualizer`: SolidJS SPA using TanStack Router, TanStack Query, Tailwind CSS, and Zaidan
 - `packages/domain`: runtime-independent domain models and typed HTTP contracts
 
@@ -31,6 +31,21 @@ bun install
 ```
 
 ## Launch apps
+
+Control the Kojo System Process with `start`, `stop`, `restart`, `status`, and `logs`. The commands
+return versioned JSON and are safe to repeat. `KOJO_HOME` may select an absolute Kojo Home path; it
+defaults to `~/.kojo`.
+
+```sh
+bun run apps/cli/main.ts start
+bun run apps/cli/main.ts status
+bun run apps/cli/main.ts logs
+bun run apps/cli/main.ts restart
+bun run apps/cli/main.ts stop
+```
+
+The System Process uses an owner-only private local socket and is the sole normal owner of
+`KOJO_HOME/state.sqlite`. These commands do not install an operating-system login service.
 
 Run the server for a project:
 
