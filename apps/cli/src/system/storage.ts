@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
@@ -17,6 +17,15 @@ const kojoMigrations = sqliteTable("kojo_migrations", {
   id: integer("id").primaryKey(),
 });
 
+const projects = sqliteTable("projects", {
+  createdAt: text("created_at").notNull(),
+  id: text("id").primaryKey(),
+  metadata: text("metadata").notNull(),
+  path: text("path").notNull().unique(),
+  registrationState: text("registration_state").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 const migrations = [
   {
     id: 1,
@@ -24,6 +33,19 @@ const migrations = [
       `CREATE TABLE system_metadata (
         key TEXT PRIMARY KEY NOT NULL,
         value TEXT NOT NULL
+      )`,
+    ],
+  },
+  {
+    id: 2,
+    statements: [
+      `CREATE TABLE projects (
+        id TEXT PRIMARY KEY NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        registration_state TEXT NOT NULL CHECK (registration_state IN ('Enabled', 'Disabled', 'Archived')),
+        metadata TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       )`,
     ],
   },
@@ -44,6 +66,29 @@ const chmodIfPresent = async (path: string) => {
 
 export interface SystemStore {
   readonly close: () => void;
+  readonly projects: ProjectRepository;
+}
+
+export type ProjectRegistrationState = "Archived" | "Disabled" | "Enabled";
+
+export interface StoredProject {
+  readonly createdAt: string;
+  readonly id: string;
+  readonly metadata: string;
+  readonly path: string;
+  readonly registrationState: ProjectRegistrationState;
+  readonly updatedAt: string;
+}
+
+export interface ProjectRepository {
+  readonly create: (project: StoredProject) => StoredProject;
+  readonly findById: (id: string) => StoredProject | undefined;
+  readonly findByPath: (path: string) => StoredProject | undefined;
+  readonly list: () => ReadonlyArray<StoredProject>;
+  readonly update: (
+    id: string,
+    changes: Partial<Pick<StoredProject, "metadata" | "path" | "registrationState">>,
+  ) => StoredProject | undefined;
 }
 
 export const openSystemStore = async (home: string): Promise<SystemStore> => {
@@ -137,7 +182,63 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
     await chmodIfPresent(`${databasePath}-wal`);
     await chmodIfPresent(`${databasePath}-shm`);
 
-    return { close: () => sqlite.close() };
+    const selectProject = {
+      createdAt: projects.createdAt,
+      id: projects.id,
+      metadata: projects.metadata,
+      path: projects.path,
+      registrationState: projects.registrationState,
+      updatedAt: projects.updatedAt,
+    };
+    const decodeProject = (project: typeof projects.$inferSelect): StoredProject => ({
+      ...project,
+      registrationState: project.registrationState as ProjectRegistrationState,
+    });
+    const projectRepository: ProjectRepository = {
+      create: (project) => {
+        database.insert(projects).values(project).run();
+        return project;
+      },
+      findById: (id) => {
+        const project = database
+          .select(selectProject)
+          .from(projects)
+          .where(eq(projects.id, id))
+          .get();
+        return project === undefined ? undefined : decodeProject(project);
+      },
+      findByPath: (path) => {
+        const project = database
+          .select(selectProject)
+          .from(projects)
+          .where(eq(projects.path, path))
+          .get();
+        return project === undefined ? undefined : decodeProject(project);
+      },
+      list: () =>
+        database
+          .select(selectProject)
+          .from(projects)
+          .orderBy(projects.createdAt, projects.id)
+          .all()
+          .map(decodeProject),
+      update: (id, changes) => {
+        const updatedAt = new Date().toISOString();
+        database
+          .update(projects)
+          .set({ ...changes, updatedAt })
+          .where(eq(projects.id, id))
+          .run();
+        const project = database
+          .select(selectProject)
+          .from(projects)
+          .where(eq(projects.id, id))
+          .get();
+        return project === undefined ? undefined : decodeProject(project);
+      },
+    };
+
+    return { close: () => sqlite.close(), projects: projectRepository };
   } catch (error) {
     sqlite.close();
     throw error;

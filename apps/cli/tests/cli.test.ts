@@ -27,5 +27,17 @@ describe("Kojo CLI", () => {
     expect(help).toContain("restart");
     expect(help).toContain("status");
     expect(help).toContain("logs");
+    expect(help).toContain("project");
+  });
+
+  test("documents versioned Project operations", async () => {
+    const help = await runCommand(["project", "--help"]);
+
+    expect(help).toContain("add");
+    expect(help).toContain("list");
+    expect(help).toContain("enable");
+    expect(help).toContain("disable");
+    expect(help).toContain("relink");
+    expect(help).toContain("archive");
   });
 });
