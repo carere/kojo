@@ -400,7 +400,7 @@ export const defineConfig = <
     if (validWorkflows.has(schedule.workflow) && Schema.isSchema(schedule.workflow.input)) {
       try {
         Schema.decodeUnknownSync(
-          schedule.workflow.input as unknown as Schema.ConstraintDecoder<unknown>,
+          Schema.toType(schedule.workflow.input) as unknown as Schema.ConstraintDecoder<unknown>,
         )(schedule.input);
       } catch {
         diagnostic(

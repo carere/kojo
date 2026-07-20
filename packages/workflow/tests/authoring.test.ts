@@ -203,6 +203,35 @@ describe("defineConfig", () => {
     }
   });
 
+  test("validates schedule input against the workflow schema type", () => {
+    const transformedInput = Workflow.make("TransformedInput", {
+      version: "1",
+      entryPoint: "workflows/transformed-input.ts",
+      input: Schema.Struct({ value: Schema.NumberFromString }),
+      success: Schema.Number,
+      failure: Schema.Never,
+      run: ({ value }) => Effect.succeed(value),
+    });
+    const schedule = (input: { readonly value: number }) =>
+      Schedule.make("TransformedInputSchedule", {
+        workflow: transformedInput,
+        input,
+        cron: Cron.parseUnsafe("0 9 * * *"),
+        timezone: "UTC",
+        missedTimePolicy: "skip",
+      });
+
+    expect(() =>
+      defineConfig({ workflows: [transformedInput], schedules: [schedule({ value: 42 })] }),
+    ).not.toThrow();
+    expect(() =>
+      defineConfig({
+        workflows: [transformedInput],
+        schedules: [schedule({ value: "42" } as never)],
+      }),
+    ).toThrow(RegistryValidationError);
+  });
+
   test("accepts IANA timezone aliases but rejects numeric offsets", () => {
     const withTimezone = (timezone: string) =>
       Schedule.make(`Timezone:${timezone}`, {
