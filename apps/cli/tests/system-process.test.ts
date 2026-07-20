@@ -560,6 +560,49 @@ describe("Kojo System Process", () => {
     await expect(access(endpoint)).rejects.toBeDefined();
   }, 20_000);
 
+  test("backs up online and verifies and restores only while stopped", async () => {
+    const home = await makeHome();
+    const backupParent = await mkdtemp(join(tmpdir(), "kojo-backup-test-"));
+    cleanupPaths.add(backupParent);
+    const backup = join(backupParent, "snapshot");
+    expect(runCli(home, "start").exitCode).toBe(0);
+
+    const backedUp = runCli(home, "home", "backup", backup);
+    expect(backedUp.exitCode).toBe(0);
+    expect(backedUp.json).toMatchObject({
+      command: "home.backup",
+      home,
+      result: {
+        artifactCount: 0,
+        databaseChecksum: expect.stringMatching(/^[a-f0-9]{64}$/),
+      },
+      schemaVersion: 1,
+      status: "succeeded",
+    });
+    await access(join(backup, "manifest.json"));
+
+    const lockedVerification = runCli(home, "home", "verify");
+    expect(lockedVerification.exitCode).not.toBe(0);
+    expect(lockedVerification.json).toMatchObject({
+      command: "home.verify",
+      error: { code: "HOME_LOCKED" },
+      status: "failed",
+    });
+
+    expect(runCli(home, "stop", "--timeout", "2").exitCode).toBe(0);
+    expect(runCli(home, "home", "verify").json).toMatchObject({
+      command: "home.verify",
+      result: { diagnostics: [], status: "verified" },
+      status: "succeeded",
+    });
+    expect(runCli(home, "home", "restore", backup).json).toMatchObject({
+      command: "home.restore",
+      result: { status: "restored" },
+      status: "succeeded",
+    });
+    expect(runCli(home, "start").exitCode).toBe(0);
+  }, 20_000);
+
   test("serializes concurrent starts and initializes its Drizzle-managed SQLite store", async () => {
     const home = await makeHome();
     const [first, second] = await Promise.all([

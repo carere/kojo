@@ -7,6 +7,7 @@ import { makeWorkflowRunService, WorkflowStartError } from "./workflow-runs";
 import { makeProjectWorkflowRuntime } from "./workflow-runtime";
 
 export interface ProcessDetails {
+  readonly diagnostics?: ReadonlyArray<unknown>;
   readonly endpoint: string;
   readonly pid: number;
 }
@@ -82,13 +83,28 @@ export const pingSystem = async (details: ProcessDetails): Promise<boolean> => {
   }
 };
 
+const readSystemDiagnostics = async (details: ProcessDetails) => {
+  try {
+    const response = await fetch("http://localhost/status", {
+      signal: AbortSignal.timeout(500),
+      unix: details.endpoint,
+    });
+    if (!response.ok) return undefined;
+    const body = (await response.json()) as { diagnostics?: unknown };
+    return Array.isArray(body.diagnostics) ? body.diagnostics : [];
+  } catch {
+    return undefined;
+  }
+};
+
 export const inspectSystem = async (home: string): Promise<ProcessDetails | undefined> => {
   const record = await readLockRecord(home);
   if (record?.phase !== "ready" || record.endpoint === undefined || !isProcessAlive(record.pid)) {
     return undefined;
   }
   const details = { endpoint: record.endpoint, pid: record.pid };
-  return (await pingSystem(details)) ? details : undefined;
+  const diagnostics = await readSystemDiagnostics(details);
+  return diagnostics === undefined ? undefined : { ...details, diagnostics };
 };
 
 const writeExclusiveLockRecord = async (path: string, record: LockRecord) => {
@@ -153,6 +169,7 @@ export const runSystemProcess = async (home: string): Promise<void> => {
   let server: ReturnType<typeof Bun.serve> | undefined;
   let endpointReady = false;
   let lockToken: string | undefined;
+  let homeDiagnostics: ReadonlyArray<unknown> = [];
   let projectService: ReturnType<typeof makeProjectService> | undefined;
   let workflowRunService: ReturnType<typeof makeWorkflowRunService> | undefined;
   let resolveStopped: (() => void) | undefined;
@@ -179,6 +196,11 @@ export const runSystemProcess = async (home: string): Promise<void> => {
     ownsLock = true;
     try {
       store = await openSystemStore(home);
+      const { diagnoseKojoHomeStartup } = await import("./home-maintenance");
+      homeDiagnostics = await diagnoseKojoHomeStartup(home);
+      for (const diagnostic of homeDiagnostics) {
+        console.error(JSON.stringify({ diagnostic, event: "kojo-home-diagnostic" }));
+      }
       store.workflowRuns.interruptRunning();
       projectService = makeProjectService(store);
       workflowRunService = makeWorkflowRunService(
@@ -201,11 +223,51 @@ export const runSystemProcess = async (home: string): Promise<void> => {
         }
         const url = new URL(request.url);
         if (url.pathname === "/status") {
-          return Response.json({ service: "kojo", status: "ok" });
+          return Response.json({ diagnostics: homeDiagnostics, service: "kojo", status: "ok" });
         }
         if (url.pathname === "/stop" && request.method === "POST") {
           setTimeout(() => resolveStopped?.(), 10);
           return Response.json({ status: "stopping" });
+        }
+        if (url.pathname === "/v1/home/backups" && request.method === "POST") {
+          try {
+            const body = (await request.json()) as { destination?: unknown };
+            if (typeof body.destination !== "string" || body.destination.length === 0) {
+              return Response.json(
+                {
+                  command: "home.backup",
+                  error: { code: "INVALID_REQUEST", message: "Backup destination is required" },
+                  schemaVersion: 1,
+                  status: "failed",
+                },
+                { status: 400 },
+              );
+            }
+            const { backupKojoHome } = await import("./home-maintenance");
+            const result = await backupKojoHome(home, body.destination);
+            return Response.json({
+              command: "home.backup",
+              home,
+              result,
+              schemaVersion: 1,
+              status: "succeeded",
+            });
+          } catch (error) {
+            return Response.json(
+              {
+                command: "home.backup",
+                error: {
+                  action: "Correct the reported backup or Kojo Home problem and retry.",
+                  code: "HOME_BACKUP_FAILED",
+                  message: error instanceof Error ? error.message : String(error),
+                },
+                home,
+                schemaVersion: 1,
+                status: "failed",
+              },
+              { status: 409 },
+            );
+          }
         }
         const projectMatch = url.pathname.match(
           /^\/v1\/projects\/([^/]+)\/(enable|disable|relink|archive)$/,

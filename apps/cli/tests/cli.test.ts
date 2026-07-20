@@ -29,6 +29,17 @@ describe("Kojo CLI", () => {
     expect(help).toContain("logs");
     expect(help).toContain("project");
     expect(help).toContain("workflow");
+    expect(help).toContain("home");
+  });
+
+  test("documents Kojo Home protection operations", async () => {
+    const help = await runCommand(["home", "--help"]);
+
+    expect(help).toContain("backup");
+    expect(help).toContain("restore");
+    expect(help).toContain("verify");
+    expect(help).toContain("repair-migrations");
+    expect(help).toContain("compact");
   });
 
   test("documents versioned Project operations", async () => {

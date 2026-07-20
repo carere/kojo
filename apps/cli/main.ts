@@ -4,6 +4,7 @@ import { BunRuntime, BunServices } from "@effect/platform-bun";
 import { Effect } from "effect";
 import { Command } from "effect/unstable/cli";
 import { deliveryCommand } from "./src/commands/delivery";
+import { homeCommand } from "./src/commands/home";
 import { projectCommand } from "./src/commands/project";
 import { serveCommand } from "./src/commands/serve";
 import {
@@ -26,6 +27,7 @@ export const kojoCommand = Command.make("kojo").pipe(
     restartCommand,
     statusCommand,
     logsCommand,
+    homeCommand,
     projectCommand,
     workflowCommand,
     serveCommand,

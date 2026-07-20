@@ -257,6 +257,7 @@ const migrations = [
   },
   {
     id: 5,
+    irreversible: true,
     statements: [
       `CREATE TABLE workflow_revision_snapshots (
         root_run_id TEXT PRIMARY KEY NOT NULL REFERENCES workflow_runs(run_id),
@@ -269,6 +270,13 @@ const migrations = [
 
 const migrationChecksum = (statements: ReadonlyArray<string>) =>
   createHash("sha256").update(statements.join(";\n")).digest("hex");
+
+export const kojoSchemaMigrations = migrations.map((migration) => ({
+  checksum: migrationChecksum(migration.statements),
+  id: migration.id,
+}));
+
+export const kojoSchemaVersion = migrations.length;
 
 const chmodIfPresent = async (path: string) => {
   try {
@@ -550,6 +558,16 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
       }
       if (existing !== undefined) {
         continue;
+      }
+
+      if ("irreversible" in migration && migration.irreversible && applied.length > 0) {
+        const { backupKojoHome } = await import("./home-maintenance");
+        const backupPath = join(
+          home,
+          "backups",
+          `before-migration-${migration.id}-${new Date().toISOString().replaceAll(":", "-")}`,
+        );
+        await backupKojoHome(home, backupPath);
       }
 
       database.transaction((transaction) => {
