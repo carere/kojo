@@ -5,11 +5,13 @@ import {
   DeliveryOptions,
   DeliveryWorkstream,
   PlannerSelection,
+  ReviewedIssue,
   TrackerIssue,
 } from "../../src/types/delivery";
 import { WorkflowError } from "../../src/types/errors";
 import { validatePlannerSelection } from "../../src/workflows/delivery/agents/planner";
 import { parseReviewDecision } from "../../src/workflows/delivery/agents/review-decision";
+import { deliveryMergeMessage } from "../../src/workflows/delivery/evidence";
 import { issueBranchName } from "../../src/workflows/delivery/issue";
 import { parseDeliveryMetadata } from "../../src/workflows/delivery/metadata";
 import { deliveryPullRequestContent } from "../../src/workflows/delivery/pull-request";
@@ -227,11 +229,23 @@ describe("delivery completion", () => {
       title: "Summary slice",
       body: "<!-- delivery-ticket-key: #10::02 -->",
     });
-    const workstream = await runEffect(buildDeliveryWorkstream(rootIssue, [issue(), second]));
+    const ticket = issue();
+    const workstream = await runEffect(buildDeliveryWorkstream(rootIssue, [ticket, second]));
     const content = deliveryPullRequestContent(workstream);
     const withRoot = (root: TrackerIssue) => new DeliveryWorkstream({ ...workstream, root });
+    const mergeMessage = deliveryMergeMessage(
+      workstream,
+      new ReviewedIssue({
+        branch: "sandcastle/workstream-10/issue-42",
+        issue: ticket,
+        reviewedCommit: "b".repeat(40),
+        specificationFingerprint: "c".repeat(64),
+      }),
+    );
 
     expect(content.title).toBe("feat: quote simulator");
+    expect(mergeMessage.split("\n")[0]).toBe("feat(delivery): integrate #42");
+    expect(mergeMessage).toContain("\n\nSandcastle-Delivery-Evidence: integrate #42\n");
     expect(
       deliveryPullRequestContent(withRoot(issue({ title: "fix(quotes): reject invalid totals" })))
         .title,
