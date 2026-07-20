@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createSandboxProvider } from "../../src/workflows/delivery/agents/config";
+import { createSandboxProvider, hooks } from "../../src/workflows/delivery/agents/config";
 
 describe("delivery agent sandbox configuration", () => {
   test("removes host environment secrets before creating the sandbox", async () => {
@@ -116,6 +116,12 @@ describe("delivery agent sandbox configuration", () => {
       hostPath: expect.stringMatching(/\.sandcastle\/\.env\.example$/),
       readonly: true,
       sandboxPath: ".sandcastle/.env",
+    });
+  });
+
+  test("prepares the environment shadow target before Docker mounts it", () => {
+    expect(hooks.host?.onWorktreeReady).toContainEqual({
+      command: "touch .sandcastle/.env",
     });
   });
 });

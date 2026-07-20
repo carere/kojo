@@ -80,6 +80,13 @@ export const createSandboxProvider = (options: SandboxProviderOptions = {}) => {
 };
 
 export const hooks = {
+  host: {
+    // Docker file mounts require the nested destination to exist in each
+    // generated worktree before the container starts. `touch` preserves the
+    // real host file for head-mode runs while creating an empty ignored file
+    // in branch worktrees.
+    onWorktreeReady: [{ command: "touch .sandcastle/.env" }],
+  },
   sandbox: {
     onSandboxReady: [
       {
