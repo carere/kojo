@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   activateProjectSource,
   activateStoredProjectSource,
+  freezeCheckoutSource,
   type LoadedRegistry,
   materializeRuntimeSourceCheckout,
   ProjectSourceValidationError,
@@ -93,6 +94,42 @@ afterEach(async () => {
 });
 
 describe("Project Source Revision adapter", () => {
+  test("freezes dirty and untracked workflow source with truthful provenance", async () => {
+    const repository = await makeRepository();
+    await write(join(repository, "workflows/shared.ts"), "export const message = 'dirty'\n");
+    await write(join(repository, "workflows/untracked.ts"), "export const value = 'untracked'\n");
+
+    const frozen = await freezeCheckoutSource(repository, {
+      installRuntimeDependencies: false,
+      loadRegistry: async () => ({
+        configPath: "kojo.config.ts",
+        schedules: [],
+        workflows: [
+          { entryPoint: "workflows/alpha.ts", name: "alpha", version: "v1" },
+          { entryPoint: "workflows/untracked.ts", name: "untracked", version: "v1" },
+        ],
+      }),
+    });
+    try {
+      expect(frozen.source).toMatchObject({
+        baseCommit: git(repository, "rev-parse", "HEAD"),
+        dirty: true,
+        kind: "CheckoutSourceSnapshot",
+      });
+      expect(frozen.source.changes.join("\n")).toContain("workflows/shared.ts");
+      expect(frozen.source.changes.join("\n")).toContain("workflows/untracked.ts");
+      expect(await Bun.file(join(frozen.checkout.path, "workflows/shared.ts")).text()).toContain(
+        "dirty",
+      );
+      expect(await Bun.file(join(frozen.checkout.path, "workflows/untracked.ts")).text()).toContain(
+        "untracked",
+      );
+      expect(frozen.revision.workflows.map(({ name }) => name)).toEqual(["alpha", "untracked"]);
+    } finally {
+      await frozen.checkout.dispose();
+    }
+  });
+
   test("selects the local default branch with freshness evidence and requires remote latest", async () => {
     const remote = await makeRepository();
     const local = await mkdtemp(join(tmpdir(), "kojo-source-clone-"));

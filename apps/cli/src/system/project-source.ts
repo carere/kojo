@@ -1,6 +1,17 @@
 import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { chmod, lstat, mkdtemp, readdir, readFile, realpath, rm, stat } from "node:fs/promises";
+import {
+  chmod,
+  cp,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -1368,10 +1379,12 @@ export interface RuntimeSourceCheckout {
 export const materializeRuntimeSourceCheckout = async (
   requestedRepository: string,
   revision: Pick<ProjectSourceRevision, "commit">,
+  options: { readonly installDependencies?: boolean } = {},
 ): Promise<RuntimeSourceCheckout> => {
   const repository = await realpath(requestedRepository);
   const checkout = await makeMutableCheckout(repository, revision.commit);
   try {
+    if (options.installDependencies === true) await installProjectDependencies(checkout.path);
     await chmodTree(checkout.path, checkout.path, false);
   } catch (error) {
     await chmodTree(checkout.path, checkout.path, true).catch(() => undefined);
@@ -1389,4 +1402,109 @@ export const materializeRuntimeSourceCheckout = async (
       await checkout.dispose();
     },
   };
+};
+
+export interface CheckoutSourceSnapshotRuntime {
+  readonly checkout: RuntimeSourceCheckout;
+  readonly revision: ProjectSourceRevision;
+  readonly source: {
+    readonly baseCommit: string;
+    readonly changes: ReadonlyArray<string>;
+    readonly commit: string;
+    readonly dirty: boolean;
+    readonly kind: "CheckoutSourceSnapshot";
+  };
+}
+
+const nulSeparated = (value: string) => value.split("\0").filter((entry) => entry.length > 0);
+
+export const freezeCheckoutSource = async (
+  requestedRepository: string,
+  options: {
+    readonly installRuntimeDependencies?: boolean;
+    readonly loadRegistry?: ProjectSourceActivationOptions["loadRegistry"];
+  } = {},
+): Promise<CheckoutSourceSnapshotRuntime> => {
+  const repository = await realpath(requestedRepository);
+  const baseCommit = await runGit(repository, "rev-parse", "HEAD");
+  const status = await runGit(
+    repository,
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "--untracked-files=all",
+  );
+  const changes = nulSeparated(status);
+  const parent = await mkdtemp(join(tmpdir(), "kojo-checkout-snapshot-"));
+  const snapshotRepository = join(parent, "repository");
+  let checkout: RuntimeSourceCheckout | undefined;
+  try {
+    const clone = Bun.spawnSync(
+      ["git", "clone", "--no-hardlinks", "--no-checkout", repository, snapshotRepository],
+      { stderr: "pipe", stdout: "pipe" },
+    );
+    if (clone.exitCode !== 0) throw new Error(clone.stderr.toString().trim());
+    await runGit(snapshotRepository, "checkout", "--detach", baseCommit);
+    const paths = nulSeparated(
+      await runGit(repository, "ls-files", "-z", "--cached", "--others", "--exclude-standard"),
+    );
+    for (const logicalPath of paths) {
+      const source = join(repository, logicalPath);
+      const destination = join(snapshotRepository, logicalPath);
+      const information = await lstat(source).catch(() => undefined);
+      if (information === undefined) {
+        await rm(destination, { force: true, recursive: true });
+        continue;
+      }
+      await mkdir(dirname(destination), { recursive: true });
+      await cp(source, destination, { force: true, recursive: information.isDirectory() });
+    }
+    await runGit(snapshotRepository, "config", "user.email", "kojo@localhost");
+    await runGit(snapshotRepository, "config", "user.name", "Kojo Checkout Snapshot");
+    await runGit(snapshotRepository, "add", "--all");
+    if (changes.length > 0) {
+      await runGit(
+        snapshotRepository,
+        "commit",
+        "--no-gpg-sign",
+        "-m",
+        "kojo checkout source snapshot",
+      );
+    }
+    const snapshotCommit = await runGit(snapshotRepository, "rev-parse", "HEAD");
+    await runGit(snapshotRepository, "branch", "--force", "main", snapshotCommit);
+    await runGit(snapshotRepository, "checkout", "main");
+    await runGit(snapshotRepository, "remote", "remove", "origin");
+    const revision = await activateProjectSource({
+      loadRegistry: options.loadRegistry,
+      policy: "LocalWithFreshnessWarning",
+      repository: snapshotRepository,
+    });
+    checkout = await materializeRuntimeSourceCheckout(snapshotRepository, revision, {
+      installDependencies: options.installRuntimeDependencies ?? true,
+    });
+    const originalDispose = checkout.dispose;
+    checkout = {
+      ...checkout,
+      dispose: async () => {
+        await originalDispose();
+        await rm(parent, { force: true, recursive: true });
+      },
+    };
+    return {
+      checkout,
+      revision,
+      source: {
+        baseCommit,
+        changes,
+        commit: snapshotCommit,
+        dirty: changes.length > 0,
+        kind: "CheckoutSourceSnapshot",
+      },
+    };
+  } catch (error) {
+    await checkout?.dispose().catch(() => undefined);
+    await rm(parent, { force: true, recursive: true });
+    throw error;
+  }
 };

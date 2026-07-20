@@ -13,8 +13,10 @@ import {
   statusCommand,
   stopCommand,
 } from "./src/commands/system";
+import { workflowCommand } from "./src/commands/workflow";
 import { resolveKojoHome } from "./src/system/lifecycle";
 import { runSystemProcess } from "./src/system/process";
+import { runProjectRuntime } from "./src/system/project-runtime";
 
 export const kojoCommand = Command.make("kojo").pipe(
   Command.withDescription("Run Kojo Developer Workflows and control the local System Process"),
@@ -25,13 +27,16 @@ export const kojoCommand = Command.make("kojo").pipe(
     statusCommand,
     logsCommand,
     projectCommand,
+    workflowCommand,
     serveCommand,
     deliveryCommand,
   ]),
 );
 
 if (import.meta.main) {
-  if (process.env.KOJO_INTERNAL_SYSTEM === "1") {
+  if (process.env.KOJO_INTERNAL_PROJECT_RUNTIME === "1") {
+    runProjectRuntime().catch(() => process.exit(1));
+  } else if (process.env.KOJO_INTERNAL_SYSTEM === "1") {
     runSystemProcess(resolveKojoHome()).catch(() => process.exit(1));
   } else {
     kojoCommand.pipe(

@@ -3,6 +3,8 @@ import { chmod, link, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { makeProjectService, type Project, ProjectOperationError } from "./projects";
 import { openSystemStore } from "./storage";
+import { makeWorkflowRunService, WorkflowStartError } from "./workflow-runs";
+import { makeProjectWorkflowRuntime } from "./workflow-runtime";
 
 export interface ProcessDetails {
   readonly endpoint: string;
@@ -152,6 +154,7 @@ export const runSystemProcess = async (home: string): Promise<void> => {
   let endpointReady = false;
   let lockToken: string | undefined;
   let projectService: ReturnType<typeof makeProjectService> | undefined;
+  let workflowRunService: ReturnType<typeof makeWorkflowRunService> | undefined;
   let resolveStopped: (() => void) | undefined;
 
   const stopped = new Promise<void>((resolve) => {
@@ -176,7 +179,12 @@ export const runSystemProcess = async (home: string): Promise<void> => {
     ownsLock = true;
     try {
       store = await openSystemStore(home);
+      store.workflowRuns.interruptRunning();
       projectService = makeProjectService(store);
+      workflowRunService = makeWorkflowRunService(
+        store,
+        makeProjectWorkflowRuntime(store, paths.endpoint),
+      );
     } catch (error) {
       throw new Error(
         `state.sqlite initialization failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -234,6 +242,117 @@ export const runSystemProcess = async (home: string): Promise<void> => {
             });
           } catch (error) {
             return projectFailure("project.add", error);
+          }
+        }
+        const workflowRunMatch = url.pathname.match(/^\/v1\/workflow-runs\/([^/]+)$/);
+        const workflowBoundaryMatch = url.pathname.match(
+          /^\/v1\/workflow-runs\/([^/]+)\/boundaries$/,
+        );
+        if (url.pathname === "/v1/workflow-runs" && request.method === "POST") {
+          try {
+            const body = (await request.json()) as {
+              fromCheckout?: unknown;
+              input?: unknown;
+              projectId?: unknown;
+              workflowName?: unknown;
+            };
+            if (
+              typeof body.projectId !== "string" ||
+              body.projectId.length === 0 ||
+              typeof body.workflowName !== "string" ||
+              body.workflowName.length === 0 ||
+              typeof body.fromCheckout !== "boolean" ||
+              !("input" in body)
+            ) {
+              return Response.json(
+                {
+                  command: "workflow.start",
+                  error: {
+                    code: "INVALID_REQUEST",
+                    message: "A complete start request is required",
+                  },
+                  schemaVersion: 1,
+                  status: "failed",
+                },
+                { status: 400 },
+              );
+            }
+            const started = await workflowRunService?.start({
+              fromCheckout: body.fromCheckout,
+              input: body.input,
+              projectId: body.projectId,
+              workflowName: body.workflowName,
+            });
+            return Response.json({
+              command: "workflow.start",
+              run: started,
+              schemaVersion: 1,
+              status: "started",
+            });
+          } catch (error) {
+            return workflowFailure("workflow.start", error);
+          }
+        }
+        if (workflowRunMatch !== null && request.method === "GET") {
+          const runId = decodeURIComponent(workflowRunMatch[1] ?? "");
+          const run = workflowRunService?.inspect(runId);
+          if (run === undefined) {
+            return Response.json(
+              {
+                command: "workflow.inspect",
+                error: { code: "RUN_NOT_FOUND", message: `Workflow Run ${runId} was not found` },
+                schemaVersion: 1,
+                status: "failed",
+              },
+              { status: 404 },
+            );
+          }
+          return Response.json({
+            command: "workflow.inspect",
+            run,
+            schemaVersion: 1,
+            status: "succeeded",
+          });
+        }
+        if (workflowBoundaryMatch !== null && request.method === "POST") {
+          try {
+            const runId = decodeURIComponent(workflowBoundaryMatch[1] ?? "");
+            const body = (await request.json()) as {
+              attempt?: unknown;
+              idempotencyKey?: unknown;
+              leaseGeneration?: unknown;
+              leaseHolder?: unknown;
+              operation?: unknown;
+              payload?: unknown;
+              subject?: unknown;
+            };
+            if (
+              !Number.isInteger(body.attempt) ||
+              !Number.isInteger(body.leaseGeneration) ||
+              typeof body.leaseHolder !== "string" ||
+              typeof body.idempotencyKey !== "string" ||
+              typeof body.operation !== "string" ||
+              typeof body.subject !== "string" ||
+              !("payload" in body)
+            ) {
+              return Response.json({ error: "Invalid durable boundary" }, { status: 400 });
+            }
+            const event = workflowRunService?.recordBoundary({
+              attempt: body.attempt as number,
+              idempotencyKey: body.idempotencyKey,
+              leaseGeneration: body.leaseGeneration as number,
+              leaseHolder: body.leaseHolder,
+              operation: body.operation,
+              payload: body.payload,
+              runId,
+              subject: body.subject,
+            });
+            return Response.json({ event, status: "recorded" });
+          } catch (error) {
+            return Response.json(
+              { error: error instanceof Error ? error.message : String(error) },
+              { status: 409 },
+            );
           }
         }
         if (projectMatch !== null && request.method === "POST") {
@@ -325,6 +444,25 @@ export const runSystemProcess = async (home: string): Promise<void> => {
       await cleanup();
     }
   }
+};
+
+const workflowFailure = (command: string, error: unknown) => {
+  const startError = error instanceof WorkflowStartError ? error : undefined;
+  const code = startError?.code ?? "WORKFLOW_START_FAILED";
+  const status = code === "PROJECT_NOT_FOUND" || code === "WORKFLOW_NOT_FOUND" ? 404 : 400;
+  return Response.json(
+    {
+      command,
+      error: {
+        code,
+        message: error instanceof Error ? error.message : String(error),
+        ...(startError?.details === undefined ? {} : { details: startError.details }),
+      },
+      schemaVersion: 1,
+      status: "failed",
+    },
+    { status },
+  );
 };
 
 const projectFailure = (command: string, error: unknown) => {

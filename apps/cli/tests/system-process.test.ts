@@ -3,6 +3,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { access, mkdir, mkdtemp, rename, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { openSystemStore } from "../src/system/storage";
+import { makeWorkflowRunService } from "../src/system/workflow-runs";
 
 interface CommandResult {
   readonly command: "start" | "stop" | "restart" | "status" | "logs";
@@ -96,6 +98,64 @@ afterEach(async () => {
 });
 
 describe("Kojo System Process", () => {
+  test("inspects a terminal Workflow Run by Run ID without valid Project source", async () => {
+    const home = await makeHome();
+    const store = await openSystemStore(home);
+    const now = new Date().toISOString();
+    store.projects.create({
+      createdAt: now,
+      id: "source-independent-project",
+      metadata: "{}",
+      path: join(home, "missing-project"),
+      registrationState: "Archived",
+      updatedAt: now,
+    });
+    const runs = makeWorkflowRunService(store, {
+      prepare: async () => ({
+        encodedInput: { name: "Kojo" },
+        execute: async () => ({ state: "Completed", value: { greeting: "Hello Kojo" } }),
+        revision: {
+          declaredVersion: "v1",
+          fingerprint: "source-independent-fingerprint",
+          source: {
+            commit: "d".repeat(40),
+            dirty: false,
+            kind: "ProjectSourceRevision",
+          },
+          stableName: "greet",
+          workflowAbi: "1",
+        },
+      }),
+    });
+    const started = await runs.start({
+      fromCheckout: false,
+      input: { name: "Kojo" },
+      projectId: "source-independent-project",
+      workflowName: "greet",
+    });
+    await runs.settle(started.runId);
+    store.close();
+
+    expect(runCli(home, "start").exitCode).toBe(0);
+    const inspected = runCli(home, "workflow", "inspect", started.runId);
+    expect(inspected.exitCode).toBe(0);
+    expect(inspected.json).toMatchObject({
+      command: "workflow.inspect",
+      run: {
+        attempts: [{ number: 1, state: "Completed" }],
+        outcome: { encodingVersion: 1, value: { greeting: "Hello Kojo" } },
+        revision: {
+          fingerprint: "source-independent-fingerprint",
+          stableName: "greet",
+        },
+        runId: started.runId,
+        state: "Completed",
+      },
+      schemaVersion: 1,
+      status: "succeeded",
+    });
+  }, 20_000);
+
   test("preserves Project identity across path, availability, and registration changes", async () => {
     const home = await makeHome();
     const repositories = await mkdtemp(join(tmpdir(), "kojo-project-test-"));
@@ -519,6 +579,10 @@ describe("Kojo System Process", () => {
         {
           checksum: expect.stringMatching(/^[a-f0-9]{64}$/),
           id: 3,
+        },
+        {
+          checksum: expect.stringMatching(/^[a-f0-9]{64}$/),
+          id: 4,
         },
       ]);
     } finally {
