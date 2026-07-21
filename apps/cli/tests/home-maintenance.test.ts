@@ -176,6 +176,23 @@ describe("Kojo Home maintenance", () => {
     ]);
   });
 
+  test("rejects artifact references that collide with Kojo Home authority files", async () => {
+    const home = await makeTemporaryDirectory("unsafe-artifact-home");
+    const destination = join(await makeTemporaryDirectory("unsafe-artifact-backup"), "snapshot");
+    const store = await openSystemStore(home);
+    store.close();
+    const database = new Database(join(home, "state.sqlite"));
+    database.run(
+      "INSERT INTO execution_artifacts (fingerprint, path, media_type, byte_length, created_at) VALUES ('unsafe', 'state.sqlite', 'application/octet-stream', 0, 'now')",
+    );
+    database.close();
+
+    await expect(backupKojoHome(home, destination)).rejects.toThrow("finalized artifact store");
+    expect(await diagnoseKojoHomeStartup(home)).toEqual([
+      expect.objectContaining({ code: "ARTIFACT_MISSING", path: "state.sqlite" }),
+    ]);
+  });
+
   test("creates a complete backup before an irreversible migration", async () => {
     const home = await makeTemporaryDirectory("migration-backup-home");
     const initialized = await openSystemStore(home);

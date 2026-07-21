@@ -77,6 +77,14 @@ const assertSafeRelativePath = (path: string) => {
   }
 };
 
+const assertFinalizedArtifactPath = (path: string) => {
+  assertSafeRelativePath(path);
+  const parts = path.split(/[\\/]/);
+  if (parts.length < 2 || parts[0] !== "artifacts" || parts[1] === "staging") {
+    throw new Error(`Execution Artifact path is outside the finalized artifact store: ${path}`);
+  }
+};
+
 const resolveInside = (root: string, path: string) => {
   assertSafeRelativePath(path);
   const resolvedRoot = resolve(root);
@@ -85,6 +93,11 @@ const resolveInside = (root: string, path: string) => {
     throw new Error(`Execution Artifact path is outside Kojo Home: ${path}`);
   }
   return resolvedPath;
+};
+
+const resolveArtifactInside = (root: string, path: string) => {
+  assertFinalizedArtifactPath(path);
+  return resolveInside(root, path);
 };
 
 const assertNoSymbolicLinkComponents = async (
@@ -215,7 +228,7 @@ const inspectDatabase = async (home: string, databasePath: string) => {
     for (const artifact of artifacts) {
       let artifactPath: string;
       try {
-        artifactPath = resolveInside(home, artifact.path);
+        artifactPath = resolveArtifactInside(home, artifact.path);
         await assertNoSymbolicLinkComponents(home, artifact.path);
       } catch (error) {
         diagnostics.push({
@@ -351,8 +364,8 @@ export const backupKojoHome = async (home: string, destination: string) => {
     snapshot.close();
     const manifestArtifacts: Array<BackupManifestBody["artifacts"][number]> = [];
     for (const artifact of artifacts) {
-      const sourcePath = resolveInside(canonicalHome, artifact.path);
-      const destinationPath = resolveInside(staging, artifact.path);
+      const sourcePath = resolveArtifactInside(canonicalHome, artifact.path);
+      const destinationPath = resolveArtifactInside(staging, artifact.path);
       await assertNoSymbolicLinkComponents(canonicalHome, artifact.path);
       const details = await lstat(sourcePath).catch((error) => {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -491,7 +504,7 @@ export const verifyBackup = async (backup: string) => {
     throw new Error("Backup state.sqlite checksum does not match the manifest");
   }
   for (const artifact of manifest.artifacts) {
-    const path = resolveInside(canonicalBackup, artifact.path);
+    const path = resolveArtifactInside(canonicalBackup, artifact.path);
     await assertNoSymbolicLinkComponents(canonicalBackup, artifact.path);
     const details = await lstat(path).catch((error) => {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -560,8 +573,8 @@ export const restoreKojoHome = async (home: string, backup: string) => {
   }
 
   for (const artifact of manifest.artifacts) {
-    const sourcePath = resolveInside(canonicalBackup, artifact.path);
-    const destinationPath = resolveInside(canonicalHome, artifact.path);
+    const sourcePath = resolveArtifactInside(canonicalBackup, artifact.path);
+    const destinationPath = resolveArtifactInside(canonicalHome, artifact.path);
     await assertNoSymbolicLinkComponents(canonicalBackup, artifact.path);
     await assertNoSymbolicLinkComponents(canonicalHome, artifact.path, { allowFinal: true });
     await mkdir(dirname(destinationPath), { mode: 0o700, recursive: true });
