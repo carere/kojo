@@ -241,7 +241,15 @@ describe("Project Source Revision adapter", () => {
         ...registry(),
         schedules: [
           {
-            cron: "Cron({seconds:[0]})",
+            cron: {
+              and: false,
+              days: [],
+              hours: [9],
+              minutes: [0],
+              months: [],
+              seconds: [0],
+              weekdays: [],
+            },
             input: {},
             missedTimePolicy: "skip",
             name: "daily",

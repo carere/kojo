@@ -6,6 +6,7 @@ import { Command } from "effect/unstable/cli";
 import { deliveryCommand } from "./src/commands/delivery";
 import { homeCommand } from "./src/commands/home";
 import { projectCommand } from "./src/commands/project";
+import { scheduleCommand } from "./src/commands/schedule";
 import { serveCommand } from "./src/commands/serve";
 import {
   logsCommand,
@@ -29,6 +30,7 @@ export const kojoCommand = Command.make("kojo").pipe(
     logsCommand,
     homeCommand,
     projectCommand,
+    scheduleCommand,
     workflowCommand,
     serveCommand,
     deliveryCommand,

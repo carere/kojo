@@ -198,6 +198,9 @@ describe("Kojo Home maintenance", () => {
     const initialized = await openSystemStore(home);
     initialized.close();
     const database = new Database(join(home, "state.sqlite"));
+    database.run("DROP TABLE schedule_history");
+    database.run("DROP TABLE schedule_occurrences");
+    database.run("DROP TABLE workflow_schedules");
     database.run("DROP TABLE activity_claims");
     database.run("DROP TABLE workflow_revision_snapshots");
     database.run("DELETE FROM kojo_migrations WHERE id >= 5");

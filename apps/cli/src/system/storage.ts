@@ -4,7 +4,7 @@ import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const systemMetadata = sqliteTable("system_metadata", {
   key: text("key").primaryKey(),
@@ -32,6 +32,46 @@ const projectSourceState = sqliteTable("project_source_state", {
   projectId: text("project_id").primaryKey(),
   sourcePolicy: text("source_policy").notNull(),
   updatedAt: text("updated_at").notNull(),
+});
+
+const workflowSchedules = sqliteTable(
+  "workflow_schedules",
+  {
+    activeDefinition: text("active_definition"),
+    catchUp: text("catch_up"),
+    cursor: text("cursor"),
+    definitionFingerprint: text("definition_fingerprint"),
+    enablement: text("enablement").notNull(),
+    name: text("name").notNull(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id),
+    updatedAt: text("updated_at").notNull(),
+    workflowName: text("workflow_name").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.projectId, table.name] })],
+);
+
+const scheduleOccurrences = sqliteTable(
+  "schedule_occurrences",
+  {
+    outcome: text("outcome").notNull(),
+    projectId: text("project_id").notNull(),
+    runId: text("run_id"),
+    scheduleName: text("schedule_name").notNull(),
+    scheduledAt: text("scheduled_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.projectId, table.scheduleName, table.scheduledAt] })],
+);
+
+const scheduleHistory = sqliteTable("schedule_history", {
+  details: text("details").notNull(),
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  outcome: text("outcome").notNull(),
+  projectId: text("project_id").notNull(),
+  recordedAt: text("recorded_at").notNull(),
+  runId: text("run_id"),
+  scheduleName: text("schedule_name").notNull(),
 });
 
 const workflowRevisions = sqliteTable("workflow_revisions", {
@@ -290,10 +330,64 @@ const migrations = [
       )`,
     ],
   },
+  {
+    id: 7,
+    statements: [
+      `CREATE TABLE workflow_schedules (
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        name TEXT NOT NULL,
+        workflow_name TEXT NOT NULL,
+        enablement TEXT NOT NULL CHECK (enablement IN ('Enabled', 'Disabled')),
+        definition_fingerprint TEXT,
+        active_definition TEXT,
+        cursor TEXT,
+        catch_up TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, name),
+        CHECK ((active_definition IS NULL) = (definition_fingerprint IS NULL))
+      )`,
+      `CREATE TABLE schedule_occurrences (
+        project_id TEXT NOT NULL,
+        schedule_name TEXT NOT NULL,
+        scheduled_at TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        run_id TEXT REFERENCES workflow_runs(run_id),
+        PRIMARY KEY (project_id, schedule_name, scheduled_at),
+        FOREIGN KEY (project_id, schedule_name) REFERENCES workflow_schedules(project_id, name)
+      )`,
+      `CREATE TABLE schedule_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id TEXT NOT NULL,
+        schedule_name TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        details TEXT NOT NULL,
+        run_id TEXT REFERENCES workflow_runs(run_id),
+        recorded_at TEXT NOT NULL,
+        FOREIGN KEY (project_id, schedule_name) REFERENCES workflow_schedules(project_id, name)
+      )`,
+    ],
+  },
 ] as const;
 
 const migrationChecksum = (statements: ReadonlyArray<string>) =>
   createHash("sha256").update(statements.join(";\n")).digest("hex");
+
+const canonicalJson = (value: unknown): string => {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+};
+
+const currentMinute = () => {
+  const value = new Date();
+  value.setUTCSeconds(0, 0);
+  return value.toISOString();
+};
 
 export const kojoSchemaMigrations = migrations.map((migration) => ({
   checksum: migrationChecksum(migration.statements),
@@ -316,6 +410,7 @@ export interface SystemStore {
   readonly close: () => void;
   readonly projects: ProjectRepository;
   readonly projectSources: ProjectSourceRepository;
+  readonly workflowSchedules: WorkflowScheduleRepository;
   readonly workflowJournal: WorkflowJournalRepository;
   readonly workflowRuns: WorkflowRunRepository;
 }
@@ -542,6 +637,67 @@ export interface ProjectSourceRepository {
   ) => StoredProjectSourceState;
 }
 
+export interface StoredWorkflowSchedule {
+  readonly activeDefinition: string | null;
+  readonly catchUp: string | null;
+  readonly cursor: string | null;
+  readonly definitionFingerprint: string | null;
+  readonly enablement: "Disabled" | "Enabled";
+  readonly name: string;
+  readonly projectId: string;
+  readonly updatedAt: string;
+  readonly workflowName: string;
+}
+
+export interface StoredScheduleOccurrence {
+  readonly outcome: string;
+  readonly projectId: string;
+  readonly runId: string | null;
+  readonly scheduleName: string;
+  readonly scheduledAt: string;
+}
+
+export interface StoredScheduleHistory {
+  readonly details: string;
+  readonly id: number;
+  readonly outcome: string;
+  readonly projectId: string;
+  readonly recordedAt: string;
+  readonly runId: string | null;
+  readonly scheduleName: string;
+}
+
+export interface ScheduleEvaluationCommit {
+  readonly catchUp: string | null;
+  readonly cursor: string;
+  readonly details: string;
+  readonly expectedDefinitionFingerprint: string;
+  readonly occurrences: ReadonlyArray<string>;
+  readonly outcome: "PreflightFailed" | "Skipped" | "Started";
+  readonly projectId: string;
+  readonly recordedAt: string;
+  readonly scheduleName: string;
+  readonly start?: WorkflowStartRecord;
+}
+
+export interface WorkflowScheduleRepository {
+  readonly commitEvaluation: (evaluation: ScheduleEvaluationCommit) => {
+    readonly outcome: string;
+    readonly runId: string | null;
+    readonly status: "committed" | "stale";
+  };
+  readonly disable: (projectId: string, name: string) => StoredWorkflowSchedule;
+  readonly enable: (projectId: string, name: string, cursor: string) => StoredWorkflowSchedule;
+  readonly find: (projectId: string, name: string) => StoredWorkflowSchedule | undefined;
+  readonly history: (projectId: string, name: string) => ReadonlyArray<StoredScheduleHistory>;
+  readonly list: (projectId?: string) => ReadonlyArray<StoredWorkflowSchedule>;
+  readonly occurrences: (
+    projectId: string,
+    name: string,
+  ) => ReadonlyArray<StoredScheduleOccurrence>;
+  readonly updateCursorWithoutMisses: (projectId: string, name: string, cursor: string) => void;
+}
+
 export const openSystemStore = async (home: string): Promise<SystemStore> => {
   await mkdir(home, { mode: 0o700, recursive: true });
   await chmod(home, 0o700);
@@ -722,6 +878,13 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
           .set({ ...changes, updatedAt })
           .where(eq(projects.id, id))
           .run();
+        if (changes.registrationState === "Disabled" || changes.registrationState === "Archived") {
+          database
+            .update(workflowSchedules)
+            .set({ catchUp: null, cursor: currentMinute(), updatedAt })
+            .where(eq(workflowSchedules.projectId, id))
+            .run();
+        }
         const project = database
           .select(selectProject)
           .from(projects)
@@ -744,19 +907,126 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
       ...source,
       sourcePolicy: source.sourcePolicy as StoredProjectSourcePolicy,
     });
-    const writeProjectSource = (
+    const activateProjectSource = (
       projectId: string,
       sourcePolicy: StoredProjectSourcePolicy,
-      activeRevision: string | null,
-      diagnostics: string,
+      revision: string,
     ) =>
       database.transaction((transaction) => {
-        const updatedAt = new Date().toISOString();
+        const parsed = JSON.parse(revision) as {
+          readonly schedules?: ReadonlyArray<{
+            readonly cron: unknown;
+            readonly input: unknown;
+            readonly missedTimePolicy: unknown;
+            readonly name: unknown;
+            readonly timezone: unknown;
+            readonly workflow: unknown;
+          }>;
+        };
+        if (!Array.isArray(parsed.schedules)) {
+          throw new Error("Project Source Revision has no validated Workflow Schedules");
+        }
+        const now = new Date().toISOString();
+        const inactiveCursor = currentMinute();
+        const activeNames = new Set<string>();
+        for (const definition of parsed.schedules) {
+          if (typeof definition.name !== "string" || typeof definition.workflow !== "string") {
+            throw new Error("Project Source Revision contains an invalid Workflow Schedule");
+          }
+          activeNames.add(definition.name);
+          const canonicalDefinition = canonicalJson({
+            cron: definition.cron,
+            input: definition.input,
+            missedTimePolicy: definition.missedTimePolicy,
+            name: definition.name,
+            timezone: definition.timezone,
+            workflow: definition.workflow,
+          });
+          const fingerprint = createHash("sha256")
+            .update(
+              canonicalJson({
+                cron: definition.cron,
+                input: definition.input,
+                missedTimePolicy: definition.missedTimePolicy,
+                name: definition.name,
+                timezone: definition.timezone,
+                workflow: definition.workflow,
+              }),
+            )
+            .digest("hex");
+          const existing = transaction
+            .select()
+            .from(workflowSchedules)
+            .where(
+              and(
+                eq(workflowSchedules.projectId, projectId),
+                eq(workflowSchedules.name, definition.name),
+              ),
+            )
+            .get();
+          if (existing !== undefined && existing.workflowName !== definition.workflow) {
+            throw new Error(
+              `Workflow Schedule '${definition.name}' cannot be retargeted from '${existing.workflowName}' to '${definition.workflow}'`,
+            );
+          }
+          transaction
+            .insert(workflowSchedules)
+            .values({
+              activeDefinition: canonicalDefinition,
+              catchUp: existing?.catchUp ?? null,
+              cursor: existing?.cursor ?? null,
+              definitionFingerprint: fingerprint,
+              enablement: existing?.enablement ?? "Disabled",
+              name: definition.name,
+              projectId,
+              updatedAt: now,
+              workflowName: definition.workflow,
+            })
+            .onConflictDoUpdate({
+              set: {
+                activeDefinition: canonicalDefinition,
+                definitionFingerprint: fingerprint,
+                updatedAt: now,
+              },
+              target: [workflowSchedules.projectId, workflowSchedules.name],
+            })
+            .run();
+        }
+        const storedSchedules = transaction
+          .select({ name: workflowSchedules.name })
+          .from(workflowSchedules)
+          .where(eq(workflowSchedules.projectId, projectId))
+          .all();
+        for (const stored of storedSchedules) {
+          if (activeNames.has(stored.name)) continue;
+          transaction
+            .update(workflowSchedules)
+            .set({
+              activeDefinition: null,
+              catchUp: null,
+              cursor: inactiveCursor,
+              definitionFingerprint: null,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(workflowSchedules.projectId, projectId),
+                eq(workflowSchedules.name, stored.name),
+              ),
+            )
+            .run();
+        }
         transaction
           .insert(projectSourceState)
-          .values({ activeRevision, diagnostics, projectId, sourcePolicy, updatedAt })
+          .values({
+            activeRevision: revision,
+            diagnostics: "[]",
+            projectId,
+            sourcePolicy,
+            updatedAt: now,
+          })
           .onConflictDoUpdate({
-            set: { activeRevision, diagnostics, sourcePolicy, updatedAt },
+            set: { activeRevision: revision, diagnostics: "[]", sourcePolicy, updatedAt: now },
             target: projectSourceState.projectId,
           })
           .run();
@@ -770,8 +1040,7 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
         return decodeProjectSource(stored);
       });
     const projectSourceRepository: ProjectSourceRepository = {
-      activate: (projectId, sourcePolicy, revision) =>
-        writeProjectSource(projectId, sourcePolicy, revision, "[]"),
+      activate: activateProjectSource,
       findByProjectId: (projectId) => {
         const source = database
           .select(selectProjectSource)
@@ -781,7 +1050,36 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
         return source === undefined ? undefined : decodeProjectSource(source);
       },
       reject: (projectId, sourcePolicy, diagnostics) =>
-        writeProjectSource(projectId, sourcePolicy, null, diagnostics),
+        database.transaction((transaction) => {
+          const updatedAt = new Date().toISOString();
+          transaction
+            .insert(projectSourceState)
+            .values({ activeRevision: null, diagnostics, projectId, sourcePolicy, updatedAt })
+            .onConflictDoUpdate({
+              set: { activeRevision: null, diagnostics, sourcePolicy, updatedAt },
+              target: projectSourceState.projectId,
+            })
+            .run();
+          transaction
+            .update(workflowSchedules)
+            .set({
+              activeDefinition: null,
+              catchUp: null,
+              cursor: currentMinute(),
+              definitionFingerprint: null,
+              updatedAt,
+            })
+            .where(eq(workflowSchedules.projectId, projectId))
+            .run();
+          const stored = transaction
+            .select(selectProjectSource)
+            .from(projectSourceState)
+            .where(eq(projectSourceState.projectId, projectId))
+            .get();
+          if (stored === undefined)
+            throw new Error(`Project source state for ${projectId} was not stored`);
+          return decodeProjectSource(stored);
+        }),
     };
 
     const decodeRun = (run: typeof workflowRuns.$inferSelect): StoredWorkflowRun => ({
@@ -1162,6 +1460,19 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
         throw new Error(`Workflow Run ${scope.runId} rejected a delayed execution write`);
       }
     };
+    const insertWorkflowStart = (transaction: StoreTransaction, record: WorkflowStartRecord) => {
+      transaction
+        .insert(workflowRevisions)
+        .values(record.revision)
+        .onConflictDoNothing({ target: workflowRevisions.fingerprint })
+        .run();
+      transaction.insert(workflowRuns).values(record.run).run();
+      transaction.insert(workflowRevisionSnapshots).values(record.revisionSnapshot).run();
+      transaction.insert(executionAttempts).values(record.attempt).run();
+      transaction.insert(executionLeases).values(record.lease).run();
+      transaction.insert(workflowJournal).values(record.journal).run();
+      transaction.insert(evidenceEvents).values(record.evidence).run();
+    };
     const workflowRunRepository: WorkflowRunRepository = {
       appendBoundary: (record) => {
         reconcileExpiredScope(record);
@@ -1517,18 +1828,218 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
       },
       start: (record) => {
         database.transaction((transaction) => {
-          transaction
-            .insert(workflowRevisions)
-            .values(record.revision)
-            .onConflictDoNothing({ target: workflowRevisions.fingerprint })
-            .run();
-          transaction.insert(workflowRuns).values(record.run).run();
-          transaction.insert(workflowRevisionSnapshots).values(record.revisionSnapshot).run();
-          transaction.insert(executionAttempts).values(record.attempt).run();
-          transaction.insert(executionLeases).values(record.lease).run();
-          transaction.insert(workflowJournal).values(record.journal).run();
-          transaction.insert(evidenceEvents).values(record.evidence).run();
+          insertWorkflowStart(transaction, record);
         });
+      },
+    };
+    const decodeSchedule = (
+      schedule: typeof workflowSchedules.$inferSelect,
+    ): StoredWorkflowSchedule => ({
+      ...schedule,
+      enablement: schedule.enablement as StoredWorkflowSchedule["enablement"],
+    });
+    const requireSchedule = (projectId: string, name: string) => {
+      const schedule = database
+        .select()
+        .from(workflowSchedules)
+        .where(and(eq(workflowSchedules.projectId, projectId), eq(workflowSchedules.name, name)))
+        .get();
+      if (schedule === undefined) {
+        throw new Error(`Workflow Schedule '${name}' was not found for Project ${projectId}`);
+      }
+      return schedule;
+    };
+    const workflowScheduleRepository: WorkflowScheduleRepository = {
+      commitEvaluation: (evaluation) =>
+        database.transaction((transaction) => {
+          const schedule = transaction
+            .select()
+            .from(workflowSchedules)
+            .where(
+              and(
+                eq(workflowSchedules.projectId, evaluation.projectId),
+                eq(workflowSchedules.name, evaluation.scheduleName),
+              ),
+            )
+            .get();
+          const project = transaction
+            .select({ registrationState: projects.registrationState })
+            .from(projects)
+            .where(eq(projects.id, evaluation.projectId))
+            .get();
+          if (
+            schedule === undefined ||
+            schedule.activeDefinition === null ||
+            schedule.enablement !== "Enabled" ||
+            schedule.definitionFingerprint !== evaluation.expectedDefinitionFingerprint ||
+            project?.registrationState !== "Enabled"
+          ) {
+            return { outcome: "Stale", runId: null, status: "stale" as const };
+          }
+          const novelOccurrences = evaluation.occurrences.filter(
+            (scheduledAt) =>
+              transaction
+                .select({ scheduledAt: scheduleOccurrences.scheduledAt })
+                .from(scheduleOccurrences)
+                .where(
+                  and(
+                    eq(scheduleOccurrences.projectId, evaluation.projectId),
+                    eq(scheduleOccurrences.scheduleName, evaluation.scheduleName),
+                    eq(scheduleOccurrences.scheduledAt, scheduledAt),
+                  ),
+                )
+                .get() === undefined,
+          );
+          if (
+            novelOccurrences.length === 0 &&
+            evaluation.start !== undefined &&
+            schedule.catchUp === null
+          ) {
+            return { outcome: "Duplicate", runId: null, status: "stale" as const };
+          }
+          let outcome: string = evaluation.outcome;
+          let runId: string | null = null;
+          if (evaluation.start !== undefined) {
+            const overlap = transaction
+              .select({ runId: workflowRuns.runId })
+              .from(workflowRuns)
+              .innerJoin(
+                workflowRevisions,
+                eq(workflowRevisions.fingerprint, workflowRuns.revisionFingerprint),
+              )
+              .where(
+                and(
+                  eq(workflowRuns.projectId, evaluation.projectId),
+                  eq(workflowRuns.state, "Running"),
+                  eq(workflowRuns.rootRunId, workflowRuns.runId),
+                  eq(workflowRevisions.stableName, schedule.workflowName),
+                ),
+              )
+              .get();
+            if (overlap !== undefined) {
+              outcome = "SkippedOverlap";
+            } else {
+              insertWorkflowStart(transaction, evaluation.start);
+              outcome = "Started";
+              runId = evaluation.start.run.runId;
+            }
+          }
+          for (const scheduledAt of novelOccurrences) {
+            transaction
+              .insert(scheduleOccurrences)
+              .values({
+                outcome,
+                projectId: evaluation.projectId,
+                runId,
+                scheduleName: evaluation.scheduleName,
+                scheduledAt,
+              })
+              .run();
+          }
+          const nextCursor =
+            schedule.cursor !== null && schedule.cursor > evaluation.cursor
+              ? schedule.cursor
+              : evaluation.cursor;
+          const nextCatchUp = outcome === "Started" ? null : evaluation.catchUp;
+          transaction
+            .update(workflowSchedules)
+            .set({ catchUp: nextCatchUp, cursor: nextCursor, updatedAt: evaluation.recordedAt })
+            .where(
+              and(
+                eq(workflowSchedules.projectId, evaluation.projectId),
+                eq(workflowSchedules.name, evaluation.scheduleName),
+              ),
+            )
+            .run();
+          transaction
+            .insert(scheduleHistory)
+            .values({
+              details: evaluation.details,
+              outcome,
+              projectId: evaluation.projectId,
+              recordedAt: evaluation.recordedAt,
+              runId,
+              scheduleName: evaluation.scheduleName,
+            })
+            .run();
+          return { outcome, runId, status: "committed" as const };
+        }),
+      disable: (projectId, name) => {
+        requireSchedule(projectId, name);
+        database
+          .update(workflowSchedules)
+          .set({ catchUp: null, enablement: "Disabled", updatedAt: new Date().toISOString() })
+          .where(and(eq(workflowSchedules.projectId, projectId), eq(workflowSchedules.name, name)))
+          .run();
+        return decodeSchedule(requireSchedule(projectId, name));
+      },
+      enable: (projectId, name, cursor) => {
+        const schedule = requireSchedule(projectId, name);
+        if (schedule.activeDefinition === null) {
+          throw new Error(
+            `Workflow Schedule '${name}' is absent from the active Project Source Revision`,
+          );
+        }
+        database
+          .update(workflowSchedules)
+          .set({
+            catchUp: null,
+            cursor,
+            enablement: "Enabled",
+            updatedAt: new Date().toISOString(),
+          })
+          .where(and(eq(workflowSchedules.projectId, projectId), eq(workflowSchedules.name, name)))
+          .run();
+        return decodeSchedule(requireSchedule(projectId, name));
+      },
+      find: (projectId, name) => {
+        const schedule = database
+          .select()
+          .from(workflowSchedules)
+          .where(and(eq(workflowSchedules.projectId, projectId), eq(workflowSchedules.name, name)))
+          .get();
+        return schedule === undefined ? undefined : decodeSchedule(schedule);
+      },
+      history: (projectId, name) =>
+        database
+          .select()
+          .from(scheduleHistory)
+          .where(
+            and(eq(scheduleHistory.projectId, projectId), eq(scheduleHistory.scheduleName, name)),
+          )
+          .orderBy(scheduleHistory.id)
+          .all(),
+      list: (projectId) => {
+        const query = database.select().from(workflowSchedules);
+        const values =
+          projectId === undefined
+            ? query.orderBy(workflowSchedules.projectId, workflowSchedules.name).all()
+            : query
+                .where(eq(workflowSchedules.projectId, projectId))
+                .orderBy(workflowSchedules.name)
+                .all();
+        return values.map(decodeSchedule);
+      },
+      occurrences: (projectId, name) =>
+        database
+          .select()
+          .from(scheduleOccurrences)
+          .where(
+            and(
+              eq(scheduleOccurrences.projectId, projectId),
+              eq(scheduleOccurrences.scheduleName, name),
+            ),
+          )
+          .orderBy(scheduleOccurrences.scheduledAt)
+          .all(),
+      updateCursorWithoutMisses: (projectId, name, cursor) => {
+        const schedule = requireSchedule(projectId, name);
+        if (schedule.cursor !== null && schedule.cursor >= cursor) return;
+        database
+          .update(workflowSchedules)
+          .set({ catchUp: null, cursor, updatedAt: new Date().toISOString() })
+          .where(and(eq(workflowSchedules.projectId, projectId), eq(workflowSchedules.name, name)))
+          .run();
       },
     };
     const workflowJournalRepository: WorkflowJournalRepository = {
@@ -1545,6 +2056,7 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
       close: () => sqlite.close(),
       projects: projectRepository,
       projectSources: projectSourceRepository,
+      workflowSchedules: workflowScheduleRepository,
       workflowJournal: workflowJournalRepository,
       workflowRuns: workflowRunRepository,
     };

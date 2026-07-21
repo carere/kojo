@@ -5,6 +5,7 @@ import { makeProjectService, type Project, ProjectOperationError } from "./proje
 import { openSystemStore } from "./storage";
 import { makeWorkflowRunService, WorkflowStartError } from "./workflow-runs";
 import { makeProjectWorkflowRuntime } from "./workflow-runtime";
+import { makeWorkflowScheduleService } from "./workflow-schedules";
 
 export interface ProcessDetails {
   readonly diagnostics?: ReadonlyArray<unknown>;
@@ -171,9 +172,11 @@ export const runSystemProcess = async (home: string): Promise<void> => {
   let lockToken: string | undefined;
   let homeDiagnostics: ReadonlyArray<unknown> = [];
   let leaseReconciler: ReturnType<typeof setInterval> | undefined;
+  let scheduleEvaluator: ReturnType<typeof setInterval> | undefined;
   let projectService: ReturnType<typeof makeProjectService> | undefined;
   let restartRunIds: ReadonlyArray<string> = [];
   let workflowRunService: ReturnType<typeof makeWorkflowRunService> | undefined;
+  let workflowScheduleService: ReturnType<typeof makeWorkflowScheduleService> | undefined;
   let resolveStopped: (() => void) | undefined;
 
   const stopped = new Promise<void>((resolve) => {
@@ -182,6 +185,7 @@ export const runSystemProcess = async (home: string): Promise<void> => {
 
   const cleanup = async () => {
     if (leaseReconciler !== undefined) clearInterval(leaseReconciler);
+    if (scheduleEvaluator !== undefined) clearInterval(scheduleEvaluator);
     server?.stop(true);
     try {
       store?.close();
@@ -210,6 +214,7 @@ export const runSystemProcess = async (home: string): Promise<void> => {
         store,
         makeProjectWorkflowRuntime(store, paths.endpoint),
       );
+      workflowScheduleService = makeWorkflowScheduleService(store, workflowRunService);
       restartRunIds = store.workflowRuns
         .list()
         .filter((run) => {
@@ -330,6 +335,77 @@ export const runSystemProcess = async (home: string): Promise<void> => {
           }
         }
         const workflowRunMatch = url.pathname.match(/^\/v1\/workflow-runs\/([^/]+)$/);
+        const scheduleListMatch = url.pathname.match(/^\/v1\/projects\/([^/]+)\/schedules$/);
+        const scheduleInspectMatch = url.pathname.match(
+          /^\/v1\/projects\/([^/]+)\/schedules\/([^/]+)$/,
+        );
+        const scheduleStateMatch = url.pathname.match(
+          /^\/v1\/projects\/([^/]+)\/schedules\/([^/]+)\/(enable|disable)$/,
+        );
+        if (scheduleListMatch !== null && request.method === "GET") {
+          const projectId = decodeURIComponent(scheduleListMatch[1] ?? "");
+          return Response.json({
+            command: "schedule.list",
+            schedules: workflowScheduleService?.list(projectId) ?? [],
+            schemaVersion: 1,
+            status: "succeeded",
+          });
+        }
+        if (scheduleInspectMatch !== null && request.method === "GET") {
+          try {
+            const projectId = decodeURIComponent(scheduleInspectMatch[1] ?? "");
+            const name = decodeURIComponent(scheduleInspectMatch[2] ?? "");
+            return Response.json({
+              command: "schedule.inspect",
+              schedule: workflowScheduleService?.inspect(projectId, name),
+              schemaVersion: 1,
+              status: "succeeded",
+            });
+          } catch (error) {
+            return Response.json(
+              {
+                command: "schedule.inspect",
+                error: {
+                  code: "SCHEDULE_NOT_FOUND",
+                  message: error instanceof Error ? error.message : String(error),
+                },
+                schemaVersion: 1,
+                status: "failed",
+              },
+              { status: 404 },
+            );
+          }
+        }
+        if (scheduleStateMatch !== null && request.method === "POST") {
+          const projectId = decodeURIComponent(scheduleStateMatch[1] ?? "");
+          const name = decodeURIComponent(scheduleStateMatch[2] ?? "");
+          const operation = scheduleStateMatch[3] as "disable" | "enable";
+          try {
+            const schedule =
+              operation === "enable"
+                ? workflowScheduleService?.enable(projectId, name)
+                : workflowScheduleService?.disable(projectId, name);
+            return Response.json({
+              command: `schedule.${operation}`,
+              schedule,
+              schemaVersion: 1,
+              status: `${operation}d`,
+            });
+          } catch (error) {
+            return Response.json(
+              {
+                command: `schedule.${operation}`,
+                error: {
+                  code: "SCHEDULE_OPERATION_FAILED",
+                  message: error instanceof Error ? error.message : String(error),
+                },
+                schemaVersion: 1,
+                status: "failed",
+              },
+              { status: 409 },
+            );
+          }
+        }
         const workflowLifecycleMatch = url.pathname.match(
           /^\/v1\/workflow-runs\/([^/]+)\/(suspend|resume|discard)$/,
         );
@@ -621,6 +697,19 @@ export const runSystemProcess = async (home: string): Promise<void> => {
       }
     }, 60_000);
     leaseReconciler.unref();
+    const evaluateSchedules = () => {
+      void workflowScheduleService?.evaluate().catch((error) => {
+        console.error(
+          JSON.stringify({
+            event: "workflow-schedule-evaluation-failed",
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      });
+    };
+    evaluateSchedules();
+    scheduleEvaluator = setInterval(evaluateSchedules, 60_000);
+    scheduleEvaluator.unref();
     for (const runId of restartRunIds) {
       await workflowRunService?.resume(runId).catch((error) => {
         console.error(
