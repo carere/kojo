@@ -92,6 +92,149 @@ const activeSourceFor = (stableName: string): NonNullable<Project["source"]> => 
 };
 
 describe("Dense Inspector projections", () => {
+  test("lists only root Workflow Runs in descending keyset order with composed facets", async () => {
+    const home = await mkdtemp(join(tmpdir(), "kojo-inspector-list-test-"));
+    homes.add(home);
+    const store = await openSystemStore(home);
+    const now = new Date().toISOString();
+    for (const [id, registrationState] of [
+      ["project-active", "Enabled"],
+      ["project-archived", "Archived"],
+    ] as const) {
+      store.projects.create({
+        createdAt: now,
+        id,
+        metadata: "{}",
+        path: join(home, id),
+        registrationState,
+        updatedAt: now,
+      });
+    }
+    const projects: ReadonlyArray<Project> = [
+      {
+        availability: { status: "Available" },
+        createdAt: now,
+        id: "project-active",
+        metadata: {
+          branches: ["main"],
+          currentBranch: "main",
+          folderName: "active",
+          headCommit: "a".repeat(40),
+          remotes: [],
+        },
+        path: join(home, "project-active"),
+        registrationState: "Enabled",
+        source: null,
+        updatedAt: now,
+      },
+      {
+        availability: {
+          reasons: [
+            {
+              code: "PATH_NOT_FOUND",
+              message: "Folder is missing",
+              path: join(home, "project-archived"),
+            },
+          ],
+          status: "Unavailable",
+        },
+        createdAt: now,
+        id: "project-archived",
+        metadata: {
+          branches: [],
+          currentBranch: null,
+          folderName: "archived",
+          headCommit: null,
+          remotes: [],
+        },
+        path: join(home, "project-archived"),
+        registrationState: "Archived",
+        source: null,
+        updatedAt: now,
+      },
+    ];
+    const runs = makeWorkflowRunService(store, {
+      prepare: async ({ workflowName }) => ({
+        encodedInput: {},
+        execute: async () => new Promise(() => undefined),
+        ...revisionFor(workflowName),
+      }),
+    });
+    const activeDelivery = await runs.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-active",
+      workflowName: "delivery",
+    });
+    const lease = store.workflowRuns.find(activeDelivery.runId)?.lease;
+    if (lease === undefined) throw new Error("The root Workflow Run lease is missing");
+    const child = runs.startChild({
+      attempt: 1,
+      input: {},
+      invocationKey: "ticket-41",
+      leaseGeneration: lease.generation,
+      leaseHolder: lease.holder,
+      projectId: "project-active",
+      recoveryTags: [],
+      rootRunId: activeDelivery.runId,
+      runId: activeDelivery.runId,
+      workflowName: "delivery",
+    });
+    const activeOther = await runs.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-active",
+      workflowName: "other",
+    });
+    store.workflowRuns.interruptScope(
+      {
+        attempt: 1,
+        leaseGeneration: store.workflowRuns.find(activeOther.runId)?.lease?.generation ?? 1,
+        leaseHolder: store.workflowRuns.find(activeOther.runId)?.lease?.holder ?? "missing",
+        projectId: "project-active",
+        rootRunId: activeOther.runId,
+        runId: activeOther.runId,
+      },
+      "ProjectRuntimeProcessLost",
+    );
+    const archivedDelivery = await runs.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-archived",
+      workflowName: "delivery",
+    });
+    const inspector = makeInspectorService(store, runs, async () => projects);
+
+    const active = await inspector.list();
+    expect(active.map(({ runId }) => runId)).not.toContain(child.runId);
+    expect(active.map(({ runId }) => runId)).not.toContain(archivedDelivery.runId);
+    expect(active).toEqual(
+      [...active].sort(
+        (left, right) =>
+          right.createdAt.localeCompare(left.createdAt) || right.runId.localeCompare(left.runId),
+      ),
+    );
+    expect(
+      await inspector.list({
+        includeArchived: true,
+        projectId: "project-active",
+        state: "Running",
+        workflowName: "delivery",
+      }),
+    ).toMatchObject([{ runId: activeDelivery.runId }]);
+    expect((await inspector.list({ includeArchived: true })).map(({ runId }) => runId)).toContain(
+      archivedDelivery.runId,
+    );
+    const deliveryRunIds = (
+      await inspector.list({ includeArchived: true, workflowName: "delivery" })
+    ).map(({ runId }) => runId);
+    expect(deliveryRunIds).toEqual(
+      expect.arrayContaining([activeDelivery.runId, archivedDelivery.runId]),
+    );
+    expect(deliveryRunIds).not.toContain(activeOther.runId);
+    store.close();
+  });
+
   test("preserves unknown evidence and reports unavailable facts without changing run state", async () => {
     const home = await mkdtemp(join(tmpdir(), "kojo-inspector-test-"));
     homes.add(home);
@@ -257,7 +400,34 @@ describe("Dense Inspector projections", () => {
         { enabled: false, name: "resume", reason: "Project registration is Disabled" },
         { enabled: true, name: "discard" },
       ],
+      project: {
+        availability: { status: "Available" },
+        registrationState: "Disabled",
+      },
       resumeCompatibility: { reason: "Project registration is Disabled", status: "Unavailable" },
+      state: "Failed",
+    });
+
+    const sourceIncompatibleInspector = makeInspectorService(store, runs, async () => [
+      { ...project, source: activeSourceFor("another-workflow") },
+    ]);
+    expect(await sourceIncompatibleInspector.inspect(defect.runId)).toMatchObject({
+      actions: [
+        {
+          enabled: false,
+          name: "resume",
+          reason: "The Workflow Run failed with a non-resumable Defect",
+        },
+        { enabled: true, name: "discard" },
+      ],
+      project: {
+        availability: { status: "Available" },
+        registrationState: "Enabled",
+      },
+      resumeCompatibility: {
+        reason: "Developer Workflow defect is not available in the active Project Source Revision",
+        status: "Incompatible",
+      },
       state: "Failed",
     });
 

@@ -181,6 +181,7 @@ const failedRun = {
   input: { workstream: 26 },
   outcome: { _tag: "ReviewLimitReached" },
   projectId: "project-checkout-1f9",
+  project: roots.runs[0]?.project,
   resumeCompatibility: { reason: "Project source is unavailable", status: "Unavailable" },
   rootRunId: "run-failed-001",
   runId: "run-failed-001",
@@ -215,6 +216,7 @@ const installControlledApi = async (page: Page) => {
             actions: [],
             children: [],
             evidence: [failedRun.evidence[0]],
+            project: roots.runs[1]?.project,
             projectId: "project-kojo-7a2",
             resumeCompatibility: { status: "NotApplicable" },
             runId: "run-completed-002",
@@ -233,6 +235,7 @@ const installControlledApi = async (page: Page) => {
             actions: [],
             children: [],
             evidence: [failedRun.evidence[0]],
+            project: archivedRoot.project,
             projectId: "project-legacy-3c1",
             resumeCompatibility: { status: "NotApplicable" },
             runId: "run-archived-003",
@@ -258,6 +261,11 @@ test("selects root runs and preserves run-level facts", async ({ page }) => {
   await expect(page.getByTestId("resume-compatibility")).toContainText("Unavailable");
   await expect(page.getByRole("button", { name: "Resume" })).toBeDisabled();
   await expect(page.getByText("Project source is unavailable", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("project-registration-state")).toHaveText("Enabled");
+  await expect(page.getByTestId("project-availability")).toHaveText("Unavailable");
+  await expect(page.getByTestId("action-disabled-reason")).toHaveText(
+    "Resume: Project source is unavailable",
+  );
 
   await page.getByRole("button", { name: /run-completed-002/ }).click();
   await expect(page.getByTestId("run-state")).toHaveText("Completed");
@@ -282,7 +290,9 @@ test("navigates chronological evidence, artifacts, and unknown schemas", async (
 });
 
 test("navigates child runs and failure history without Project source", async ({ page }) => {
-  await expect(page.getByText("Registered folder is missing")).toBeVisible();
+  await expect(page.locator(".project-availability-reason")).toHaveText(
+    "Registered folder is missing",
+  );
   await page.getByTestId("run-tree-run-child-040").click();
   await expect(page.getByTestId("selected-subject")).toContainText("run-child-040");
   await expect(page.getByRole("button", { name: /WorkflowRun.Completed/ })).toBeVisible();
@@ -295,24 +305,47 @@ test("navigates child runs and failure history without Project source", async ({
 test("composes facets, disambiguates workflows, and pins investigations", async ({ page }) => {
   await expect(page.getByRole("combobox", { name: "Workflow" }).locator("option")).toHaveText([
     "All workflows",
-    "checkout · project…t-1f9 / delivery",
-    "kojo · project…o-7a2 / delivery",
+    "delivery",
   ]);
+  await expect(
+    page.locator(".run-list .run-row").filter({ hasText: "run-failed-001" }),
+  ).toContainText("checkout · project…t-1f9");
+  await expect(
+    page.locator(".run-list .run-row").filter({ hasText: "run-completed-002" }),
+  ).toContainText("kojo · project…o-7a2");
 
-  await page.getByRole("combobox", { name: "Workflow" }).selectOption("project-kojo-7a2:delivery");
-  await expect(page.getByRole("button", { name: /run-completed-002/ })).toBeVisible();
-  await expect(page.getByText("PINNED OUTSIDE FILTERS")).toBeVisible();
+  await page.getByRole("combobox", { name: "Workflow" }).selectOption("delivery");
+  await expect(
+    page.locator(".run-list .run-row").filter({ hasText: "run-failed-001" }),
+  ).toBeVisible();
+  await expect(
+    page.locator(".run-list .run-row").filter({ hasText: "run-completed-002" }),
+  ).toBeVisible();
+  await expect(page.getByText("PINNED OUTSIDE FILTERS")).toHaveCount(0);
 
-  await page.getByRole("combobox", { name: "Workflow" }).selectOption("all");
   await page.getByRole("combobox", { name: "Project" }).selectOption("project-kojo-7a2");
   await expect(page.getByText("PINNED OUTSIDE FILTERS")).toBeVisible();
-  await expect(page.getByRole("button", { name: /run-completed-002/ })).toBeVisible();
+  await expect(
+    page.locator(".run-list .run-row").filter({ hasText: "run-completed-002" }),
+  ).toBeVisible();
   await expect(page.getByTestId("selected-subject")).toContainText("run-failed-001");
 
   await page.getByRole("combobox", { name: "State" }).selectOption("Failed");
   await expect(page.getByText("No runs match these filters.")).toBeVisible();
   await expect(page.getByText("PINNED OUTSIDE FILTERS")).toBeVisible();
   await expect(page.getByTestId("selected-subject")).toContainText("run-failed-001");
+});
+
+test("retains a selected child trace subject when facets change", async ({ page }) => {
+  await page.getByTestId("run-tree-run-child-040").click();
+  await page.getByRole("button", { name: /WorkflowRun.Completed/ }).click();
+  await expect(page.getByTestId("selected-subject")).toContainText("run-child-040");
+  await expect(page.getByRole("heading", { name: "WorkflowRun.Completed" })).toBeVisible();
+
+  await page.getByRole("combobox", { name: "Project" }).selectOption("project-kojo-7a2");
+  await expect(page.getByText("PINNED OUTSIDE FILTERS")).toBeVisible();
+  await expect(page.getByTestId("selected-subject")).toContainText("run-child-040");
+  await expect(page.getByRole("heading", { name: "WorkflowRun.Completed" })).toBeVisible();
 });
 
 test("keeps Archived history behind explicit opt-in", async ({ page }) => {
@@ -342,6 +375,7 @@ test("can opt into Archived history when no active Project has runs", async ({ p
             actions: [],
             children: [],
             evidence: [failedRun.evidence[0]],
+            project: archivedRoot.project,
             projectId: "project-legacy-3c1",
             resumeCompatibility: { status: "NotApplicable" },
             rootRunId: "run-archived-003",

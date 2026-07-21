@@ -6,18 +6,20 @@ export type WorkflowRunState =
   | "Completed"
   | "Discarded";
 
+export interface InspectorProjectSummary {
+  readonly availability: {
+    readonly reason?: string;
+    readonly status: "Available" | "Unavailable";
+  };
+  readonly displayName: string;
+  readonly id: string;
+  readonly registrationState: "Enabled" | "Disabled" | "Archived";
+}
+
 export interface InspectorRunSummary {
   readonly attempt: number;
   readonly createdAt: string;
-  readonly project: {
-    readonly availability: {
-      readonly reason?: string;
-      readonly status: "Available" | "Unavailable";
-    };
-    readonly displayName: string;
-    readonly id: string;
-    readonly registrationState: "Enabled" | "Disabled" | "Archived";
-  };
+  readonly project: InspectorProjectSummary;
   readonly runId: string;
   readonly state: WorkflowRunState;
   readonly workflowName: string;
@@ -62,6 +64,7 @@ export interface InspectorRun {
   readonly invocationKey?: string | null;
   readonly outcome: unknown;
   readonly parentRunId?: string | null;
+  readonly project: InspectorProjectSummary;
   readonly projectId: string;
   readonly resumeCompatibility: { readonly reason?: string; readonly status: string };
   readonly rootRunId: string;

@@ -328,7 +328,7 @@
 .run-facts {
   display: grid;
   min-height: 57px;
-  grid-template-columns: repeat(3, minmax(120px, 1fr)) auto;
+  grid-template-columns: repeat(5, minmax(105px, 1fr)) auto;
   border-bottom: 1px solid #292923;
 }
 
@@ -372,12 +372,19 @@
   cursor: not-allowed;
 }
 
-.compatibility-reason {
+.action-disabled-reason,
+.compatibility-reason,
+.project-availability-reason {
   margin: 0;
   border-bottom: 1px solid #a13f3f;
   background: #f7ded7;
   color: #792d2d;
   padding: 5px 9px;
+}
+
+.action-disabled-reason {
+  background: #ebe9e1;
+  color: #6e6c63;
 }
 
 .run-tree {

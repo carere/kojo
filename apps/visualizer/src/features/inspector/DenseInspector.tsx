@@ -20,8 +20,6 @@ const shortId = (value: string) =>
   value.length > 15 ? `${value.slice(0, 7)}…${value.slice(-5)}` : value;
 const timestamp = (value: string) => value.replace("T", " ").replace(".000Z", "Z");
 const titleCase = (value: string) => `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
-const workflowFacetKey = (projectId: string, workflowName: string) =>
-  `${encodeURIComponent(projectId)}:${encodeURIComponent(workflowName)}`;
 
 const flattenRuns = (run: InspectorRun): ReadonlyArray<InspectorRun> => [
   run,
@@ -76,8 +74,7 @@ export function DenseInspector() {
       (candidate) =>
         (includeArchived() || candidate.project.registrationState !== "Archived") &&
         (projectFilter() === "all" || candidate.project.id === projectFilter()) &&
-        (workflowFilter() === "all" ||
-          workflowFacetKey(candidate.project.id, candidate.workflowName) === workflowFilter()) &&
+        (workflowFilter() === "all" || candidate.workflowName === workflowFilter()) &&
         (stateFilter() === "all" || candidate.state === stateFilter()),
     ),
   );
@@ -109,13 +106,8 @@ export function DenseInspector() {
     return [...unique.values()];
   });
   const workflows = createMemo(() => {
-    const unique = new Map(
-      (runs() ?? []).map((candidate) => [
-        workflowFacetKey(candidate.project.id, candidate.workflowName),
-        candidate,
-      ]),
-    );
-    return [...unique.entries()];
+    const unique = new Set((runs() ?? []).map(({ workflowName }) => workflowName));
+    return [...unique].sort();
   });
 
   return (
@@ -169,13 +161,7 @@ export function DenseInspector() {
                   >
                     <option value="all">All workflows</option>
                     <For each={workflows()}>
-                      {([value, workflow]) => (
-                        <option value={value}>
-                          {workflow.project.displayName} · {shortId(workflow.project.id)}
-                          {" / "}
-                          {workflow.workflowName}
-                        </option>
-                      )}
+                      {(workflowName) => <option value={workflowName}>{workflowName}</option>}
                     </For>
                   </select>
                 </label>
@@ -254,6 +240,18 @@ export function DenseInspector() {
                   <>
                     <div class="run-facts">
                       <div>
+                        <small>PROJECT REGISTRATION</small>
+                        <strong data-testid="project-registration-state">
+                          {root().project.registrationState}
+                        </strong>
+                      </div>
+                      <div>
+                        <small>PROJECT AVAILABILITY</small>
+                        <strong data-testid="project-availability">
+                          {root().project.availability.status}
+                        </strong>
+                      </div>
+                      <div>
                         <small>RUN STATE</small>
                         <strong
                           class={`state-${root().state.toLowerCase()}`}
@@ -282,6 +280,16 @@ export function DenseInspector() {
                         </For>
                       </div>
                     </div>
+                    <Show when={root().project.availability.reason}>
+                      {(reason) => <p class="project-availability-reason">{reason()}</p>}
+                    </Show>
+                    <For each={root().actions.filter((action) => !action.enabled && action.reason)}>
+                      {(action) => (
+                        <p class="action-disabled-reason" data-testid="action-disabled-reason">
+                          {titleCase(action.name)}: {action.reason}
+                        </p>
+                      )}
+                    </For>
                     <Show when={root().resumeCompatibility.reason}>
                       {(reason) => <p class="compatibility-reason">{reason()}</p>}
                     </Show>
