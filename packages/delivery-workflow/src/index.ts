@@ -7,7 +7,7 @@ import {
   type SandboxProviderService,
   Workflow,
 } from "@kojo/workflow";
-import { Context, Effect, Schema } from "effect";
+import { Cause, Context, Effect, Option, Schema } from "effect";
 
 const IssueState = Schema.Literals(["OPEN", "CLOSED"]);
 const PositiveInteger = Schema.Int.check(Schema.isGreaterThan(0));
@@ -509,7 +509,17 @@ const proveImplementation = (baseCommit: string) =>
     yield* successfulCommand("check", "moon run :check");
     yield* successfulCommand("typecheck", "moon run :tsc");
     yield* successfulCommand("test", "moon run :test");
-    return { head, status: cleanOutput(status.stdout) };
+    const postCheckStatus = yield* successfulCommand(
+      "post-check-clean-worktree",
+      "git status --porcelain",
+    );
+    if (cleanOutput(postCheckStatus.stdout) !== "") {
+      return yield* failProof(
+        "post-check-clean-worktree",
+        "The configured commands left uncommitted work.",
+      );
+    }
+    return { head, status: cleanOutput(postCheckStatus.stdout) };
   });
 
 const implementationPrompt = (
@@ -569,6 +579,15 @@ const dispositionsMatch = (
     expected.length === actual.length &&
     expected.every((findingId, index) => actual[index] === findingId)
   );
+};
+
+const ticketFailureFromCause = (cause: Cause.Cause<unknown>) => {
+  const failure = Cause.findErrorOption(cause);
+  if (!Cause.hasDies(cause) && Option.isSome(failure)) return failure.value;
+  return {
+    _tag: "Delivery.TicketDefect" as const,
+    cause: Cause.pretty(cause),
+  };
 };
 
 export const DeliveryTicket = Workflow.make("delivery-ticket", {
@@ -858,11 +877,11 @@ export const Delivery = Workflow.make("delivery", {
                   targetBranch: routing.targetBranch,
                   ticket: specification,
                 }).pipe(
-                  Effect.catch((failure) =>
+                  Effect.catchCause((cause) =>
                     Effect.succeed({
                       _tag: "TicketFailed" as const,
                       ticket: selectedTicket,
-                      failure,
+                      failure: ticketFailureFromCause(cause),
                     }),
                   ),
                 );

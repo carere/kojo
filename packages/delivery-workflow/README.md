@@ -30,7 +30,7 @@ disposition, and the checks repeat before the next review.
 
 Zero findings produces `Implemented`. Three Reviewer Steps with remaining findings produces the
 ticket outcome `ReviewLimitReached`, retaining the shared `Loop.MaximumLimitReached` failure and
-the full finding/disposition history. Other typed ticket failures become `TicketFailed`, allowing
+the full finding/disposition history. Other ticket failures become `TicketFailed`, allowing
 an already-started sibling ticket to settle and retain its own outcome and evidence.
 
 To opt in, statically import `Delivery` from `packages/delivery-workflow/src/index.ts` in the

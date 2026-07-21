@@ -71,15 +71,29 @@ interface Finding {
   readonly detail: string;
 }
 
-const providers = (
-  reviews: Readonly<Record<number, ReadonlyArray<ReadonlyArray<Finding>>>> = {},
-  requireConcurrentImplementation = false,
-  failingCheckTicket?: number,
-) => {
+interface ProviderOptions {
+  readonly defectingReviewTicket?: number;
+  readonly dirtyAfterChecksTicket?: number;
+  readonly failingCheckTicket?: number;
+  readonly requireConcurrentImplementation?: boolean;
+  readonly reviews?: Readonly<Record<number, ReadonlyArray<ReadonlyArray<Finding>>>>;
+  readonly slowReviewTicket?: number;
+}
+
+const providers = (options: ProviderOptions = {}) => {
+  const {
+    defectingReviewTicket,
+    dirtyAfterChecksTicket,
+    failingCheckTicket,
+    requireConcurrentImplementation = false,
+    reviews = {},
+    slowReviewTicket,
+  } = options;
   const acquisitions: Array<{ readonly baseBranch?: string; readonly branch: string }> = [];
   const agentPrompts: Array<{ readonly branch: string; readonly prompt: string }> = [];
   const reviewOrdinals = new Map<number, number>();
   const commits = new Map<number, string>();
+  const completedChecks = new Set<number>();
   const concurrency = { active: 0, maximum: 0 };
   let releaseImplementers: (() => void) | undefined;
   const bothImplementersStarted = new Promise<void>((resolve) => {
@@ -97,7 +111,16 @@ const providers = (
     if (command.startsWith("git diff --quiet ")) {
       return { exitCode: 1, stderr: "", stdout: "" };
     }
-    if (command === "git status --porcelain") return { exitCode: 0, stderr: "", stdout: "" };
+    if (command === "git status --porcelain") {
+      return {
+        exitCode: 0,
+        stderr: "",
+        stdout:
+          number === dirtyAfterChecksTicket && completedChecks.has(number)
+            ? " M generated.ts\n"
+            : "",
+      };
+    }
     if (command.startsWith("git diff --binary ")) {
       return { exitCode: 0, stderr: "", stdout: `diff for ticket ${number}` };
     }
@@ -105,6 +128,7 @@ const providers = (
       if (command === "moon run :check" && number === failingCheckTicket) {
         return { exitCode: 1, stderr: "check failed", stdout: "" };
       }
+      if (command === "moon run :test") completedChecks.add(number);
       return { exitCode: 0, stderr: "", stdout: `${command} passed` };
     }
     return { exitCode: 127, stderr: `unexpected command: ${command}`, stdout: "" };
@@ -120,6 +144,16 @@ const providers = (
       if (prompt.includes("mechanically read-only reviewer")) {
         const ordinal = (reviewOrdinals.get(number) ?? 0) + 1;
         reviewOrdinals.set(number, ordinal);
+        if (number === slowReviewTicket) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        if (number === defectingReviewTicket) {
+          return {
+            commits: [],
+            stdout: "reviewed",
+            output: { invalid: "review result" },
+          };
+        }
         return {
           commits: [],
           stdout: "reviewed",
@@ -195,7 +229,7 @@ const run = (loaded: GitHubDeliveryGraph, controlled = providers()) =>
 
 describe("Delivery ready frontier implementation", () => {
   test("selects two tickets in stable order and runs each as an isolated Child Workflow", async () => {
-    const controlled = providers({}, true);
+    const controlled = providers({ requireConcurrentImplementation: true });
     const result = await run(graph([ticket(45, 3), ticket(43, 1), ticket(44, 2)]), controlled);
 
     expect(result.state).toBe("Completed");
@@ -233,6 +267,7 @@ describe("Delivery ready frontier implementation", () => {
         "moon run :check",
         "moon run :tsc",
         "moon run :test",
+        "git status --porcelain",
         `git diff --binary ${sourceRevision}...HEAD`,
         "git rev-parse HEAD",
         "git status --porcelain",
@@ -247,7 +282,7 @@ describe("Delivery ready frontier implementation", () => {
       summary: "Missing guard",
       detail: "The cumulative diff needs a guard.",
     };
-    const controlled = providers({ 43: [[finding], []] });
+    const controlled = providers({ reviews: { 43: [[finding], []] } });
     const result = await run(graph([ticket(43, 1)]), controlled);
 
     expect(result.outcome).toMatchObject({
@@ -277,7 +312,10 @@ describe("Delivery ready frontier implementation", () => {
   });
 
   test("lets an already-started sibling settle when another ticket fails", async () => {
-    const result = await run(graph([ticket(43, 1), ticket(44, 2)]), providers({}, false, 43));
+    const result = await run(
+      graph([ticket(43, 1), ticket(44, 2)]),
+      providers({ failingCheckTicket: 43 }),
+    );
 
     expect(result.state).toBe("Completed");
     expect(result.outcome).toMatchObject({
@@ -299,6 +337,54 @@ describe("Delivery ready frontier implementation", () => {
     ]);
   });
 
+  test("rejects a worktree dirtied by a successful configured command", async () => {
+    const result = await run(graph([ticket(43, 1)]), providers({ dirtyAfterChecksTicket: 43 }));
+
+    expect(result.outcome).toMatchObject({
+      _tag: "Success",
+      value: {
+        ticketOutcomes: [
+          {
+            _tag: "TicketFailed",
+            failure: {
+              _tag: "Delivery.TicketProofFailure",
+              check: "post-check-clean-worktree",
+            },
+            ticket: { number: 43 },
+          },
+        ],
+      },
+    });
+  });
+
+  test("settles an already-started sibling when a ticket defects", async () => {
+    const controlled = providers({
+      defectingReviewTicket: 43,
+      requireConcurrentImplementation: true,
+      slowReviewTicket: 44,
+    });
+    const result = await run(graph([ticket(43, 1), ticket(44, 2)]), controlled);
+
+    expect(result.state).toBe("Completed");
+    expect(result.outcome).toMatchObject({
+      _tag: "Success",
+      value: {
+        ticketOutcomes: [
+          {
+            _tag: "TicketFailed",
+            failure: { _tag: "Delivery.TicketDefect" },
+            ticket: { number: 43 },
+          },
+          { _tag: "Implemented", ticket: { number: 44 } },
+        ],
+      },
+    });
+    expect(result.children).toMatchObject([
+      { outcome: { _tag: "Defect" }, state: "Failed" },
+      { outcome: { _tag: "Success", value: { _tag: "Implemented" } }, state: "Completed" },
+    ]);
+  });
+
   test("returns ReviewLimitReached with retained history after three Reviewer Steps", async () => {
     const findings = [1, 2, 3].map((ordinal) => [
       {
@@ -308,7 +394,7 @@ describe("Delivery ready frontier implementation", () => {
         detail: `Detail ${ordinal}`,
       },
     ]);
-    const result = await run(graph([ticket(43, 1)]), providers({ 43: findings }));
+    const result = await run(graph([ticket(43, 1)]), providers({ reviews: { 43: findings } }));
 
     expect(result.state).toBe("Completed");
     expect(result.outcome).toMatchObject({
