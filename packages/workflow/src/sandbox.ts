@@ -184,20 +184,6 @@ const useSandbox = <A, E, R>(
             type: "Sandbox.OpenFailed",
           }),
         ),
-        Effect.tap(() =>
-          record({
-            details: {
-              adapterVersion: provider.configuration.adapterVersion,
-              branch: options.branch,
-              durabilityGuarantee: "CommittedGitWorkOnly",
-              hardCrashOrphanCleanupGuaranteed: false,
-              name: provider.configuration.name,
-            },
-            idempotencyKey: `sandbox:${subject}:${executionAttempt}:opened`,
-            subject,
-            type: "Sandbox.Opened",
-          }),
-        ),
       );
     const release = (handle: SandboxHandle) =>
       Effect.promise(() => handle.close()).pipe(
@@ -234,9 +220,24 @@ const useSandbox = <A, E, R>(
     return yield* Effect.acquireUseRelease(
       acquire,
       (handle) =>
-        options.effect.pipe(
-          Effect.provideService(CurrentSandbox, { handle, name }),
-          Effect.provideService(CompositionRuntime.DurablePath, [...path, name]),
+        record({
+          details: {
+            adapterVersion: provider.configuration.adapterVersion,
+            branch: options.branch,
+            durabilityGuarantee: "CommittedGitWorkOnly",
+            hardCrashOrphanCleanupGuaranteed: false,
+            name: provider.configuration.name,
+          },
+          idempotencyKey: `sandbox:${subject}:${executionAttempt}:opened`,
+          subject,
+          type: "Sandbox.Opened",
+        }).pipe(
+          Effect.andThen(
+            options.effect.pipe(
+              Effect.provideService(CurrentSandbox, { handle, name }),
+              Effect.provideService(CompositionRuntime.DurablePath, [...path, name]),
+            ),
+          ),
         ),
       release,
     );

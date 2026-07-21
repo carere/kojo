@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { createSandbox, type Sandbox as SandcastleSandbox } from "@ai-hero/sandcastle";
+import {
+  createSandbox,
+  type CreateSandboxOptions,
+  type Sandbox as SandcastleSandbox,
+} from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { Cause, Context, Duration, Effect, Exit, Layer, Option, Schema, Scope } from "effect";
 import { Workflow as EffectWorkflow, WorkflowEngine } from "effect/unstable/workflow";
@@ -87,6 +91,7 @@ interface RuntimeRequest {
   readonly leaseHolder?: string;
   readonly mode: "execute" | "validate";
   readonly projectId?: string;
+  readonly projectPath?: string;
   readonly recoveryFailure?: unknown;
   readonly rootRunId?: string;
   readonly runId?: string;
@@ -94,6 +99,16 @@ interface RuntimeRequest {
 }
 
 const responsePrefix = "KOJO_RUNTIME_RESULT ";
+
+export const localDockerSandboxOptions = (
+  projectPath: string,
+  imageName: string,
+  options: { readonly baseBranch?: string; readonly branch: string },
+): CreateSandboxOptions => ({
+  ...options,
+  cwd: projectPath,
+  sandbox: docker({ imageName }),
+});
 
 const encodeSchemaValue = async (schema: Schema.Top, value: unknown) =>
   Effect.runPromise(
@@ -139,6 +154,7 @@ const executeWorkflow = async (
     request.leaseGeneration === undefined ||
     request.leaseHolder === undefined ||
     request.projectId === undefined ||
+    request.projectPath === undefined ||
     request.rootRunId === undefined ||
     request.runId === undefined
   ) {
@@ -291,11 +307,7 @@ const executeWorkflow = async (
     create: (options) =>
       Effect.tryPromise({
         try: () =>
-          createSandbox({
-            ...options,
-            cwd: process.cwd(),
-            sandbox: docker({ imageName: dockerImage }),
-          }),
+          createSandbox(localDockerSandboxOptions(request.projectPath, dockerImage, options)),
         catch: (error) => ({
           _tag: "Sandbox.ProviderFailure" as const,
           message: error instanceof Error ? error.message : String(error),

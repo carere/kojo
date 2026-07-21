@@ -50,6 +50,7 @@ const invokeRuntime = async (
     readonly leaseHolder?: string;
     readonly mode: "execute" | "validate";
     readonly projectId?: string;
+    readonly projectPath?: string;
     readonly recoveryFailure?: unknown;
     readonly rootRunId?: string;
     readonly runId?: string;
@@ -205,6 +206,7 @@ export const makeProjectWorkflowRuntime = (
                 leaseHolder,
                 mode: "execute",
                 projectId,
+                projectPath: project.path,
                 rootRunId,
                 runId,
                 workflowName: request.workflowName,
@@ -387,6 +389,7 @@ export const makeProjectWorkflowRuntime = (
                 leaseHolder,
                 mode: "execute",
                 projectId,
+                projectPath: project.path,
                 ...(request.state === "Failed" ? { recoveryFailure: request.outcome } : {}),
                 rootRunId,
                 runId,

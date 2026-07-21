@@ -12,6 +12,7 @@ import {
   Workflow,
   WorkflowTest,
 } from "../src/index";
+import { CompositionRuntime } from "../src/composition";
 
 const Adapter = Context.Service<{
   readonly invoke: <A>(
@@ -238,6 +239,43 @@ describe("WorkflowTest", () => {
         cleanup === "dirty" ? "Sandbox.DirtyWorkRetained" : "Sandbox.CleanupFailed",
       );
     }
+  });
+
+  test("closes an acquired Sandbox when recording its open boundary fails", async () => {
+    let closes = 0;
+    const sandboxLayer = Layer.succeed(SandboxProvider, {
+      configuration: {
+        adapterVersion: "test",
+        configurationFingerprint: "open-boundary-failure",
+        name: "controlled",
+        publicFields: {},
+      },
+      create: ({ branch }) =>
+        Effect.succeed({
+          branch,
+          close: async () => {
+            closes += 1;
+            return {};
+          },
+          exec: () => Promise.resolve({ exitCode: 0, stderr: "", stdout: "" }),
+          run: () => Promise.resolve({ commits: [], stdout: "" }),
+        }),
+    });
+    const exit = await Effect.runPromiseExit(
+      Sandbox.use("cleanup-after-open", {
+        branch: "ticket/cleanup-after-open",
+        effect: Effect.void,
+      }).pipe(
+        Effect.provide(sandboxLayer),
+        Effect.provideService(CompositionRuntime.BoundaryRecorder, {
+          record: ({ type }) =>
+            type === "Sandbox.Opened" ? Effect.die("journal unavailable") : Effect.void,
+        }),
+      ),
+    );
+
+    expect(exit._tag).toBe("Failure");
+    expect(closes).toBe(1);
   });
 
   test("retries Command execution failures while keeping nonzero exits as observed data", async () => {

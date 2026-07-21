@@ -1257,8 +1257,7 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
             .get();
           if (
             storedClaim !== undefined &&
-            (storedClaim.attempt !== record.attempt ||
-              storedClaim.completionIdempotencyKey !== record.completionIdempotencyKey ||
+            (storedClaim.completionIdempotencyKey !== record.completionIdempotencyKey ||
               storedClaim.subject !== record.subject)
           ) {
             throw new Error(

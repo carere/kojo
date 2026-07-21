@@ -99,6 +99,18 @@ export interface WorkflowStartRequest {
 }
 
 const encoded = (value: unknown) => JSON.stringify({ encodingVersion: 1, value });
+const canonicalJson = (value: unknown): string => {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+};
+const encodedCanonical = (value: unknown) =>
+  `{"encodingVersion":1,"value":${canonicalJson(value)}}`;
 const decoded = <A>(value: string | null): A | null =>
   value === null ? null : (JSON.parse(value) as A);
 const decodedValue = <A>(value: string): A => (JSON.parse(value) as { readonly value: A }).value;
@@ -315,7 +327,7 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
     }) =>
       store.workflowRuns.verifyRuntimeConfiguration({
         ...request,
-        snapshot: encoded(request.snapshot),
+        snapshot: encodedCanonical(request.snapshot),
       }),
     discard: (runId: string) => {
       const discarded = store.workflowRuns.discard(runId);

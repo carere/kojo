@@ -94,6 +94,19 @@ describe("Workflow Run service", () => {
     expect(
       service.verifyRuntimeConfiguration({
         ...scope,
+        snapshot: {
+          publicFields: { image: "sandcastle:kojo" },
+          name: "local-docker",
+          kind: "Sandbox",
+          configurationFingerprint: "docker-default",
+          adapterVersion: "0.12.0",
+        },
+        subject: "ticket-36",
+      }).status,
+    ).toBe("compatible");
+    expect(
+      service.verifyRuntimeConfiguration({
+        ...scope,
         snapshot: { ...snapshot, configurationFingerprint: "changed" },
         subject: "ticket-36",
       }).status,
@@ -363,6 +376,80 @@ describe("Workflow Run service", () => {
       "Activity.Completed",
       "WorkflowRun.Completed",
     ]);
+    store.close();
+  });
+
+  test("replays a completed Activity under the next Execution Attempt", async () => {
+    const store = await makeStore();
+    const service = makeWorkflowRunService(store, {
+      prepare: async () => ({
+        encodedInput: {},
+        execute: async () => new Promise(() => undefined),
+        ...preparedRevision("activity-replay", "activity-replay-fingerprint", "a"),
+      }),
+      prepareResume: async () => ({
+        execute: async () => new Promise(() => undefined),
+        leaseAvailability: "Available",
+        recoveryPolicy: "NotRequired",
+        revisionCompatibility: "Compatible",
+        runtimeConfigurationCompatibility: "Compatible",
+        sourceAvailability: "Available",
+      }),
+    });
+    const started = await service.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-1",
+      workflowName: "activity-replay",
+    });
+    const firstLease = store.workflowRuns.find(started.runId)?.lease;
+    if (firstLease === undefined) throw new Error("start did not create an Execution Lease");
+    const startedKey = `${started.runId}:activity:echo:1:Activity.Started`;
+    const completedKey = `${started.runId}:activity:echo:1:Activity.Completed`;
+    const firstScope = {
+      attempt: 1,
+      leaseGeneration: 1,
+      leaseHolder: firstLease.holder,
+      projectId: "project-1",
+      rootRunId: started.runId,
+      runId: started.runId,
+    };
+    service.claimActivity({
+      ...firstScope,
+      completionIdempotencyKey: completedKey,
+      idempotencyKey: startedKey,
+      payload: { ordinal: 1 },
+      subject: "echo",
+    });
+    service.recordBoundary({
+      ...firstScope,
+      idempotencyKey: completedKey,
+      operation: "Activity.Completed",
+      payload: { _tag: "Complete", exit: { _tag: "Success", value: "committed" } },
+      subject: "echo",
+    });
+    store.workflowRuns.interruptRunning();
+    await service.resume(started.runId);
+    const secondLease = store.workflowRuns.find(started.runId)?.lease;
+    if (secondLease === undefined) throw new Error("resume did not create an Execution Lease");
+
+    expect(
+      service.claimActivity({
+        attempt: 2,
+        completionIdempotencyKey: completedKey,
+        idempotencyKey: startedKey,
+        leaseGeneration: 2,
+        leaseHolder: secondLease.holder,
+        payload: { ordinal: 1 },
+        projectId: "project-1",
+        rootRunId: started.runId,
+        runId: started.runId,
+        subject: "echo",
+      }),
+    ).toEqual({
+      payload: { _tag: "Complete", exit: { _tag: "Success", value: "committed" } },
+      status: "replay",
+    });
     store.close();
   });
 
