@@ -113,6 +113,86 @@ export default defineConfig({ workflows: [example] });
     }
   });
 
+  test("does not run Compensation when a settled Activity suspends the Workflow Run", async () => {
+    const fixture = await mkdtemp(join(resolve(import.meta.dir, "../../.."), ".runtime-test-"));
+    cleanup.add(fixture);
+    const socket = join(await mkdtemp(join(tmpdir(), "kojo-runtime-socket-")), "system.sock");
+    cleanup.add(socket.slice(0, socket.lastIndexOf("/")));
+    const server = Bun.serve({
+      async fetch(request) {
+        const boundary = (await request.json()) as Record<string, unknown>;
+        return Response.json({
+          status:
+            boundary.operation === "Activity.Started"
+              ? "execute"
+              : boundary.operation === "Activity.Completed"
+                ? "suspended"
+                : "recorded",
+        });
+      },
+      unix: socket,
+    });
+    await Bun.write(
+      join(fixture, "workflow.ts"),
+      `import { Effect, Schema } from "../packages/workflow/node_modules/effect/src/index.ts";
+import { Activity, Workflow as EffectWorkflow } from "../packages/workflow/node_modules/effect/src/unstable/workflow/index.ts";
+import { Workflow, defineConfig } from "../packages/workflow/src/index.ts";
+const example = Workflow.make("example", {
+  version: "v1",
+  entryPoint: "workflow.ts",
+  input: Schema.Void,
+  success: Schema.String,
+  failure: Schema.Never,
+  run: () => EffectWorkflow.withCompensation(
+    Activity.make({ name: "create", success: Schema.String, execute: Effect.succeed("created") }),
+    () => Effect.promise(() => Bun.write("compensated", "yes")).pipe(Effect.asVoid),
+  ),
+});
+export default defineConfig({ workflows: [example] });
+`,
+    );
+
+    try {
+      const request = Buffer.from(
+        JSON.stringify({
+          attempt: 1,
+          configPath: "workflow.ts",
+          endpoint: socket,
+          input: undefined,
+          leaseGeneration: 1,
+          leaseHolder: "lease-holder",
+          mode: "execute",
+          projectId: "project-1",
+          rootRunId: "run-1",
+          runId: "run-1",
+          workflowName: "example",
+        }),
+      ).toString("base64url");
+      const child = Bun.spawn([process.execPath, "run", resolve(import.meta.dir, "../main.ts")], {
+        cwd: fixture,
+        env: {
+          ...process.env,
+          KOJO_INTERNAL_PROJECT_RUNTIME: "1",
+          KOJO_RUNTIME_REQUEST: request,
+        },
+        stderr: "pipe",
+        stdout: "pipe",
+      });
+      const [exitCode, stderr, stdout] = await Promise.all([
+        child.exited,
+        new Response(child.stderr).text(),
+        new Response(child.stdout).text(),
+      ]);
+
+      expect(stderr).toBe("");
+      expect(exitCode).toBe(0);
+      expect(decodeProjectRuntimeResult(stdout)).toEqual({ state: "Suspended" });
+      expect(await Bun.file(join(fixture, "compensated")).exists()).toBe(false);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("replays a completed Activity from the System Process journal", async () => {
     const fixture = await mkdtemp(join(resolve(import.meta.dir, "../../.."), ".runtime-test-"));
     cleanup.add(fixture);

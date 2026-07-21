@@ -1,5 +1,21 @@
-import { Cause, Duration, Effect, Exit, Layer, Option, Schema } from "effect";
+import { Cause, Context, Duration, Effect, Exit, Layer, Option, Schema, Scope } from "effect";
 import { Workflow as EffectWorkflow, WorkflowEngine } from "effect/unstable/workflow";
+
+const DurableBoundaryRecorder = Context.Reference<{
+  readonly record: (boundary: {
+    readonly details?: unknown;
+    readonly idempotencyKey: string;
+    readonly subject: string;
+    readonly type: string;
+  }) => Effect.Effect<void>;
+}>("@kojo/workflow/DurableBoundaryRecorder", {
+  defaultValue: () => ({ record: () => Effect.void }),
+});
+const DurablePath = Context.Reference<ReadonlyArray<string>>("@kojo/workflow/DurablePath", {
+  defaultValue: () => [],
+});
+const activitySubject = (activityName: string) =>
+  DurablePath.pipe(Effect.map((path) => [...path, activityName].join("/")));
 
 interface RuntimeRequest {
   readonly attempt?: number;
@@ -172,7 +188,21 @@ const executeWorkflow = async (
     recordKernelBoundary,
   });
   const handlerLayer = kernel
-    .toLayer(({ input }) => workflow.run(input) as Effect.Effect<unknown, unknown>)
+    .toLayer(({ input }) =>
+      (workflow.run(input) as Effect.Effect<unknown, unknown>).pipe(
+        Effect.provideService(DurableBoundaryRecorder, {
+          record: (boundary) =>
+            Effect.promise(() =>
+              recordKernelBoundary(
+                `${runtimeRunId}:${boundary.idempotencyKey}`,
+                boundary.type,
+                boundary.details ?? {},
+                boundary.subject,
+              ),
+            ),
+        }),
+      ),
+    )
     .pipe(Layer.provide(engineLayer));
   const recoveryInstance = WorkflowEngine.WorkflowInstance.initial(kernel, runtimeRunId);
   const recovery =
@@ -285,32 +315,32 @@ const makeDurableEngineLayer = (journal: {
         activityExecute: (activity, attempt) =>
           Effect.gen(function* () {
             const parent = yield* WorkflowEngine.WorkflowInstance;
+            const subject = yield* activitySubject(activity.name);
             const activityInstance = WorkflowEngine.WorkflowInstance.initial(
               parent.workflow,
               parent.executionId,
             );
             const claimed = yield* Effect.promise(() =>
-              journal.recordActivity(
-                parent.executionId,
-                activity.name,
+              journal.recordActivity(parent.executionId, subject, attempt, "Activity.Started", {
                 attempt,
-                "Activity.Started",
-                { attempt },
-              ),
+                idempotencyKey: `${parent.executionId}:${subject}`,
+                logicalIdentity: subject,
+                ordinal: attempt,
+              }),
             );
             if (claimed.status === "replay") {
               return claimed.payload as EffectWorkflow.Result<unknown, unknown>;
             }
             if (claimed.status === "suspend" || claimed.status === "suspended") {
+              yield* Scope.close(parent.scope, Exit.void);
               return yield* Effect.die("__KOJO_SUSPENDED__");
             }
             if (claimed.status === "discard" || claimed.status === "discarded") {
+              yield* Scope.close(parent.scope, Exit.void);
               return yield* Effect.die("__KOJO_DISCARDED__");
             }
             if (claimed.status !== "execute") {
-              return yield* Effect.die(
-                `Activity '${activity.name}' has an Uncertain Activity Outcome`,
-              );
+              return yield* Effect.die(`Activity '${subject}' has an Uncertain Activity Outcome`);
             }
             const result = yield* activity.executeEncoded.pipe(
               EffectWorkflow.intoResult,
@@ -320,16 +350,18 @@ const makeDurableEngineLayer = (journal: {
             const completion = yield* Effect.promise(() =>
               journal.recordActivity(
                 parent.executionId,
-                activity.name,
+                subject,
                 attempt,
                 "Activity.Completed",
                 result,
               ),
             );
             if (completion.status === "suspend" || completion.status === "suspended") {
+              yield* Scope.close(parent.scope, Exit.void);
               return yield* Effect.die("__KOJO_SUSPENDED__");
             }
             if (completion.status === "discard" || completion.status === "discarded") {
+              yield* Scope.close(parent.scope, Exit.void);
               return yield* Effect.die("__KOJO_DISCARDED__");
             }
             return result;

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "@effect/vitest";
 import { Clock, Context, Effect, Layer, Schema } from "effect";
-import { Activity, DurableClock } from "effect/unstable/workflow";
-import { Workflow, WorkflowTest } from "../src/index";
+import { Activity, DurableClock, Workflow as EffectWorkflow } from "effect/unstable/workflow";
+import { ActivityRetry, Loop, Workflow, WorkflowTest } from "../src/index";
 
 const Adapter = Context.Service<{
   readonly invoke: <A>(
@@ -551,5 +551,223 @@ describe("WorkflowTest", () => {
     await expect(resume).rejects.toThrow("unreconciled uncertain outcome");
     expect(pushes).toBe(1);
     expect(interrupted.evidence.map(({ type }) => type)).toContain("ExternalCall.Uncertain");
+  });
+
+  test("runs named Loops with one-based iterations and nested durable Activity identities", async () => {
+    const observed: Array<{ readonly iteration: number; readonly previous?: number }> = [];
+    const looping = Workflow.make("DurableLoop", {
+      version: "1",
+      entryPoint: "workflows/durable-loop.ts",
+      input: Schema.Void,
+      success: Schema.Number,
+      failure: Loop.MaximumLimitReached,
+      run: () =>
+        Loop.run("outer", {
+          maxIterations: 3,
+          effect: ({ iteration, previous }) =>
+            Loop.run("inner", {
+              maxIterations: 1,
+              effect: () => {
+                observed.push({ iteration, ...(previous === undefined ? {} : { previous }) });
+                return Activity.make({
+                  execute: Effect.succeed(iteration),
+                  name: "inspect",
+                  success: Schema.Number,
+                });
+              },
+              repeatWhile: () => false,
+            }),
+          repeatWhile: (value) => value < 3,
+        }),
+    });
+
+    const result = await WorkflowTest.make(looping).run(undefined);
+
+    expect(result).toMatchObject({ outcome: { _tag: "Success", value: 3 }, state: "Completed" });
+    expect(observed).toEqual([
+      { iteration: 1 },
+      { iteration: 2, previous: 1 },
+      { iteration: 3, previous: 2 },
+    ]);
+    expect(
+      result.evidence
+        .filter(({ type }) => type === "Activity.Completed")
+        .map(({ subject }) => subject),
+    ).toEqual([
+      "outer[1]/inner[1]/inspect",
+      "outer[2]/inner[1]/inspect",
+      "outer[3]/inner[1]/inspect",
+    ]);
+    expect(result.evidence.map(({ type }) => type)).toContain("Loop.Completed");
+  });
+
+  test("stops a Loop immediately on Effect failure and preserves the shared limit failure", async () => {
+    let calls = 0;
+    const BodyFailure = Schema.TaggedStruct("BodyFailure", { iteration: Schema.Number });
+    const loopFailure = Workflow.make("LoopFailure", {
+      version: "1",
+      entryPoint: "workflows/loop-failure.ts",
+      input: Schema.Boolean,
+      success: Schema.Never,
+      failure: Schema.Union([BodyFailure, Loop.MaximumLimitReached]),
+      run: (failBody) =>
+        Loop.run("bounded", {
+          maxIterations: 2,
+          effect: ({ iteration }) => {
+            calls += 1;
+            return failBody
+              ? Effect.fail({ _tag: "BodyFailure" as const, iteration })
+              : Effect.succeed(iteration);
+          },
+          repeatWhile: () => true,
+        }),
+    });
+
+    const body = await WorkflowTest.make(loopFailure).run(true);
+    expect(body.outcome).toEqual({
+      _tag: "Failure",
+      failure: { _tag: "BodyFailure", iteration: 1 },
+    });
+    expect(calls).toBe(1);
+
+    calls = 0;
+    const exhausted = await WorkflowTest.make(loopFailure).run(false);
+    expect(exhausted.outcome).toEqual({
+      _tag: "Failure",
+      failure: {
+        _tag: "Loop.MaximumLimitReached",
+        maxIterations: 2,
+        name: "bounded",
+      },
+    });
+    expect(calls).toBe(2);
+    expect(exhausted.evidence.map(({ type }) => type)).toContain("Loop.MaximumLimitReached");
+  });
+
+  test("retries only selected Typed Failures with durable backoff and one persistent budget", async () => {
+    const RetryFailure = Schema.TaggedStruct("RetryFailure", {
+      retryable: Schema.Boolean,
+      ordinal: Schema.Number,
+    });
+    let executions = 0;
+    const retried = Workflow.make("DurableRetry", {
+      version: "1",
+      entryPoint: "workflows/durable-retry.ts",
+      input: Schema.Boolean,
+      success: Schema.String,
+      failure: RetryFailure,
+      run: (retryable) =>
+        ActivityRetry.run(
+          Activity.make({
+            error: RetryFailure,
+            execute: Effect.suspend(() => {
+              executions += 1;
+              return Effect.fail({ _tag: "RetryFailure" as const, ordinal: executions, retryable });
+            }),
+            name: "publish",
+            success: Schema.String,
+          }),
+          {
+            backoff: ({ ordinal }) => `${ordinal} seconds`,
+            maxAttempts: 3,
+            while: (failure) => failure.retryable,
+          },
+        ),
+    });
+    const fixture = WorkflowTest.make(retried);
+
+    const interrupted = await fixture.run(true, {
+      interruptAfter: { subject: "publish", type: "Activity.Failed" },
+    });
+    const exhausted = await fixture.restart();
+
+    expect(interrupted.state).toBe("Interrupted");
+    expect(exhausted.outcome).toEqual({
+      _tag: "Failure",
+      failure: { _tag: "RetryFailure", ordinal: 3, retryable: true },
+    });
+    expect(executions).toBe(3);
+    expect(
+      exhausted.evidence.filter(({ type }) => type === "Activity.RetryScheduled"),
+    ).toHaveLength(2);
+    expect(
+      exhausted.evidence.filter(
+        ({ subject, type }) =>
+          type === "Activity.Completed" && subject.startsWith("DurableClock/activity-retry:"),
+      ),
+    ).toHaveLength(2);
+    const attempts = exhausted.evidence
+      .filter(({ subject, type }) => type === "Activity.Started" && subject === "publish")
+      .map(({ details }) => details as Record<string, unknown>);
+    expect(attempts.map(({ ordinal }) => ordinal)).toEqual([1, 2, 3]);
+    expect(new Set(attempts.map(({ idempotencyKey }) => idempotencyKey)).size).toBe(1);
+
+    executions = 0;
+    const notSelected = await WorkflowTest.make(retried).run(false);
+    expect(notSelected.outcome).toEqual({
+      _tag: "Failure",
+      failure: { _tag: "RetryFailure", ordinal: 1, retryable: false },
+    });
+    expect(executions).toBe(1);
+  });
+
+  test("runs evidenced durable Compensation in reverse order only for terminal failure", async () => {
+    const compensated: Array<string> = [];
+    const CompensatedFailure = Schema.TaggedStruct("CompensatedFailure", {});
+    const compensatedWorkflow = Workflow.make("Compensated", {
+      version: "1",
+      entryPoint: "workflows/compensated.ts",
+      input: Schema.Void,
+      success: Schema.Never,
+      failure: CompensatedFailure,
+      run: () =>
+        EffectWorkflow.withCompensation(
+          EffectWorkflow.withCompensation(
+            Effect.gen(function* () {
+              yield* Activity.make({ name: "create-first", execute: Effect.void });
+              return "first";
+            }),
+            () =>
+              Activity.make({
+                execute: Effect.sync(() => compensated.push("first")),
+                name: "compensate-first",
+              }),
+          ).pipe(
+            Effect.andThen(
+              EffectWorkflow.withCompensation(
+                Activity.make({
+                  execute: Effect.succeed("second"),
+                  name: "create-second",
+                  success: Schema.String,
+                }),
+                () =>
+                  Activity.make({
+                    execute: Effect.sync(() => compensated.push("second")),
+                    name: "compensate-second",
+                  }),
+              ),
+            ),
+          ),
+          () => Effect.void,
+        ).pipe(Effect.andThen(Effect.fail({ _tag: "CompensatedFailure" as const }))),
+    });
+
+    const failed = await WorkflowTest.make(compensatedWorkflow).run(undefined);
+
+    expect(failed.state).toBe("Failed");
+    expect(compensated).toEqual(["second", "first"]);
+    expect(
+      failed.evidence
+        .filter(({ type }) => type === "Activity.Completed")
+        .map(({ subject }) => subject),
+    ).toEqual(["create-first", "create-second", "compensate-second", "compensate-first"]);
+
+    compensated.length = 0;
+    const fixture = WorkflowTest.make(compensatedWorkflow);
+    const interrupted = await fixture.run(undefined, {
+      interruptAfter: { subject: "create-first", type: "Activity.Started" },
+    });
+    expect(interrupted.state).toBe("Interrupted");
+    expect(compensated).toEqual([]);
   });
 });
