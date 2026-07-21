@@ -1,4 +1,12 @@
-import { Workflow } from "@kojo/workflow";
+import {
+  Agent,
+  type AgentProviderService,
+  Command,
+  Loop,
+  Sandbox,
+  type SandboxProviderService,
+  Workflow,
+} from "@kojo/workflow";
 import { Context, Effect, Schema } from "effect";
 
 const IssueState = Schema.Literals(["OPEN", "CLOSED"]);
@@ -79,6 +87,65 @@ const WorkTicket = Schema.Struct({
   publicationKey: Schema.String,
 });
 
+const DeliveryTicketInput = Schema.Struct({
+  baseCommit: Schema.String,
+  branch: Schema.String,
+  destinationBranch: Schema.String,
+  targetBranch: Schema.String,
+  ticket: NormalizedSpecification,
+});
+
+const ReviewFinding = Schema.Struct({
+  id: Schema.String,
+  priority: Schema.Literals(["P1", "P2", "P3"]),
+  summary: Schema.String,
+  detail: Schema.String,
+});
+
+const FindingDisposition = Schema.Struct({
+  findingId: Schema.String,
+  disposition: Schema.Literal("Addressed"),
+  summary: Schema.String,
+});
+
+const FindingHistory = Schema.Struct({
+  attempt: PositiveInteger,
+  findings: Schema.Array(ReviewFinding),
+  dispositions: Schema.Array(FindingDisposition),
+});
+
+const TicketIdentity = Schema.Struct({
+  number: PositiveInteger,
+  publicationKey: Schema.String,
+});
+
+const Implemented = Schema.TaggedStruct("Implemented", {
+  ticket: TicketIdentity,
+  sandbox: Schema.Struct({ name: Schema.String, branch: Schema.String }),
+  baseCommit: Schema.String,
+  finalCommit: Schema.String,
+  reviewAttempts: PositiveInteger,
+  findingHistory: Schema.Array(FindingHistory),
+});
+
+const ReviewLimitReached = Schema.TaggedStruct("ReviewLimitReached", {
+  ticket: TicketIdentity,
+  sandbox: Schema.Struct({ name: Schema.String, branch: Schema.String }),
+  baseCommit: Schema.String,
+  finalCommit: Schema.String,
+  reviewAttempts: PositiveInteger,
+  findingHistory: Schema.Array(FindingHistory),
+  failure: Loop.MaximumLimitReached,
+});
+
+const TicketFailed = Schema.TaggedStruct("TicketFailed", {
+  ticket: TicketIdentity,
+  failure: Schema.Unknown,
+});
+
+export const DeliveryTicketOutcome = Schema.Union([Implemented, ReviewLimitReached, TicketFailed]);
+export type DeliveryTicketOutcome = Schema.Schema.Type<typeof DeliveryTicketOutcome>;
+
 const Exclusion = Schema.Struct({
   number: PositiveInteger,
   publicationKey: Schema.String,
@@ -106,7 +173,10 @@ const AlreadyComplete = Schema.TaggedStruct("AlreadyComplete", { evidence: Deliv
 const OpenWorkNoReadyTicket = Schema.TaggedStruct("OpenWorkNoReadyTicket", {
   evidence: DeliveryEvidence,
 });
-const OpenWork = Schema.TaggedStruct("OpenWork", { evidence: DeliveryEvidence });
+const OpenWork = Schema.TaggedStruct("OpenWork", {
+  evidence: DeliveryEvidence,
+  ticketOutcomes: Schema.Array(DeliveryTicketOutcome),
+});
 
 export const DeliveryResult = Schema.Union([
   NothingToDo,
@@ -125,6 +195,17 @@ export const DeliveryFailure = Schema.Union([InvalidDeliveryWorkstream, GitHubDe
 export type DeliveryFailure = Schema.Schema.Type<typeof DeliveryFailure>;
 
 const DeliveryInput = Schema.Struct({ workstream: Schema.String });
+
+const ImplementerResult = Schema.Struct({
+  summary: Schema.String,
+  dispositions: Schema.Array(FindingDisposition),
+});
+
+const ReviewerResult = Schema.Struct({ findings: Schema.Array(ReviewFinding) });
+
+const AgentStepFailure = Schema.TaggedStruct("Delivery.AgentStepFailure", {
+  message: Schema.String,
+});
 
 interface ParsedRootUrl {
   readonly repository: string;
@@ -383,8 +464,244 @@ const invalid = (diagnostics: ReadonlyArray<string>, inputGraph?: GitHubDelivery
 
 const decodeGraphSync = Schema.decodeUnknownSync(GitHubDeliveryGraphSchema);
 
-export const Delivery = Workflow.make("delivery", {
+const ticketIdentity = (ticket: Schema.Schema.Type<typeof NormalizedSpecification>) => ({
+  number: ticket.number,
+  publicationKey: ticket.publicationKey,
+});
+
+const failProof = (check: string, message: string) =>
+  Effect.fail({ _tag: "Delivery.TicketProofFailure" as const, check, message });
+
+const successfulCommand = (name: string, command: string) =>
+  Command.run(name, { command }).pipe(
+    Effect.flatMap((result) =>
+      result.exitCode === 0
+        ? Effect.succeed(result)
+        : failProof(name, `'${command}' exited with ${result.exitCode}`),
+    ),
+  );
+
+const cleanOutput = (value: string) => value.replace(/\r\n/g, "\n").trim();
+
+const proveImplementation = (baseCommit: string) =>
+  Effect.gen(function* () {
+    const headResult = yield* successfulCommand("committed-head", "git rev-parse HEAD");
+    const head = cleanOutput(headResult.stdout);
+    if (!/^[0-9a-f]{40,64}$/i.test(head) || head.toLowerCase() === baseCommit.toLowerCase()) {
+      return yield* failProof("committed-head", "The implementer did not produce a new commit.");
+    }
+    yield* successfulCommand("base-ancestry", `git merge-base --is-ancestor ${baseCommit} HEAD`);
+    const changed = yield* Command.run("non-empty-change", {
+      command: `git diff --quiet ${baseCommit} HEAD`,
+    });
+    if (changed.exitCode !== 1) {
+      return yield* failProof(
+        "non-empty-change",
+        changed.exitCode === 0
+          ? "The committed change is empty."
+          : `Git could not compare the committed change (exit ${changed.exitCode}).`,
+      );
+    }
+    const status = yield* successfulCommand("clean-worktree", "git status --porcelain");
+    if (cleanOutput(status.stdout) !== "") {
+      return yield* failProof("clean-worktree", "The implementer left uncommitted work.");
+    }
+    yield* successfulCommand("check", "moon run :check");
+    yield* successfulCommand("typecheck", "moon run :tsc");
+    yield* successfulCommand("test", "moon run :test");
+    return { head, status: cleanOutput(status.stdout) };
+  });
+
+const implementationPrompt = (
+  input: Schema.Schema.Type<typeof DeliveryTicketInput>,
+  history: ReadonlyArray<Schema.Schema.Type<typeof FindingHistory>>,
+) => {
+  const findings = history.at(-1)?.findings ?? [];
+  const feedback =
+    findings.length === 0
+      ? "There are no prior review findings."
+      : findings
+          .map(
+            (finding) =>
+              `Finding ${finding.id}: ${finding.priority} ${finding.summary}\n${finding.detail}`,
+          )
+          .join("\n\n");
+  return `Implement Delivery ticket #${input.ticket.number} in the current isolated Sandbox.
+The Sandbox starts from exact target commit ${input.baseCommit} on branch ${input.branch}.
+Produce a non-empty committed change and leave the worktree clean.
+
+Ticket title: ${input.ticket.title}
+Ticket specification:
+${input.ticket.body}
+
+Review finding history:
+${JSON.stringify(history)}
+
+Findings to address in this turn:
+${feedback}
+
+Return one Addressed disposition for every listed finding. Do not claim checks passed; deterministic Code Steps run them after you commit.`;
+};
+
+const reviewPrompt = (
+  input: Schema.Schema.Type<typeof DeliveryTicketInput>,
+  cumulativeDiff: string,
+  history: ReadonlyArray<Schema.Schema.Type<typeof FindingHistory>>,
+) => `Act as a mechanically read-only reviewer for Delivery ticket #${input.ticket.number}.
+Do not modify files, create commits, or change the worktree. Review all severities and return every P1, P2, and P3 finding. Success requires an empty findings array.
+
+Ticket specification:
+${input.ticket.body}
+
+Cumulative diff from exact base commit ${input.baseCommit}:
+${cumulativeDiff}
+
+Finding and disposition history:
+${JSON.stringify(history)}`;
+
+const dispositionsMatch = (
+  findings: ReadonlyArray<Schema.Schema.Type<typeof ReviewFinding>>,
+  dispositions: ReadonlyArray<Schema.Schema.Type<typeof FindingDisposition>>,
+) => {
+  const expected = findings.map(({ id }) => id).sort();
+  const actual = dispositions.map(({ findingId }) => findingId).sort();
+  return (
+    expected.length === actual.length &&
+    expected.every((findingId, index) => actual[index] === findingId)
+  );
+};
+
+export const DeliveryTicket = Workflow.make("delivery-ticket", {
   version: "1",
+  entryPoint: "packages/delivery-workflow/src/index.ts",
+  input: DeliveryTicketInput,
+  success: DeliveryTicketOutcome,
+  failure: Schema.Unknown,
+  run: (input) =>
+    Sandbox.use(`ticket-${input.ticket.number}`, {
+      baseBranch: input.baseCommit,
+      branch: input.branch,
+      effect: Effect.gen(function* () {
+        const sandbox = { name: `ticket-${input.ticket.number}`, branch: input.branch };
+        let history: Array<Schema.Schema.Type<typeof FindingHistory>> = [];
+        let finalCommit = input.baseCommit;
+        const initial = yield* Agent.run("implement", {
+          prompt: implementationPrompt(input, history),
+          success: ImplementerResult,
+          failure: AgentStepFailure,
+        });
+        if (!dispositionsMatch([], initial.dispositions)) {
+          return yield* failProof(
+            "implementer-dispositions",
+            "The implementer returned dispositions that do not match the routed findings.",
+          );
+        }
+
+        const reviewed = yield* Loop.run("review", {
+          maxIterations: 3,
+          effect: ({ iteration }) =>
+            Effect.gen(function* () {
+              const proof = yield* proveImplementation(input.baseCommit);
+              finalCommit = proof.head;
+              const diff = yield* successfulCommand(
+                "cumulative-diff",
+                `git diff --binary ${input.baseCommit}...HEAD`,
+              );
+              const review = yield* Agent.run("reviewer", {
+                prompt: reviewPrompt(input, diff.stdout, history),
+                success: ReviewerResult,
+                failure: AgentStepFailure,
+              });
+              const afterHead = yield* successfulCommand("review-head-proof", "git rev-parse HEAD");
+              const afterStatus = yield* successfulCommand(
+                "review-worktree-proof",
+                "git status --porcelain",
+              );
+              if (
+                cleanOutput(afterHead.stdout) !== proof.head ||
+                cleanOutput(afterStatus.stdout) !== proof.status
+              ) {
+                return yield* failProof(
+                  "read-only-review",
+                  "The reviewer changed the commit or worktree.",
+                );
+              }
+
+              let dispositions: ReadonlyArray<Schema.Schema.Type<typeof FindingDisposition>> = [];
+              if (review.findings.length > 0) {
+                const repair = yield* Agent.run("repair", {
+                  prompt: implementationPrompt(input, [
+                    ...history,
+                    { attempt: iteration, findings: review.findings, dispositions: [] },
+                  ]),
+                  success: ImplementerResult,
+                  failure: AgentStepFailure,
+                });
+                dispositions = repair.dispositions;
+                if (!dispositionsMatch(review.findings, dispositions)) {
+                  return yield* failProof(
+                    "implementer-dispositions",
+                    "The implementer did not disposition every routed finding exactly once.",
+                  );
+                }
+              }
+              const entry = {
+                attempt: iteration,
+                findings: review.findings,
+                dispositions: [...dispositions],
+              };
+              history = [...history, entry];
+              return entry;
+            }),
+          repeatWhile: (entry: Schema.Schema.Type<typeof FindingHistory>) =>
+            entry.findings.length > 0,
+        }).pipe(
+          Effect.catch((failure) =>
+            typeof failure === "object" &&
+            failure !== null &&
+            "_tag" in failure &&
+            failure._tag === "Loop.MaximumLimitReached"
+              ? Effect.succeed({
+                  _tag: "ReviewLimit" as const,
+                  failure: failure as Schema.Schema.Type<typeof Loop.MaximumLimitReached>,
+                })
+              : Effect.fail(failure),
+          ),
+        );
+
+        if ("_tag" in reviewed && reviewed._tag === "ReviewLimit") {
+          const finalHead = yield* successfulCommand("review-limit-head", "git rev-parse HEAD");
+          finalCommit = cleanOutput(finalHead.stdout);
+          return {
+            _tag: "ReviewLimitReached" as const,
+            ticket: ticketIdentity(input.ticket),
+            sandbox,
+            baseCommit: input.baseCommit,
+            finalCommit,
+            reviewAttempts: history.length,
+            findingHistory: history,
+            failure: reviewed.failure,
+          };
+        }
+        return {
+          _tag: "Implemented" as const,
+          ticket: ticketIdentity(input.ticket),
+          sandbox,
+          baseCommit: input.baseCommit,
+          finalCommit,
+          reviewAttempts: history.length,
+          findingHistory: history,
+        };
+      }),
+    }) as Effect.Effect<
+      DeliveryTicketOutcome,
+      unknown,
+      AgentProviderService | SandboxProviderService
+    >,
+});
+
+export const Delivery = Workflow.make("delivery", {
+  version: "2",
   entryPoint: "packages/delivery-workflow/src/index.ts",
   input: DeliveryInput,
   success: DeliveryResult,
@@ -448,6 +765,7 @@ export const Delivery = Workflow.make("delivery", {
             ticket.blockedBy.nodes.every(({ state }) => state === "CLOSED"),
         )
         .map(({ publicationKey, ticket }) => ({ number: ticket.number, publicationKey }));
+      const selected = ready.slice(0, 2);
       const exclusions: Array<Schema.Schema.Type<typeof Exclusion>> = [];
       for (const { publicationKey, ticket } of sortedTickets) {
         if (ticket.state === "CLOSED") {
@@ -510,7 +828,7 @@ export const Delivery = Workflow.make("delivery", {
         sourceRevision: routing.sourceRevision,
         eligibleWork,
         exclusions,
-        frontier: { decision, tickets: ready },
+        frontier: { decision, tickets: selected },
       };
       switch (decision) {
         case "NothingToDo":
@@ -520,7 +838,42 @@ export const Delivery = Workflow.make("delivery", {
         case "OpenWorkNoReadyTicket":
           return { _tag: "OpenWorkNoReadyTicket" as const, evidence };
         case "Ready":
-          return { _tag: "OpenWork" as const, evidence };
+          return {
+            _tag: "OpenWork" as const,
+            evidence,
+            ticketOutcomes: yield* Effect.all(
+              selected.map((selectedTicket) => {
+                const specification = normalizedSpecifications.find(
+                  ({ number }) => number === selectedTicket.number,
+                );
+                if (specification === undefined) {
+                  return Effect.die(
+                    `Ready ticket #${selectedTicket.number} has no normalized specification`,
+                  );
+                }
+                return DeliveryTicket.run(`ticket-${selectedTicket.number}`, {
+                  baseCommit: routing.sourceRevision,
+                  branch: `kojo-delivery-ticket-${selectedTicket.number}`,
+                  destinationBranch: routing.destinationBranch,
+                  targetBranch: routing.targetBranch,
+                  ticket: specification,
+                }).pipe(
+                  Effect.catch((failure) =>
+                    Effect.succeed({
+                      _tag: "TicketFailed" as const,
+                      ticket: selectedTicket,
+                      failure,
+                    }),
+                  ),
+                );
+              }),
+              { concurrency: 2 },
+            ),
+          };
       }
-    }),
+    }) as Effect.Effect<
+      DeliveryResult,
+      DeliveryFailure,
+      AgentProviderService | GitHubDeliveryService | SandboxProviderService
+    >,
 });

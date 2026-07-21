@@ -1,12 +1,12 @@
 import { describe, expect, test } from "@effect/vitest";
-import { WorkflowTest } from "@kojo/workflow";
+import { AgentProvider, SandboxProvider, WorkflowTest } from "@kojo/workflow";
 import { Effect, Layer } from "effect";
 import type {
   GitHubDeliveryFailure,
   GitHubDeliveryGraph,
   GitHubDeliveryService,
 } from "../src/index";
-import { Delivery, GitHubDelivery } from "../src/index";
+import { Delivery, DeliveryTicket, GitHubDelivery } from "../src/index";
 
 const revision = "a".repeat(40);
 const rootUrl = "https://github.com/carere/kojo/issues/26";
@@ -63,15 +63,50 @@ const githubLayer = (loaded: GitHubDeliveryGraph, reachable = true) =>
       ) as unknown as Effect.Effect<unknown, GitHubDeliveryFailure>,
   } satisfies GitHubDeliveryService);
 
+const unavailableExecutionLayer = Layer.merge(
+  Layer.succeed(SandboxProvider, {
+    configuration: {
+      adapterVersion: "test-1",
+      configurationFingerprint: "unavailable",
+      name: "unavailable-sandbox",
+      publicFields: {},
+    },
+    create: () =>
+      Effect.fail({
+        _tag: "Sandbox.ProviderFailure" as const,
+        message: "Execution is outside these loading tests",
+      }),
+  }),
+  Layer.succeed(AgentProvider, {
+    agent: {},
+    configuration: {
+      adapterVersion: "test-1",
+      configurationFingerprint: "unavailable",
+      model: "unavailable",
+      name: "unavailable-agent",
+      publicFields: {},
+    },
+  }),
+);
+
+const testLayer = (loaded: GitHubDeliveryGraph, reachable = true) =>
+  Layer.merge(githubLayer(loaded, reachable), unavailableExecutionLayer);
+
 const run = (loaded: GitHubDeliveryGraph, reachable = true) =>
-  WorkflowTest.make(Delivery, { layer: githubLayer(loaded, reachable) }).run({
+  WorkflowTest.make(Delivery, {
+    workflows: [DeliveryTicket],
+    layer: testLayer(loaded, reachable),
+  }).run({
     workstream: rootUrl,
   });
 
 const runAt = (loaded: GitHubDeliveryGraph, workstream: string) =>
-  WorkflowTest.make(Delivery, { layer: githubLayer(loaded) }).run({ workstream });
+  WorkflowTest.make(Delivery, { workflows: [DeliveryTicket], layer: testLayer(loaded) }).run({
+    workstream,
+  });
 
 const expectNoExecution = (result: Awaited<ReturnType<typeof run>>) => {
+  expect(result.children).toEqual([]);
   expect(result.calls.filter(({ layer }) => layer === "Agent" || layer === "Sandbox")).toEqual([]);
   expect(() =>
     WorkflowTest.assertCalls(result, {
@@ -161,7 +196,6 @@ describe("Delivery workstream loading", () => {
         ],
       }),
     ).not.toThrow();
-    expectNoExecution(result);
   });
 
   test("rejects truncated child and blocker relationships", async () => {
@@ -295,7 +329,6 @@ describe("Delivery workstream loading", () => {
         ],
       }),
     ).not.toThrow();
-    expectNoExecution(result);
   });
 
   test("rejects invalid root, Delivery routing, and executable ticket state", async () => {
