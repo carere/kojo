@@ -149,10 +149,23 @@ export interface ProjectSourceActivationOptions {
   readonly repository: string;
 }
 
+export interface PinnedProjectSourceOptions extends ProjectSourceActivationOptions {
+  readonly commit: string;
+  readonly defaultBranch?: string;
+  readonly remote?: string | null;
+}
+
 interface GitResult {
   readonly exitCode: number;
   readonly stderr: string;
   readonly stdout: string;
+}
+
+interface SelectedProjectSource {
+  readonly branch: string;
+  readonly commit: string;
+  readonly freshness: ProjectSourceRevision["freshness"];
+  readonly remote: string | null;
 }
 
 const runGitResult = async (
@@ -1277,13 +1290,12 @@ const rejectCustomLoaders = async (checkout: string) => {
   }
 };
 
-export const activateProjectSource = async ({
-  loadRegistry = defaultLoadRegistry,
-  policy,
-  repository: requestedRepository,
-}: ProjectSourceActivationOptions): Promise<ProjectSourceRevision> => {
-  const repository = await realpath(requestedRepository);
-  const selected = await selectSource(repository, policy);
+const validateSelectedProjectSource = async (
+  repository: string,
+  policy: ProjectSourcePolicy,
+  selected: SelectedProjectSource,
+  loadRegistry: NonNullable<ProjectSourceActivationOptions["loadRegistry"]>,
+): Promise<ProjectSourceRevision> => {
   const checkout = await makeMutableCheckout(repository, selected.commit);
   try {
     const { evidence, lockfile, lockfileDigest, manifest } = await validateToolchain(checkout.path);
@@ -1317,6 +1329,52 @@ export const activateProjectSource = async ({
   } finally {
     await checkout.dispose();
   }
+};
+
+export const activateProjectSource = async ({
+  loadRegistry = defaultLoadRegistry,
+  policy,
+  repository: requestedRepository,
+}: ProjectSourceActivationOptions): Promise<ProjectSourceRevision> => {
+  const repository = await realpath(requestedRepository);
+  const selected = await selectSource(repository, policy);
+  return validateSelectedProjectSource(repository, policy, selected, loadRegistry);
+};
+
+export const validatePinnedProjectSource = async ({
+  commit,
+  defaultBranch = "(pinned)",
+  loadRegistry = defaultLoadRegistry,
+  policy,
+  remote = null,
+  repository: requestedRepository,
+}: PinnedProjectSourceOptions): Promise<ProjectSourceRevision> => {
+  const repository = await realpath(requestedRepository);
+  const available = await runGitResult(repository, "cat-file", "-e", `${commit}^{commit}`);
+  if (available.exitCode !== 0) {
+    throw new ProjectSourceValidationError([
+      diagnostic(
+        "SOURCE_NOT_ACTIVATED",
+        `The pinned Project Source Revision ${commit} is not available in the registered repository.`,
+      ),
+    ]);
+  }
+  return validateSelectedProjectSource(
+    repository,
+    policy,
+    {
+      branch: defaultBranch,
+      commit,
+      freshness: {
+        localCommit: commit,
+        status: "Unknown",
+        warning:
+          "Resume validated the pinned commit independently from the current default branch.",
+      },
+      remote,
+    },
+    loadRegistry,
+  );
 };
 
 export const activateStoredProjectSource = async (

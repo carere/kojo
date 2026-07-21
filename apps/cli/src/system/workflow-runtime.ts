@@ -7,6 +7,7 @@ import {
   type ProjectSourceRevision,
   ProjectSourceValidationError,
   type RuntimeSourceCheckout,
+  validatePinnedProjectSource,
 } from "./project-source";
 import type { SystemStore } from "./storage";
 import {
@@ -18,7 +19,8 @@ import {
 interface RuntimeResult {
   readonly encodedInput?: unknown;
   readonly error?: string;
-  readonly state?: "Completed" | "Failed";
+  readonly recoveryTags?: ReadonlyArray<string>;
+  readonly state?: "Completed" | "Discarded" | "Failed" | "Suspended";
   readonly status?: "failed" | "validated";
   readonly value?: unknown;
 }
@@ -48,10 +50,12 @@ const invokeRuntime = async (
     readonly leaseHolder?: string;
     readonly mode: "execute" | "validate";
     readonly projectId?: string;
+    readonly recoveryFailure?: unknown;
     readonly rootRunId?: string;
     readonly runId?: string;
     readonly workflowName: string;
   },
+  signal?: AbortSignal,
 ) => {
   const cli = await projectLocalCli(checkout);
   const encodedRequest = Buffer.from(JSON.stringify({ configPath, ...request })).toString(
@@ -72,11 +76,14 @@ const invokeRuntime = async (
     stderr: "pipe",
     stdout: "pipe",
   });
+  const abort = () => child.kill();
+  if (signal?.aborted === true) abort();
+  else signal?.addEventListener("abort", abort, { once: true });
   const [exitCode, stderr, stdout] = await Promise.all([
     child.exited,
     new Response(child.stderr).text(),
     new Response(child.stdout).text(),
-  ]);
+  ]).finally(() => signal?.removeEventListener("abort", abort));
   let result: RuntimeResult;
   try {
     result = decodeProjectRuntimeResult(stdout) as RuntimeResult;
@@ -123,9 +130,11 @@ const prepareRevision = async (
     revision,
     source: {
       commit: revision.commit,
+      defaultBranch: revision.provenance.defaultBranch,
       dirty: false,
       kind: "ProjectSourceRevision" as const,
       policy: revision.policy,
+      remote: revision.provenance.remote,
     },
   };
 };
@@ -175,21 +184,39 @@ export const makeProjectWorkflowRuntime = (
       const fixed = prepared;
       return {
         encodedInput: validation.encodedInput,
-        execute: async ({ attempt, leaseGeneration, leaseHolder, projectId, rootRunId, runId }) => {
+        execute: async ({
+          attempt,
+          leaseGeneration,
+          leaseHolder,
+          projectId,
+          rootRunId,
+          runId,
+          signal,
+        }) => {
           try {
-            const result = await invokeRuntime(fixed.checkout.path, fixed.revision.configPath, {
-              attempt,
-              endpoint,
-              input: validation.encodedInput,
-              leaseGeneration,
-              leaseHolder,
-              mode: "execute",
-              projectId,
-              rootRunId,
-              runId,
-              workflowName: request.workflowName,
-            });
-            if (result.state !== "Completed" && result.state !== "Failed") {
+            const result = await invokeRuntime(
+              fixed.checkout.path,
+              fixed.revision.configPath,
+              {
+                attempt,
+                endpoint,
+                input: validation.encodedInput,
+                leaseGeneration,
+                leaseHolder,
+                mode: "execute",
+                projectId,
+                rootRunId,
+                runId,
+                workflowName: request.workflowName,
+              },
+              signal,
+            );
+            if (
+              result.state !== "Completed" &&
+              result.state !== "Discarded" &&
+              result.state !== "Failed" &&
+              result.state !== "Suspended"
+            ) {
               throw new Error("Project Runtime Process returned no terminal outcome");
             }
             return { state: result.state, value: result.value };
@@ -222,6 +249,178 @@ export const makeProjectWorkflowRuntime = (
         throw new WorkflowStartError(
           "INVALID_CONFIGURATION",
           "The candidate Project Source Revision is invalid",
+          error.diagnostics,
+        );
+      }
+      throw new WorkflowStartError(
+        "RUNTIME_START_FAILED",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  },
+  prepareResume: async (request) => {
+    const project = store.projects.findById(request.projectId);
+    if (project === undefined) {
+      throw new WorkflowStartError(
+        "PROJECT_NOT_FOUND",
+        `Project ${request.projectId} was not found`,
+      );
+    }
+    if (project.registrationState !== "Enabled") {
+      throw new WorkflowStartError(
+        "PROJECT_UNAVAILABLE",
+        `Project ${request.projectId} must be Enabled before resuming a Workflow Run`,
+      );
+    }
+    if (request.revision.source.kind !== "ProjectSourceRevision") {
+      throw new WorkflowStartError(
+        "WORKFLOW_INCOMPATIBLE",
+        "The temporary Checkout Source Snapshot required by this Workflow Run is no longer retained",
+      );
+    }
+
+    let prepared:
+      | {
+          readonly checkout: RuntimeSourceCheckout;
+          readonly revision: ProjectSourceRevision;
+          readonly source: PreparedWorkflowRun["revision"]["source"];
+        }
+      | undefined;
+    try {
+      const policy = request.revision.source.policy;
+      if (policy !== "LocalWithFreshnessWarning" && policy !== "RemoteLatest") {
+        throw new WorkflowStartError(
+          "WORKFLOW_INCOMPATIBLE",
+          "The pinned Workflow Revision has no reproducible Project Source Policy",
+        );
+      }
+      const revision = await validatePinnedProjectSource({
+        commit: request.revision.source.commit,
+        defaultBranch:
+          typeof request.revision.source.defaultBranch === "string"
+            ? request.revision.source.defaultBranch
+            : undefined,
+        policy,
+        remote:
+          typeof request.revision.source.remote === "string" ||
+          request.revision.source.remote === null
+            ? request.revision.source.remote
+            : undefined,
+        repository: project.path,
+      });
+      prepared = {
+        checkout: await materializeRuntimeSourceCheckout(project.path, revision, {
+          installDependencies: true,
+        }),
+        revision,
+        source: request.revision.source,
+      };
+      const workflow = prepared.revision.workflows.find(
+        (candidate) => candidate.name === request.revision.stableName,
+      );
+      const availableSnapshot = {
+        rootWorkflow: request.revisionSnapshot.rootWorkflow,
+        source: prepared.source,
+        workflows: prepared.revision.workflows.map((candidate) => ({
+          declaredVersion: candidate.version,
+          fingerprint: candidate.fingerprint,
+          stableName: candidate.name,
+          workflowAbi: prepared?.revision.toolchain.workflowAbi ?? "",
+        })),
+      };
+      if (
+        workflow === undefined ||
+        workflow.version !== request.revision.declaredVersion ||
+        workflow.fingerprint !== request.revision.fingerprint ||
+        prepared.revision.toolchain.workflowAbi !== request.revision.workflowAbi ||
+        JSON.stringify(availableSnapshot) !== JSON.stringify(request.revisionSnapshot)
+      ) {
+        throw new WorkflowStartError(
+          "WORKFLOW_INCOMPATIBLE",
+          "The current Workflow Revision does not exactly match the pinned Workflow Revision Snapshot",
+        );
+      }
+      const validation = await invokeRuntime(prepared.checkout.path, prepared.revision.configPath, {
+        input: request.input,
+        mode: "validate",
+        workflowName: request.revision.stableName,
+      });
+      const failureTag =
+        request.state === "Failed" &&
+        typeof request.outcome === "object" &&
+        request.outcome !== null &&
+        "_tag" in request.outcome &&
+        typeof request.outcome._tag === "string"
+          ? request.outcome._tag
+          : undefined;
+      if (
+        request.state === "Failed" &&
+        (failureTag === undefined ||
+          failureTag === "Defect" ||
+          validation.recoveryTags?.includes(failureTag) !== true)
+      ) {
+        throw new WorkflowStartError(
+          "WORKFLOW_INCOMPATIBLE",
+          "The Failed Workflow Run has no stable-tagged Recovery Handler",
+        );
+      }
+      const fixed = prepared;
+      return {
+        execute: async ({
+          attempt,
+          leaseGeneration,
+          leaseHolder,
+          projectId,
+          rootRunId,
+          runId,
+          signal,
+        }) => {
+          try {
+            const result = await invokeRuntime(
+              fixed.checkout.path,
+              fixed.revision.configPath,
+              {
+                attempt,
+                endpoint,
+                input: validation.encodedInput,
+                leaseGeneration,
+                leaseHolder,
+                mode: "execute",
+                projectId,
+                ...(request.state === "Failed" ? { recoveryFailure: request.outcome } : {}),
+                rootRunId,
+                runId,
+                workflowName: request.revision.stableName,
+              },
+              signal,
+            );
+            if (
+              result.state !== "Completed" &&
+              result.state !== "Discarded" &&
+              result.state !== "Failed" &&
+              result.state !== "Suspended"
+            ) {
+              throw new Error("Project Runtime Process returned no outcome");
+            }
+            return { state: result.state, value: result.value };
+          } finally {
+            await fixed.checkout.dispose();
+          }
+        },
+        leaseAvailability: "Available" as const,
+        recoveryPolicy:
+          request.state === "Failed" ? ("Available" as const) : ("NotRequired" as const),
+        revisionCompatibility: "Compatible" as const,
+        runtimeConfigurationCompatibility: "Compatible" as const,
+        sourceAvailability: "Available" as const,
+      };
+    } catch (error) {
+      await prepared?.checkout.dispose().catch(() => undefined);
+      if (error instanceof WorkflowStartError) throw error;
+      if (error instanceof ProjectSourceValidationError) {
+        throw new WorkflowStartError(
+          "WORKFLOW_INCOMPATIBLE",
+          "The pinned Project source is unavailable or invalid",
           error.diagnostics,
         );
       }

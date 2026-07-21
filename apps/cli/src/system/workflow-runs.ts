@@ -7,6 +7,7 @@ export type WorkflowStartErrorCode =
   | "PROJECT_NOT_FOUND"
   | "PROJECT_UNAVAILABLE"
   | "RUNTIME_START_FAILED"
+  | "WORKFLOW_INCOMPATIBLE"
   | "WORKFLOW_NOT_FOUND";
 
 export class WorkflowStartError extends Error {
@@ -43,22 +44,51 @@ export type WorkflowTerminalOutcome =
   | { readonly state: "Completed"; readonly value: unknown }
   | { readonly state: "Failed"; readonly value: unknown };
 
+export type WorkflowExecutionOutcome =
+  | WorkflowTerminalOutcome
+  | { readonly state: "Discarded" | "Suspended"; readonly value?: unknown };
+
 export interface PreparedWorkflowRun {
   readonly encodedInput: unknown;
   readonly execute: (scope: {
-    readonly attempt: 1;
-    readonly leaseGeneration: 1;
+    readonly attempt: number;
+    readonly leaseGeneration: number;
     readonly leaseHolder: string;
     readonly projectId: string;
     readonly rootRunId: string;
     readonly runId: string;
-  }) => Promise<WorkflowTerminalOutcome>;
+    readonly signal: AbortSignal;
+  }) => Promise<WorkflowExecutionOutcome>;
   readonly revision: PinnedWorkflowRevision;
   readonly revisionSnapshot: WorkflowRevisionSnapshot;
 }
 
 export interface WorkflowRuntimeAdapter {
   readonly prepare: (request: WorkflowStartRequest) => Promise<PreparedWorkflowRun>;
+  readonly prepareResume?: (
+    request: WorkflowResumePreflightRequest,
+  ) => Promise<PreparedWorkflowResume>;
+}
+
+export interface WorkflowResumePreflightRequest {
+  readonly attempt: number;
+  readonly input: unknown;
+  readonly outcome: unknown;
+  readonly projectId: string;
+  readonly revision: PinnedWorkflowRevision;
+  readonly revisionSnapshot: WorkflowRevisionSnapshot;
+  readonly rootRunId: string;
+  readonly runId: string;
+  readonly state: "Failed" | "Interrupted" | "Suspended";
+}
+
+export interface PreparedWorkflowResume {
+  readonly execute: PreparedWorkflowRun["execute"];
+  readonly leaseAvailability: "Available";
+  readonly recoveryPolicy: "Available" | "NotRequired";
+  readonly revisionCompatibility: "Compatible";
+  readonly runtimeConfigurationCompatibility: "Compatible";
+  readonly sourceAvailability: "Available";
 }
 
 export interface WorkflowStartRequest {
@@ -74,6 +104,7 @@ const decoded = <A>(value: string | null): A | null =>
 const decodedValue = <A>(value: string): A => (JSON.parse(value) as { readonly value: A }).value;
 
 export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRuntimeAdapter) => {
+  const executionControllers = new Map<string, AbortController>();
   const settlements = new Map<string, Promise<void>>();
 
   const finalize = (
@@ -89,11 +120,11 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
     store.workflowRuns.finalize(
       {
         evidence: {
-          attempt: 1,
+          attempt: scope.attempt,
           causationId: inspected.evidence[0]?.eventId ?? null,
           details: encoded(outcome.value),
           eventId: randomUUID(),
-          idempotencyKey: `${runId}:terminal`,
+          idempotencyKey: `${runId}:terminal:${scope.attempt}`,
           parentEventId: inspected.evidence[0]?.eventId ?? null,
           recordedAt: now,
           runId,
@@ -102,8 +133,8 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
           type,
         },
         journal: {
-          attempt: 1,
-          idempotencyKey: `${runId}:terminal`,
+          attempt: scope.attempt,
+          idempotencyKey: `${runId}:terminal:${scope.attempt}`,
           operation: type,
           payload: encoded(outcome.value),
           runId,
@@ -160,17 +191,51 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
       revision: {
         declaredVersion: pinnedRevision?.declaredVersion ?? stored.revision.declaredVersion,
         fingerprint: pinnedRevision?.fingerprint ?? stored.revision.fingerprint,
-        source: revisionSnapshot?.source ?? (JSON.parse(stored.revision.source) as unknown),
+        source:
+          revisionSnapshot?.source ??
+          (JSON.parse(stored.revision.source) as PinnedWorkflowRevision["source"]),
         stableName: pinnedRevision?.stableName ?? stored.revision.stableName,
         workflowAbi: pinnedRevision?.workflowAbi ?? stored.revision.workflowAbi,
       },
       revisionSnapshot: revisionSnapshot ?? null,
+      resumeCompatibility: { status: "NotChecked" as const },
       rootRunId: stored.run.rootRunId,
       runId: stored.run.runId,
       state: stored.run.state,
+      runtimeConfigurationCompatibility: { status: "NotChecked" as const },
       trigger: JSON.parse(stored.run.trigger) as unknown,
       updatedAt: stored.run.updatedAt,
     };
+  };
+
+  const executeAttempt = async (
+    execute: PreparedWorkflowRun["execute"],
+    scope: ExecutionWriteScope,
+    controller: AbortController,
+  ) => {
+    const heartbeat = setInterval(() => {
+      try {
+        store.workflowRuns.renewLease(scope, new Date(Date.now() + 5 * 60_000).toISOString());
+      } catch {
+        // The next fenced write or finalization will reconcile lost authority.
+      }
+    }, 60_000);
+    heartbeat.unref();
+    let outcome: WorkflowExecutionOutcome;
+    try {
+      outcome = await execute({ ...scope, signal: controller.signal });
+    } catch {
+      store.workflowRuns.interruptScope(scope, "ProjectRuntimeProcessLost");
+      return;
+    } finally {
+      clearInterval(heartbeat);
+      if (executionControllers.get(scope.runId) === controller) {
+        executionControllers.delete(scope.runId);
+      }
+    }
+    if (outcome.state === "Completed" || outcome.state === "Failed") {
+      finalize(scope.runId, outcome, scope);
+    }
   };
 
   return {
@@ -226,10 +291,176 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
         ...request,
         details: encoded(request.payload),
       }),
+    discard: (runId: string) => {
+      const discarded = store.workflowRuns.discard(runId);
+      if (discarded.state === "Discarded") executionControllers.get(runId)?.abort();
+      return discarded;
+    },
+    gracefulStop: async () => {
+      const runningRoots = store.workflowRuns
+        .list()
+        .filter((run) => run.runId === run.rootRunId && run.state === "Running")
+        .map(({ runId }) => runId);
+      const requestedRoots: Array<string> = [];
+      for (const runId of runningRoots) {
+        try {
+          store.workflowRuns.requestSuspend(runId, "SystemProcessStop");
+          requestedRoots.push(runId);
+        } catch {
+          // A terminal boundary may win the race after the Running roots were listed.
+        }
+      }
+      await Promise.allSettled(
+        requestedRoots
+          .map((runId) => settlements.get(runId))
+          .filter((value) => value !== undefined),
+      );
+      return requestedRoots;
+    },
+    resume: (runId: string) => {
+      const inspected = inspect(runId);
+      if (inspected === undefined) throw new Error(`Workflow Run ${runId} was not found`);
+      if (
+        inspected.state !== "Suspended" &&
+        inspected.state !== "Interrupted" &&
+        inspected.state !== "Failed"
+      ) {
+        throw new Error(`Workflow Run ${runId} is immutable in ${inspected.state} state`);
+      }
+      if (inspected.revisionSnapshot === null) {
+        throw new WorkflowStartError(
+          "WORKFLOW_INCOMPATIBLE",
+          `Workflow Run ${runId} has no Workflow Revision Snapshot`,
+        );
+      }
+      const outcome =
+        typeof inspected.outcome === "object" &&
+        inspected.outcome !== null &&
+        "value" in inspected.outcome
+          ? inspected.outcome.value
+          : inspected.outcome;
+      if (
+        inspected.state === "Failed" &&
+        typeof outcome === "object" &&
+        outcome !== null &&
+        "_tag" in outcome &&
+        outcome._tag === "Defect"
+      ) {
+        throw new WorkflowStartError(
+          "WORKFLOW_INCOMPATIBLE",
+          `Workflow Run ${runId} failed with a non-resumable Defect`,
+        );
+      }
+      if (inspected.evidence.some(({ type }) => type === "Activity.Uncertain")) {
+        throw new WorkflowStartError(
+          "WORKFLOW_INCOMPATIBLE",
+          `Workflow Run ${runId} has an Uncertain Activity Outcome that requires reconciliation`,
+        );
+      }
+      if (
+        inspected.lease?.state === "Active" &&
+        inspected.lease.expiresAt > new Date().toISOString()
+      ) {
+        throw new WorkflowStartError(
+          "WORKFLOW_INCOMPATIBLE",
+          `Workflow Run ${runId} still has active execution authority`,
+        );
+      }
+      const prepareResume = runtime.prepareResume;
+      if (prepareResume === undefined) {
+        throw new WorkflowStartError(
+          "WORKFLOW_INCOMPATIBLE",
+          "The runtime cannot perform complete resume preflight",
+        );
+      }
+      const nextAttempt = (inspected.attempts.at(-1)?.number ?? 0) + 1;
+      return prepareResume({
+        attempt: nextAttempt - 1,
+        input: decodedValue(store.workflowRuns.find(runId)?.run.input ?? encoded(undefined)),
+        outcome,
+        projectId: inspected.projectId,
+        revision: inspected.revision,
+        revisionSnapshot: inspected.revisionSnapshot,
+        rootRunId: inspected.rootRunId,
+        runId,
+        state: inspected.state,
+      }).then((prepared) => {
+        const now = new Date().toISOString();
+        const leaseHolder = randomUUID();
+        const expiresAt = new Date(Date.now() + 5 * 60_000).toISOString();
+        const eventId = randomUUID();
+        const sequence = inspected.evidence.length + 1;
+        const idempotencyKey = `${runId}:resume:${nextAttempt}`;
+        const details = encoded({
+          leaseAvailability: prepared.leaseAvailability,
+          recoveryPolicy: prepared.recoveryPolicy,
+          revisionCompatibility: prepared.revisionCompatibility,
+          runtimeConfigurationCompatibility: prepared.runtimeConfigurationCompatibility,
+          sourceAvailability: prepared.sourceAvailability,
+        });
+        store.workflowRuns.resume({
+          attempt: {
+            finishedAt: null,
+            number: nextAttempt,
+            runId,
+            startedAt: now,
+            state: "Running",
+          },
+          evidence: {
+            attempt: nextAttempt,
+            causationId: inspected.evidence[0]?.eventId ?? null,
+            details,
+            eventId,
+            idempotencyKey,
+            parentEventId: inspected.evidence[0]?.eventId ?? null,
+            recordedAt: now,
+            runId,
+            sequence,
+            subject: runId,
+            type: "WorkflowRun.Resumed",
+          },
+          journal: {
+            attempt: nextAttempt,
+            idempotencyKey,
+            operation: "WorkflowRun.Resumed",
+            payload: details,
+            runId,
+            sequence,
+            writtenAt: now,
+          },
+          lease: {
+            acquiredAt: now,
+            expiresAt,
+            generation: nextAttempt,
+            holder: leaseHolder,
+            runId,
+            state: "Active",
+          },
+          runId,
+        });
+        const executionScope = {
+          attempt: nextAttempt,
+          leaseGeneration: nextAttempt,
+          leaseHolder,
+          projectId: inspected.projectId,
+          rootRunId: inspected.rootRunId,
+          runId,
+        };
+        const controller = new AbortController();
+        executionControllers.set(runId, controller);
+        const settlement = Promise.resolve().then(() =>
+          executeAttempt(prepared.execute, executionScope, controller),
+        );
+        settlements.set(runId, settlement);
+        void settlement.catch(() => undefined);
+        return { attempt: nextAttempt, runId, state: "Running" as const };
+      });
+    },
     settle: async (runId: string) => {
       await settlements.get(runId);
       return inspect(runId);
     },
+    suspend: (runId: string) => store.workflowRuns.requestSuspend(runId, "Operator"),
     start: async (request: WorkflowStartRequest) => {
       // Preparation owns Project/source discovery, complete registry validation,
       // runtime configuration preflight, and schema decoding. Nothing durable is
@@ -314,33 +545,10 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
         rootRunId: runId,
         runId,
       };
+      const controller = new AbortController();
+      executionControllers.set(runId, controller);
       const settlement = Promise.resolve().then(async () => {
-        const heartbeat = setInterval(() => {
-          try {
-            store.workflowRuns.renewLease(
-              executionScope,
-              new Date(Date.now() + 5 * 60_000).toISOString(),
-            );
-          } catch {
-            // The next fenced write or finalization will reconcile lost authority.
-          }
-        }, 60_000);
-        heartbeat.unref();
-        let outcome: WorkflowTerminalOutcome;
-        try {
-          outcome = await prepared.execute(executionScope);
-        } catch (error) {
-          outcome = {
-            state: "Failed",
-            value: {
-              _tag: "RuntimeDefect",
-              message: error instanceof Error ? error.message : String(error),
-            },
-          };
-        } finally {
-          clearInterval(heartbeat);
-        }
-        finalize(runId, outcome, executionScope);
+        await executeAttempt(prepared.execute, executionScope, controller);
       });
       settlements.set(runId, settlement);
       void settlement.catch(() => undefined);

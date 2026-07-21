@@ -89,6 +89,16 @@ const executionLeases = sqliteTable("execution_leases", {
   state: text("state").notNull(),
 });
 
+const activityClaims = sqliteTable("activity_claims", {
+  attempt: integer("attempt").notNull(),
+  completionIdempotencyKey: text("completion_idempotency_key").notNull(),
+  runId: text("run_id")
+    .notNull()
+    .references(() => workflowRuns.runId),
+  startedIdempotencyKey: text("started_idempotency_key").notNull(),
+  subject: text("subject").notNull(),
+});
+
 const workflowJournal = sqliteTable("workflow_journal", {
   attempt: integer("attempt").notNull(),
   idempotencyKey: text("idempotency_key").notNull(),
@@ -266,6 +276,20 @@ const migrations = [
       )`,
     ],
   },
+  {
+    id: 6,
+    statements: [
+      `CREATE TABLE activity_claims (
+        run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),
+        started_idempotency_key TEXT NOT NULL,
+        completion_idempotency_key TEXT NOT NULL,
+        attempt INTEGER NOT NULL CHECK (attempt > 0),
+        subject TEXT NOT NULL,
+        PRIMARY KEY (run_id, started_idempotency_key),
+        UNIQUE (run_id, completion_idempotency_key)
+      )`,
+    ],
+  },
 ] as const;
 
 const migrationChecksum = (statements: ReadonlyArray<string>) =>
@@ -420,7 +444,13 @@ export interface WorkflowRunRepository {
   ) =>
     | { readonly evidence: StoredEvidenceEvent; readonly status: "execute" }
     | { readonly evidence: StoredEvidenceEvent; readonly status: "uncertain" }
+    | { readonly evidence: StoredEvidenceEvent; readonly status: "discarded" | "suspended" }
     | { readonly payload: string; readonly status: "replay" };
+  readonly discard: (
+    runId: string,
+  ) =>
+    | { readonly runId: string; readonly state: "Discarded"; readonly status: "discarded" }
+    | { readonly runId: string; readonly state: "Running"; readonly status: "requested" };
   readonly finalize: (record: WorkflowTerminalRecord, scope: ExecutionWriteScope) => void;
   readonly find: (runId: string) =>
     | {
@@ -434,11 +464,31 @@ export interface WorkflowRunRepository {
     | undefined;
   readonly list: () => ReadonlyArray<StoredWorkflowRun>;
   readonly interruptRunning: () => ReadonlyArray<string>;
+  readonly interruptScope: (
+    scope: ExecutionWriteScope,
+    reason: "ProjectRuntimeProcessLost",
+  ) => boolean;
+  readonly reconcileExpiredLeases: () => ReadonlyArray<string>;
+  readonly requestSuspend: (
+    runId: string,
+    reason?: "Operator" | "SystemProcessStop",
+  ) => {
+    readonly runId: string;
+    readonly state: WorkflowRunState;
+    readonly status: "requested";
+  };
   readonly readBoundary: (
     scope: ExecutionWriteScope,
     idempotencyKey: string,
   ) => StoredWorkflowJournalEntry | undefined;
   readonly renewLease: (scope: ExecutionWriteScope, expiresAt: string) => void;
+  readonly resume: (record: {
+    readonly attempt: StoredExecutionAttempt;
+    readonly evidence: StoredEvidenceEvent;
+    readonly journal: StoredWorkflowJournalEntry;
+    readonly lease: StoredExecutionLease;
+    readonly runId: string;
+  }) => void;
   readonly start: (record: WorkflowStartRecord) => void;
 }
 
@@ -859,15 +909,314 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
       transaction.insert(evidenceEvents).values(evidence).run();
       return evidence;
     };
+    const lifecycleRequested = (
+      transaction: StoreTransaction,
+      runId: string,
+      operation: "Discard" | "Suspend",
+    ) => {
+      const requested = transaction
+        .select({ sequence: workflowJournal.sequence })
+        .from(workflowJournal)
+        .where(
+          and(
+            eq(workflowJournal.runId, runId),
+            eq(workflowJournal.operation, `WorkflowRun.${operation}Requested`),
+          ),
+        )
+        .orderBy(sql`${workflowJournal.sequence} desc`)
+        .get();
+      const applied = transaction
+        .select({ sequence: workflowJournal.sequence })
+        .from(workflowJournal)
+        .where(
+          and(
+            eq(workflowJournal.runId, runId),
+            eq(
+              workflowJournal.operation,
+              operation === "Suspend" ? "WorkflowRun.Suspended" : "WorkflowRun.Discarded",
+            ),
+          ),
+        )
+        .orderBy(sql`${workflowJournal.sequence} desc`)
+        .get();
+      return requested !== undefined && (applied?.sequence ?? 0) < requested.sequence;
+    };
+    const appendLifecycle = (
+      transaction: StoreTransaction,
+      runId: string,
+      attempt: number,
+      operation: string,
+      detailsValue: unknown,
+      options: { readonly idempotencyKey?: string; readonly subject?: string } = {},
+    ) => {
+      const idempotencyKey = options.idempotencyKey ?? `${runId}:${operation}:${attempt}`;
+      const existing = transaction
+        .select()
+        .from(evidenceEvents)
+        .where(
+          and(eq(evidenceEvents.runId, runId), eq(evidenceEvents.idempotencyKey, idempotencyKey)),
+        )
+        .get();
+      if (existing !== undefined) return existing;
+      const previous = transaction
+        .select({ sequence: sql<number>`max(${evidenceEvents.sequence})` })
+        .from(evidenceEvents)
+        .where(eq(evidenceEvents.runId, runId))
+        .get();
+      const sequence = (previous?.sequence ?? 0) + 1;
+      const parentEventId =
+        transaction
+          .select({ eventId: evidenceEvents.eventId })
+          .from(evidenceEvents)
+          .where(and(eq(evidenceEvents.runId, runId), eq(evidenceEvents.sequence, 1)))
+          .get()?.eventId ?? null;
+      const now = new Date().toISOString();
+      const details = JSON.stringify({ encodingVersion: 1, value: detailsValue });
+      const event: StoredEvidenceEvent = {
+        attempt,
+        causationId: parentEventId,
+        details,
+        eventId: randomUUID(),
+        idempotencyKey,
+        parentEventId,
+        recordedAt: now,
+        runId,
+        sequence,
+        subject: options.subject ?? runId,
+        type: operation,
+      };
+      transaction
+        .insert(workflowJournal)
+        .values({
+          attempt,
+          idempotencyKey: event.idempotencyKey,
+          operation,
+          payload: details,
+          runId,
+          sequence,
+          writtenAt: now,
+        })
+        .run();
+      transaction.insert(evidenceEvents).values(event).run();
+      return event;
+    };
+    const appendUncertainActivities = (transaction: StoreTransaction, runId: string) => {
+      const claims = transaction
+        .select()
+        .from(activityClaims)
+        .where(eq(activityClaims.runId, runId))
+        .all();
+      const uncertain: Array<StoredEvidenceEvent> = [];
+      for (const claim of claims) {
+        const completed = transaction
+          .select({ sequence: workflowJournal.sequence })
+          .from(workflowJournal)
+          .where(
+            and(
+              eq(workflowJournal.runId, runId),
+              eq(workflowJournal.idempotencyKey, claim.completionIdempotencyKey),
+            ),
+          )
+          .get();
+        if (completed !== undefined) continue;
+        const started = transaction
+          .select({ eventId: evidenceEvents.eventId })
+          .from(evidenceEvents)
+          .where(
+            and(
+              eq(evidenceEvents.runId, runId),
+              eq(evidenceEvents.idempotencyKey, claim.startedIdempotencyKey),
+            ),
+          )
+          .get();
+        uncertain.push(
+          appendLifecycle(
+            transaction,
+            runId,
+            claim.attempt,
+            "Activity.Uncertain",
+            { activityEventId: started?.eventId ?? null, subject: claim.subject },
+            {
+              idempotencyKey: `${claim.startedIdempotencyKey}:uncertain`,
+              subject: claim.subject,
+            },
+          ),
+        );
+      }
+      return uncertain;
+    };
+    const applyPendingLifecycle = (
+      transaction: StoreTransaction,
+      runId: string,
+      attempt: number,
+    ):
+      | { readonly control: "discard" | "suspend"; readonly evidence: StoredEvidenceEvent }
+      | undefined => {
+      const run = transaction
+        .select({ state: workflowRuns.state })
+        .from(workflowRuns)
+        .where(eq(workflowRuns.runId, runId))
+        .get();
+      if (run?.state !== "Running") return undefined;
+      const control = lifecycleRequested(transaction, runId, "Discard")
+        ? ("discard" as const)
+        : lifecycleRequested(transaction, runId, "Suspend")
+          ? ("suspend" as const)
+          : undefined;
+      if (control === undefined) return undefined;
+      const state = control === "suspend" ? "Suspended" : "Discarded";
+      const operation = `WorkflowRun.${state}`;
+      const evidence = appendLifecycle(transaction, runId, attempt, operation, {
+        reason: control === "suspend" ? "Requested" : "DiscardedByOperator",
+      });
+      transaction
+        .update(workflowRuns)
+        .set({ state, updatedAt: evidence.recordedAt })
+        .where(eq(workflowRuns.runId, runId))
+        .run();
+      transaction
+        .update(executionAttempts)
+        .set({ finishedAt: evidence.recordedAt, state })
+        .where(and(eq(executionAttempts.runId, runId), eq(executionAttempts.number, attempt)))
+        .run();
+      transaction
+        .update(executionLeases)
+        .set({ state: "Released" })
+        .where(and(eq(executionLeases.runId, runId), eq(executionLeases.state, "Active")))
+        .run();
+      return { control, evidence };
+    };
+    const interruptRun = (
+      runId: string,
+      reason: "LeaseExpired" | "ProjectRuntimeProcessLost" | "SystemProcessRestart",
+      scope?: ExecutionWriteScope,
+    ) =>
+      database.transaction((transaction) => {
+        const run = transaction
+          .select({ state: workflowRuns.state })
+          .from(workflowRuns)
+          .where(eq(workflowRuns.runId, runId))
+          .get();
+        if (run?.state !== "Running") return false;
+        const attempt =
+          transaction
+            .select({ number: executionAttempts.number })
+            .from(executionAttempts)
+            .where(eq(executionAttempts.runId, runId))
+            .orderBy(sql`${executionAttempts.number} desc`)
+            .get()?.number ?? 1;
+        if (scope !== undefined) {
+          const lease = transaction
+            .select()
+            .from(executionLeases)
+            .where(
+              and(
+                eq(executionLeases.runId, scope.runId),
+                eq(executionLeases.generation, scope.leaseGeneration),
+              ),
+            )
+            .get();
+          if (
+            attempt !== scope.attempt ||
+            runId !== scope.runId ||
+            lease?.state !== "Active" ||
+            lease.holder !== scope.leaseHolder
+          ) {
+            return false;
+          }
+        }
+        appendUncertainActivities(transaction, runId);
+        const evidence = appendLifecycle(transaction, runId, attempt, "WorkflowRun.Interrupted", {
+          reason,
+        });
+        transaction
+          .update(workflowRuns)
+          .set({ state: "Interrupted", updatedAt: evidence.recordedAt })
+          .where(eq(workflowRuns.runId, runId))
+          .run();
+        transaction
+          .update(executionAttempts)
+          .set({ finishedAt: evidence.recordedAt, state: "Interrupted" })
+          .where(and(eq(executionAttempts.runId, runId), eq(executionAttempts.number, attempt)))
+          .run();
+        transaction
+          .update(executionLeases)
+          .set({ state: "Expired" })
+          .where(and(eq(executionLeases.runId, runId), eq(executionLeases.state, "Active")))
+          .run();
+        return true;
+      });
+    const reconcileExpiredScope = (scope: ExecutionWriteScope) => {
+      const lease = database
+        .select()
+        .from(executionLeases)
+        .where(
+          and(
+            eq(executionLeases.runId, scope.runId),
+            eq(executionLeases.generation, scope.leaseGeneration),
+          ),
+        )
+        .get();
+      if (lease?.state === "Active" && lease.expiresAt <= new Date().toISOString()) {
+        interruptRun(scope.runId, "LeaseExpired");
+        throw new Error(`Workflow Run ${scope.runId} rejected a delayed execution write`);
+      }
+    };
     const workflowRunRepository: WorkflowRunRepository = {
-      appendBoundary: (record) =>
-        database.transaction((transaction) => {
+      appendBoundary: (record) => {
+        reconcileExpiredScope(record);
+        return database.transaction((transaction) => {
           assertExecutionScope(transaction, record);
-          return insertBoundary(transaction, record);
-        }),
-      claimActivity: (record) =>
-        database.transaction((transaction) => {
+          const evidence = insertBoundary(transaction, record);
+          const lifecycle = applyPendingLifecycle(transaction, record.runId, record.attempt);
+          return lifecycle === undefined
+            ? evidence
+            : Object.assign(evidence, { control: lifecycle.control });
+        });
+      },
+      claimActivity: (record) => {
+        reconcileExpiredScope(record);
+        return database.transaction((transaction) => {
           assertExecutionScope(transaction, record);
+          const lifecycle = applyPendingLifecycle(transaction, record.runId, record.attempt);
+          if (lifecycle !== undefined) {
+            return {
+              evidence: lifecycle.evidence,
+              status: `${lifecycle.control}ed` as "discarded" | "suspended",
+            } as const;
+          }
+          const storedClaim = transaction
+            .select()
+            .from(activityClaims)
+            .where(
+              and(
+                eq(activityClaims.runId, record.runId),
+                eq(activityClaims.startedIdempotencyKey, record.idempotencyKey),
+              ),
+            )
+            .get();
+          if (
+            storedClaim !== undefined &&
+            (storedClaim.attempt !== record.attempt ||
+              storedClaim.completionIdempotencyKey !== record.completionIdempotencyKey ||
+              storedClaim.subject !== record.subject)
+          ) {
+            throw new Error(
+              `Workflow Run ${record.runId} reused Activity claim ${record.idempotencyKey} with different data`,
+            );
+          }
+          if (storedClaim === undefined) {
+            transaction
+              .insert(activityClaims)
+              .values({
+                attempt: record.attempt,
+                completionIdempotencyKey: record.completionIdempotencyKey,
+                runId: record.runId,
+                startedIdempotencyKey: record.idempotencyKey,
+                subject: record.subject,
+              })
+              .run();
+          }
           const completed = transaction
             .select()
             .from(workflowJournal)
@@ -892,11 +1241,68 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
             record.idempotencyKey,
           );
           if (existing !== undefined) {
-            return { evidence: existing, status: "uncertain" } as const;
+            const evidence = appendLifecycle(
+              transaction,
+              record.runId,
+              record.attempt,
+              "Activity.Uncertain",
+              { activityEventId: existing.eventId, subject: record.subject },
+              {
+                idempotencyKey: `${record.idempotencyKey}:uncertain`,
+                subject: record.subject,
+              },
+            );
+            return { evidence, status: "uncertain" } as const;
           }
           return { evidence: insertBoundary(transaction, record), status: "execute" } as const;
+        });
+      },
+      discard: (runId) =>
+        database.transaction((transaction) => {
+          const run = transaction
+            .select()
+            .from(workflowRuns)
+            .where(eq(workflowRuns.runId, runId))
+            .get();
+          if (run === undefined) throw new Error(`Workflow Run ${runId} was not found`);
+          if (run.state === "Completed" || run.state === "Discarded") {
+            throw new Error(`Workflow Run ${runId} is immutable in ${run.state} state`);
+          }
+          const attempt =
+            transaction
+              .select({ number: executionAttempts.number })
+              .from(executionAttempts)
+              .where(eq(executionAttempts.runId, runId))
+              .orderBy(sql`${executionAttempts.number} desc`)
+              .get()?.number ?? 1;
+          if (run.state === "Running") {
+            appendLifecycle(transaction, runId, attempt, "WorkflowRun.DiscardRequested", {});
+            appendUncertainActivities(transaction, runId);
+          }
+          const evidence = appendLifecycle(transaction, runId, attempt, "WorkflowRun.Discarded", {
+            cleanup: "BestEffort",
+          });
+          transaction
+            .update(workflowRuns)
+            .set({ state: "Discarded", updatedAt: evidence.recordedAt })
+            .where(eq(workflowRuns.runId, runId))
+            .run();
+          if (run.state === "Running") {
+            transaction
+              .update(executionAttempts)
+              .set({ finishedAt: evidence.recordedAt, state: "Discarded" })
+              .where(and(eq(executionAttempts.runId, runId), eq(executionAttempts.number, attempt)))
+              .run();
+            transaction
+              .update(executionLeases)
+              .set({ state: "Released" })
+              .where(and(eq(executionLeases.runId, runId), eq(executionLeases.state, "Active")))
+              .run();
+          }
+          return { runId, state: "Discarded" as const, status: "discarded" as const };
         }),
       finalize: (record, scope) => {
+        reconcileExpiredScope(scope);
         database.transaction((transaction) => {
           assertExecutionScope(transaction, scope);
           transaction
@@ -988,82 +1394,49 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
           .from(workflowRuns)
           .where(eq(workflowRuns.state, "Running"))
           .all();
-        for (const { runId } of running) {
-          database.transaction((transaction) => {
-            const previous = transaction
-              .select({ sequence: sql<number>`max(${evidenceEvents.sequence})` })
-              .from(evidenceEvents)
-              .where(eq(evidenceEvents.runId, runId))
-              .get();
-            const sequence = (previous?.sequence ?? 0) + 1;
-            const now = new Date().toISOString();
-            const attempt =
-              transaction
-                .select({ number: executionAttempts.number })
-                .from(executionAttempts)
-                .where(eq(executionAttempts.runId, runId))
-                .orderBy(sql`${executionAttempts.number} desc`)
-                .get()?.number ?? 1;
-            const parentEventId =
-              transaction
-                .select({ eventId: evidenceEvents.eventId })
-                .from(evidenceEvents)
-                .where(and(eq(evidenceEvents.runId, runId), eq(evidenceEvents.sequence, 1)))
-                .get()?.eventId ?? null;
-            const details = JSON.stringify({
-              encodingVersion: 1,
-              value: { reason: "SystemProcessRestart" },
-            });
-            transaction
-              .update(workflowRuns)
-              .set({ state: "Interrupted", updatedAt: now })
-              .where(eq(workflowRuns.runId, runId))
-              .run();
-            transaction
-              .update(executionAttempts)
-              .set({ finishedAt: now, state: "Interrupted" })
-              .where(and(eq(executionAttempts.runId, runId), eq(executionAttempts.number, attempt)))
-              .run();
-            transaction
-              .update(executionLeases)
-              .set({ state: "Expired" })
-              .where(and(eq(executionLeases.runId, runId), eq(executionLeases.state, "Active")))
-              .run();
-            const idempotencyKey = `${runId}:interrupted:${attempt}`;
-            transaction
-              .insert(workflowJournal)
-              .values({
-                attempt,
-                idempotencyKey,
-                operation: "WorkflowRun.Interrupted",
-                payload: details,
-                runId,
-                sequence,
-                writtenAt: now,
-              })
-              .run();
-            transaction
-              .insert(evidenceEvents)
-              .values({
-                attempt,
-                causationId: parentEventId,
-                details,
-                eventId: randomUUID(),
-                idempotencyKey,
-                parentEventId,
-                recordedAt: now,
-                runId,
-                sequence,
-                subject: runId,
-                type: "WorkflowRun.Interrupted",
-              })
-              .run();
-          });
-        }
+        for (const { runId } of running) interruptRun(runId, "SystemProcessRestart");
         return running.map(({ runId }) => runId);
       },
-      readBoundary: (scope, idempotencyKey) =>
+      interruptScope: (scope, reason) => interruptRun(scope.runId, reason, scope),
+      reconcileExpiredLeases: () => {
+        const now = new Date().toISOString();
+        const expired = database
+          .select({ runId: executionLeases.runId })
+          .from(executionLeases)
+          .where(
+            and(eq(executionLeases.state, "Active"), sql`${executionLeases.expiresAt} <= ${now}`),
+          )
+          .all();
+        const interrupted: Array<string> = [];
+        for (const { runId } of expired) {
+          if (interruptRun(runId, "LeaseExpired")) interrupted.push(runId);
+        }
+        return interrupted;
+      },
+      requestSuspend: (runId, reason = "Operator") =>
         database.transaction((transaction) => {
+          const run = transaction
+            .select()
+            .from(workflowRuns)
+            .where(eq(workflowRuns.runId, runId))
+            .get();
+          if (run === undefined) throw new Error(`Workflow Run ${runId} was not found`);
+          if (run.state !== "Running") {
+            throw new Error(`Workflow Run ${runId} cannot suspend from ${run.state} state`);
+          }
+          const attempt =
+            transaction
+              .select({ number: executionAttempts.number })
+              .from(executionAttempts)
+              .where(eq(executionAttempts.runId, runId))
+              .orderBy(sql`${executionAttempts.number} desc`)
+              .get()?.number ?? 1;
+          appendLifecycle(transaction, runId, attempt, "WorkflowRun.SuspendRequested", { reason });
+          return { runId, state: "Running" as const, status: "requested" as const };
+        }),
+      readBoundary: (scope, idempotencyKey) => {
+        reconcileExpiredScope(scope);
+        return database.transaction((transaction) => {
           assertExecutionScope(transaction, scope);
           return transaction
             .select()
@@ -1075,8 +1448,10 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
               ),
             )
             .get();
-        }),
+        });
+      },
       renewLease: (scope, expiresAt) => {
+        reconcileExpiredScope(scope);
         database.transaction((transaction) => {
           assertExecutionScope(transaction, scope);
           transaction
@@ -1089,6 +1464,55 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
               ),
             )
             .run();
+        });
+      },
+      resume: (record) => {
+        database.transaction((transaction) => {
+          const run = transaction
+            .select()
+            .from(workflowRuns)
+            .where(eq(workflowRuns.runId, record.runId))
+            .get();
+          if (run === undefined) throw new Error(`Workflow Run ${record.runId} was not found`);
+          if (!["Suspended", "Interrupted", "Failed"].includes(run.state)) {
+            throw new Error(`Workflow Run ${record.runId} is immutable in ${run.state} state`);
+          }
+          const latestAttempt =
+            transaction
+              .select({ number: executionAttempts.number })
+              .from(executionAttempts)
+              .where(eq(executionAttempts.runId, record.runId))
+              .orderBy(sql`${executionAttempts.number} desc`)
+              .get()?.number ?? 0;
+          const latestGeneration =
+            transaction
+              .select({ generation: executionLeases.generation })
+              .from(executionLeases)
+              .where(eq(executionLeases.runId, record.runId))
+              .orderBy(sql`${executionLeases.generation} desc`)
+              .get()?.generation ?? 0;
+          if (
+            record.attempt.number !== latestAttempt + 1 ||
+            record.lease.generation !== latestGeneration + 1
+          ) {
+            throw new Error(`Workflow Run ${record.runId} resume authority is stale`);
+          }
+          transaction
+            .update(executionLeases)
+            .set({ state: "Superseded" })
+            .where(
+              and(eq(executionLeases.runId, record.runId), eq(executionLeases.state, "Active")),
+            )
+            .run();
+          transaction
+            .update(workflowRuns)
+            .set({ state: "Running", updatedAt: record.evidence.recordedAt })
+            .where(eq(workflowRuns.runId, record.runId))
+            .run();
+          transaction.insert(executionAttempts).values(record.attempt).run();
+          transaction.insert(executionLeases).values(record.lease).run();
+          transaction.insert(workflowJournal).values(record.journal).run();
+          transaction.insert(evidenceEvents).values(record.evidence).run();
         });
       },
       start: (record) => {

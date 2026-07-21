@@ -10,6 +10,7 @@ interface RuntimeRequest {
   readonly leaseHolder?: string;
   readonly mode: "execute" | "validate";
   readonly projectId?: string;
+  readonly recoveryFailure?: unknown;
   readonly rootRunId?: string;
   readonly runId?: string;
   readonly workflowName: string;
@@ -34,6 +35,9 @@ const loadWorkflow = async (request: RuntimeRequest) => {
       readonly failure: Schema.Top;
       readonly input: Schema.Top;
       readonly name: string;
+      readonly recovery?: Readonly<
+        Record<string, (failure: unknown) => Effect.Effect<void, never, unknown>>
+      >;
       readonly run: (input: unknown) => Effect.Effect<unknown, unknown, unknown>;
       readonly success: Schema.Top;
     }>;
@@ -64,6 +68,7 @@ const executeWorkflow = async (
     throw new Error("Project Runtime execution scope is incomplete");
   }
   const runtimeRunId = request.runId;
+  const runtimeAttempt = request.attempt;
   const executionScope = {
     attempt: request.attempt,
     leaseGeneration: request.leaseGeneration,
@@ -100,7 +105,15 @@ const executeWorkflow = async (
     if (!response.ok) throw new Error(`System Process rejected durable Activity '${name}'`);
     return (await response.json()) as {
       readonly payload?: unknown;
-      readonly status: "execute" | "recorded" | "replay" | "uncertain";
+      readonly status:
+        | "discard"
+        | "discarded"
+        | "execute"
+        | "recorded"
+        | "replay"
+        | "suspend"
+        | "suspended"
+        | "uncertain";
     };
   };
   const readBoundary = async (idempotencyKey: string) => {
@@ -141,6 +154,11 @@ const executeWorkflow = async (
       },
     );
     if (!response.ok) throw new Error(`System Process rejected durable boundary '${operation}'`);
+    const recorded = (await response.json()) as {
+      readonly status?: "discard" | "recorded" | "suspend";
+    };
+    if (recorded.status === "suspend") throw new Error("__KOJO_SUSPENDED__");
+    if (recorded.status === "discard") throw new Error("__KOJO_DISCARDED__");
   };
   const kernel = EffectWorkflow.make(`kojo:${workflow.name}`, {
     error: workflow.failure,
@@ -156,8 +174,47 @@ const executeWorkflow = async (
   const handlerLayer = kernel
     .toLayer(({ input }) => workflow.run(input) as Effect.Effect<unknown, unknown>)
     .pipe(Layer.provide(engineLayer));
-  const program = kernel
-    .execute({ input })
+  const recoveryInstance = WorkflowEngine.WorkflowInstance.initial(kernel, runtimeRunId);
+  const recovery =
+    request.recoveryFailure === undefined
+      ? Effect.void
+      : Effect.gen(function* () {
+          const failure = yield* Effect.promise(() =>
+            decodeSchemaValue(workflow.failure, request.recoveryFailure),
+          );
+          const tag =
+            typeof failure === "object" &&
+            failure !== null &&
+            "_tag" in failure &&
+            typeof failure._tag === "string"
+              ? failure._tag
+              : undefined;
+          const handler = tag === undefined ? undefined : workflow.recovery?.[tag];
+          if (handler === undefined || tag === undefined) {
+            return yield* Effect.die("The Failed Workflow Run has no matching Recovery Handler");
+          }
+          const recoveryKey = `${runtimeRunId}:recovery:${runtimeAttempt}:${tag}`;
+          yield* Effect.promise(() =>
+            recordKernelBoundary(
+              `${recoveryKey}:Recovery.Started`,
+              "Recovery.Started",
+              { failure },
+              tag,
+            ),
+          );
+          const recoveryExit = yield* Effect.exit(handler(failure));
+          yield* Effect.promise(() =>
+            recordKernelBoundary(
+              `${recoveryKey}:Recovery.${Exit.isSuccess(recoveryExit) ? "Completed" : "Failed"}`,
+              Exit.isSuccess(recoveryExit) ? "Recovery.Completed" : "Recovery.Failed",
+              Exit.isSuccess(recoveryExit) ? {} : { cause: Cause.pretty(recoveryExit.cause) },
+              tag,
+            ),
+          );
+          if (Exit.isFailure(recoveryExit)) return yield* Effect.failCause(recoveryExit.cause);
+        }).pipe(Effect.provideService(WorkflowEngine.WorkflowInstance, recoveryInstance));
+  const program = recovery
+    .pipe(Effect.andThen(kernel.execute({ input } as never)))
     .pipe(Effect.provide(Layer.merge(engineLayer, handlerLayer)), Effect.scoped);
   const exit = await Effect.runPromiseExit(program as Effect.Effect<unknown, unknown, never>);
   if (Exit.isSuccess(exit)) {
@@ -173,9 +230,16 @@ const executeWorkflow = async (
       value: await encodeSchemaValue(workflow.failure, failure.value),
     };
   }
+  const renderedCause = Cause.pretty(exit.cause);
+  if (renderedCause.includes("__KOJO_SUSPENDED__")) {
+    return { state: "Suspended" as const };
+  }
+  if (renderedCause.includes("__KOJO_DISCARDED__")) {
+    return { state: "Discarded" as const };
+  }
   return {
     state: "Failed" as const,
-    value: { _tag: "Defect", cause: Cause.pretty(exit.cause) },
+    value: { _tag: "Defect", cause: renderedCause },
   };
 };
 
@@ -191,7 +255,15 @@ const makeDurableEngineLayer = (journal: {
     result: unknown,
   ) => Promise<{
     readonly payload?: unknown;
-    readonly status: "execute" | "recorded" | "replay" | "uncertain";
+    readonly status:
+      | "discard"
+      | "discarded"
+      | "execute"
+      | "recorded"
+      | "replay"
+      | "suspend"
+      | "suspended"
+      | "uncertain";
   }>;
   readonly recordKernelBoundary: (
     idempotencyKey: string,
@@ -229,6 +301,12 @@ const makeDurableEngineLayer = (journal: {
             if (claimed.status === "replay") {
               return claimed.payload as EffectWorkflow.Result<unknown, unknown>;
             }
+            if (claimed.status === "suspend" || claimed.status === "suspended") {
+              return yield* Effect.die("__KOJO_SUSPENDED__");
+            }
+            if (claimed.status === "discard" || claimed.status === "discarded") {
+              return yield* Effect.die("__KOJO_DISCARDED__");
+            }
             if (claimed.status !== "execute") {
               return yield* Effect.die(
                 `Activity '${activity.name}' has an Uncertain Activity Outcome`,
@@ -239,7 +317,7 @@ const makeDurableEngineLayer = (journal: {
               Effect.provideService(WorkflowEngine.WorkflowInstance, activityInstance),
               Effect.provideService(WorkflowEngine.WorkflowEngine, engine),
             );
-            yield* Effect.promise(() =>
+            const completion = yield* Effect.promise(() =>
               journal.recordActivity(
                 parent.executionId,
                 activity.name,
@@ -248,6 +326,12 @@ const makeDurableEngineLayer = (journal: {
                 result,
               ),
             );
+            if (completion.status === "suspend" || completion.status === "suspended") {
+              return yield* Effect.die("__KOJO_SUSPENDED__");
+            }
+            if (completion.status === "discard" || completion.status === "discarded") {
+              return yield* Effect.die("__KOJO_DISCARDED__");
+            }
             return result;
           }),
         deferredDone: ({ deferredName, executionId, exit }) =>
@@ -339,7 +423,11 @@ export const runProjectRuntime = async () => {
     const encodedInput = await encodeSchemaValue(workflow.input, input);
     result =
       request.mode === "validate"
-        ? { encodedInput, status: "validated" }
+        ? {
+            encodedInput,
+            recoveryTags: Object.keys(workflow.recovery ?? {}).sort(),
+            status: "validated",
+          }
         : await executeWorkflow(request, workflow, input);
   } catch (error) {
     result = {

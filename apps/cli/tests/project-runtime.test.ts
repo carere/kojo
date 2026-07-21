@@ -201,4 +201,96 @@ export default defineConfig({ workflows: [example] });
       server.stop(true);
     }
   });
+
+  test("records Recovery Handler boundaries before replay continues", async () => {
+    const fixture = await mkdtemp(join(resolve(import.meta.dir, "../../.."), ".runtime-test-"));
+    cleanup.add(fixture);
+    const socket = join(await mkdtemp(join(tmpdir(), "kojo-runtime-socket-")), "system.sock");
+    cleanup.add(socket.slice(0, socket.lastIndexOf("/")));
+    const boundaries: Array<Record<string, unknown>> = [];
+    const server = Bun.serve({
+      async fetch(request) {
+        const boundary = (await request.json()) as Record<string, unknown>;
+        boundaries.push(boundary);
+        return Response.json({
+          status: boundary.operation === "Activity.Started" ? "execute" : "recorded",
+        });
+      },
+      unix: socket,
+    });
+    await Bun.write(
+      join(fixture, "workflow.ts"),
+      `import { Effect, Schema } from "../packages/workflow/node_modules/effect/src/index.ts";
+import { Activity } from "../packages/workflow/node_modules/effect/src/unstable/workflow/index.ts";
+import { Workflow, defineConfig } from "../packages/workflow/src/index.ts";
+let recovered = false;
+const failure = Schema.TaggedStruct("Retryable", { reason: Schema.String });
+const example = Workflow.make("example", {
+  version: "v1",
+  entryPoint: "workflow.ts",
+  input: Schema.Void,
+  success: Schema.String,
+  failure,
+  recovery: {
+    Retryable: () => Activity.make({
+      name: "reconcile",
+      success: Schema.Void,
+      execute: Effect.sync(() => { recovered = true; }),
+    }),
+  },
+  run: () => recovered ? Effect.succeed("recovered") : Effect.fail({ _tag: "Retryable", reason: "repair" }),
+});
+export default defineConfig({ workflows: [example] });
+`,
+    );
+
+    try {
+      const request = Buffer.from(
+        JSON.stringify({
+          attempt: 2,
+          configPath: "workflow.ts",
+          endpoint: socket,
+          input: undefined,
+          leaseGeneration: 2,
+          leaseHolder: "lease-holder",
+          mode: "execute",
+          projectId: "project-1",
+          recoveryFailure: { _tag: "Retryable", reason: "repair" },
+          rootRunId: "run-1",
+          runId: "run-1",
+          workflowName: "example",
+        }),
+      ).toString("base64url");
+      const child = Bun.spawn([process.execPath, "run", resolve(import.meta.dir, "../main.ts")], {
+        cwd: fixture,
+        env: {
+          ...process.env,
+          KOJO_INTERNAL_PROJECT_RUNTIME: "1",
+          KOJO_RUNTIME_REQUEST: request,
+        },
+        stderr: "pipe",
+        stdout: "pipe",
+      });
+      const [exitCode, stderr, stdout] = await Promise.all([
+        child.exited,
+        new Response(child.stderr).text(),
+        new Response(child.stdout).text(),
+      ]);
+
+      expect(stderr).toBe("");
+      expect(exitCode).toBe(0);
+      expect(decodeProjectRuntimeResult(stdout)).toEqual({
+        state: "Completed",
+        value: "recovered",
+      });
+      expect(boundaries.map(({ operation }) => operation)).toEqual([
+        "Recovery.Started",
+        "Activity.Started",
+        "Activity.Completed",
+        "Recovery.Completed",
+      ]);
+    } finally {
+      server.stop(true);
+    }
+  });
 });

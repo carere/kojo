@@ -74,7 +74,33 @@ const inspectCommand = Command.make("inspect", { runId }, ({ runId }) =>
   request("workflow.inspect", `/v1/workflow-runs/${encodeURIComponent(runId)}`),
 ).pipe(Command.withDescription("Inspect a durable Workflow Run by Run ID"));
 
+const suspendCommand = Command.make("suspend", { runId }, ({ runId }) =>
+  request("workflow.suspend", `/v1/workflow-runs/${encodeURIComponent(runId)}/suspend`, {
+    method: "POST",
+  }),
+).pipe(
+  Command.withDescription("Suspend a Running Workflow Run after its current Activity settles"),
+);
+
+const resumeCommand = Command.make("resume", { runId }, ({ runId }) =>
+  request("workflow.resume", `/v1/workflow-runs/${encodeURIComponent(runId)}/resume`, {
+    method: "POST",
+  }),
+).pipe(Command.withDescription("Resume a compatible unfinished Workflow Run"));
+
+const discardCommand = Command.make("discard", { runId }, ({ runId }) =>
+  request("workflow.discard", `/v1/workflow-runs/${encodeURIComponent(runId)}/discard`, {
+    method: "POST",
+  }),
+).pipe(Command.withDescription("Discard an unfinished Workflow Run while preserving evidence"));
+
 export const workflowCommand = Command.make("workflow").pipe(
-  Command.withDescription("Start and inspect durable Developer Workflow Runs"),
-  Command.withSubcommands([startCommand, inspectCommand]),
+  Command.withDescription("Start, inspect, and control durable Developer Workflow Runs"),
+  Command.withSubcommands([
+    startCommand,
+    inspectCommand,
+    suspendCommand,
+    resumeCommand,
+    discardCommand,
+  ]),
 );

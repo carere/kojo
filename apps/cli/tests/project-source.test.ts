@@ -9,6 +9,7 @@ import {
   type LoadedRegistry,
   materializeRuntimeSourceCheckout,
   ProjectSourceValidationError,
+  validatePinnedProjectSource,
 } from "../src/system/project-source";
 import { makeProjectService, ProjectOperationError } from "../src/system/projects";
 import { openSystemStore } from "../src/system/storage";
@@ -159,6 +160,30 @@ describe("Project Source Revision adapter", () => {
     });
     expect(latestRevision.commit).toBe(remoteCommit);
     expect(git(local, "rev-parse", "refs/heads/main")).toBe(localCommit);
+  });
+
+  test("validates a pinned commit after the Project default branch advances", async () => {
+    const repository = await makeRepository();
+    const pinnedCommit = git(repository, "rev-parse", "HEAD");
+    const pinned = await activateProjectSource({
+      loadRegistry: async () => registry(),
+      policy: "LocalWithFreshnessWarning",
+      repository,
+    });
+    await write(join(repository, "workflows/shared.ts"), "export const message = 'new'\n");
+    git(repository, "add", ".");
+    git(repository, "commit", "-m", "advance default branch");
+
+    const restored = await validatePinnedProjectSource({
+      commit: pinnedCommit,
+      loadRegistry: async () => registry(),
+      policy: "LocalWithFreshnessWarning",
+      repository,
+    });
+
+    expect(restored.commit).toBe(pinnedCommit);
+    expect(restored.workflows).toEqual(pinned.workflows);
+    expect(restored.commit).not.toBe(git(repository, "rev-parse", "HEAD"));
   });
 
   test("RemoteLatest follows the current remote default branch instead of stale origin HEAD", async () => {
