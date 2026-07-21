@@ -68,6 +68,9 @@ const run = (loaded: GitHubDeliveryGraph, reachable = true) =>
     workstream: rootUrl,
   });
 
+const runAt = (loaded: GitHubDeliveryGraph, workstream: string) =>
+  WorkflowTest.make(Delivery, { layer: githubLayer(loaded) }).run({ workstream });
+
 const expectNoExecution = (result: Awaited<ReturnType<typeof run>>) => {
   expect(result.calls.filter(({ layer }) => layer === "Agent" || layer === "Sandbox")).toEqual([]);
   expect(() =>
@@ -81,6 +84,17 @@ const expectNoExecution = (result: Awaited<ReturnType<typeof run>>) => {
 };
 
 describe("Delivery workstream loading", () => {
+  test("rejects a non-canonical issue number before loading GitHub", async () => {
+    const result = await runAt(graph(), "https://github.com/carere/kojo/issues/1e2");
+
+    expect(result.outcome).toMatchObject({
+      _tag: "Failure",
+      failure: { _tag: "InvalidDeliveryWorkstream" },
+    });
+    expect(result.calls).toEqual([]);
+    expectNoExecution(result);
+  });
+
   test("loads and retains the complete graph and routing in publication-key order", async () => {
     const later = ticket({
       number: 43,
@@ -230,7 +244,6 @@ describe("Delivery workstream loading", () => {
         ],
       }),
     );
-
     for (const result of [cyclic, outside]) {
       expect(result.outcome).toMatchObject({
         _tag: "Failure",
@@ -253,6 +266,36 @@ describe("Delivery workstream loading", () => {
       });
       expectNoExecution(result);
     }
+  });
+
+  test("accepts a reachable full SHA-256 source revision", async () => {
+    const sha256Revision = "b".repeat(64);
+    const loaded = graph({
+      root: { ...graph().root, body: delivery.replace(revision, sha256Revision) },
+    });
+
+    const result = await run(loaded);
+
+    expect(result.outcome).toMatchObject({
+      _tag: "Success",
+      value: { evidence: { sourceRevision: sha256Revision } },
+    });
+    expect(() =>
+      WorkflowTest.assertCalls(result, {
+        required: [
+          {
+            input: {
+              repository: "carere/kojo",
+              revision: sha256Revision,
+              targetBranch: "feat/add-delivery-workflow-vertical",
+            },
+            layer: "GitHub",
+            operation: "isSourceRevisionReachable",
+          },
+        ],
+      }),
+    ).not.toThrow();
+    expectNoExecution(result);
   });
 
   test("rejects invalid root, Delivery routing, and executable ticket state", async () => {

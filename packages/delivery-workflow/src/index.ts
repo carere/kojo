@@ -156,7 +156,8 @@ const parseRootUrl = (value: string): ParsedRootUrl | undefined => {
   try {
     const url = new URL(value);
     const segments = url.pathname.split("/").filter(Boolean);
-    const number = Number(segments[3]);
+    const issueSegment = segments[3] ?? "";
+    const number = Number(issueSegment);
     if (
       url.protocol !== "https:" ||
       url.hostname !== "github.com" ||
@@ -167,6 +168,7 @@ const parseRootUrl = (value: string): ParsedRootUrl | undefined => {
       url.hash !== "" ||
       segments.length !== 4 ||
       segments[2] !== "issues" ||
+      !/^[1-9]\d*$/.test(issueSegment) ||
       !Number.isSafeInteger(number) ||
       number <= 0
     ) {
@@ -236,7 +238,7 @@ const parseDelivery = (body: string): DeliveryRouting | undefined => {
     !branchIsValid(targetBranch) ||
     !branchIsValid(destinationBranch) ||
     targetBranch === destinationBranch ||
-    !/^[0-9a-f]{40}$/i.test(sourceRevision)
+    !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(sourceRevision)
   ) {
     return undefined;
   }
