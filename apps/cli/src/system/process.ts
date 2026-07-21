@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, link, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { makeInspectorService } from "./inspector";
 import { makeProjectService, type Project, ProjectOperationError } from "./projects";
 import { openSystemStore } from "./storage";
 import { makeWorkflowRunService, WorkflowStartError } from "./workflow-runs";
@@ -174,6 +175,7 @@ export const runSystemProcess = async (home: string): Promise<void> => {
   let leaseReconciler: ReturnType<typeof setInterval> | undefined;
   let scheduleEvaluator: ReturnType<typeof setInterval> | undefined;
   let projectService: ReturnType<typeof makeProjectService> | undefined;
+  let inspectorService: ReturnType<typeof makeInspectorService> | undefined;
   let restartRunIds: ReadonlyArray<string> = [];
   let workflowRunService: ReturnType<typeof makeWorkflowRunService> | undefined;
   let workflowScheduleService: ReturnType<typeof makeWorkflowScheduleService> | undefined;
@@ -214,6 +216,7 @@ export const runSystemProcess = async (home: string): Promise<void> => {
         store,
         makeProjectWorkflowRuntime(store, paths.endpoint),
       );
+      inspectorService = makeInspectorService(store, workflowRunService, projectService.list);
       workflowScheduleService = makeWorkflowScheduleService(store, workflowRunService);
       restartRunIds = store.workflowRuns
         .list()
@@ -256,6 +259,39 @@ export const runSystemProcess = async (home: string): Promise<void> => {
             void workflowRunService?.gracefulStop().finally(() => resolveStopped?.());
           }, 10);
           return Response.json({ status: "stopping" });
+        }
+        if (url.pathname === "/api/inspector/runs" && request.method === "GET") {
+          const state = url.searchParams.get("state");
+          const allowedStates = [
+            "Running",
+            "Suspended",
+            "Interrupted",
+            "Failed",
+            "Completed",
+            "Discarded",
+          ] as const;
+          if (state !== null && !allowedStates.some((candidate) => candidate === state)) {
+            return Response.json({ error: "Unknown Workflow Run State" }, { status: 400 });
+          }
+          const runs = await inspectorService?.list({
+            includeArchived: url.searchParams.get("includeArchived") === "true",
+            projectId: url.searchParams.get("projectId") ?? undefined,
+            state: (state ?? undefined) as (typeof allowedStates)[number] | undefined,
+            workflowName: url.searchParams.get("workflowName") ?? undefined,
+          });
+          return Response.json({ runs: runs ?? [], schemaVersion: 1 });
+        }
+        const inspectorRunMatch = url.pathname.match(/^\/api\/inspector\/runs\/([^/]+)$/);
+        if (inspectorRunMatch !== null && request.method === "GET") {
+          const runId = decodeURIComponent(inspectorRunMatch[1] ?? "");
+          const run = await inspectorService?.inspect(runId);
+          if (run === undefined) {
+            return Response.json(
+              { error: { code: "RUN_NOT_FOUND", message: `Workflow Run ${runId} was not found` } },
+              { status: 404 },
+            );
+          }
+          return Response.json({ run, schemaVersion: 1 });
         }
         if (url.pathname === "/v1/home/backups" && request.method === "POST") {
           try {

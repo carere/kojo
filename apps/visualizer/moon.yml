@@ -19,6 +19,15 @@ tasks:
       - "dist/"
     type: build
 
+  test:
+    command: bun --bun playwright test
+    description: Test the Dense Inspector against a controlled System Process API
+    inputs:
+      - "@group(configs)"
+      - "@group(sources)"
+      - "@group(tests)"
+    type: test
+
   preview:
     command: bun vite preview
     description: Preview the visualizer production build
@@ -28,4 +37,3 @@ tasks:
     command: bunx shadcn@latest add
     description: Add a Zaidan component
     preset: utility
-

@@ -33,6 +33,13 @@ describe("Kojo CLI", () => {
     expect(help).toContain("home");
   });
 
+  test("documents the aggregate Dense Inspector gateway without a Project argument", async () => {
+    const help = await runCommand(["serve", "--help"]);
+
+    expect(help).toContain("Dense Inspector API");
+    expect(help).not.toContain("<project>");
+  });
+
   test("documents durable Workflow Schedule operations", async () => {
     const help = await runCommand(["schedule", "--help"]);
 

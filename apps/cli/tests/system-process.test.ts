@@ -3,6 +3,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { access, mkdir, mkdtemp, rename, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { makeInspectorService } from "../src/system/inspector";
+import { makeProjectService } from "../src/system/projects";
 import { openSystemStore } from "../src/system/storage";
 import { makeWorkflowRunService } from "../src/system/workflow-runs";
 
@@ -179,7 +181,7 @@ describe("Kojo System Process", () => {
       id: "source-independent-project",
       metadata: "{}",
       path: join(home, "missing-project"),
-      registrationState: "Archived",
+      registrationState: "Disabled",
       updatedAt: now,
     });
     const runs = makeWorkflowRunService(store, {
@@ -222,9 +224,12 @@ describe("Kojo System Process", () => {
       workflowName: "greet",
     });
     await runs.settle(started.runId);
+    const directInspector = makeInspectorService(store, runs, makeProjectService(store).list);
+    expect(await directInspector.list()).toMatchObject([{ runId: started.runId }]);
     store.close();
 
-    expect(runCli(home, "start").exitCode).toBe(0);
+    const system = runCli(home, "start");
+    expect(system.exitCode).toBe(0);
     const inspected = runCli(home, "workflow", "inspect", started.runId);
     expect(inspected.exitCode).toBe(0);
     expect(inspected.json).toMatchObject({
@@ -241,6 +246,44 @@ describe("Kojo System Process", () => {
       },
       schemaVersion: 1,
       status: "succeeded",
+    });
+
+    const endpoint = system.json?.process?.endpoint;
+    expect(endpoint).toBeDefined();
+    const aggregateResponse = await fetch("http://localhost/api/inspector/runs", {
+      unix: endpoint,
+    });
+    expect(await aggregateResponse.json()).toMatchObject({
+      runs: [
+        {
+          attempt: 1,
+          project: {
+            availability: { status: "Unavailable" },
+            id: "source-independent-project",
+            registrationState: "Disabled",
+          },
+          runId: started.runId,
+          state: "Completed",
+          workflowName: "greet",
+        },
+      ],
+      schemaVersion: 1,
+    });
+    const inspectorResponse = await fetch(`http://localhost/api/inspector/runs/${started.runId}`, {
+      unix: endpoint,
+    });
+    expect(await inspectorResponse.json()).toMatchObject({
+      run: {
+        actions: [],
+        evidence: [
+          { schema: { status: "Known", version: 1 }, type: "WorkflowRun.Started" },
+          { schema: { status: "Known", version: 1 }, type: "WorkflowRun.Completed" },
+        ],
+        resumeCompatibility: { status: "NotApplicable" },
+        runId: started.runId,
+        state: "Completed",
+      },
+      schemaVersion: 1,
     });
   }, 20_000);
 
