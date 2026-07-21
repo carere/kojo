@@ -35,9 +35,9 @@ tasks:
       - build-js
       - build-types
 
-  test:
-    command: bun test
-    description: Run workflow authoring contract tests
+  test-unit:
+    command: bun test tests/authoring.test.ts tests/package.test.ts
+    description: Run workflow authoring unit and package contract tests
     deps:
       - build
     inputs:
@@ -46,6 +46,25 @@ tasks:
       - "@group(tests)"
       - "@group(workspace)"
     type: test
+
+  test-acceptance:
+    command: bun node_modules/vitest/vitest.mjs run tests/workflow-test.test.ts
+    description: Run Developer Workflow Acceptance Tests
+    deps:
+      - build
+    inputs:
+      - "@group(configs)"
+      - "@group(sources)"
+      - "@group(tests)"
+      - "@group(workspace)"
+    type: test
+
+  test:
+    command: bun -e "void 0"
+    description: Run every workflow authoring test seam
+    deps:
+      - test-unit
+      - test-acceptance
 
   tsc:
     command: bun node_modules/typescript/bin/tsc --build --verbose
