@@ -538,6 +538,48 @@ describe("durable Workflow Schedules", () => {
     store.close();
   });
 
+  test("preserves Schedule identity when parsed cron fields only change order", async () => {
+    const store = await makeStore();
+    store.projectSources.activate(
+      "project-1",
+      "LocalWithFreshnessWarning",
+      revision([
+        {
+          cron: cron([15, 45], [9, 17]),
+          name: "canonical-cron",
+          workflow: "alpha",
+        },
+      ]),
+    );
+    const runs = makeWorkflowRunService(store, {
+      prepare: async ({ workflowName }) => prepared(workflowName),
+    });
+    const schedules = makeWorkflowScheduleService(store, runs);
+    schedules.enable("project-1", "canonical-cron", new Date("2026-01-01T08:00:00.000Z"));
+    const before = schedules.inspect("project-1", "canonical-cron");
+
+    store.projectSources.activate(
+      "project-1",
+      "LocalWithFreshnessWarning",
+      revision(
+        [
+          {
+            cron: cron([45, 15], [17, 9]),
+            name: "canonical-cron",
+            workflow: "alpha",
+          },
+        ],
+        "b".repeat(40),
+      ),
+    );
+
+    expect(schedules.inspect("project-1", "canonical-cron")).toMatchObject({
+      cursor: before.cursor,
+      definitionFingerprint: before.definitionFingerprint,
+    });
+    store.close();
+  });
+
   test("serializes repeated evaluation so a late failure cannot restore a started catch-up", async () => {
     const store = await makeStore();
     store.projectSources.activate(
