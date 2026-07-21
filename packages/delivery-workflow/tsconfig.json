@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "emitDeclarationOnly": true,
+    "types": ["bun"],
+    "outDir": "../../.moon/cache/types/packages/delivery-workflow"
+  },
+  "include": ["src/**/*", "tests/**/*"],
+  "references": [
+    {
+      "path": "../workflow"
+    }
+  ]
+}
