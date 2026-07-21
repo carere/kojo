@@ -52,6 +52,33 @@ afterEach(async () => {
 });
 
 describe("Workflow Run service", () => {
+  test("reports lifecycle state separately from resume compatibility", async () => {
+    const store = await makeStore();
+    const service = makeWorkflowRunService(store, {
+      prepare: async () => ({
+        encodedInput: {},
+        execute: async () => new Promise(() => undefined),
+        ...preparedRevision("separate-facts", "separate-facts-fingerprint", "f"),
+      }),
+      prepareResume: async () => {
+        throw new Error("not used");
+      },
+    });
+    const started = await service.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-1",
+      workflowName: "separate-facts",
+    });
+
+    expect(service.inspect(started.runId)).toMatchObject({
+      resumeCompatibility: { status: "NotChecked" },
+      runtimeConfigurationCompatibility: { status: "NotChecked" },
+      state: "Running",
+    });
+    store.close();
+  });
+
   test("leaves no run when discovery or input validation fails", async () => {
     const store = await makeStore();
     const service = makeWorkflowRunService(store, {
@@ -304,6 +331,318 @@ describe("Workflow Run service", () => {
     expect(service.inspect(started.runId)).toMatchObject({
       attempts: [{ state: "Interrupted" }],
       evidence: [{ type: "WorkflowRun.Started" }, { type: "WorkflowRun.Interrupted" }],
+      lease: { state: "Expired" },
+      state: "Interrupted",
+    });
+    store.close();
+  });
+
+  test("suspends after the current Activity settles and starts no next Activity", async () => {
+    const store = await makeStore();
+    const service = makeWorkflowRunService(store, {
+      prepare: async () => ({
+        encodedInput: {},
+        execute: async () => new Promise(() => undefined),
+        ...preparedRevision("suspend", "suspend-fingerprint", "1"),
+      }),
+      prepareResume: async () => {
+        throw new Error("not used");
+      },
+    });
+    const started = await service.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-1",
+      workflowName: "suspend",
+    });
+    const stored = store.workflowRuns.find(started.runId);
+    if (stored?.lease === undefined) throw new Error("start did not create an Execution Lease");
+    const scope = {
+      attempt: 1,
+      leaseGeneration: 1,
+      leaseHolder: stored.lease.holder,
+      projectId: "project-1",
+      rootRunId: started.runId,
+      runId: started.runId,
+    };
+
+    expect(service.suspend(started.runId)).toMatchObject({ state: "Running", status: "requested" });
+    expect(
+      service.recordBoundary({
+        ...scope,
+        idempotencyKey: `${started.runId}:activity:settle:Activity.Completed`,
+        operation: "Activity.Completed",
+        payload: { value: "settled" },
+        subject: "settle",
+      }),
+    ).toMatchObject({ control: "suspend" });
+    expect(service.inspect(started.runId)).toMatchObject({
+      attempts: [{ state: "Suspended" }],
+      evidence: [
+        { type: "WorkflowRun.Started" },
+        { type: "WorkflowRun.SuspendRequested" },
+        { type: "Activity.Completed" },
+        { type: "WorkflowRun.Suspended" },
+      ],
+      lease: { state: "Released" },
+      state: "Suspended",
+    });
+    expect(() =>
+      service.claimActivity({
+        ...scope,
+        completionIdempotencyKey: `${started.runId}:next:completed`,
+        idempotencyKey: `${started.runId}:next:started`,
+        payload: {},
+        subject: "next",
+      }),
+    ).toThrow("rejected a delayed execution write");
+    store.close();
+  });
+
+  test("resumes the same Run ID only after complete preflight and creates numbered authority", async () => {
+    const store = await makeStore();
+    const preflights: Array<unknown> = [];
+    const service = makeWorkflowRunService(store, {
+      prepare: async () => ({
+        encodedInput: { value: "kept" },
+        execute: async () => new Promise(() => undefined),
+        ...preparedRevision("resume", "resume-fingerprint", "2"),
+      }),
+      prepareResume: async (request) => {
+        preflights.push(request);
+        return {
+          execute: async () => new Promise(() => undefined),
+          revisionCompatibility: "Compatible" as const,
+          runtimeConfigurationCompatibility: "Compatible" as const,
+          sourceAvailability: "Available" as const,
+          leaseAvailability: "Available" as const,
+          recoveryPolicy: "NotRequired" as const,
+        };
+      },
+    });
+    const started = await service.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-1",
+      workflowName: "resume",
+    });
+    store.workflowRuns.interruptRunning();
+
+    const resumed = await service.resume(started.runId);
+
+    expect(preflights).toHaveLength(1);
+    expect(preflights[0]).toMatchObject({
+      attempt: 1,
+      input: { value: "kept" },
+      revision: { fingerprint: "resume-fingerprint", stableName: "resume" },
+      state: "Interrupted",
+    });
+    expect(resumed).toMatchObject({ attempt: 2, runId: started.runId, state: "Running" });
+    expect(service.inspect(started.runId)).toMatchObject({
+      attempts: [
+        { number: 1, state: "Interrupted" },
+        { number: 2, state: "Running" },
+      ],
+      evidence: [
+        { type: "WorkflowRun.Started" },
+        { type: "WorkflowRun.Interrupted" },
+        { attempt: 2, type: "WorkflowRun.Resumed" },
+      ],
+      lease: { generation: 2, state: "Active" },
+      runId: started.runId,
+      state: "Running",
+    });
+    store.close();
+  });
+
+  test("does not create an attempt when any resume preflight fails", async () => {
+    const store = await makeStore();
+    const service = makeWorkflowRunService(store, {
+      prepare: async () => ({
+        encodedInput: {},
+        execute: async () => new Promise(() => undefined),
+        ...preparedRevision("incompatible", "incompatible-fingerprint", "3"),
+      }),
+      prepareResume: async () => {
+        throw new WorkflowStartError("WORKFLOW_INCOMPATIBLE", "Pinned revision is unavailable");
+      },
+    });
+    const started = await service.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-1",
+      workflowName: "incompatible",
+    });
+    store.workflowRuns.interruptRunning();
+
+    await expect(service.resume(started.runId)).rejects.toMatchObject({
+      code: "WORKFLOW_INCOMPATIBLE",
+    });
+    expect(service.inspect(started.runId)).toMatchObject({
+      attempts: [{ number: 1 }],
+      state: "Interrupted",
+    });
+    store.close();
+  });
+
+  test("discards unfinished runs source-independently while preserving evidence and terminals", async () => {
+    const store = await makeStore();
+    const outcomes = new Map<string, { state: "Completed"; value: unknown }>();
+    const service = makeWorkflowRunService(store, {
+      prepare: async ({ workflowName }) => ({
+        encodedInput: {},
+        execute: async () => outcomes.get(workflowName) ?? (new Promise(() => undefined) as never),
+        ...preparedRevision(workflowName, `${workflowName}-fingerprint`, "4"),
+      }),
+      prepareResume: async () => {
+        throw new Error("discard must not load source");
+      },
+    });
+    const unfinished = await service.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-1",
+      workflowName: "unfinished",
+    });
+    store.workflowRuns.interruptRunning();
+    outcomes.set("complete", { state: "Completed", value: "done" });
+    const completed = await service.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-1",
+      workflowName: "complete",
+    });
+    await service.settle(completed.runId);
+
+    expect(service.discard(unfinished.runId)).toMatchObject({
+      runId: unfinished.runId,
+      state: "Discarded",
+    });
+    expect(service.inspect(unfinished.runId)).toMatchObject({
+      attempts: [{ state: "Interrupted" }],
+      evidence: [
+        { type: "WorkflowRun.Started" },
+        { type: "WorkflowRun.Interrupted" },
+        { type: "WorkflowRun.Discarded" },
+      ],
+      state: "Discarded",
+    });
+    expect(() => service.discard(completed.runId)).toThrow("immutable");
+    expect(() => service.resume(unfinished.runId)).toThrow("immutable");
+    store.close();
+  });
+
+  test("evidences an uncertain Activity outcome and fences superseded writes", async () => {
+    const store = await makeStore();
+    const service = makeWorkflowRunService(store, {
+      prepare: async () => ({
+        encodedInput: {},
+        execute: async () => new Promise(() => undefined),
+        ...preparedRevision("uncertain", "uncertain-fingerprint", "5"),
+      }),
+      prepareResume: async () => ({
+        execute: async () => new Promise(() => undefined),
+        revisionCompatibility: "Compatible" as const,
+        runtimeConfigurationCompatibility: "Compatible" as const,
+        sourceAvailability: "Available" as const,
+        leaseAvailability: "Available" as const,
+        recoveryPolicy: "NotRequired" as const,
+      }),
+    });
+    const started = await service.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-1",
+      workflowName: "uncertain",
+    });
+    const stored = store.workflowRuns.find(started.runId);
+    if (stored?.lease === undefined) throw new Error("start did not create an Execution Lease");
+    const oldScope = {
+      attempt: 1,
+      leaseGeneration: 1,
+      leaseHolder: stored.lease.holder,
+      projectId: "project-1",
+      rootRunId: started.runId,
+      runId: started.runId,
+    };
+    const startedKey = `${started.runId}:external:started`;
+    service.claimActivity({
+      ...oldScope,
+      completionIdempotencyKey: `${started.runId}:external:completed`,
+      idempotencyKey: startedKey,
+      payload: {},
+      subject: "publish",
+    });
+    expect(
+      service.claimActivity({
+        ...oldScope,
+        completionIdempotencyKey: `${started.runId}:external:completed`,
+        idempotencyKey: startedKey,
+        payload: {},
+        subject: "publish",
+      }),
+    ).toMatchObject({ status: "uncertain" });
+    expect(service.inspect(started.runId)?.evidence.map(({ type }) => type)).toContain(
+      "Activity.Uncertain",
+    );
+    store.workflowRuns.interruptRunning();
+    await service.resume(started.runId);
+    expect(() =>
+      service.recordBoundary({
+        ...oldScope,
+        idempotencyKey: `${started.runId}:delayed`,
+        operation: "Activity.Completed",
+        payload: {},
+        subject: "publish",
+      }),
+    ).toThrow("rejected a delayed execution write");
+    store.close();
+  });
+
+  test("reconciles an expired lease to Interrupted before rejecting its delayed write", async () => {
+    const store = await makeStore();
+    const service = makeWorkflowRunService(store, {
+      prepare: async () => ({
+        encodedInput: {},
+        execute: async () => new Promise(() => undefined),
+        ...preparedRevision("expired", "expired-fingerprint", "6"),
+      }),
+    });
+    const started = await service.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-1",
+      workflowName: "expired",
+    });
+    const stored = store.workflowRuns.find(started.runId);
+    if (stored?.lease === undefined) throw new Error("start did not create an Execution Lease");
+    const scope = {
+      attempt: 1,
+      leaseGeneration: 1,
+      leaseHolder: stored.lease.holder,
+      projectId: "project-1",
+      rootRunId: started.runId,
+      runId: started.runId,
+    };
+    store.workflowRuns.renewLease(scope, new Date(0).toISOString());
+
+    expect(() =>
+      service.recordBoundary({
+        ...scope,
+        idempotencyKey: `${started.runId}:late`,
+        operation: "Activity.Completed",
+        payload: {},
+        subject: "late",
+      }),
+    ).toThrow("rejected a delayed execution write");
+    expect(service.inspect(started.runId)).toMatchObject({
+      evidence: [
+        { type: "WorkflowRun.Started" },
+        {
+          details: { encodingVersion: 1, value: { reason: "LeaseExpired" } },
+          type: "WorkflowRun.Interrupted",
+        },
+      ],
       lease: { state: "Expired" },
       state: "Interrupted",
     });

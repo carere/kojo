@@ -50,7 +50,9 @@ export namespace WorkflowTest {
     | { readonly _tag: "Success"; readonly value: Success }
     | { readonly _tag: "Failure"; readonly failure: Failure }
     | { readonly _tag: "Defect"; readonly cause: string }
-    | { readonly _tag: "Interrupted" };
+    | { readonly _tag: "Discarded" }
+    | { readonly _tag: "Interrupted" }
+    | { readonly _tag: "Suspended" };
 
   export interface Result<Success, Failure> {
     readonly attempt: number;
@@ -58,12 +60,16 @@ export namespace WorkflowTest {
     readonly evidence: ReadonlyArray<EvidenceEvent>;
     readonly outcome: Outcome<Success, Failure>;
     readonly runId: string;
-    readonly state: "Completed" | "Failed" | "Interrupted";
+    readonly state: "Completed" | "Discarded" | "Failed" | "Interrupted" | "Suspended";
     readonly trace: ReadonlyArray<TraceSpan>;
   }
 
   export interface RunOptions {
     readonly interruptAfter?: {
+      readonly subject?: string;
+      readonly type: string;
+    };
+    readonly suspendAfter?: {
       readonly subject?: string;
       readonly type: string;
     };
@@ -77,7 +83,9 @@ export namespace WorkflowTest {
   }
 
   export interface Fixture<Input, Success, Failure> {
+    readonly discard: () => Promise<Result<Success, Failure>>;
     readonly restart: () => Promise<Result<Success, Failure>>;
+    readonly resume: () => Promise<Result<Success, Failure>>;
     readonly run: (input: Input, options?: RunOptions) => Promise<Result<Success, Failure>>;
   }
 
@@ -99,6 +107,7 @@ interface RecorderService {
 const Recorder = Context.Service<RecorderService>("@kojo/workflow/WorkflowTest/Recorder");
 
 class InterruptedSignal extends Error {}
+class SuspendedSignal extends Error {}
 class UncertainSignal extends Error {}
 
 const matchesCall = (call: WorkflowTest.CallMatcher, matcher: WorkflowTest.CallMatcher) =>
@@ -126,7 +135,13 @@ const traceFromEvidence = (
 ): ReadonlyArray<WorkflowTest.TraceSpan> => {
   const first = evidence[0];
   const terminal = evidence.findLast(({ type }) =>
-    ["WorkflowRun.Completed", "WorkflowRun.Failed", "WorkflowRun.Interrupted"].includes(type),
+    [
+      "WorkflowRun.Completed",
+      "WorkflowRun.Discarded",
+      "WorkflowRun.Failed",
+      "WorkflowRun.Interrupted",
+      "WorkflowRun.Suspended",
+    ].includes(type),
   );
   const spans: Array<WorkflowTest.TraceSpan> = [
     {
@@ -224,8 +239,14 @@ const make = <
     runOptions: WorkflowTest.RunOptions = {},
   ): Promise<WorkflowTest.Result<SuccessValue, FailureValue>> => {
     attempt += 1;
+    const resumedState = latestResult?.state;
+    const recoveryFailure =
+      resumedState === "Failed" && latestResult?.outcome._tag === "Failure"
+        ? latestResult.outcome.failure
+        : undefined;
     const callOrdinals = new Map<string, number>();
     let interrupted = false;
+    let suspended = false;
     let interruptionConsumed = false;
 
     const append = (type: string, subject: string, details?: unknown) => {
@@ -248,6 +269,16 @@ const make = <
         interruptionConsumed = true;
         interrupted = true;
         throw new InterruptedSignal();
+      }
+      if (
+        !interruptionConsumed &&
+        runOptions.suspendAfter?.type === type &&
+        (runOptions.suspendAfter.subject === undefined ||
+          runOptions.suspendAfter.subject === subject)
+      ) {
+        interruptionConsumed = true;
+        suspended = true;
+        throw new SuspendedSignal();
       }
       return event;
     };
@@ -418,10 +449,30 @@ const make = <
       handler = handler.pipe(Effect.provide(makeOptions.layer as Layer.Layer<never, never, never>));
     }
     const handlerLayer = kernel.toLayer(() => handler).pipe(Layer.provide(engineLayer));
+    const recoveryTag =
+      typeof recoveryFailure === "object" &&
+      recoveryFailure !== null &&
+      "_tag" in recoveryFailure &&
+      typeof recoveryFailure._tag === "string"
+        ? recoveryFailure._tag
+        : undefined;
+    const recoveryHandler = recoveryTag === undefined ? undefined : workflow.recovery[recoveryTag];
+    const recovery =
+      recoveryHandler === undefined || recoveryTag === undefined
+        ? Effect.void
+        : Effect.sync(() => append("Recovery.Started", recoveryTag)).pipe(
+            Effect.andThen(recoveryHandler(recoveryFailure as never)),
+            Effect.andThen(Effect.sync(() => append("Recovery.Completed", recoveryTag))),
+          );
     const program = Effect.sync(() => {
       if (attempt === 1) append("WorkflowRun.Started", workflow.name, { input });
-      else append("WorkflowRun.Restarted", workflow.name);
+      else
+        append(
+          resumedState === "Suspended" ? "WorkflowRun.Resumed" : "WorkflowRun.Restarted",
+          workflow.name,
+        );
     }).pipe(
+      Effect.andThen(recovery),
       Effect.andThen(kernel.execute({ input } as never)),
       Effect.provide(Layer.merge(engineLayer, handlerLayer)),
       Effect.provideService(Recorder, recorder),
@@ -442,6 +493,10 @@ const make = <
       } catch {
         // The configured interruption point has already been consumed.
       }
+    } else if (suspended) {
+      state = "Suspended";
+      outcome = { _tag: "Suspended" };
+      append("WorkflowRun.Suspended", workflow.name);
     } else if (Exit.isSuccess(exit)) {
       state = "Completed";
       outcome = { _tag: "Success", value: exit.value as SuccessValue };
@@ -469,11 +524,61 @@ const make = <
   };
 
   return Object.freeze({
+    discard: async () => {
+      if (!hasRun) throw new Error("WorkflowTest has not been run yet");
+      if (latestResult === undefined) throw new Error("WorkflowTest is still running");
+      if (latestResult.state === "Completed" || latestResult.state === "Discarded") {
+        throw new Error(`Cannot discard a Workflow Run in ${latestResult.state} state`);
+      }
+      const event: WorkflowTest.EvidenceEvent = Object.freeze({
+        attempt,
+        eventId: `event-${latestResult.evidence.length + 1}`,
+        recordedAt: new Date(currentTime).toISOString(),
+        sequence: latestResult.evidence.length + 1,
+        subject: workflow.name,
+        type: "WorkflowRun.Discarded",
+      });
+      latestResult = Object.freeze({
+        ...latestResult,
+        evidence: Object.freeze([...latestResult.evidence, event]),
+        outcome: { _tag: "Discarded" as const },
+        state: "Discarded" as const,
+        trace: Object.freeze([
+          ...traceFromEvidence(workflow.name, [...latestResult.evidence, event]),
+        ]),
+      });
+      return latestResult;
+    },
     restart: async () => {
       if (!hasRun) throw new Error("WorkflowTest has not been run yet");
       if (latestResult === undefined) throw new Error("WorkflowTest is still running");
       if (latestResult.state !== "Interrupted") {
         throw new Error(`Cannot restart a Workflow Run in ${latestResult.state} state`);
+      }
+      latestResult = await execute(latestInput as Schema.Schema.Type<Input>);
+      return latestResult;
+    },
+    resume: async () => {
+      if (!hasRun) throw new Error("WorkflowTest has not been run yet");
+      if (latestResult === undefined) throw new Error("WorkflowTest is still running");
+      const failureTag =
+        latestResult.outcome._tag === "Failure" &&
+        typeof latestResult.outcome.failure === "object" &&
+        latestResult.outcome.failure !== null &&
+        "_tag" in latestResult.outcome.failure &&
+        typeof latestResult.outcome.failure._tag === "string"
+          ? latestResult.outcome.failure._tag
+          : undefined;
+      const recoverableFailure =
+        latestResult.state === "Failed" &&
+        failureTag !== undefined &&
+        workflow.recovery[failureTag] !== undefined;
+      if (
+        latestResult.state !== "Interrupted" &&
+        latestResult.state !== "Suspended" &&
+        !recoverableFailure
+      ) {
+        throw new Error(`Cannot resume a Workflow Run in ${latestResult.state} state`);
       }
       latestResult = await execute(latestInput as Schema.Schema.Type<Input>);
       return latestResult;

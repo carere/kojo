@@ -24,6 +24,22 @@ const hello = Workflow.make("Hello", {
 });
 
 describe("Workflow.make", () => {
+  test("registers stable-tagged Recovery Handlers without placing behavior in failure values", () => {
+    const recovery = Effect.fn("recover")(() => Effect.void);
+    const recoverable = Workflow.make("Recoverable", {
+      version: "1",
+      entryPoint: "workflows/recoverable.ts",
+      input: Schema.Void,
+      success: Schema.Void,
+      failure: Schema.Struct({ _tag: Schema.Literal("Retryable") }),
+      recovery: { Retryable: recovery },
+      run: () => Effect.void,
+    });
+
+    expect(recoverable.recovery).toEqual({ Retryable: recovery });
+    expect(Object.isFrozen(recoverable.recovery)).toBe(true);
+  });
+
   test("defines an ordinary typed Effect program and stable revision metadata", async () => {
     expect(hello.name).toBe("Hello");
     expect(hello.version).toBe("release-opaque+1");

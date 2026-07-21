@@ -253,6 +253,102 @@ describe("WorkflowTest", () => {
     ]);
   });
 
+  test("suspends, resumes, and discards one durable Workflow Run without changing identity", async () => {
+    let executions = 0;
+    const controlled = Workflow.make("Lifecycle", {
+      version: "1",
+      entryPoint: "workflows/lifecycle.ts",
+      input: Schema.String,
+      success: Schema.String,
+      failure: Schema.Never,
+      run: (message) =>
+        Activity.make({
+          execute: Effect.sync(() => {
+            executions += 1;
+            return message;
+          }),
+          name: "settle-current",
+          success: Schema.String,
+        }),
+    });
+    const resumable = WorkflowTest.make(controlled);
+    const suspended = await resumable.run("same run", {
+      suspendAfter: { subject: "settle-current", type: "Activity.Completed" },
+    });
+    const resumed = await resumable.resume();
+
+    expect(suspended).toMatchObject({
+      attempt: 1,
+      outcome: { _tag: "Suspended" },
+      state: "Suspended",
+    });
+    expect(resumed).toMatchObject({
+      attempt: 2,
+      outcome: { _tag: "Success", value: "same run" },
+      runId: suspended.runId,
+      state: "Completed",
+    });
+    expect(executions).toBe(1);
+
+    const discardable = WorkflowTest.make(controlled);
+    const anotherSuspended = await discardable.run("preserve evidence", {
+      suspendAfter: { subject: "settle-current", type: "Activity.Completed" },
+    });
+    const discarded = await discardable.discard();
+    expect(discarded).toMatchObject({
+      attempt: 1,
+      outcome: { _tag: "Discarded" },
+      runId: anotherSuspended.runId,
+      state: "Discarded",
+    });
+    expect(discarded.evidence.map(({ type }) => type)).toEqual([
+      "WorkflowRun.Started",
+      "Activity.Started",
+      "Activity.Completed",
+      "WorkflowRun.Suspended",
+      "WorkflowRun.Discarded",
+    ]);
+    await expect(discardable.resume()).rejects.toThrow(
+      "Cannot resume a Workflow Run in Discarded state",
+    );
+  });
+
+  test("runs a stable-tagged Recovery Handler before resuming an eligible Failed run", async () => {
+    let recovered = false;
+    const recoverable = Workflow.make("RecoverableFailure", {
+      version: "1",
+      entryPoint: "workflows/recoverable-failure.ts",
+      input: Schema.Void,
+      success: Schema.String,
+      failure: AcceptanceFailure,
+      recovery: {
+        InvalidWorkstream: () =>
+          Effect.sync(() => {
+            recovered = true;
+          }),
+      },
+      run: () =>
+        recovered
+          ? Effect.succeed("recovered")
+          : Effect.fail({
+              _tag: "InvalidWorkstream" as const,
+              reason: "repair external state",
+            }),
+    });
+    const fixture = WorkflowTest.make(recoverable);
+    const failed = await fixture.run(undefined);
+    const resumed = await fixture.resume();
+
+    expect(failed.state).toBe("Failed");
+    expect(resumed).toMatchObject({
+      attempt: 2,
+      outcome: { _tag: "Success", value: "recovered" },
+      runId: failed.runId,
+      state: "Completed",
+    });
+    expect(resumed.evidence.map(({ type }) => type)).toContain("Recovery.Completed");
+  });
+
   test("keeps a failed Activity truthful in evidence and trace", async () => {
     const activityFailure = Workflow.make("ActivityFailure", {
       version: "1",

@@ -29,6 +29,12 @@ export interface WorkflowDefinition<
   readonly input: Input;
   readonly success: Success;
   readonly failure: Failure;
+  readonly recovery: Readonly<
+    Record<
+      string,
+      (failure: Schema.Schema.Type<Failure>) => Effect.Effect<void, never, Requirements>
+    >
+  >;
   readonly run: (
     input: Schema.Schema.Type<Input>,
   ) => Effect.Effect<Schema.Schema.Type<Success>, Schema.Schema.Type<Failure>, Requirements>;
@@ -45,6 +51,12 @@ export interface WorkflowOptions<
   readonly input: Input;
   readonly success: Success;
   readonly failure: Failure;
+  readonly recovery?: Readonly<
+    Record<
+      string,
+      (failure: Schema.Schema.Type<Failure>) => Effect.Effect<void, never, Requirements>
+    >
+  >;
   readonly run: (
     input: Schema.Schema.Type<Input>,
   ) => Effect.Effect<Schema.Schema.Type<Success>, Schema.Schema.Type<Failure>, Requirements>;
@@ -70,6 +82,7 @@ const makeWorkflow = <
     input: options.input,
     success: options.success,
     failure: options.failure,
+    recovery: Object.freeze({ ...options.recovery }),
     run: options.run,
   }) as WorkflowDefinition<Name, Input, Success, Failure, Requirements>;
 
@@ -122,6 +135,7 @@ export type RegistryDiagnosticCode =
   | "InvalidWorkflowEntryPoint"
   | "InvalidWorkflowSchema"
   | "InvalidWorkflowRun"
+  | "InvalidWorkflowRecovery"
   | "InvalidScheduleRegistry"
   | "InvalidScheduleDefinition"
   | "InvalidScheduleName"
@@ -270,6 +284,17 @@ const validateWorkflow = (
       `${path}.run`,
       "Expected an Effect-returning run function.",
     );
+  }
+  for (const [tag, handler] of Object.entries(value.recovery)) {
+    if (tag.length === 0 || typeof handler !== "function") {
+      diagnostic(
+        diagnostics,
+        "InvalidWorkflowRecovery",
+        `${path}.recovery`,
+        "Expected non-empty stable failure tags mapped to Effect-returning Recovery Handlers.",
+      );
+      break;
+    }
   }
   return true;
 };

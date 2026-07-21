@@ -171,6 +171,7 @@ export const runSystemProcess = async (home: string): Promise<void> => {
   let lockToken: string | undefined;
   let homeDiagnostics: ReadonlyArray<unknown> = [];
   let projectService: ReturnType<typeof makeProjectService> | undefined;
+  let restartRunIds: ReadonlyArray<string> = [];
   let workflowRunService: ReturnType<typeof makeWorkflowRunService> | undefined;
   let resolveStopped: (() => void) | undefined;
 
@@ -207,6 +208,24 @@ export const runSystemProcess = async (home: string): Promise<void> => {
         store,
         makeProjectWorkflowRuntime(store, paths.endpoint),
       );
+      restartRunIds = store.workflowRuns
+        .list()
+        .filter((run) => {
+          if (run.runId !== run.rootRunId || run.state !== "Suspended") return false;
+          const requested = store?.workflowRuns
+            .find(run.runId)
+            ?.evidence.findLast(({ type }) => type === "WorkflowRun.SuspendRequested");
+          if (requested === undefined) return false;
+          try {
+            const details = JSON.parse(requested.details) as {
+              readonly value?: { readonly reason?: unknown };
+            };
+            return details.value?.reason === "SystemProcessStop";
+          } catch {
+            return false;
+          }
+        })
+        .map(({ runId }) => runId);
     } catch (error) {
       throw new Error(
         `state.sqlite initialization failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -226,7 +245,9 @@ export const runSystemProcess = async (home: string): Promise<void> => {
           return Response.json({ diagnostics: homeDiagnostics, service: "kojo", status: "ok" });
         }
         if (url.pathname === "/stop" && request.method === "POST") {
-          setTimeout(() => resolveStopped?.(), 10);
+          setTimeout(() => {
+            void workflowRunService?.gracefulStop().finally(() => resolveStopped?.());
+          }, 10);
           return Response.json({ status: "stopping" });
         }
         if (url.pathname === "/v1/home/backups" && request.method === "POST") {
@@ -307,6 +328,9 @@ export const runSystemProcess = async (home: string): Promise<void> => {
           }
         }
         const workflowRunMatch = url.pathname.match(/^\/v1\/workflow-runs\/([^/]+)$/);
+        const workflowLifecycleMatch = url.pathname.match(
+          /^\/v1\/workflow-runs\/([^/]+)\/(suspend|resume|discard)$/,
+        );
         const workflowBoundaryMatch = url.pathname.match(
           /^\/v1\/workflow-runs\/([^/]+)\/boundaries$/,
         );
@@ -379,6 +403,37 @@ export const runSystemProcess = async (home: string): Promise<void> => {
             status: "succeeded",
           });
         }
+        if (workflowLifecycleMatch !== null && request.method === "POST") {
+          const runId = decodeURIComponent(workflowLifecycleMatch[1] ?? "");
+          const operation = workflowLifecycleMatch[2] as "discard" | "resume" | "suspend";
+          const command = `workflow.${operation}`;
+          try {
+            const service = workflowRunService;
+            if (service === undefined) throw new Error("Workflow Run service is unavailable");
+            const run =
+              operation === "resume"
+                ? await service.resume(runId)
+                : operation === "suspend"
+                  ? service.suspend(runId)
+                  : service.discard(runId);
+            const status =
+              operation === "resume"
+                ? "started"
+                : operation === "suspend"
+                  ? "requested"
+                  : "status" in run
+                    ? run.status
+                    : "discarded";
+            return Response.json({
+              command,
+              run,
+              schemaVersion: 1,
+              status,
+            });
+          } catch (error) {
+            return workflowFailure(command, error);
+          }
+        }
         if (workflowBoundaryMatch !== null && request.method === "POST") {
           try {
             const runId = decodeURIComponent(workflowBoundaryMatch[1] ?? "");
@@ -434,7 +489,12 @@ export const runSystemProcess = async (home: string): Promise<void> => {
               ...scope,
               operation: body.operation,
             });
-            return Response.json({ event, status: "recorded" });
+            return Response.json({
+              event,
+              ...(event !== undefined && "control" in event
+                ? { status: event.control }
+                : { status: "recorded" }),
+            });
           } catch (error) {
             return Response.json(
               { error: error instanceof Error ? error.message : String(error) },
@@ -546,6 +606,17 @@ export const runSystemProcess = async (home: string): Promise<void> => {
     await replaceLockRecord(paths.lock, details);
     await rm(paths.startupError, { force: true });
     endpointReady = true;
+    for (const runId of restartRunIds) {
+      await workflowRunService?.resume(runId).catch((error) => {
+        console.error(
+          JSON.stringify({
+            event: "workflow-resume-skipped",
+            message: error instanceof Error ? error.message : String(error),
+            runId,
+          }),
+        );
+      });
+    }
     console.log(
       JSON.stringify({
         endpoint: details.endpoint,
@@ -555,7 +626,9 @@ export const runSystemProcess = async (home: string): Promise<void> => {
       }),
     );
 
-    const requestStop = () => resolveStopped?.();
+    const requestStop = () => {
+      void workflowRunService?.gracefulStop().finally(() => resolveStopped?.());
+    };
     process.once("SIGINT", requestStop);
     process.once("SIGTERM", requestStop);
     await stopped;
