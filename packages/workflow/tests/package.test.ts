@@ -40,9 +40,14 @@ describe("published package", () => {
 
     expect(Object.keys(root).sort()).toEqual([
       "ActivityRetry",
+      "Agent",
+      "AgentProvider",
       "COMPATIBILITY",
+      "Command",
       "Loop",
       "RegistryValidationError",
+      "Sandbox",
+      "SandboxProvider",
       "Schedule",
       "Workflow",
       "WorkflowTest",

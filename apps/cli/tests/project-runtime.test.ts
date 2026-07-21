@@ -2,7 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { decodeProjectRuntimeResult } from "../src/system/project-runtime";
+import {
+  decodeProjectRuntimeResult,
+  localDockerSandboxOptions,
+} from "../src/system/project-runtime";
 
 const cleanup = new Set<string>();
 
@@ -12,6 +15,19 @@ afterEach(async () => {
 });
 
 describe("Project Runtime Process", () => {
+  test("anchors the local Docker Sandbox fallback to the registered Project", () => {
+    const options = localDockerSandboxOptions("/registered/project", "sandcastle:kojo", {
+      baseBranch: "920ff25",
+      branch: "sandcastle/workstream-26/issue-36",
+    });
+
+    expect(options).toMatchObject({
+      baseBranch: "920ff25",
+      branch: "sandcastle/workstream-26/issue-36",
+      cwd: "/registered/project",
+    });
+  });
+
   test("runs Effect Activities through durable System Process boundaries", async () => {
     const fixture = await mkdtemp(join(resolve(import.meta.dir, "../../.."), ".runtime-test-"));
     cleanup.add(fixture);
@@ -62,6 +78,7 @@ export default defineConfig({ workflows: [example] });
           leaseHolder: "lease-holder",
           mode: "execute",
           projectId: "project-1",
+          projectPath: fixture,
           rootRunId: "run-1",
           attempt: 1,
           runId: "run-1",
@@ -163,6 +180,7 @@ export default defineConfig({ workflows: [example] });
           leaseHolder: "lease-holder",
           mode: "execute",
           projectId: "project-1",
+          projectPath: fixture,
           rootRunId: "run-1",
           runId: "run-1",
           workflowName: "example",
@@ -249,6 +267,7 @@ export default defineConfig({ workflows: [example] });
           leaseHolder: "lease-holder",
           mode: "execute",
           projectId: "project-1",
+          projectPath: fixture,
           rootRunId: "run-1",
           runId: "run-1",
           workflowName: "example",
@@ -334,6 +353,7 @@ export default defineConfig({ workflows: [example] });
           leaseHolder: "lease-holder",
           mode: "execute",
           projectId: "project-1",
+          projectPath: fixture,
           rootRunId: "run-1",
           runId: "run-1",
           workflowName: "example",
@@ -421,6 +441,7 @@ export default defineConfig({ workflows: [example] });
           leaseHolder: "lease-holder",
           mode: "execute",
           projectId: "project-1",
+          projectPath: fixture,
           recoveryFailure: { _tag: "Retryable", reason: "repair" },
           rootRunId: "run-1",
           runId: "run-1",

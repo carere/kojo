@@ -199,6 +199,7 @@ describe("Kojo Home maintenance", () => {
     initialized.close();
     const database = new Database(join(home, "state.sqlite"));
     database.run("DROP TABLE activity_claims");
+    database.run("DROP TABLE runtime_configuration_snapshots");
     database.run("DROP TABLE workflow_revision_snapshots");
     database.run("DELETE FROM kojo_migrations WHERE id >= 5");
     database.run("UPDATE system_metadata SET value = '4' WHERE key = 'schema_version'");

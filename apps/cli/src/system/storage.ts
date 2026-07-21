@@ -68,6 +68,15 @@ const workflowRevisionSnapshots = sqliteTable("workflow_revision_snapshots", {
   snapshot: text("snapshot").notNull(),
 });
 
+const runtimeConfigurationSnapshots = sqliteTable("runtime_configuration_snapshots", {
+  createdAt: text("created_at").notNull(),
+  runId: text("run_id")
+    .notNull()
+    .references(() => workflowRuns.runId),
+  snapshot: text("snapshot").notNull(),
+  subject: text("subject").notNull(),
+});
+
 const executionAttempts = sqliteTable("execution_attempts", {
   finishedAt: text("finished_at"),
   number: integer("number").notNull(),
@@ -135,7 +144,7 @@ const executionArtifacts = sqliteTable("execution_artifacts", {
   path: text("path").notNull().unique(),
 });
 
-const _evidenceArtifacts = sqliteTable("evidence_artifacts", {
+const evidenceArtifacts = sqliteTable("evidence_artifacts", {
   artifactFingerprint: text("artifact_fingerprint")
     .notNull()
     .references(() => executionArtifacts.fingerprint),
@@ -290,6 +299,18 @@ const migrations = [
       )`,
     ],
   },
+  {
+    id: 7,
+    statements: [
+      `CREATE TABLE runtime_configuration_snapshots (
+        run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),
+        subject TEXT NOT NULL,
+        snapshot TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, subject)
+      )`,
+    ],
+  },
 ] as const;
 
 const migrationChecksum = (statements: ReadonlyArray<string>) =>
@@ -301,6 +322,9 @@ export const kojoSchemaMigrations = migrations.map((migration) => ({
 }));
 
 export const kojoSchemaVersion = migrations.length;
+
+const encodePayload = (value: unknown) => JSON.stringify({ encodingVersion: 1, value });
+const decodePayload = <A>(value: string): A => (JSON.parse(value) as { readonly value: A }).value;
 
 const chmodIfPresent = async (path: string) => {
   try {
@@ -469,6 +493,14 @@ export interface WorkflowRunRepository {
     reason: "ProjectRuntimeProcessLost",
   ) => boolean;
   readonly reconcileExpiredLeases: () => ReadonlyArray<string>;
+  readonly registerArtifact: (
+    record: {
+      readonly byteLength: number;
+      readonly fingerprint: string;
+      readonly mediaType: string;
+      readonly path: string;
+    } & ExecutionWriteScope,
+  ) => void;
   readonly requestSuspend: (
     runId: string,
     reason?: "Operator" | "SystemProcessStop",
@@ -490,6 +522,15 @@ export interface WorkflowRunRepository {
     readonly runId: string;
   }) => void;
   readonly start: (record: WorkflowStartRecord) => void;
+  readonly verifyRuntimeConfiguration: (
+    record: {
+      readonly snapshot: string;
+      readonly subject: string;
+    } & ExecutionWriteScope,
+  ) => {
+    readonly evidence: StoredEvidenceEvent;
+    readonly status: "compatible" | "incompatible" | "recorded";
+  };
 }
 
 export interface WorkflowJournalRepository {
@@ -858,7 +899,6 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
       );
       if (existing !== undefined) {
         if (
-          existing.attempt !== record.attempt ||
           existing.details !== record.details ||
           existing.subject !== record.subject ||
           existing.type !== record.operation
@@ -907,6 +947,26 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
         })
         .run();
       transaction.insert(evidenceEvents).values(evidence).run();
+      const details = decodePayload<Record<string, unknown>>(record.details);
+      const artifacts = Array.isArray(details.artifacts) ? details.artifacts : [];
+      for (const artifact of artifacts) {
+        if (
+          typeof artifact === "object" &&
+          artifact !== null &&
+          typeof artifact.fingerprint === "string" &&
+          typeof artifact.name === "string"
+        ) {
+          transaction
+            .insert(evidenceArtifacts)
+            .values({
+              artifactFingerprint: artifact.fingerprint,
+              eventId: evidence.eventId,
+              name: artifact.name,
+            })
+            .onConflictDoNothing()
+            .run();
+        }
+      }
       return evidence;
     };
     const lifecycleRequested = (
@@ -1197,8 +1257,7 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
             .get();
           if (
             storedClaim !== undefined &&
-            (storedClaim.attempt !== record.attempt ||
-              storedClaim.completionIdempotencyKey !== record.completionIdempotencyKey ||
+            (storedClaim.completionIdempotencyKey !== record.completionIdempotencyKey ||
               storedClaim.subject !== record.subject)
           ) {
             throw new Error(
@@ -1413,6 +1472,39 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
         }
         return interrupted;
       },
+      registerArtifact: (record) => {
+        reconcileExpiredScope(record);
+        database.transaction((transaction) => {
+          assertExecutionScope(transaction, record);
+          const existing = transaction
+            .select()
+            .from(executionArtifacts)
+            .where(eq(executionArtifacts.fingerprint, record.fingerprint))
+            .get();
+          if (
+            existing !== undefined &&
+            (existing.byteLength !== record.byteLength ||
+              existing.mediaType !== record.mediaType ||
+              existing.path !== record.path)
+          ) {
+            throw new Error(
+              `Execution Artifact ${record.fingerprint} conflicts with durable metadata`,
+            );
+          }
+          if (existing === undefined) {
+            transaction
+              .insert(executionArtifacts)
+              .values({
+                byteLength: record.byteLength,
+                createdAt: new Date().toISOString(),
+                fingerprint: record.fingerprint,
+                mediaType: record.mediaType,
+                path: record.path,
+              })
+              .run();
+          }
+        });
+      },
       requestSuspend: (runId, reason = "Operator") =>
         database.transaction((transaction) => {
           const run = transaction
@@ -1528,6 +1620,62 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
           transaction.insert(executionLeases).values(record.lease).run();
           transaction.insert(workflowJournal).values(record.journal).run();
           transaction.insert(evidenceEvents).values(record.evidence).run();
+        });
+      },
+      verifyRuntimeConfiguration: (record) => {
+        reconcileExpiredScope(record);
+        return database.transaction((transaction) => {
+          assertExecutionScope(transaction, record);
+          const existing = transaction
+            .select()
+            .from(runtimeConfigurationSnapshots)
+            .where(
+              and(
+                eq(runtimeConfigurationSnapshots.runId, record.runId),
+                eq(runtimeConfigurationSnapshots.subject, record.subject),
+              ),
+            )
+            .get();
+          if (existing === undefined) {
+            const now = new Date().toISOString();
+            transaction
+              .insert(runtimeConfigurationSnapshots)
+              .values({
+                createdAt: now,
+                runId: record.runId,
+                snapshot: record.snapshot,
+                subject: record.subject,
+              })
+              .run();
+            return {
+              evidence: insertBoundary(transaction, {
+                ...record,
+                details: record.snapshot,
+                idempotencyKey: `${record.runId}:runtime-configuration:${record.subject}:snapshot`,
+                operation: "RuntimeConfiguration.SnapshotRecorded",
+              }),
+              status: "recorded" as const,
+            };
+          }
+          const status = existing.snapshot === record.snapshot ? "compatible" : "incompatible";
+          return {
+            evidence: insertBoundary(transaction, {
+              ...record,
+              details:
+                status === "compatible"
+                  ? record.snapshot
+                  : encodePayload({
+                      available: decodePayload(record.snapshot),
+                      expected: decodePayload(existing.snapshot),
+                    }),
+              idempotencyKey: `${record.runId}:runtime-configuration:${record.subject}:${record.attempt}:${status}`,
+              operation:
+                status === "compatible"
+                  ? "RuntimeConfiguration.Compatible"
+                  : "RuntimeConfiguration.Incompatible",
+            }),
+            status,
+          };
         });
       },
     };

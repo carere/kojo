@@ -213,6 +213,7 @@ const make = <
     { readonly exit?: Exit.Exit<unknown, unknown>; readonly uncertain: boolean }
   >();
   const controlJournal = new Set<string>();
+  const runtimeConfigurations = new Map<string, unknown>();
   const ids = [...(makeOptions.ids ?? [])];
   let generatedId = 0;
   let attempt = 0;
@@ -322,6 +323,40 @@ const make = <
             boundary.details,
           );
         }) as Effect.Effect<void>,
+    };
+
+    const runtimeConfigurationRecorder = {
+      verify: (subject: string, snapshot: unknown) =>
+        Effect.gen(function* () {
+          const existing = runtimeConfigurations.get(subject);
+          if (existing === undefined) {
+            runtimeConfigurations.set(subject, structuredClone(snapshot));
+            yield* appendWithoutLifecycleCompensation(
+              "RuntimeConfiguration.SnapshotRecorded",
+              subject,
+              snapshot,
+            );
+            return;
+          }
+          if (!Equal.equals(existing, snapshot)) {
+            yield* appendWithoutLifecycleCompensation(
+              "RuntimeConfiguration.Incompatible",
+              subject,
+              {
+                available: snapshot,
+                expected: existing,
+              },
+            );
+            return yield* Effect.die(
+              `Runtime Configuration for '${subject}' does not match its durable snapshot`,
+            );
+          }
+          yield* appendWithoutLifecycleCompensation(
+            "RuntimeConfiguration.Compatible",
+            subject,
+            snapshot,
+          );
+        }),
     };
 
     const recorder: RecorderService = {
@@ -502,6 +537,11 @@ const make = <
     ) as Effect.Effect<unknown, unknown, unknown>;
     handler = handler.pipe(
       Effect.provideService(CompositionRuntime.BoundaryRecorder, boundaryRecorder),
+      Effect.provideService(
+        CompositionRuntime.RuntimeConfigurationRecorder,
+        runtimeConfigurationRecorder,
+      ),
+      Effect.provideService(CompositionRuntime.ExecutionAttempt, attempt),
     );
     if (makeOptions.layer !== undefined) {
       handler = handler.pipe(Effect.provide(makeOptions.layer as Layer.Layer<never, never, never>));

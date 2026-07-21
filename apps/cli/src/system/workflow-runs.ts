@@ -99,6 +99,18 @@ export interface WorkflowStartRequest {
 }
 
 const encoded = (value: unknown) => JSON.stringify({ encodingVersion: 1, value });
+const canonicalJson = (value: unknown): string => {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+};
+const encodedCanonical = (value: unknown) =>
+  `{"encodingVersion":1,"value":${canonicalJson(value)}}`;
 const decoded = <A>(value: string | null): A | null =>
   value === null ? null : (JSON.parse(value) as A);
 const decodedValue = <A>(value: string): A => (JSON.parse(value) as { readonly value: A }).value;
@@ -275,6 +287,18 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
       const entry = store.workflowRuns.readBoundary(scope, idempotencyKey);
       return entry === undefined ? undefined : decodedValue(entry.payload);
     },
+    registerArtifact: (request: {
+      readonly attempt: number;
+      readonly byteLength: number;
+      readonly fingerprint: string;
+      readonly leaseGeneration: number;
+      readonly leaseHolder: string;
+      readonly mediaType: string;
+      readonly path: string;
+      readonly projectId: string;
+      readonly rootRunId: string;
+      readonly runId: string;
+    }) => store.workflowRuns.registerArtifact(request),
     recordBoundary: (request: {
       readonly attempt: number;
       readonly idempotencyKey: string;
@@ -290,6 +314,20 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
       store.workflowRuns.appendBoundary({
         ...request,
         details: encoded(request.payload),
+      }),
+    verifyRuntimeConfiguration: (request: {
+      readonly attempt: number;
+      readonly leaseGeneration: number;
+      readonly leaseHolder: string;
+      readonly projectId: string;
+      readonly rootRunId: string;
+      readonly runId: string;
+      readonly snapshot: unknown;
+      readonly subject: string;
+    }) =>
+      store.workflowRuns.verifyRuntimeConfiguration({
+        ...request,
+        snapshot: encodedCanonical(request.snapshot),
       }),
     discard: (runId: string) => {
       const discarded = store.workflowRuns.discard(runId);

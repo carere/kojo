@@ -12,13 +12,29 @@ interface DurableBoundaryRecorder {
   readonly record: (boundary: DurableBoundary) => Effect.Effect<void>;
 }
 
+interface RuntimeConfigurationRecorder {
+  readonly verify: (
+    subject: string,
+    snapshot: unknown,
+  ) => Effect.Effect<void, never, WorkflowEngine.WorkflowInstance>;
+}
+
 const BoundaryRecorder = Context.Reference<DurableBoundaryRecorder>(
   "@kojo/workflow/DurableBoundaryRecorder",
   { defaultValue: () => ({ record: () => Effect.void }) },
 );
 
+const RuntimeConfigurationRecorder = Context.Reference<RuntimeConfigurationRecorder>(
+  "@kojo/workflow/RuntimeConfigurationRecorder",
+  { defaultValue: () => ({ verify: () => Effect.void }) },
+);
+
 const DurablePath = Context.Reference<ReadonlyArray<string>>("@kojo/workflow/DurablePath", {
   defaultValue: () => [],
+});
+
+const ExecutionAttempt = Context.Reference<number>("@kojo/workflow/ExecutionAttempt", {
+  defaultValue: () => 1,
 });
 
 const pathSubject = (path: ReadonlyArray<string>, leaf?: string) =>
@@ -199,6 +215,8 @@ export const ActivityRetry = Object.freeze({ run: retryActivity });
 export const CompositionRuntime = Object.freeze({
   BoundaryRecorder,
   DurablePath,
+  ExecutionAttempt,
+  RuntimeConfigurationRecorder,
   activitySubject: (activityName: string) =>
     DurablePath.pipe(Effect.map((path) => pathSubject(path, activityName))),
 });

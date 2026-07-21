@@ -1,7 +1,18 @@
 import { describe, expect, test } from "@effect/vitest";
 import { Clock, Context, Effect, Layer, Schema } from "effect";
 import { Activity, DurableClock, Workflow as EffectWorkflow } from "effect/unstable/workflow";
-import { ActivityRetry, Loop, Workflow, WorkflowTest } from "../src/index";
+import { CompositionRuntime } from "../src/composition";
+import {
+  ActivityRetry,
+  Agent,
+  AgentProvider,
+  Command,
+  Loop,
+  Sandbox,
+  SandboxProvider,
+  Workflow,
+  WorkflowTest,
+} from "../src/index";
 
 const Adapter = Context.Service<{
   readonly invoke: <A>(
@@ -41,6 +52,279 @@ const acceptance = Workflow.make("Acceptance", {
 });
 
 describe("WorkflowTest", () => {
+  test("recreates one named Sandbox around committed work and reuses it within an attempt", async () => {
+    let handleOrdinal = 0;
+    const acquisitions: Array<{ readonly branch: string; readonly handle: number }> = [];
+    const uses: Array<{ readonly handle: number; readonly operation: string }> = [];
+    const sandboxLayer = Layer.succeed(SandboxProvider, {
+      configuration: {
+        adapterVersion: "0.12.0",
+        configurationFingerprint: "docker-default",
+        name: "local-docker",
+        publicFields: { image: "sandcastle:kojo" },
+      },
+      create: ({ branch }) =>
+        Effect.sync(() => {
+          const handle = ++handleOrdinal;
+          acquisitions.push({ branch, handle });
+          return {
+            branch,
+            close: () => Promise.resolve({}),
+            exec: async (command: string) => {
+              uses.push({ handle, operation: `command:${command}` });
+              return { exitCode: 7, stderr: "lint failed\n", stdout: "checked\n" };
+            },
+            run: async () => {
+              uses.push({ handle, operation: "agent" });
+              return { commits: [{ sha: "abc123" }], stdout: "committed" };
+            },
+          };
+        }),
+    });
+    const definition = Workflow.make("ReusableSandbox", {
+      version: "1",
+      entryPoint: "workflows/reusable-sandbox.ts",
+      input: Schema.Void,
+      success: Schema.Number,
+      failure: Command.Failure,
+      run: () =>
+        Sandbox.use("ticket-36", {
+          branch: "sandcastle/workstream-26/issue-36",
+          effect: Effect.gen(function* () {
+            yield* Agent.run("implement", { prompt: "Commit the ticket" });
+            const result = yield* Command.run("check", { command: "moon run :check" });
+            return result.exitCode;
+          }),
+        }),
+    });
+    const fixture = WorkflowTest.make(definition, {
+      layer: Layer.merge(
+        sandboxLayer,
+        Layer.succeed(AgentProvider, {
+          agent: {},
+          configuration: {
+            adapterVersion: "test",
+            configurationFingerprint: "agent-default",
+            model: "controlled",
+            name: "controlled-agent",
+            publicFields: {},
+          },
+        }),
+      ),
+    });
+
+    const interrupted = await fixture.run(undefined, {
+      interruptAfter: { subject: "ticket-36/check", type: "Activity.Completed" },
+    });
+    const restarted = await fixture.restart();
+
+    expect(interrupted.state).toBe("Interrupted");
+    expect(restarted.outcome).toEqual({ _tag: "Success", value: 7 });
+    expect(acquisitions).toEqual([
+      { branch: "sandcastle/workstream-26/issue-36", handle: 1 },
+      { branch: "sandcastle/workstream-26/issue-36", handle: 2 },
+    ]);
+    expect(uses).toEqual([
+      { handle: 1, operation: "agent" },
+      { handle: 1, operation: "command:moon run :check" },
+    ]);
+    expect(restarted.evidence.map(({ type }) => type)).toContain(
+      "RuntimeConfiguration.SnapshotRecorded",
+    );
+    expect(restarted.evidence.map(({ type }) => type)).toContain("Command.OutputArtifactsRecorded");
+    const commandEvidence = restarted.evidence.find(
+      ({ type }) => type === "Command.OutputArtifactsRecorded",
+    );
+    expect(commandEvidence?.details).toMatchObject({
+      artifacts: [
+        { fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/), name: "stdout" },
+        { fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/), name: "stderr" },
+      ],
+      exitCode: 7,
+    });
+    expect(JSON.stringify(commandEvidence?.details)).not.toContain("checked");
+  });
+
+  test("rejects changed Sandbox configuration before creating an external resource", async () => {
+    let fingerprint = "first";
+    let acquisitions = 0;
+    const sandboxLayer = Layer.succeed(SandboxProvider, {
+      get configuration() {
+        return {
+          adapterVersion: "0.12.0",
+          configurationFingerprint: fingerprint,
+          name: "local-docker",
+          publicFields: {},
+        };
+      },
+      create: ({ branch }) =>
+        Effect.sync(() => {
+          acquisitions += 1;
+          return {
+            branch,
+            close: () => Promise.resolve({}),
+            exec: () => Promise.resolve({ exitCode: 0, stderr: "", stdout: "ok" }),
+            run: () => Promise.resolve({ commits: [], stdout: "" }),
+          };
+        }),
+    });
+    const definition = Workflow.make("ConfigurationBoundary", {
+      version: "1",
+      entryPoint: "workflows/configuration-boundary.ts",
+      input: Schema.Void,
+      success: Schema.String,
+      failure: Command.Failure,
+      run: () =>
+        Sandbox.use("shared", {
+          branch: "ticket/shared",
+          effect: Command.run("observe", { command: "true" }).pipe(
+            Effect.map(({ stdout }) => stdout),
+          ),
+        }),
+    });
+    const fixture = WorkflowTest.make(definition, { layer: sandboxLayer });
+    const interrupted = await fixture.run(undefined, {
+      interruptAfter: { subject: "shared/observe", type: "Activity.Completed" },
+    });
+    fingerprint = "changed";
+    const restarted = await fixture.restart();
+
+    expect(interrupted.state).toBe("Interrupted");
+    expect(restarted.state).toBe("Failed");
+    expect(restarted.outcome._tag).toBe("Defect");
+    expect(acquisitions).toBe(1);
+    expect(restarted.evidence.map(({ type }) => type)).toContain(
+      "RuntimeConfiguration.Incompatible",
+    );
+  });
+
+  test("records dirty and failed cleanup without replacing the workflow outcome", async () => {
+    const outcomes: Array<"dirty" | "failed"> = ["dirty", "failed"];
+    for (const cleanup of outcomes) {
+      const sandboxLayer = Layer.succeed(SandboxProvider, {
+        configuration: {
+          adapterVersion: "test",
+          configurationFingerprint: cleanup,
+          name: "controlled",
+          publicFields: {},
+        },
+        create: ({ branch }) =>
+          Effect.succeed({
+            branch,
+            close: () =>
+              cleanup === "dirty"
+                ? Promise.resolve({ preservedWorktreePath: "/retained/ticket-36" })
+                : Promise.reject(new Error("cleanup unavailable")),
+            exec: () => Promise.resolve({ exitCode: 0, stderr: "", stdout: "ok" }),
+            run: () => Promise.resolve({ commits: [], stdout: "" }),
+          }),
+      });
+      const definition = Workflow.make(`Cleanup-${cleanup}`, {
+        version: "1",
+        entryPoint: "workflows/cleanup.ts",
+        input: Schema.Void,
+        success: Schema.String,
+        failure: Schema.Never,
+        run: () =>
+          Sandbox.use("cleanup", {
+            branch: "ticket/cleanup",
+            effect: Effect.succeed("primary success"),
+          }),
+      });
+
+      const result = await WorkflowTest.make(definition, { layer: sandboxLayer }).run(undefined);
+
+      expect(result.outcome).toEqual({ _tag: "Success", value: "primary success" });
+      expect(result.evidence.map(({ type }) => type)).toContain(
+        cleanup === "dirty" ? "Sandbox.DirtyWorkRetained" : "Sandbox.CleanupFailed",
+      );
+    }
+  });
+
+  test("closes an acquired Sandbox when recording its open boundary fails", async () => {
+    let closes = 0;
+    const sandboxLayer = Layer.succeed(SandboxProvider, {
+      configuration: {
+        adapterVersion: "test",
+        configurationFingerprint: "open-boundary-failure",
+        name: "controlled",
+        publicFields: {},
+      },
+      create: ({ branch }) =>
+        Effect.succeed({
+          branch,
+          close: async () => {
+            closes += 1;
+            return {};
+          },
+          exec: () => Promise.resolve({ exitCode: 0, stderr: "", stdout: "" }),
+          run: () => Promise.resolve({ commits: [], stdout: "" }),
+        }),
+    });
+    const exit = await Effect.runPromiseExit(
+      Sandbox.use("cleanup-after-open", {
+        branch: "ticket/cleanup-after-open",
+        effect: Effect.void,
+      }).pipe(
+        Effect.provide(sandboxLayer),
+        Effect.provideService(CompositionRuntime.BoundaryRecorder, {
+          record: ({ type }) =>
+            type === "Sandbox.Opened" ? Effect.die("journal unavailable") : Effect.void,
+        }),
+      ),
+    );
+
+    expect(exit._tag).toBe("Failure");
+    expect(closes).toBe(1);
+  });
+
+  test("retries Command execution failures while keeping nonzero exits as observed data", async () => {
+    let executions = 0;
+    const sandboxLayer = Layer.succeed(SandboxProvider, {
+      configuration: {
+        adapterVersion: "test",
+        configurationFingerprint: "retry",
+        name: "controlled",
+        publicFields: {},
+      },
+      create: ({ branch }) =>
+        Effect.succeed({
+          branch,
+          close: () => Promise.resolve({}),
+          exec: async () => {
+            executions += 1;
+            if (executions === 1) throw new Error("temporary process failure");
+            return { exitCode: 23, stderr: "failed policy", stdout: "observed" };
+          },
+          run: () => Promise.resolve({ commits: [], stdout: "" }),
+        }),
+    });
+    const definition = Workflow.make("CommandRetry", {
+      version: "1",
+      entryPoint: "workflows/command-retry.ts",
+      input: Schema.Void,
+      success: Command.Result,
+      failure: Command.Failure,
+      run: () =>
+        Sandbox.use("retry", {
+          branch: "ticket/retry",
+          effect: Command.run("check", {
+            command: "moon run :check",
+            retry: { backoff: "0 millis", maxAttempts: 2, while: () => true },
+          }),
+        }),
+    });
+
+    const result = await WorkflowTest.make(definition, { layer: sandboxLayer }).run(undefined);
+
+    expect(result.outcome).toEqual({
+      _tag: "Success",
+      value: { exitCode: 23, stderr: "failed policy", stdout: "observed" },
+    });
+    expect(executions).toBe(2);
+    expect(result.evidence.map(({ type }) => type)).toContain("Activity.RetryScheduled");
+  });
+
   test("runs a Developer Workflow through its public entry point with controlled layers", async () => {
     const fixture = WorkflowTest.make(acceptance, {
       clock: "2026-07-20T12:00:00.000Z",
