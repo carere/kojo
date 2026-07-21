@@ -483,7 +483,7 @@ describe("WorkflowTest", () => {
           close: () => Promise.resolve({}),
           exec: () => Promise.resolve({ exitCode: 0, stderr: "", stdout: "" }),
           run: ({ agent, prompt }) => {
-            const providerName = prompt === "Implement" ? "implementer" : "reviewer";
+            const providerName = prompt.startsWith("Implement") ? "implementer" : "reviewer";
             observations.push({ agent, provider: providerName });
             return Promise.resolve({
               commits: [],
@@ -535,7 +535,7 @@ describe("WorkflowTest", () => {
     expect(rendered).not.toContain(secret);
     expect(rendered).not.toContain(unsafeName);
     expect(rendered).not.toContain(secretFingerprint);
-    expect(rendered).not.toContain("configurationFingerprint");
+    expect(rendered).toContain("implementer-safe-configuration");
     expect(rendered).toContain('"name":"implementer"');
     expect(rendered).toContain('"model":"model-a"');
     expect(rendered).toContain('"adapterVersion":"1.2.3"');
@@ -612,6 +612,71 @@ describe("WorkflowTest", () => {
     expect(result.evidence.map(({ type }) => type)).not.toContain("Agent.Completed");
   });
 
+  test("extracts a structured Agent result from the Sandcastle transcript", async () => {
+    let receivedPrompt = "";
+    let receivedLogging: unknown;
+    const definition = Workflow.make("SandcastleAgentResult", {
+      version: "1",
+      entryPoint: "workflows/sandcastle-agent-result.ts",
+      input: Schema.Void,
+      success: Schema.BigIntFromString,
+      failure: Schema.Never,
+      run: () =>
+        Sandbox.use("shared", {
+          branch: "ticket/sandcastle-agent-result",
+          effect: Agent.run("agent", {
+            failure: Schema.Never,
+            prompt: "Return the answer",
+            success: Schema.BigIntFromString,
+          }),
+        }),
+    });
+    const result = await WorkflowTest.make(definition, {
+      layer: Layer.merge(
+        Layer.succeed(AgentProvider, {
+          agent: {},
+          configuration: {
+            adapterVersion: "1",
+            configurationFingerprint: "controlled",
+            model: "controlled",
+            name: "controlled",
+            publicFields: {},
+          },
+        }),
+        Layer.succeed(SandboxProvider, {
+          configuration: {
+            adapterVersion: "1",
+            configurationFingerprint: "sandbox",
+            name: "sandbox",
+            publicFields: {},
+          },
+          create: ({ branch }) =>
+            Effect.succeed({
+              branch,
+              close: () => Promise.resolve({}),
+              exec: () => Promise.resolve({ exitCode: 0, stderr: "", stdout: "" }),
+              run: ({ logging, prompt }) => {
+                receivedLogging = logging;
+                receivedPrompt = prompt;
+                return Promise.resolve({
+                  commits: [{ sha: "abc123" }],
+                  stdout:
+                    'work log\n<kojo-agent-output>{"_tag":"Success","value":"42"}</kojo-agent-output>',
+                });
+              },
+            }),
+        }),
+      ),
+    }).run(undefined);
+
+    expect(result.outcome).toEqual({ _tag: "Success", value: 42n });
+    expect(receivedPrompt).toContain("<kojo-agent-output>");
+    expect(receivedLogging).toEqual({ type: "stdout", verbose: false });
+    const completed = result.evidence.find(({ type }) => type === "Agent.Completed");
+    expect(completed?.details).toMatchObject({ result: "42" });
+    expect(() => JSON.stringify(completed?.details)).not.toThrow();
+  });
+
   test("checks Agent compatibility before a later external call", async () => {
     let configurationFingerprint = "behavior-a";
     let secret = "first-secret";
@@ -629,8 +694,9 @@ describe("WorkflowTest", () => {
       get agent() {
         return { token: secret };
       },
-      get redactedValues() {
-        return [Redacted.make(secret)];
+      get redact() {
+        const resolvedSecret = secret;
+        return (value: string) => value.split(resolvedSecret).join("[REDACTED]");
       },
     };
     const sandboxLayer = Layer.succeed(SandboxProvider, {

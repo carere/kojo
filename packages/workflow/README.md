@@ -97,12 +97,15 @@ the process-local Sandcastle construction boundary. The layer may be supplied to
 scope or directly to one `Agent.run`, so separate Agent Steps in one Sandbox can use different
 providers without making the CLI choose an agent or model.
 
-`Agent.run(name, { prompt, success, failure })` expects the controlled Sandcastle adapter to return
-a structured `{ _tag: "Success", value }` or `{ _tag: "Failure", failure }` output and validates
-the selected value with the author schema. Its durable result retains commits and finalized,
-redacted transcript artifact references. Agent evidence records the logical Step and attempt with
-only the provider name, model, and adapter version; provider objects, credentials, configuration
-fingerprints, and transcript text are not rendered into evidence or traces.
+`Agent.run(name, { prompt, success, failure })` asks the Agent to return a structured
+`{ _tag: "Success", value }` or `{ _tag: "Failure", failure }` result in a tagged JSON block and
+validates the selected value with the author schema. A controlled adapter may return that value
+directly; the Sandcastle adapter extracts it from the reusable Sandbox's stdout. Its durable result
+retains commits and finalized, redacted transcript artifact references. Agent evidence records the
+logical Step and attempt with only the provider name, model, and adapter version; provider objects,
+credentials, secret-derived fingerprints, and transcript text are not rendered into Agent evidence
+or traces. The separate Runtime Configuration Snapshot retains the explicitly non-secret
+configuration fingerprint used for compatibility checks.
 
 `Command.run` schema-checks `{ exitCode, stdout, stderr }`. A nonzero exit code is observed data;
 workflow policy decides whether it is a failure. Rejected executions are typed

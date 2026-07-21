@@ -37,6 +37,7 @@ export interface SandboxHandle {
   readonly exec: (command: string, options?: CommandExecutionOptions) => Promise<SandboxExecResult>;
   readonly run: (options: {
     readonly agent: unknown;
+    readonly logging: { readonly type: "stdout"; readonly verbose: false };
     readonly maxIterations?: number;
     readonly prompt: string;
   }) => Promise<SandboxAgentResult>;
@@ -57,7 +58,7 @@ export type SandboxProviderFailure = Schema.Schema.Type<typeof SandboxProviderFa
 export interface AgentProviderService {
   readonly agent: unknown;
   readonly configuration: AgentProviderConfiguration;
-  readonly redactedValues?: ReadonlyArray<Redacted.Redacted<string>>;
+  readonly redact?: (value: string) => string;
 }
 
 export interface AgentProviderLayerOptions<E, R> {
@@ -77,13 +78,22 @@ export const AgentProvider = Object.assign(AgentProviderService, {
     Layer.effect(
       AgentProviderService,
       options.secrets.pipe(
-        Effect.map((redactedValues) => ({
-          // Sandcastle accepts plain strings. Keep this unwrap adjacent to constructing
-          // the process-local agent so credentials never become durable workflow values.
-          agent: options.makeAgent(redactedValues.map(Redacted.value)),
-          configuration: options.configuration,
-          redactedValues,
-        })),
+        Effect.map((redactedValues) => {
+          // Sandcastle accepts plain strings. Keep this one unwrap adjacent to
+          // constructing the process-local agent. The redactor closes over those
+          // values without exposing them as provider service data.
+          const secrets = redactedValues.map(Redacted.value);
+          return {
+            agent: options.makeAgent(secrets),
+            configuration: options.configuration,
+            redact: (value: string) =>
+              secrets.reduce(
+                (text, secret) =>
+                  secret.length === 0 ? text : text.split(secret).join("[REDACTED]"),
+                value,
+              ),
+          };
+        }),
       ),
     ),
 });
@@ -357,7 +367,7 @@ export interface AgentRunOptions<Success extends Schema.Top, Failure extends Sch
 
 const AgentTransportResult = Schema.Struct({
   commits: Schema.Array(Schema.Struct({ sha: Schema.String })),
-  output: Schema.Unknown,
+  output: Schema.optional(Schema.Unknown),
   stdout: Schema.String,
 });
 
@@ -372,27 +382,42 @@ const safeProviderIdentity = (configuration: AgentProviderConfiguration) => ({
   name: configuration.name,
 });
 
-const redact = (
-  value: string,
-  redactedValues: ReadonlyArray<Redacted.Redacted<string>> | undefined,
-) =>
-  (redactedValues ?? []).reduce((text, item) => {
-    const secret = Redacted.value(item);
-    return secret.length === 0 ? text : text.split(secret).join("[REDACTED]");
-  }, value);
+const agentOutputTag = "kojo-agent-output";
 
-const containsSecret = (
-  value: unknown,
-  redactedValues: ReadonlyArray<Redacted.Redacted<string>> | undefined,
-) => {
+const structuredAgentPrompt = (prompt: string) => `${prompt}
+
+Return the structured Agent Step result as one JSON object wrapped in
+<${agentOutputTag}> and </${agentOutputTag}>. Use
+{"_tag":"Success","value":...} for success or
+{"_tag":"Failure","failure":...} for a typed failure.`;
+
+const outputFromTranscript = (stdout: string) => {
+  const closingTag = `</${agentOutputTag}>`;
+  const closingIndex = stdout.lastIndexOf(closingTag);
+  const openingTag = `<${agentOutputTag}>`;
+  const openingIndex =
+    closingIndex === -1 ? -1 : stdout.lastIndexOf(openingTag, closingIndex - openingTag.length);
+  if (openingIndex === -1 || closingIndex === -1) {
+    return Effect.fail({
+      _tag: "Agent.ProviderFailure" as const,
+      message: "The Agent Provider did not return a structured Agent Step result",
+    });
+  }
+  return Effect.try({
+    try: () => JSON.parse(stdout.slice(openingIndex + openingTag.length, closingIndex)),
+    catch: () => ({
+      _tag: "Agent.ProviderFailure" as const,
+      message: "The Agent Provider returned invalid structured JSON",
+    }),
+  });
+};
+
+const redact = (value: string, provider: AgentProviderService) =>
+  provider.redact === undefined ? value : provider.redact(value);
+
+const containsSecret = (value: unknown, provider: AgentProviderService) => {
   const encoded = JSON.stringify(value);
-  return (
-    encoded !== undefined &&
-    (redactedValues ?? []).some((item) => {
-      const secret = Redacted.value(item);
-      return secret.length > 0 && encoded.includes(secret);
-    })
-  );
+  return encoded !== undefined && redact(encoded, provider) !== encoded;
 };
 
 const runAgent = <Success extends Schema.Top, Failure extends Schema.Top>(
@@ -434,10 +459,14 @@ const runAgent = <Success extends Schema.Top, Failure extends Schema.Top>(
         try: () =>
           sandbox.handle.run({
             agent: provider.agent,
+            // Sandcastle otherwise writes an unredacted process log to disk. Its
+            // stdout mode is silent when verbose is false; Kojo finalizes only the
+            // redacted transcript after the run settles.
+            logging: { type: "stdout", verbose: false },
             ...(options.maxIterations === undefined
               ? {}
               : { maxIterations: options.maxIterations }),
-            prompt: options.prompt,
+            prompt: structuredAgentPrompt(options.prompt),
           }),
         catch: () => ({
           _tag: "Agent.ProviderFailure" as const,
@@ -454,13 +483,15 @@ const runAgent = <Success extends Schema.Top, Failure extends Schema.Top>(
         ),
         Effect.flatMap((transport) =>
           Effect.gen(function* () {
-            if (containsSecret(transport.output, provider.redactedValues)) {
+            const output =
+              transport.output === undefined
+                ? yield* outputFromTranscript(transport.stdout)
+                : transport.output;
+            if (containsSecret(output, provider)) {
               return yield* Effect.die("Agent structured output contains a provider secret");
             }
-            const outcome = yield* Schema.decodeUnknownEffect(Outcome)(transport.output).pipe(
-              Effect.orDie,
-            );
-            const transcript = redact(transport.stdout, provider.redactedValues);
+            const outcome = yield* Schema.decodeUnknownEffect(Outcome)(output).pipe(Effect.orDie);
+            const transcript = redact(transport.stdout, provider);
             const artifact = yield* ExecutionArtifactRecorder.pipe(
               Effect.flatMap((recorder) => recorder.finalizeText("transcript", transcript)),
             );
@@ -483,12 +514,15 @@ const runAgent = <Success extends Schema.Top, Failure extends Schema.Top>(
       | { readonly _tag: "Failure"; readonly failure: Schema.Schema.Type<Failure> }
       | { readonly _tag: "ProviderFailure"; readonly failure: AgentProviderFailure };
     if (outcome._tag === "Success") {
+      const encodedResult = yield* Schema.encodeUnknownEffect(options.success)(outcome.value).pipe(
+        Effect.orDie,
+      );
       yield* record({
         details: {
           artifacts: result.artifacts,
           commits: result.commits,
           provider: providerIdentity,
-          result: outcome.value,
+          result: encodedResult,
         },
         idempotencyKey: `agent:${subject}:completed`,
         subject,
@@ -497,10 +531,14 @@ const runAgent = <Success extends Schema.Top, Failure extends Schema.Top>(
       return outcome.value;
     }
     const failure = outcome.failure;
+    const encodedFailure =
+      outcome._tag === "Failure"
+        ? yield* Schema.encodeUnknownEffect(options.failure)(failure).pipe(Effect.orDie)
+        : failure;
     yield* record({
       details: {
         artifacts: result.artifacts,
-        failure,
+        failure: encodedFailure,
         provider: providerIdentity,
       },
       idempotencyKey: `agent:${subject}:failed`,
