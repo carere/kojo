@@ -16,14 +16,10 @@ afterEach(async () => {
 
 describe("Project Runtime Process", () => {
   test("anchors the local Docker Sandbox fallback to the registered Project", () => {
-    const options = localDockerSandboxOptions(
-      "/registered/project",
-      "sandcastle:kojo",
-      {
-        baseBranch: "920ff25",
-        branch: "sandcastle/workstream-26/issue-36",
-      },
-    );
+    const options = localDockerSandboxOptions("/registered/project", "sandcastle:kojo", {
+      baseBranch: "920ff25",
+      branch: "sandcastle/workstream-26/issue-36",
+    });
 
     expect(options).toMatchObject({
       baseBranch: "920ff25",

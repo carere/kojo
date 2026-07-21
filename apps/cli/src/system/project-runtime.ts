@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import {
-  createSandbox,
   type CreateSandboxOptions,
+  createSandbox,
   type Sandbox as SandcastleSandbox,
 } from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
@@ -162,6 +162,7 @@ const executeWorkflow = async (
   }
   const runtimeRunId = request.runId;
   const runtimeAttempt = request.attempt;
+  const runtimeProjectPath = request.projectPath;
   const executionScope = {
     attempt: request.attempt,
     leaseGeneration: request.leaseGeneration,
@@ -307,7 +308,7 @@ const executeWorkflow = async (
     create: (options) =>
       Effect.tryPromise({
         try: () =>
-          createSandbox(localDockerSandboxOptions(request.projectPath, dockerImage, options)),
+          createSandbox(localDockerSandboxOptions(runtimeProjectPath, dockerImage, options)),
         catch: (error) => ({
           _tag: "Sandbox.ProviderFailure" as const,
           message: error instanceof Error ? error.message : String(error),
