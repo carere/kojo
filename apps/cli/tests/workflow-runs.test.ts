@@ -227,6 +227,103 @@ describe("Workflow Run service", () => {
     store.close();
   });
 
+  test("binds and rejoins Child Workflow Runs and inspects their complete tree", async () => {
+    const store = await makeStore();
+    const prepared = preparedRevision("parent", "parent-fingerprint", "a");
+    const service = makeWorkflowRunService(store, {
+      prepare: async () => ({
+        encodedInput: {},
+        execute: async () => new Promise(() => undefined),
+        ...prepared,
+        revisionSnapshot: {
+          ...prepared.revisionSnapshot,
+          workflows: [
+            ...prepared.revisionSnapshot.workflows,
+            {
+              declaredVersion: "v1",
+              fingerprint: "child-fingerprint",
+              stableName: "child",
+              workflowAbi: "1",
+            },
+          ],
+        },
+      }),
+    });
+    const root = await service.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-1",
+      workflowName: "parent",
+    });
+    const rootLease = store.workflowRuns.find(root.runId)?.lease;
+    if (rootLease === undefined) throw new Error("root lease is missing");
+    const rootScope = {
+      attempt: 1,
+      leaseGeneration: rootLease.generation,
+      leaseHolder: rootLease.holder,
+      projectId: "project-1",
+      rootRunId: root.runId,
+      runId: root.runId,
+    };
+    const child = service.startChild({
+      ...rootScope,
+      input: { task: 35 },
+      invocationKey: "ticket-35",
+      recoveryTags: [],
+      workflowName: "child",
+    });
+    const rejoined = service.startChild({
+      ...rootScope,
+      input: { task: 35 },
+      invocationKey: "ticket-35",
+      recoveryTags: [],
+      workflowName: "child",
+    });
+
+    expect(child).toMatchObject({ status: "created", state: "Running" });
+    expect(rejoined).toMatchObject({ runId: child.runId, status: "rejoined" });
+    expect(() =>
+      service.startChild({
+        ...rootScope,
+        input: { task: 36 },
+        invocationKey: "ticket-35",
+        recoveryTags: [],
+        workflowName: "child",
+      }),
+    ).toThrow("cannot be retargeted");
+    service.finalizeChild({
+      attempt: child.attempt,
+      leaseGeneration: child.leaseGeneration,
+      leaseHolder: child.leaseHolder,
+      invocationKey: "ticket-35",
+      parentScope: rootScope,
+      projectId: "project-1",
+      rootRunId: root.runId,
+      runId: child.runId,
+      state: "Completed",
+      value: "done",
+      workflowName: "child",
+    });
+
+    expect(service.inspectTree(root.runId)).toMatchObject({
+      children: [
+        {
+          parentRunId: root.runId,
+          runId: child.runId,
+          state: "Completed",
+        },
+      ],
+      runId: root.runId,
+    });
+    expect(service.inspect(root.runId)?.evidence.map(({ type }) => type)).toEqual([
+      "WorkflowRun.Started",
+      "ChildWorkflow.Linked",
+      "ChildWorkflow.Rejoined",
+      "ChildWorkflow.Completed",
+    ]);
+    store.close();
+  });
+
   test("finalizes completed and failed outcomes with evidence for source-independent inspection", async () => {
     const store = await makeStore();
     const outcomes = [

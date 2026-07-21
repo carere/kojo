@@ -19,6 +19,18 @@ interface RuntimeConfigurationRecorder {
   ) => Effect.Effect<void, never, WorkflowEngine.WorkflowInstance>;
 }
 
+interface ChildWorkflowInvoker {
+  readonly invoke: (
+    workflow: unknown,
+    key: string,
+    input: unknown,
+  ) => Effect.Effect<unknown, unknown, unknown>;
+}
+
+interface WorkflowRunContext {
+  readonly runId: string;
+}
+
 const BoundaryRecorder = Context.Reference<DurableBoundaryRecorder>(
   "@kojo/workflow/DurableBoundaryRecorder",
   { defaultValue: () => ({ record: () => Effect.void }) },
@@ -27,6 +39,20 @@ const BoundaryRecorder = Context.Reference<DurableBoundaryRecorder>(
 const RuntimeConfigurationRecorder = Context.Reference<RuntimeConfigurationRecorder>(
   "@kojo/workflow/RuntimeConfigurationRecorder",
   { defaultValue: () => ({ verify: () => Effect.void }) },
+);
+
+const ChildWorkflowInvoker = Context.Reference<ChildWorkflowInvoker>(
+  "@kojo/workflow/ChildWorkflowInvoker",
+  {
+    defaultValue: () => ({
+      invoke: () => Effect.die("Child Workflows can only run inside a Kojo Workflow Run"),
+    }),
+  },
+);
+
+const WorkflowRunContext = Context.Reference<WorkflowRunContext>(
+  "@kojo/workflow/WorkflowRunContext",
+  { defaultValue: () => ({ runId: "unknown-run" }) },
 );
 
 const DurablePath = Context.Reference<ReadonlyArray<string>>("@kojo/workflow/DurablePath", {
@@ -214,9 +240,11 @@ export const ActivityRetry = Object.freeze({ run: retryActivity });
 
 export const CompositionRuntime = Object.freeze({
   BoundaryRecorder,
+  ChildWorkflowInvoker,
   DurablePath,
   ExecutionAttempt,
   RuntimeConfigurationRecorder,
+  WorkflowRunContext,
   activitySubject: (activityName: string) =>
     DurablePath.pipe(Effect.map((path) => pathSubject(path, activityName))),
 });

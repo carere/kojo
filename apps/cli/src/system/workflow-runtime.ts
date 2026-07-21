@@ -358,6 +358,7 @@ export const makeProjectWorkflowRuntime = (
           : undefined;
       if (
         request.state === "Failed" &&
+        request.propagatedChildFailure !== true &&
         (failureTag === undefined ||
           failureTag === "Defect" ||
           validation.recoveryTags?.includes(failureTag) !== true)
@@ -391,7 +392,9 @@ export const makeProjectWorkflowRuntime = (
                 mode: "execute",
                 projectId,
                 projectPath: project.path,
-                ...(request.state === "Failed" ? { recoveryFailure: request.outcome } : {}),
+                ...(request.state === "Failed" && request.propagatedChildFailure !== true
+                  ? { recoveryFailure: request.outcome }
+                  : {}),
                 rootRunId,
                 runId,
                 workflowName: request.revision.stableName,

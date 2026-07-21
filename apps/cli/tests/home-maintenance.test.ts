@@ -204,6 +204,9 @@ describe("Kojo Home maintenance", () => {
     database.run("DROP TABLE activity_claims");
     database.run("DROP TABLE runtime_configuration_snapshots");
     database.run("DROP TABLE workflow_revision_snapshots");
+    database.run("DROP INDEX workflow_runs_parent_invocation_key");
+    database.run("ALTER TABLE workflow_runs DROP COLUMN invocation_key");
+    database.run("ALTER TABLE workflow_runs DROP COLUMN parent_run_id");
     database.run("DELETE FROM kojo_migrations WHERE id >= 5");
     database.run("UPDATE system_metadata SET value = '4' WHERE key = 'schema_version'");
     database.close();

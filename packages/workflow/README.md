@@ -64,6 +64,18 @@ Use Effect Workflow's `withCompensation` for Compensation. Durable Activities us
 finalizers retain ordinary journal identity and evidence, run idempotently in reverse registration
 order after terminal failure, and are not a separate Kojo primitive.
 
+Invoke another registered Developer Workflow with an author-chosen stable key to create a Child
+Workflow Run:
+
+```ts
+const result = yield* child.run("ticket-35", input);
+```
+
+Kojo binds that key within the parent's current durable path. Replay rejoins the same Child Run ID
+and rejects changing its input or Developer Workflow. The child retains its own state, result, and
+Execution Evidence while its success, Typed Failure, or Defect uses the parent's ordinary Effect
+channels. Completed children are immutable and are never reopened for parent Compensation.
+
 ## Reusable Sandboxes
 
 `Sandbox.use` scopes one process-local Sandcastle Sandbox to a stable name and Git branch.
@@ -95,6 +107,11 @@ the whole registry before returning it.
 Effect Layer with controlled Agent, Sandbox, Command, Git, or GitHub adapters and wrap their public
 operations with `WorkflowTest.call`. The result exposes the typed outcome, Workflow Run State,
 normalized Execution Evidence and Trace, and the observed calls.
+
+For Child Workflow acceptance tests, pass the root snapshot as
+`WorkflowTest.make(parent, { workflows: [child] })`. Every returned run has `children`; each node
+contains only its own evidence, so the complete Workflow Run Tree remains inspectable without
+copying child evidence into its parent.
 
 ```ts
 import { expect, test } from "@effect/vitest";

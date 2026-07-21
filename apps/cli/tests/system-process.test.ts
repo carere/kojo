@@ -731,6 +731,10 @@ describe("Kojo System Process", () => {
           checksum: expect.stringMatching(/^[a-f0-9]{64}$/),
           id: 8,
         },
+        {
+          checksum: expect.stringMatching(/^[a-f0-9]{64}$/),
+          id: 9,
+        },
       ]);
     } finally {
       database.close();

@@ -52,6 +52,221 @@ const acceptance = Workflow.make("Acceptance", {
 });
 
 describe("WorkflowTest", () => {
+  test("composes keyed Child Workflow Runs with independent identity, evidence, and results", async () => {
+    const ChildFailure = Schema.TaggedStruct("ChildFailure", { reason: Schema.String });
+    const child = Workflow.make("Child", {
+      version: "1",
+      entryPoint: "workflows/child.ts",
+      input: Schema.Struct({ value: Schema.String }),
+      success: Schema.String,
+      failure: ChildFailure,
+      run: ({ value }) =>
+        Activity.make({
+          execute: Effect.succeed(value.toUpperCase()),
+          name: "child-activity",
+          success: Schema.String,
+        }),
+    });
+    const parent = Workflow.make("Parent", {
+      version: "1",
+      entryPoint: "workflows/parent.ts",
+      input: Schema.String,
+      success: Schema.String,
+      failure: ChildFailure,
+      run: (value) => child.run("selected-child", { value }),
+    });
+
+    const result = await WorkflowTest.make(parent, { workflows: [child] }).run("hello");
+
+    expect(result).toMatchObject({
+      outcome: { _tag: "Success", value: "HELLO" },
+      parentRunId: null,
+      rootRunId: result.runId,
+      state: "Completed",
+      workflowName: "Parent",
+    });
+    expect(result.children).toHaveLength(1);
+    expect(result.children[0]).toMatchObject({
+      input: { value: "hello" },
+      outcome: { _tag: "Success", value: "HELLO" },
+      parentRunId: result.runId,
+      rootRunId: result.runId,
+      state: "Completed",
+      workflowName: "Child",
+    });
+    expect(result.children[0]?.runId).not.toBe(result.runId);
+    expect(result.evidence.map(({ type }) => type)).toContain("ChildWorkflow.Linked");
+    expect(result.evidence.map(({ type }) => type)).not.toContain("Activity.Completed");
+    expect(result.children[0]?.evidence.map(({ type }) => type)).toEqual([
+      "WorkflowRun.Started",
+      "Activity.Started",
+      "Activity.Completed",
+      "WorkflowRun.Completed",
+    ]);
+    expect(result.revisionSnapshot.map(({ stableName }) => stableName)).toEqual([
+      "Parent",
+      "Child",
+    ]);
+  });
+
+  test("rejoins one Child Workflow Run on replay and rejects retargeting its stable key", async () => {
+    let executions = 0;
+    let childInput = "first";
+    const child = Workflow.make("ReplayChild", {
+      version: "1",
+      entryPoint: "workflows/replay-child.ts",
+      input: Schema.String,
+      success: Schema.String,
+      failure: Schema.Never,
+      run: (value) =>
+        Activity.make({
+          execute: Effect.sync(() => {
+            executions += 1;
+            return value;
+          }),
+          name: "once",
+          success: Schema.String,
+        }),
+    });
+    const parent = Workflow.make("ReplayParent", {
+      version: "1",
+      entryPoint: "workflows/replay-parent.ts",
+      input: Schema.Void,
+      success: Schema.String,
+      failure: Schema.Never,
+      run: () => child.run("stable", childInput),
+    });
+    const fixture = WorkflowTest.make(parent, { workflows: [child] });
+    const interrupted = await fixture.run(undefined, {
+      interruptAfter: { subject: "ReplayParent", type: "ChildWorkflow.Completed" },
+    });
+    const childRunId = interrupted.children[0]?.runId;
+    const restarted = await fixture.restart();
+
+    expect(restarted.state).toBe("Completed");
+    expect(restarted.children[0]?.runId).toBe(childRunId);
+    expect(executions).toBe(1);
+
+    const retargeted = WorkflowTest.make(parent, { workflows: [child] });
+    await retargeted.run(undefined, {
+      interruptAfter: { subject: "ReplayParent", type: "ChildWorkflow.Completed" },
+    });
+    childInput = "different";
+    const rejected = await retargeted.restart();
+    expect(rejected).toMatchObject({ outcome: { _tag: "Defect" }, state: "Failed" });
+    expect((rejected.outcome as { readonly cause: string }).cause).toContain(
+      "cannot be retargeted",
+    );
+  });
+
+  test("lets a parent handle a Child Workflow Typed Failure without rewriting child history", async () => {
+    const ChildFailure = Schema.TaggedStruct("ChildFailure", { reason: Schema.String });
+    const child = Workflow.make("FailingChild", {
+      version: "1",
+      entryPoint: "workflows/failing-child.ts",
+      input: Schema.String,
+      success: Schema.Never,
+      failure: ChildFailure,
+      run: (reason) => Effect.fail({ _tag: "ChildFailure" as const, reason }),
+    });
+    const parent = Workflow.make("HandlingParent", {
+      version: "1",
+      entryPoint: "workflows/handling-parent.ts",
+      input: Schema.String,
+      success: Schema.String,
+      failure: Schema.Never,
+      run: (reason) =>
+        child
+          .run("handled", reason)
+          .pipe(Effect.catchTag("ChildFailure", (failure) => Effect.succeed(failure.reason))),
+    });
+
+    const fixture = WorkflowTest.make(parent, { workflows: [child] });
+    const result = await fixture.run("expected");
+
+    expect(result).toMatchObject({
+      outcome: { _tag: "Success", value: "expected" },
+      state: "Completed",
+    });
+    expect(result.children[0]).toMatchObject({
+      outcome: { _tag: "Failure", failure: { _tag: "ChildFailure", reason: "expected" } },
+      state: "Failed",
+    });
+    await expect(fixture.resume()).rejects.toThrow("Completed state");
+    await expect(fixture.discard()).rejects.toThrow("Completed state");
+  });
+
+  test("recovers descendants before replaying their parent and discards unfinished trees deepest-first", async () => {
+    const Recoverable = Schema.TaggedStruct("RecoverableChild", {});
+    let recovered = false;
+    const child = Workflow.make("RecoverableChild", {
+      version: "1",
+      entryPoint: "workflows/recoverable-child.ts",
+      input: Schema.Void,
+      success: Schema.String,
+      failure: Recoverable,
+      recovery: {
+        RecoverableChild: () => Effect.sync(() => (recovered = true)),
+      },
+      run: () =>
+        recovered
+          ? Effect.succeed("recovered child")
+          : Effect.fail({ _tag: "RecoverableChild" as const }),
+    });
+    const parent = Workflow.make("RecoveryParent", {
+      version: "1",
+      entryPoint: "workflows/recovery-parent.ts",
+      input: Schema.Void,
+      success: Schema.String,
+      failure: Recoverable,
+      run: () => child.run("recoverable", undefined),
+    });
+    const fixture = WorkflowTest.make(parent, { workflows: [child] });
+    const failed = await fixture.run(undefined);
+    const resumed = await fixture.resume();
+
+    expect(failed.children[0]).toMatchObject({ state: "Failed" });
+    expect(resumed).toMatchObject({
+      attempt: 2,
+      outcome: { _tag: "Success", value: "recovered child" },
+      state: "Completed",
+    });
+    expect(resumed.children[0]).toMatchObject({ attempt: 2, state: "Completed" });
+    expect(resumed.children[0]?.evidence.map(({ type }) => type)).toContain("Recovery.Completed");
+
+    const activeChild = Workflow.make("ActiveChild", {
+      version: "1",
+      entryPoint: "workflows/active-child.ts",
+      input: Schema.Void,
+      success: Schema.String,
+      failure: Schema.Never,
+      run: () =>
+        Activity.make({
+          execute: Effect.succeed("settled"),
+          name: "active",
+          success: Schema.String,
+        }),
+    });
+    const activeParent = Workflow.make("ActiveParent", {
+      version: "1",
+      entryPoint: "workflows/active-parent.ts",
+      input: Schema.Void,
+      success: Schema.String,
+      failure: Schema.Never,
+      run: () => activeChild.run("active", undefined),
+    });
+    const discardable = WorkflowTest.make(activeParent, { workflows: [activeChild] });
+    await discardable.run(undefined, {
+      interruptAfter: { subject: "active", type: "Activity.Started" },
+    });
+    const discarded = await discardable.discard();
+
+    expect(discarded.state).toBe("Discarded");
+    expect(discarded.children[0]?.state).toBe("Discarded");
+    expect(discarded.children[0]?.evidence.at(-1)?.type).toBe("WorkflowRun.Discarded");
+    expect(discarded.evidence.at(-1)?.type).toBe("WorkflowRun.Discarded");
+  });
+
   test("recreates one named Sandbox around committed work and reuses it within an attempt", async () => {
     let handleOrdinal = 0;
     const acquisitions: Array<{ readonly branch: string; readonly handle: number }> = [];

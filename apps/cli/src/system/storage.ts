@@ -86,10 +86,12 @@ const workflowRevisions = sqliteTable("workflow_revisions", {
 const workflowRuns = sqliteTable("workflow_runs", {
   createdAt: text("created_at").notNull(),
   input: text("input").notNull(),
+  invocationKey: text("invocation_key"),
   outcome: text("outcome"),
   projectId: text("project_id")
     .notNull()
     .references(() => projects.id),
+  parentRunId: text("parent_run_id"),
   revisionFingerprint: text("revision_fingerprint")
     .notNull()
     .references(() => workflowRevisions.fingerprint),
@@ -388,6 +390,14 @@ const migrations = [
       )`,
     ],
   },
+  {
+    id: 9,
+    statements: [
+      "ALTER TABLE workflow_runs ADD COLUMN parent_run_id TEXT REFERENCES workflow_runs(run_id)",
+      "ALTER TABLE workflow_runs ADD COLUMN invocation_key TEXT",
+      "CREATE UNIQUE INDEX workflow_runs_parent_invocation_key ON workflow_runs(parent_run_id, invocation_key) WHERE parent_run_id IS NOT NULL",
+    ],
+  },
 ] as const;
 
 const migrationChecksum = (statements: ReadonlyArray<string>) =>
@@ -462,8 +472,10 @@ export interface StoredWorkflowRevision {
 export interface StoredWorkflowRun {
   readonly createdAt: string;
   readonly input: string;
+  readonly invocationKey?: string | null;
   readonly outcome: string | null;
   readonly projectId: string;
+  readonly parentRunId?: string | null;
   readonly revisionFingerprint: string;
   readonly rootRunId: string;
   readonly runId: string;
@@ -542,6 +554,11 @@ export interface WorkflowTerminalRecord {
   readonly evidence: StoredEvidenceEvent;
   readonly journal: StoredWorkflowJournalEntry;
   readonly outcome: string;
+  readonly parentNotification?: {
+    readonly invocationKey: string;
+    readonly scope: ExecutionWriteScope;
+    readonly workflowName: string;
+  };
   readonly runId: string;
   readonly state: "Completed" | "Failed";
 }
@@ -620,6 +637,13 @@ export interface WorkflowRunRepository {
     readonly runId: string;
   }) => void;
   readonly start: (record: WorkflowStartRecord) => void;
+  readonly startChild: (
+    record: Omit<WorkflowStartRecord, "revisionSnapshot"> & {
+      readonly invocationKey: string;
+      readonly parentScope: ExecutionWriteScope;
+      readonly resumeFailed: boolean;
+    },
+  ) => { readonly run: StoredWorkflowRun; readonly status: "created" | "rejoined" | "resumed" };
   readonly verifyRuntimeConfiguration: (
     record: {
       readonly snapshot: string;
@@ -1760,6 +1784,17 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
             .run();
           transaction.insert(workflowJournal).values(record.journal).run();
           transaction.insert(evidenceEvents).values(record.evidence).run();
+          if (record.parentNotification !== undefined) {
+            assertExecutionScope(transaction, record.parentNotification.scope);
+            insertBoundary(transaction, {
+              ...record.parentNotification.scope,
+              details: record.outcome,
+              idempotencyKey: `${record.parentNotification.scope.runId}:child:${record.parentNotification.invocationKey}:observed`,
+              operation:
+                record.state === "Completed" ? "ChildWorkflow.Completed" : "ChildWorkflow.Failed",
+              subject: record.parentNotification.workflowName,
+            });
+          }
         });
       },
       find: (runId) => {
@@ -1975,6 +2010,121 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
       start: (record) => {
         database.transaction((transaction) => {
           insertWorkflowStart(transaction, record);
+        });
+      },
+      startChild: (record) => {
+        reconcileExpiredScope(record.parentScope);
+        return database.transaction((transaction) => {
+          assertExecutionScope(transaction, record.parentScope);
+          const existing = transaction
+            .select()
+            .from(workflowRuns)
+            .where(
+              and(
+                eq(workflowRuns.parentRunId, record.parentScope.runId),
+                eq(workflowRuns.invocationKey, record.invocationKey),
+              ),
+            )
+            .get();
+          if (existing !== undefined) {
+            if (
+              existing.input !== record.run.input ||
+              existing.revisionFingerprint !== record.run.revisionFingerprint
+            ) {
+              throw new Error(
+                `Child Workflow invocation key '${record.invocationKey}' cannot be retargeted to different input or workflow`,
+              );
+            }
+            insertBoundary(transaction, {
+              ...record.parentScope,
+              details: JSON.stringify({
+                encodingVersion: 1,
+                value: { childRunId: existing.runId, key: record.invocationKey },
+              }),
+              idempotencyKey: `${record.parentScope.runId}:child:${record.invocationKey}:rejoined:${record.parentScope.attempt}`,
+              operation: "ChildWorkflow.Rejoined",
+              subject: record.revision.stableName,
+            });
+            if (
+              existing.state === "Interrupted" ||
+              existing.state === "Suspended" ||
+              (existing.state === "Failed" && record.resumeFailed)
+            ) {
+              const attempt =
+                (transaction
+                  .select({ number: sql<number>`max(${executionAttempts.number})` })
+                  .from(executionAttempts)
+                  .where(eq(executionAttempts.runId, existing.runId))
+                  .get()?.number ?? 0) + 1;
+              const generation =
+                (transaction
+                  .select({ generation: sql<number>`max(${executionLeases.generation})` })
+                  .from(executionLeases)
+                  .where(eq(executionLeases.runId, existing.runId))
+                  .get()?.generation ?? 0) + 1;
+              const now = new Date().toISOString();
+              transaction
+                .update(workflowRuns)
+                .set({ state: "Running", updatedAt: now })
+                .where(eq(workflowRuns.runId, existing.runId))
+                .run();
+              transaction
+                .insert(executionAttempts)
+                .values({
+                  finishedAt: null,
+                  number: attempt,
+                  runId: existing.runId,
+                  startedAt: now,
+                  state: "Running",
+                })
+                .run();
+              transaction
+                .insert(executionLeases)
+                .values({
+                  acquiredAt: now,
+                  expiresAt: record.lease.expiresAt,
+                  generation,
+                  holder: record.lease.holder,
+                  runId: existing.runId,
+                  state: "Active",
+                })
+                .run();
+              appendLifecycle(transaction, existing.runId, attempt, "WorkflowRun.Resumed", {
+                parentRunId: record.parentScope.runId,
+              });
+              return {
+                run: decodeRun({ ...existing, state: "Running", updatedAt: now }),
+                status: "resumed" as const,
+              };
+            }
+            return { run: decodeRun(existing), status: "rejoined" as const };
+          }
+          transaction
+            .insert(workflowRevisions)
+            .values(record.revision)
+            .onConflictDoNothing({ target: workflowRevisions.fingerprint })
+            .run();
+          transaction.insert(workflowRuns).values(record.run).run();
+          transaction.insert(executionAttempts).values(record.attempt).run();
+          transaction.insert(executionLeases).values(record.lease).run();
+          transaction.insert(workflowJournal).values(record.journal).run();
+          transaction.insert(evidenceEvents).values(record.evidence).run();
+          insertBoundary(transaction, {
+            ...record.parentScope,
+            details: JSON.stringify({
+              encodingVersion: 1,
+              value: {
+                childRunId: record.run.runId,
+                input: JSON.parse(record.run.input),
+                key: record.invocationKey,
+                workflow: record.revision.stableName,
+              },
+            }),
+            idempotencyKey: `${record.parentScope.runId}:child:${record.invocationKey}:linked`,
+            operation: "ChildWorkflow.Linked",
+            subject: record.revision.stableName,
+          });
+          return { run: record.run, status: "created" as const };
         });
       },
       verifyRuntimeConfiguration: (record) => {
