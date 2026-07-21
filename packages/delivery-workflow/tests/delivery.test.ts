@@ -1,5 +1,5 @@
 import { describe, expect, test } from "@effect/vitest";
-import { AgentProvider, SandboxProvider, WorkflowTest } from "@kojo/workflow";
+import { AgentProvider, type SandboxHandle, SandboxProvider, WorkflowTest } from "@kojo/workflow";
 import { Effect, Layer } from "effect";
 import type {
   GitHubDeliveryFailure,
@@ -49,8 +49,21 @@ const graph = (overrides: Partial<GitHubDeliveryGraph> = {}): GitHubDeliveryGrap
   ...overrides,
 });
 
-const githubLayer = (loaded: GitHubDeliveryGraph, reachable = true) =>
-  Layer.succeed(GitHubDelivery, {
+const githubLayer = (loaded: GitHubDeliveryGraph, reachable = true) => {
+  let pullRequest:
+    | {
+        readonly body: string;
+        readonly destinationBranch: string;
+        readonly draft: true;
+        readonly headCommit: string;
+        readonly number: number;
+        readonly owned: true;
+        readonly targetBranch: string;
+        readonly title: string;
+        readonly url: string;
+      }
+    | undefined;
+  return Layer.succeed(GitHubDelivery, {
     closeTicket: (input) =>
       WorkflowTest.call(
         { input, layer: "GitHub", operation: "closeTicket" },
@@ -84,36 +97,103 @@ const githubLayer = (loaded: GitHubDeliveryGraph, reachable = true) =>
         { input, layer: "GitHub", operation: "readPublication" },
         Effect.succeed({ remoteTargetCommit: revision, ticketState: "OPEN" as const }),
       ) as unknown as ReturnType<GitHubDeliveryService["readPublication"]>,
+    reconcileFinalization: (input) =>
+      WorkflowTest.call(
+        { input, layer: "GitHub", operation: "reconcileFinalization" },
+        Effect.succeed({
+          activeMerge: "Clean" as const,
+          localTargetCommit: revision,
+          ownedRecoveryRefs: [],
+          publicationProgress:
+            pullRequest === undefined
+              ? ("TicketsPublished" as const)
+              : ("DraftPullRequestApplied" as const),
+          pullRequests: pullRequest === undefined ? [] : [pullRequest],
+          remoteTargetCommit: revision,
+          sandboxCleanup: "Clean" as const,
+          ticketMutations: "Reconciled" as const,
+          unownedDirtyState: false,
+        }),
+      ) as unknown as ReturnType<GitHubDeliveryService["reconcileFinalization"]>,
+    upsertDraftPullRequest: (input) =>
+      WorkflowTest.call(
+        { input, layer: "GitHub", operation: "upsertDraftPullRequest" },
+        Effect.sync(() => {
+          pullRequest = {
+            body: input.body,
+            destinationBranch: input.destinationBranch,
+            draft: true,
+            headCommit: input.targetCommit,
+            number: 101,
+            owned: true,
+            targetBranch: input.targetBranch,
+            title: input.title,
+            url: "https://github.com/carere/kojo/pull/101",
+          };
+          return {
+            body: input.body,
+            draft: true as const,
+            idempotencyKey: input.idempotencyKey,
+            number: 101,
+            state: "Created" as const,
+            targetCommit: input.targetCommit,
+            title: input.title,
+            url: pullRequest.url,
+          };
+        }),
+      ) as unknown as ReturnType<GitHubDeliveryService["upsertDraftPullRequest"]>,
   } satisfies GitHubDeliveryService);
+};
 
-const unavailableExecutionLayer = Layer.merge(
+const executionLayer = Layer.merge(
   Layer.succeed(SandboxProvider, {
     configuration: {
       adapterVersion: "test-1",
-      configurationFingerprint: "unavailable",
-      name: "unavailable-sandbox",
+      configurationFingerprint: "controlled",
+      name: "controlled-sandbox",
       publicFields: {},
     },
-    create: () =>
-      Effect.fail({
-        _tag: "Sandbox.ProviderFailure" as const,
-        message: "Execution is outside these loading tests",
-      }),
+    create: ({ branch }) =>
+      Effect.succeed({
+        branch,
+        close: async () => ({}),
+        exec: async (command) => ({
+          exitCode: 0,
+          stderr: "",
+          stdout:
+            command === "git rev-parse HEAD"
+              ? `${revision}\n`
+              : command === "git status --porcelain"
+                ? ""
+                : `${command} passed`,
+        }),
+        run: async ({ prompt }) => ({
+          commits: [],
+          stdout: "authored",
+          output: {
+            _tag: "Success",
+            value: {
+              body: prompt,
+              title: "feat(delivery): complete verified workstream",
+            },
+          },
+        }),
+      } satisfies SandboxHandle),
   }),
   Layer.succeed(AgentProvider, {
     agent: {},
     configuration: {
       adapterVersion: "test-1",
-      configurationFingerprint: "unavailable",
-      model: "unavailable",
-      name: "unavailable-agent",
+      configurationFingerprint: "controlled",
+      model: "controlled",
+      name: "controlled-agent",
       publicFields: {},
     },
   }),
 );
 
 const testLayer = (loaded: GitHubDeliveryGraph, reachable = true) =>
-  Layer.merge(githubLayer(loaded, reachable), unavailableExecutionLayer);
+  Layer.merge(githubLayer(loaded, reachable), executionLayer);
 
 const run = (loaded: GitHubDeliveryGraph, reachable = true) =>
   WorkflowTest.make(Delivery, {
@@ -410,7 +490,7 @@ describe("Delivery frontier decisions", () => {
     expectNoExecution(result);
   });
 
-  test("returns AlreadyComplete when every ticket is closed", async () => {
+  test("finalizes when every ticket is closed", async () => {
     const result = await run(
       graph({ tickets: [ticket({ state: "CLOSED", assignees: ["delivery-agent"], labels: [] })] }),
     );
@@ -418,14 +498,14 @@ describe("Delivery frontier decisions", () => {
     expect(result.outcome).toMatchObject({
       _tag: "Success",
       value: {
-        _tag: "AlreadyComplete",
+        _tag: "CompletedWorkstream",
         evidence: {
           exclusions: [{ number: 42, reason: "Closed" }],
           frontier: { decision: "AlreadyComplete", tickets: [] },
         },
       },
     });
-    expectNoExecution(result);
+    expect(result.calls.map(({ operation }) => operation)).toContain("upsertDraftPullRequest");
   });
 
   test("returns OpenWorkNoReadyTicket for blocked open work", async () => {

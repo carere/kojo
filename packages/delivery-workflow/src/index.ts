@@ -82,6 +82,23 @@ export interface GitHubDeliveryService {
     readonly targetCommit: string;
     readonly ticketNumber: number;
   }) => Effect.Effect<PublicationReceipt, GitHubDeliveryFailure>;
+  readonly reconcileFinalization: (input: {
+    readonly destinationBranch: string;
+    readonly expectedTargetCommit?: string;
+    readonly repository: string;
+    readonly rootNumber: number;
+    readonly targetBranch: string;
+  }) => Effect.Effect<FinalizationRecovery, GitHubDeliveryFailure>;
+  readonly upsertDraftPullRequest: (input: {
+    readonly body: string;
+    readonly destinationBranch: string;
+    readonly idempotencyKey: string;
+    readonly repository: string;
+    readonly rootNumber: number;
+    readonly targetBranch: string;
+    readonly targetCommit: string;
+    readonly title: string;
+  }) => Effect.Effect<PullRequestReceipt, GitHubDeliveryFailure>;
 }
 
 export const GitHubDelivery = Context.Service<GitHubDeliveryService>(
@@ -163,6 +180,49 @@ const PublicationReceiptSchema = Schema.Struct({
 
 export type PublicationReceipt = Schema.Schema.Type<typeof PublicationReceiptSchema>;
 
+const PullRequestSnapshotSchema = Schema.Struct({
+  body: Schema.String,
+  destinationBranch: Schema.String,
+  draft: Schema.Boolean,
+  headCommit: Schema.String,
+  number: PositiveInteger,
+  owned: Schema.Boolean,
+  targetBranch: Schema.String,
+  title: Schema.String,
+  url: Schema.String,
+});
+
+const FinalizationRecoverySchema = Schema.Struct({
+  activeMerge: Schema.Literals(["Clean", "OwnedRecovered"]),
+  localTargetCommit: Schema.String,
+  ownedRecoveryRefs: Schema.Array(Schema.String),
+  publicationProgress: Schema.Literals([
+    "TicketsPublished",
+    "TargetPublished",
+    "DraftPullRequestApplied",
+  ]),
+  pullRequests: Schema.Array(PullRequestSnapshotSchema),
+  remoteTargetCommit: Schema.String,
+  sandboxCleanup: Schema.Literals(["Clean", "OwnedCleaned"]),
+  ticketMutations: Schema.Literal("Reconciled"),
+  unownedDirtyState: Schema.Boolean,
+});
+
+export type FinalizationRecovery = Schema.Schema.Type<typeof FinalizationRecoverySchema>;
+
+const PullRequestReceiptSchema = Schema.Struct({
+  body: Schema.String,
+  draft: Schema.Literal(true),
+  idempotencyKey: Schema.String,
+  number: PositiveInteger,
+  state: Schema.Literals(["Created", "Updated", "AlreadyApplied"]),
+  targetCommit: Schema.String,
+  title: Schema.String,
+  url: Schema.String,
+});
+
+export type PullRequestReceipt = Schema.Schema.Type<typeof PullRequestReceiptSchema>;
+
 const Published = Schema.TaggedStruct("Published", {
   ticket: TicketIdentity,
   reviewedCommit: Schema.String,
@@ -227,7 +287,6 @@ const DeliveryEvidence = Schema.Struct({
 });
 
 const NothingToDo = Schema.TaggedStruct("NothingToDo", { evidence: DeliveryEvidence });
-const AlreadyComplete = Schema.TaggedStruct("AlreadyComplete", { evidence: DeliveryEvidence });
 const OpenWorkNoReadyTicket = Schema.TaggedStruct("OpenWorkNoReadyTicket", {
   evidence: DeliveryEvidence,
 });
@@ -240,12 +299,32 @@ const TicketsFailed = Schema.TaggedStruct("TicketsFailed", {
   ticketOutcomes: Schema.Array(Schema.Union([Published, ReviewLimitReached, TicketFailed])),
 });
 
+const Finalization = Schema.Struct({
+  verifiedCommit: Schema.String,
+  verificationCommands: Schema.Array(Schema.String),
+  recovery: FinalizationRecoverySchema,
+  pushReceipt: PublicationReceiptSchema,
+  pullRequestReceipt: PullRequestReceiptSchema,
+});
+
+const AlreadyComplete = Schema.TaggedStruct("AlreadyComplete", {
+  evidence: DeliveryEvidence,
+  finalization: Finalization,
+});
+
+const CompletedWorkstream = Schema.TaggedStruct("CompletedWorkstream", {
+  evidence: DeliveryEvidence,
+  ticketOutcomes: Schema.Array(Schema.Union([Published, ReviewLimitReached, TicketFailed])),
+  finalization: Finalization,
+});
+
 export const DeliveryResult = Schema.Union([
   NothingToDo,
   AlreadyComplete,
   OpenWorkNoReadyTicket,
   OpenWork,
   TicketsFailed,
+  CompletedWorkstream,
 ]);
 export type DeliveryResult = Schema.Schema.Type<typeof DeliveryResult>;
 
@@ -254,7 +333,16 @@ const InvalidDeliveryWorkstream = Schema.TaggedStruct("InvalidDeliveryWorkstream
   inputGraph: Schema.optional(GitHubDeliveryGraphSchema),
 });
 
-export const DeliveryFailure = Schema.Union([InvalidDeliveryWorkstream, GitHubDeliveryFailure]);
+const FinalizationFailed = Schema.TaggedStruct("FinalizationFailed", {
+  failure: Schema.Unknown,
+  expectedTargetCommit: Schema.optional(Schema.String),
+});
+
+export const DeliveryFailure = Schema.Union([
+  InvalidDeliveryWorkstream,
+  GitHubDeliveryFailure,
+  FinalizationFailed,
+]);
 export type DeliveryFailure = Schema.Schema.Type<typeof DeliveryFailure>;
 
 const DeliveryInput = Schema.Struct({ workstream: Schema.String });
@@ -265,6 +353,11 @@ const ImplementerResult = Schema.Struct({
 });
 
 const ReviewerResult = Schema.Struct({ findings: Schema.Array(ReviewFinding) });
+
+const PullRequestDraft = Schema.Struct({
+  body: Schema.String,
+  title: Schema.String,
+});
 
 const AgentStepFailure = Schema.TaggedStruct("Delivery.AgentStepFailure", {
   message: Schema.String,
@@ -869,6 +962,126 @@ const verifyIntegrated = (ticketNumber: number, targetCommit: string) =>
     }),
   });
 
+const CONVENTIONAL_PULL_REQUEST_TITLE =
+  /^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([^)]+\))?!?:\s+\S/;
+const CLOSING_REFERENCE =
+  /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?:\s*:\s*|\s+)(?:#(\d+))\b/gi;
+const FINAL_VERIFICATION_COMMANDS = ["moon run :check", "moon run :tsc", "moon run :test"];
+
+const pullRequestPrompt = (
+  root: GitHubDeliveryGraph["root"],
+  routing: DeliveryRouting,
+  verifiedCommit: string,
+  ticketOutcomes: ReadonlyArray<Schema.Schema.Type<typeof Published>>,
+) => `Author the draft pull request for completed Delivery Workstream #${root.number}.
+Return a conventional-commit-style title and a complete body. Do not modify files or Git state.
+
+Root title: ${root.title}
+Target branch: ${routing.targetBranch}
+Destination branch: ${routing.destinationBranch}
+Exact verified target commit: ${verifiedCommit}
+Required verification receipts: ${FINAL_VERIFICATION_COMMANDS.join(", ")}
+Published ticket evidence (including exact commits, review counts, and receipts):
+${JSON.stringify(ticketOutcomes)}
+
+The body must reference that evidence and contain exactly one closing keyword: Closes #${root.number}.
+The root stays open until a human merges this draft pull request.`;
+
+const validatePullRequestDraft = (
+  root: GitHubDeliveryGraph["root"],
+  routing: DeliveryRouting,
+  verifiedCommit: string,
+  draft: Schema.Schema.Type<typeof PullRequestDraft>,
+  ticketOutcomes: ReadonlyArray<Schema.Schema.Type<typeof Published>>,
+) =>
+  Effect.gen(function* () {
+    const title = draft.title.trim();
+    const body = draft.body.replace(/\r\n/g, "\n").trim();
+    const closingReferences = [...body.matchAll(new RegExp(CLOSING_REFERENCE.source, "gi"))];
+    const requiredEvidence = [
+      routing.targetBranch,
+      routing.destinationBranch,
+      verifiedCommit,
+      ...FINAL_VERIFICATION_COMMANDS,
+      ...ticketOutcomes.flatMap((outcome) => [
+        String(outcome.ticket.number),
+        outcome.reviewedCommit,
+        outcome.integratedCommit,
+        outcome.verifiedCommit,
+        String(outcome.reviewAttempts),
+        outcome.pushReceipt.idempotencyKey,
+        outcome.closeReceipt.idempotencyKey,
+      ]),
+    ];
+    if (!CONVENTIONAL_PULL_REQUEST_TITLE.test(title)) {
+      return yield* failProof(
+        "pull-request-title",
+        "The Agent-authored pull-request title is not conventional-commit-style.",
+      );
+    }
+    if (requiredEvidence.some((value) => !body.includes(value))) {
+      return yield* failProof(
+        "pull-request-evidence",
+        "The Agent-authored pull-request body omitted required delivery evidence.",
+      );
+    }
+    if (closingReferences.length !== 1 || Number(closingReferences[0]?.[1]) !== root.number) {
+      return yield* failProof(
+        "pull-request-closure",
+        `The draft pull request must close only workstream root #${root.number}.`,
+      );
+    }
+    return { body, title };
+  });
+
+const verifyFinalTarget = (
+  root: GitHubDeliveryGraph["root"],
+  routing: DeliveryRouting,
+  targetCommit: string,
+  ticketOutcomes: ReadonlyArray<Schema.Schema.Type<typeof Published>>,
+) =>
+  Sandbox.use(`final-verify-${root.number}`, {
+    baseBranch: targetCommit,
+    branch: `kojo-delivery-final-verify-${root.number}`,
+    effect: Effect.gen(function* () {
+      const opened = cleanOutput(
+        (yield* successfulCommand("final-verified-target-head", "git rev-parse HEAD")).stdout,
+      );
+      if (opened.toLowerCase() !== targetCommit.toLowerCase()) {
+        return yield* failProof(
+          "final-verified-target-head",
+          `Final verification opened ${opened}, expected ${targetCommit}.`,
+        );
+      }
+      yield* runConfiguredVerification();
+      const beforeAgent = cleanOutput(
+        (yield* successfulCommand("pull-request-author-head", "git rev-parse HEAD")).stdout,
+      );
+      const draft = yield* Agent.run("pull-request-author", {
+        prompt: pullRequestPrompt(root, routing, targetCommit, ticketOutcomes),
+        success: PullRequestDraft,
+        failure: AgentStepFailure,
+      });
+      const afterAgent = cleanOutput(
+        (yield* successfulCommand("pull-request-author-head-proof", "git rev-parse HEAD")).stdout,
+      );
+      const status = cleanOutput(
+        (yield* successfulCommand("pull-request-author-worktree-proof", "git status --porcelain"))
+          .stdout,
+      );
+      if (beforeAgent !== targetCommit || afterAgent !== targetCommit || status !== "") {
+        return yield* failProof(
+          "pull-request-author-read-only",
+          "The pull-request author changed the exact verified target or worktree.",
+        );
+      }
+      return {
+        draft: yield* validatePullRequestDraft(root, routing, targetCommit, draft, ticketOutcomes),
+        verifiedCommit: opened,
+      };
+    }),
+  });
+
 const integrateAndVerify = (
   input: Schema.Schema.Type<typeof DeliveryTicketInput>,
   reviewed: Schema.Schema.Type<typeof Implemented>,
@@ -984,17 +1197,36 @@ const publishVerified = (
             state: "AlreadyApplied" as const,
             targetCommit: verifiedCommit,
           }
-        : yield* durableGitHub(
-            `push-ticket-${input.ticket.number}`,
-            PublicationReceiptSchema,
-            github.pushExact({
+        : yield* Effect.gen(function* () {
+            const reconciled = yield* github.readPublication({
+              repository: rootUrl.repository,
+              targetBranch: routing.targetBranch,
+              ticketNumber: input.ticket.number,
+            });
+            if (reconciled.remoteTargetCommit.toLowerCase() === verifiedCommit.toLowerCase()) {
+              return {
+                idempotencyKey: pushKey,
+                state: "AlreadyApplied" as const,
+                targetCommit: verifiedCommit,
+              };
+            }
+            if (
+              reconciled.remoteTargetCommit.toLowerCase() !== expectedTargetCommit.toLowerCase()
+            ) {
+              return yield* Effect.fail({
+                _tag: "GitHubDeliveryFailure" as const,
+                message: `Remote target moved to ${reconciled.remoteTargetCommit} before push reconciliation`,
+                operation: "pushExact",
+              });
+            }
+            return yield* github.pushExact({
               expectedTargetCommit,
               idempotencyKey: pushKey,
               repository: rootUrl.repository,
               targetBranch: routing.targetBranch,
               targetCommit: verifiedCommit,
-            }),
-          );
+            });
+          });
     if (
       pushReceipt.idempotencyKey !== pushKey ||
       pushReceipt.targetCommit.toLowerCase() !== verifiedCommit.toLowerCase()
@@ -1016,17 +1248,34 @@ const publishVerified = (
             state: "AlreadyApplied" as const,
             targetCommit: verifiedCommit,
           }
-        : yield* durableGitHub(
-            `close-ticket-${input.ticket.number}`,
-            PublicationReceiptSchema,
-            github.closeTicket({
+        : yield* Effect.gen(function* () {
+            const reconciled = yield* github.readPublication({
+              repository: rootUrl.repository,
+              targetBranch: routing.targetBranch,
+              ticketNumber: input.ticket.number,
+            });
+            if (reconciled.ticketState === "CLOSED") {
+              return {
+                idempotencyKey: closeKey,
+                state: "AlreadyApplied" as const,
+                targetCommit: verifiedCommit,
+              };
+            }
+            if (reconciled.remoteTargetCommit.toLowerCase() !== verifiedCommit.toLowerCase()) {
+              return yield* Effect.fail({
+                _tag: "GitHubDeliveryFailure" as const,
+                message: "Ticket closure reconciliation did not find the verified target",
+                operation: "closeTicket",
+              });
+            }
+            return yield* github.closeTicket({
               expectedState: "OPEN",
               idempotencyKey: closeKey,
               repository: rootUrl.repository,
               targetCommit: verifiedCommit,
               ticketNumber: input.ticket.number,
-            }),
-          );
+            });
+          });
     if (
       closeReceipt.idempotencyKey !== closeKey ||
       closeReceipt.targetCommit.toLowerCase() !== verifiedCommit.toLowerCase()
@@ -1056,6 +1305,210 @@ const publishVerified = (
       findingHistory: reviewed.findingHistory,
       pushReceipt,
       closeReceipt,
+    };
+  });
+
+const assertRecoverableFinalization = (
+  recovery: FinalizationRecovery,
+  root: GitHubDeliveryGraph["root"],
+  routing: DeliveryRouting,
+  expectedTargetCommit?: string,
+) =>
+  Effect.gen(function* () {
+    if (
+      recovery.unownedDirtyState ||
+      !exactCommit(recovery.localTargetCommit) ||
+      !exactCommit(recovery.remoteTargetCommit)
+    ) {
+      return yield* failProof(
+        "finalization-recovery-ownership",
+        "Finalization found ambiguous or unowned dirty state; it was preserved for human recovery.",
+      );
+    }
+    if (
+      expectedTargetCommit !== undefined &&
+      recovery.localTargetCommit.toLowerCase() !== expectedTargetCommit.toLowerCase()
+    ) {
+      return yield* failProof(
+        "finalization-target",
+        `Recovered local target ${recovery.localTargetCommit} differs from exact expected commit ${expectedTargetCommit}.`,
+      );
+    }
+    if (recovery.pullRequests.length > 1) {
+      return yield* failProof(
+        "pull-request-ambiguity",
+        "More than one pull request exists for the Delivery route.",
+      );
+    }
+    const pullRequest = recovery.pullRequests[0];
+    if (
+      pullRequest !== undefined &&
+      (!pullRequest.owned ||
+        pullRequest.destinationBranch !== routing.destinationBranch ||
+        pullRequest.targetBranch !== routing.targetBranch)
+    ) {
+      return yield* failProof(
+        "pull-request-ownership",
+        `The existing pull request is not demonstrably owned by workstream root #${root.number}.`,
+      );
+    }
+    return recovery.localTargetCommit;
+  });
+
+const finalizeWorkstream = (
+  github: GitHubDeliveryService,
+  rootUrl: ParsedRootUrl,
+  root: GitHubDeliveryGraph["root"],
+  routing: DeliveryRouting,
+  ticketOutcomes: ReadonlyArray<Schema.Schema.Type<typeof Published>>,
+  expectedTargetCommit?: string,
+) =>
+  Effect.gen(function* () {
+    const recoveryInput = {
+      destinationBranch: routing.destinationBranch,
+      ...(expectedTargetCommit === undefined ? {} : { expectedTargetCommit }),
+      repository: rootUrl.repository,
+      rootNumber: root.number,
+      targetBranch: routing.targetBranch,
+    };
+    const before = yield* github.reconcileFinalization(recoveryInput);
+    const targetCommit = yield* assertRecoverableFinalization(
+      before,
+      root,
+      routing,
+      expectedTargetCommit,
+    );
+    const finalVerification = yield* verifyFinalTarget(root, routing, targetCommit, ticketOutcomes);
+    const pushKey = `#${root.number}:final:push:${finalVerification.verifiedCommit}`;
+    const pushReceipt =
+      before.remoteTargetCommit.toLowerCase() === finalVerification.verifiedCommit.toLowerCase()
+        ? {
+            idempotencyKey: pushKey,
+            state: "AlreadyApplied" as const,
+            targetCommit: finalVerification.verifiedCommit,
+          }
+        : yield* Effect.gen(function* () {
+            const reconciled = yield* github.reconcileFinalization(recoveryInput);
+            if (
+              reconciled.remoteTargetCommit.toLowerCase() ===
+              finalVerification.verifiedCommit.toLowerCase()
+            ) {
+              return {
+                idempotencyKey: pushKey,
+                state: "AlreadyApplied" as const,
+                targetCommit: finalVerification.verifiedCommit,
+              };
+            }
+            if (
+              reconciled.remoteTargetCommit.toLowerCase() !==
+              before.remoteTargetCommit.toLowerCase()
+            ) {
+              return yield* Effect.fail({
+                _tag: "GitHubDeliveryFailure" as const,
+                message: `Remote target moved to ${reconciled.remoteTargetCommit} before final push reconciliation`,
+                operation: "pushExact",
+              });
+            }
+            return yield* github.pushExact({
+              expectedTargetCommit: before.remoteTargetCommit,
+              idempotencyKey: pushKey,
+              repository: rootUrl.repository,
+              targetBranch: routing.targetBranch,
+              targetCommit: finalVerification.verifiedCommit,
+            });
+          });
+    if (
+      pushReceipt.idempotencyKey !== pushKey ||
+      pushReceipt.targetCommit.toLowerCase() !== finalVerification.verifiedCommit.toLowerCase()
+    ) {
+      return yield* failProof(
+        "final-push-receipt",
+        "The final target push receipt did not match the exact verified commit.",
+      );
+    }
+
+    const pullRequestKey = `#${root.number}:draft-pull-request:${finalVerification.verifiedCommit}`;
+    const pullRequestReceipt = yield* Effect.gen(function* () {
+      const reconciled = yield* github.reconcileFinalization(recoveryInput);
+      yield* assertRecoverableFinalization(
+        reconciled,
+        root,
+        routing,
+        finalVerification.verifiedCommit,
+      );
+      const existing = reconciled.pullRequests[0];
+      if (
+        existing?.draft &&
+        existing.headCommit.toLowerCase() === finalVerification.verifiedCommit.toLowerCase() &&
+        existing.title === finalVerification.draft.title &&
+        existing.body === finalVerification.draft.body
+      ) {
+        return {
+          body: existing.body,
+          draft: true as const,
+          idempotencyKey: pullRequestKey,
+          number: existing.number,
+          state: "AlreadyApplied" as const,
+          targetCommit: finalVerification.verifiedCommit,
+          title: existing.title,
+          url: existing.url,
+        };
+      }
+      return yield* github.upsertDraftPullRequest({
+        body: finalVerification.draft.body,
+        destinationBranch: routing.destinationBranch,
+        idempotencyKey: pullRequestKey,
+        repository: rootUrl.repository,
+        rootNumber: root.number,
+        targetBranch: routing.targetBranch,
+        targetCommit: finalVerification.verifiedCommit,
+        title: finalVerification.draft.title,
+      });
+    });
+    if (
+      pullRequestReceipt.idempotencyKey !== pullRequestKey ||
+      pullRequestReceipt.targetCommit.toLowerCase() !==
+        finalVerification.verifiedCommit.toLowerCase() ||
+      pullRequestReceipt.title !== finalVerification.draft.title ||
+      pullRequestReceipt.body !== finalVerification.draft.body ||
+      !pullRequestReceipt.draft
+    ) {
+      return yield* failProof(
+        "pull-request-receipt",
+        "The draft pull-request receipt did not match the validated mutation intent.",
+      );
+    }
+
+    const completed = yield* github.reconcileFinalization(recoveryInput);
+    yield* assertRecoverableFinalization(
+      completed,
+      root,
+      routing,
+      finalVerification.verifiedCommit,
+    );
+    const completedPullRequest = completed.pullRequests[0];
+    if (
+      completed.remoteTargetCommit.toLowerCase() !==
+        finalVerification.verifiedCommit.toLowerCase() ||
+      completed.publicationProgress !== "DraftPullRequestApplied" ||
+      completedPullRequest === undefined ||
+      !completedPullRequest.draft ||
+      completedPullRequest.headCommit.toLowerCase() !==
+        finalVerification.verifiedCommit.toLowerCase() ||
+      completedPullRequest.title !== finalVerification.draft.title ||
+      completedPullRequest.body !== finalVerification.draft.body
+    ) {
+      return yield* failProof(
+        "finalization-completion-proof",
+        "Final publication and draft pull-request state did not converge exactly.",
+      );
+    }
+    return {
+      verifiedCommit: finalVerification.verifiedCommit,
+      verificationCommands: FINAL_VERIFICATION_COMMANDS,
+      recovery: completed,
+      pushReceipt,
+      pullRequestReceipt,
     };
   });
 
@@ -1321,8 +1774,32 @@ export const Delivery = Workflow.make("delivery", {
       switch (decision) {
         case "NothingToDo":
           return { _tag: "NothingToDo" as const, evidence };
-        case "AlreadyComplete":
-          return { _tag: "AlreadyComplete" as const, evidence };
+        case "AlreadyComplete": {
+          const finalization = yield* finalizeWorkstream(
+            github,
+            rootUrl,
+            inputGraph.root,
+            routing,
+            [],
+          ).pipe(
+            Effect.mapError((failure) => ({
+              _tag: "FinalizationFailed" as const,
+              failure,
+            })),
+          );
+          if (
+            finalization.pushReceipt.state === "AlreadyApplied" &&
+            finalization.pullRequestReceipt.state === "AlreadyApplied"
+          ) {
+            return { _tag: "AlreadyComplete" as const, evidence, finalization };
+          }
+          return {
+            _tag: "CompletedWorkstream" as const,
+            evidence,
+            ticketOutcomes: [],
+            finalization,
+          };
+        }
         case "OpenWorkNoReadyTicket":
           return { _tag: "OpenWorkNoReadyTicket" as const, evidence };
         case "Ready": {
@@ -1491,10 +1968,35 @@ export const Delivery = Workflow.make("delivery", {
               expectedTargetCommit = prepared.verifiedCommit;
             }
           }
+          const failed = ticketOutcomes.some(({ _tag }) => _tag !== "Published");
+          if (!failed && eligibleWork.length === selected.length) {
+            const published = ticketOutcomes.filter(
+              (outcome): outcome is Schema.Schema.Type<typeof Published> =>
+                outcome._tag === "Published",
+            );
+            const finalization = yield* finalizeWorkstream(
+              github,
+              rootUrl,
+              inputGraph.root,
+              routing,
+              published,
+              expectedTargetCommit,
+            ).pipe(
+              Effect.mapError((failure) => ({
+                _tag: "FinalizationFailed" as const,
+                expectedTargetCommit,
+                failure,
+              })),
+            );
+            return {
+              _tag: "CompletedWorkstream" as const,
+              evidence,
+              ticketOutcomes,
+              finalization,
+            };
+          }
           return {
-            _tag: ticketOutcomes.some(({ _tag }) => _tag !== "Published")
-              ? ("TicketsFailed" as const)
-              : ("OpenWork" as const),
+            _tag: failed ? ("TicketsFailed" as const) : ("OpenWork" as const),
             evidence,
             ticketOutcomes,
           };

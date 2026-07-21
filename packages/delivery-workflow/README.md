@@ -8,6 +8,8 @@ The workflow accepts `{ workstream: "https://github.com/OWNER/REPOSITORY/issues/
 the `GitHubDelivery` Effect service with an adapter that loads the root's complete native child and
 blocker graph, proves that the declared source revision is reachable, reads publication state, and
 performs exact guarded pushes and idempotent ticket closure.
+It also reconciles final local/remote target state, owned recovery state, ticket mutations, Sandbox
+cleanup, and managed pull requests before it creates or updates the final draft pull request.
 The workflow validates and pins that graph before returning one of these typed outcomes:
 
 - `NothingToDo` when the root has no children.
@@ -17,6 +19,9 @@ The workflow validates and pins that graph before returning one of these typed o
   outcomes.
 - `TicketsFailed` after all already-started tickets settle when any selected ticket cannot be
   reviewed, integrated, verified, or published.
+- `CompletedWorkstream` after the last handled ticket, a fresh exact-target verification, final
+  publication, and one validated draft pull request all converge.
+- `AlreadyComplete` when that exact final publication and draft pull request were already applied.
 - `InvalidDeliveryWorkstream` when routing, identity, relationship, or graph invariants fail.
 
 Each successful outcome carries schema-validated evidence for the normalized input graph, routing,
@@ -47,6 +52,14 @@ state before each write. Push and close operations carry stable idempotency keys
 guards, and the workflow reads their results back before recording `Published`. A moved target or
 drifted specification fails only that ticket; reviewed issue branches and open tickets remain
 intact while other already-started successes are still published.
+
+After every ticket is handled, the workflow reconciles interruption state and preserves any
+ambiguous or unowned dirty state for a person. It verifies the exact final target in a fresh
+Reusable Sandbox, pushes only that verified commit, and asks an Agent to author a schema-validated
+conventional-commit-style title and evidence-bearing description. Mechanical checks require the
+exact route and commit, configured verification receipts, ticket commits, review counts,
+publication receipts, and exactly `Closes #<root>`. The workflow then safely creates or updates one
+owned draft pull request from target to destination; only human merge closes the still-open root.
 
 To opt in, statically import `Delivery` from `packages/delivery-workflow/src/index.ts` in the
 repository's `kojo.config.ts` and include it in `defineConfig({ workflows: [...] })`. The GitHub
