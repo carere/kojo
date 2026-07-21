@@ -116,136 +116,152 @@ export const makeWorkflowScheduleService = (store: SystemStore, workflowRuns: Wo
     });
   };
 
+  const evaluate = async (evaluatedAt = new Date()) => {
+    const now = minute(evaluatedAt);
+    const nowIso = now.toISOString();
+    const candidates: Array<{
+      readonly definition: ScheduleDefinition;
+      readonly occurrences: ReadonlyArray<string>;
+      readonly pending: CatchUpRange | null;
+      readonly schedule: NonNullable<ReturnType<SystemStore["workflowSchedules"]["find"]>>;
+    }> = [];
+
+    for (const schedule of store.workflowSchedules.list()) {
+      if (schedule.enablement !== "Enabled") continue;
+      const project = store.projects.findById(schedule.projectId);
+      if (project?.registrationState !== "Enabled" || schedule.activeDefinition === null) {
+        store.workflowSchedules.updateCursorWithoutMisses(
+          schedule.projectId,
+          schedule.name,
+          nowIso,
+        );
+        continue;
+      }
+      if (schedule.cursor === null) {
+        store.workflowSchedules.updateCursorWithoutMisses(
+          schedule.projectId,
+          schedule.name,
+          nowIso,
+        );
+        continue;
+      }
+      const pending = parseCatchUp(schedule.catchUp);
+      const occurrences =
+        schedule.cursor >= nowIso
+          ? []
+          : occurrencesThrough(parseDefinition(schedule.activeDefinition), schedule.cursor, now);
+      if (occurrences.length === 0 && pending === null) {
+        if (schedule.cursor < nowIso) {
+          store.workflowSchedules.updateCursorWithoutMisses(
+            schedule.projectId,
+            schedule.name,
+            nowIso,
+          );
+        }
+        continue;
+      }
+      candidates.push({
+        definition: parseDefinition(schedule.activeDefinition),
+        occurrences,
+        pending,
+        schedule,
+      });
+    }
+
+    candidates.sort((left, right) => {
+      const leftTime = left.pending?.earliest ?? left.occurrences[0] ?? nowIso;
+      const rightTime = right.pending?.earliest ?? right.occurrences[0] ?? nowIso;
+      return (
+        leftTime.localeCompare(rightTime) || left.schedule.name.localeCompare(right.schedule.name)
+      );
+    });
+
+    const results: Array<unknown> = [];
+    for (const candidate of candidates) {
+      const { definition, schedule } = candidate;
+      if (schedule.definitionFingerprint === null) continue;
+      const missedOccurrences = candidate.occurrences.filter((scheduledAt) => scheduledAt < nowIso);
+      if (definition.missedTimePolicy === "skip" && missedOccurrences.length > 0) {
+        commitWithoutStart(schedule, {
+          catchUp: null,
+          cursor: missedOccurrences.at(-1) ?? schedule.cursor ?? nowIso,
+          occurrences: missedOccurrences,
+          outcome: "Skipped",
+          reason: "MissedTimePolicySkip",
+        });
+      }
+      const startOccurrences =
+        definition.missedTimePolicy === "skip"
+          ? candidate.occurrences.filter((scheduledAt) => scheduledAt === nowIso)
+          : candidate.occurrences;
+      const catchUp =
+        definition.missedTimePolicy === "catch-up-once"
+          ? mergeCatchUp(candidate.pending, startOccurrences)
+          : null;
+      const occurrence = catchUp?.earliest ?? startOccurrences[0];
+      if (occurrence === undefined) continue;
+      const cursor = candidate.occurrences.at(-1) ?? schedule.cursor ?? nowIso;
+      const trigger = {
+        ...(catchUp === null ? {} : { catchUp }),
+        occurrence,
+        scheduleName: schedule.name,
+        scheduledAt: catchUp?.latest ?? occurrence,
+        type: "Scheduled" as const,
+      };
+      const evaluation = {
+        catchUp: catchUp === null ? null : JSON.stringify(catchUp),
+        cursor,
+        details: JSON.stringify({ catchUp, occurrences: startOccurrences, trigger }),
+        expectedDefinitionFingerprint: schedule.definitionFingerprint,
+        occurrences: startOccurrences,
+        outcome: "Started" as const,
+        projectId: schedule.projectId,
+        recordedAt: new Date().toISOString(),
+        scheduleName: schedule.name,
+      };
+      try {
+        results.push(
+          await workflowRuns.startScheduled(
+            {
+              input: definition.input,
+              projectId: schedule.projectId,
+              workflowName: definition.workflow,
+            } satisfies Omit<WorkflowStartRequest, "fromCheckout">,
+            evaluation,
+            trigger,
+          ),
+        );
+      } catch (error) {
+        commitWithoutStart(schedule, {
+          catchUp,
+          cursor,
+          occurrences: startOccurrences,
+          outcome: "PreflightFailed",
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return results;
+  };
+  let evaluationTail: Promise<void> = Promise.resolve();
+  const enqueueEvaluation = (evaluatedAt?: Date) => {
+    const run = () => evaluate(evaluatedAt ?? new Date());
+    const queued = evaluationTail.then(
+      () => run(),
+      () => run(),
+    );
+    evaluationTail = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
+  };
+
   return {
     disable: (projectId: string, name: string) => store.workflowSchedules.disable(projectId, name),
     enable: (projectId: string, name: string, enabledAt = new Date()) =>
       store.workflowSchedules.enable(projectId, name, minute(enabledAt).toISOString()),
-    evaluate: async (evaluatedAt = new Date()) => {
-      const now = minute(evaluatedAt);
-      const nowIso = now.toISOString();
-      const candidates: Array<{
-        readonly definition: ScheduleDefinition;
-        readonly occurrences: ReadonlyArray<string>;
-        readonly pending: CatchUpRange | null;
-        readonly schedule: NonNullable<ReturnType<SystemStore["workflowSchedules"]["find"]>>;
-      }> = [];
-
-      for (const schedule of store.workflowSchedules.list()) {
-        if (schedule.enablement !== "Enabled") continue;
-        const project = store.projects.findById(schedule.projectId);
-        if (project?.registrationState !== "Enabled" || schedule.activeDefinition === null) {
-          store.workflowSchedules.updateCursorWithoutMisses(
-            schedule.projectId,
-            schedule.name,
-            nowIso,
-          );
-          continue;
-        }
-        if (schedule.cursor === null) {
-          store.workflowSchedules.updateCursorWithoutMisses(
-            schedule.projectId,
-            schedule.name,
-            nowIso,
-          );
-          continue;
-        }
-        const pending = parseCatchUp(schedule.catchUp);
-        const occurrences =
-          schedule.cursor >= nowIso
-            ? []
-            : occurrencesThrough(parseDefinition(schedule.activeDefinition), schedule.cursor, now);
-        if (occurrences.length === 0 && pending === null) {
-          if (schedule.cursor < nowIso) {
-            store.workflowSchedules.updateCursorWithoutMisses(
-              schedule.projectId,
-              schedule.name,
-              nowIso,
-            );
-          }
-          continue;
-        }
-        candidates.push({
-          definition: parseDefinition(schedule.activeDefinition),
-          occurrences,
-          pending,
-          schedule,
-        });
-      }
-
-      candidates.sort((left, right) => {
-        const leftTime = left.pending?.earliest ?? left.occurrences[0] ?? nowIso;
-        const rightTime = right.pending?.earliest ?? right.occurrences[0] ?? nowIso;
-        return (
-          leftTime.localeCompare(rightTime) || left.schedule.name.localeCompare(right.schedule.name)
-        );
-      });
-
-      const results: Array<unknown> = [];
-      for (const candidate of candidates) {
-        const { definition, schedule } = candidate;
-        if (schedule.definitionFingerprint === null) continue;
-        if (definition.missedTimePolicy === "skip" && candidate.occurrences.length > 1) {
-          commitWithoutStart(schedule, {
-            catchUp: null,
-            cursor: candidate.occurrences.at(-2) ?? schedule.cursor ?? nowIso,
-            occurrences: candidate.occurrences.slice(0, -1),
-            outcome: "Skipped",
-            reason: "MissedTimePolicySkip",
-          });
-        }
-        const startOccurrences =
-          definition.missedTimePolicy === "skip"
-            ? candidate.occurrences.slice(-1)
-            : candidate.occurrences;
-        const catchUp =
-          definition.missedTimePolicy === "catch-up-once"
-            ? mergeCatchUp(candidate.pending, startOccurrences)
-            : null;
-        const occurrence = catchUp?.earliest ?? startOccurrences[0];
-        if (occurrence === undefined) continue;
-        const cursor = candidate.occurrences.at(-1) ?? schedule.cursor ?? nowIso;
-        const trigger = {
-          ...(catchUp === null ? {} : { catchUp }),
-          occurrence,
-          scheduleName: schedule.name,
-          scheduledAt: catchUp?.latest ?? occurrence,
-          type: "Scheduled" as const,
-        };
-        const evaluation = {
-          catchUp: catchUp === null ? null : JSON.stringify(catchUp),
-          cursor,
-          details: JSON.stringify({ catchUp, occurrences: startOccurrences, trigger }),
-          expectedDefinitionFingerprint: schedule.definitionFingerprint,
-          occurrences: startOccurrences,
-          outcome: "Started" as const,
-          projectId: schedule.projectId,
-          recordedAt: new Date().toISOString(),
-          scheduleName: schedule.name,
-        };
-        try {
-          results.push(
-            await workflowRuns.startScheduled(
-              {
-                input: definition.input,
-                projectId: schedule.projectId,
-                workflowName: definition.workflow,
-              } satisfies Omit<WorkflowStartRequest, "fromCheckout">,
-              evaluation,
-              trigger,
-            ),
-          );
-        } catch (error) {
-          commitWithoutStart(schedule, {
-            catchUp,
-            cursor,
-            occurrences: startOccurrences,
-            outcome: "PreflightFailed",
-            reason: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
-      return results;
-    },
+    evaluate: enqueueEvaluation,
     inspect,
     list: (projectId?: string) => store.workflowSchedules.list(projectId),
   };

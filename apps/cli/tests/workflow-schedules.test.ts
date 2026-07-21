@@ -219,6 +219,36 @@ describe("durable Workflow Schedules", () => {
     store.close();
   });
 
+  test("skips every missed occurrence unless the current minute is due", async () => {
+    const store = await makeStore();
+    store.projectSources.activate(
+      "project-1",
+      "LocalWithFreshnessWarning",
+      revision([{ cron: cron([0], [9]), name: "morning", workflow: "alpha" }]),
+    );
+    const runs = makeWorkflowRunService(store, {
+      prepare: async ({ workflowName }) => prepared(workflowName),
+    });
+    const schedules = makeWorkflowScheduleService(store, runs);
+    schedules.enable("project-1", "morning", new Date("2026-01-01T08:00:00.000Z"));
+
+    await schedules.evaluate(new Date("2026-01-02T10:00:00.000Z"));
+
+    expect(store.workflowRuns.list()).toEqual([]);
+    expect(schedules.inspect("project-1", "morning")).toMatchObject({
+      cursor: "2026-01-02T09:00:00.000Z",
+      history: [expect.objectContaining({ outcome: "Skipped" })],
+      occurrences: [
+        expect.objectContaining({ scheduledAt: "2026-01-01T09:00:00.000Z" }),
+        expect.objectContaining({ scheduledAt: "2026-01-02T09:00:00.000Z" }),
+      ],
+    });
+
+    await schedules.evaluate(new Date("2026-01-03T09:00:00.000Z"));
+    expect(store.workflowRuns.list()).toHaveLength(1);
+    store.close();
+  });
+
   test("does not start a prepared run after the active source revision advances", async () => {
     const store = await makeStore();
     const definitions = [
@@ -446,6 +476,152 @@ describe("durable Workflow Schedules", () => {
     store.close();
   });
 
+  test("keeps the cursor monotonic across project, source, and enablement changes", async () => {
+    const store = await makeStore();
+    store.projectSources.activate(
+      "project-1",
+      "LocalWithFreshnessWarning",
+      revision([{ cron: cron([], []), name: "monotonic", workflow: "alpha" }]),
+    );
+    const runs = makeWorkflowRunService(store, {
+      prepare: async ({ workflowName }) => prepared(workflowName),
+    });
+    const schedules = makeWorkflowScheduleService(store, runs);
+    const future = new Date("2030-01-01T00:00:00.000Z");
+    schedules.enable("project-1", "monotonic", future);
+
+    store.projects.update("project-1", { registrationState: "Disabled" });
+    store.projectSources.reject("project-1", "LocalWithFreshnessWarning", "[{}]");
+    store.projectSources.activate(
+      "project-1",
+      "LocalWithFreshnessWarning",
+      revision([{ cron: cron([], []), name: "monotonic", workflow: "alpha" }]),
+    );
+    schedules.disable("project-1", "monotonic");
+    schedules.enable("project-1", "monotonic", new Date("2029-01-01T00:00:00.000Z"));
+
+    expect(schedules.inspect("project-1", "monotonic").cursor).toBe(future.toISOString());
+    store.close();
+  });
+
+  test("does not apply a changed cron definition before its activation minute", async () => {
+    const store = await makeStore();
+    store.projectSources.activate(
+      "project-1",
+      "LocalWithFreshnessWarning",
+      revision([{ cron: cron([0], [0]), name: "changed", workflow: "alpha" }]),
+    );
+    const runs = makeWorkflowRunService(store, {
+      prepare: async ({ workflowName }) => prepared(workflowName),
+    });
+    const schedules = makeWorkflowScheduleService(store, runs);
+    const beforeActivation = new Date();
+    beforeActivation.setUTCSeconds(0, 0);
+    schedules.enable("project-1", "changed", new Date(beforeActivation.getTime() - 5 * 60_000));
+
+    store.projectSources.activate(
+      "project-1",
+      "LocalWithFreshnessWarning",
+      revision([{ cron: cron([], []), name: "changed", workflow: "alpha" }], "b".repeat(40)),
+    );
+    const activationMinute = schedules.inspect("project-1", "changed").cursor;
+    if (activationMinute === null) throw new Error("changed Schedule has no activation cursor");
+    await schedules.evaluate(new Date(activationMinute));
+
+    expect(store.workflowRuns.list()).toEqual([]);
+    expect(schedules.inspect("project-1", "changed")).toMatchObject({
+      catchUp: null,
+      cursor: activationMinute,
+      history: [],
+      occurrences: [],
+    });
+    store.close();
+  });
+
+  test("serializes repeated evaluation so a late failure cannot restore a started catch-up", async () => {
+    const store = await makeStore();
+    store.projectSources.activate(
+      "project-1",
+      "LocalWithFreshnessWarning",
+      revision([
+        {
+          cron: cron([], []),
+          missedTimePolicy: "catch-up-once",
+          name: "serialized",
+          workflow: "alpha",
+        },
+      ]),
+    );
+    let preparations = 0;
+    const runs = makeWorkflowRunService(store, {
+      prepare: async ({ workflowName }) => {
+        preparations += 1;
+        if (preparations > 1) {
+          await Bun.sleep(30);
+          throw new Error("late preflight failure");
+        }
+        await Bun.sleep(10);
+        return prepared(workflowName);
+      },
+    });
+    const schedules = makeWorkflowScheduleService(store, runs);
+    schedules.enable("project-1", "serialized", new Date("2026-01-01T09:00:00.000Z"));
+
+    await Promise.all([
+      schedules.evaluate(new Date("2026-01-01T09:01:00.000Z")),
+      schedules.evaluate(new Date("2026-01-01T09:01:00.000Z")),
+    ]);
+
+    expect(preparations).toBe(1);
+    expect(store.workflowRuns.list()).toHaveLength(1);
+    expect(schedules.inspect("project-1", "serialized").catchUp).toBeNull();
+    store.close();
+  });
+
+  test("fences a late concurrent failure after another evaluator starts the catch-up", async () => {
+    const store = await makeStore();
+    store.projectSources.activate(
+      "project-1",
+      "LocalWithFreshnessWarning",
+      revision([
+        {
+          cron: cron([], []),
+          missedTimePolicy: "catch-up-once",
+          name: "fenced",
+          workflow: "alpha",
+        },
+      ]),
+    );
+    let preparations = 0;
+    const runs = makeWorkflowRunService(store, {
+      prepare: async ({ workflowName }) => {
+        preparations += 1;
+        if (preparations === 1) {
+          await Bun.sleep(10);
+          return prepared(workflowName);
+        }
+        await Bun.sleep(30);
+        throw new Error("late preflight failure");
+      },
+    });
+    const firstEvaluator = makeWorkflowScheduleService(store, runs);
+    const secondEvaluator = makeWorkflowScheduleService(store, runs);
+    firstEvaluator.enable("project-1", "fenced", new Date("2026-01-01T09:00:00.000Z"));
+
+    await Promise.all([
+      firstEvaluator.evaluate(new Date("2026-01-01T09:01:00.000Z")),
+      secondEvaluator.evaluate(new Date("2026-01-01T09:01:00.000Z")),
+    ]);
+
+    expect(preparations).toBe(2);
+    expect(store.workflowRuns.list()).toHaveLength(1);
+    expect(firstEvaluator.inspect("project-1", "fenced")).toMatchObject({
+      catchUp: null,
+      history: [expect.objectContaining({ outcome: "Started" })],
+    });
+    store.close();
+  });
+
   test("fires a daylight-saving fold once at its earlier instant and moves a gap forward", async () => {
     const store = await makeStore();
     store.projectSources.activate(
@@ -477,7 +653,6 @@ describe("durable Workflow Schedules", () => {
       schedules.inspect("project-1", "fold").occurrences.map(({ scheduledAt }) => scheduledAt),
     ).toEqual(["2026-11-01T05:30:00.000Z"]);
 
-    store.workflowRuns.discard(store.workflowRuns.list()[0]?.runId ?? "");
     schedules.enable("project-1", "gap", new Date("2026-03-08T05:00:00.000Z"));
     await schedules.evaluate(new Date("2026-03-08T08:00:00.000Z"));
     expect(

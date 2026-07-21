@@ -410,6 +410,9 @@ const currentMinute = () => {
   return value.toISOString();
 };
 
+const monotonicCursor = (current: string | null | undefined, candidate: string) =>
+  current !== null && current !== undefined && current > candidate ? current : candidate;
+
 export const kojoSchemaMigrations = migrations.map((migration) => ({
   checksum: migrationChecksum(migration.statements),
   id: migration.id,
@@ -929,11 +932,28 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
             changes.registrationState !== undefined &&
             changes.registrationState !== previous?.registrationState
           ) {
-            transaction
-              .update(workflowSchedules)
-              .set({ catchUp: null, cursor: currentMinute(), updatedAt })
+            const inactiveCursor = currentMinute();
+            const schedules = transaction
+              .select({ cursor: workflowSchedules.cursor, name: workflowSchedules.name })
+              .from(workflowSchedules)
               .where(eq(workflowSchedules.projectId, id))
-              .run();
+              .all();
+            for (const schedule of schedules) {
+              transaction
+                .update(workflowSchedules)
+                .set({
+                  catchUp: null,
+                  cursor: monotonicCursor(schedule.cursor, inactiveCursor),
+                  updatedAt,
+                })
+                .where(
+                  and(
+                    eq(workflowSchedules.projectId, id),
+                    eq(workflowSchedules.name, schedule.name),
+                  ),
+                )
+                .run();
+            }
           }
           const project = transaction
             .select(selectProject)
@@ -1019,15 +1039,22 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
               `Workflow Schedule '${definition.name}' cannot be retargeted from '${existing.workflowName}' to '${definition.workflow}'`,
             );
           }
+          const definitionChanged =
+            existing !== undefined && existing.definitionFingerprint !== fingerprint;
+          const nextCursor =
+            existing === undefined
+              ? null
+              : definitionChanged
+                ? monotonicCursor(existing.cursor, inactiveCursor)
+                : existing.cursor;
+          const nextCatchUp =
+            definition.missedTimePolicy === "catch-up-once" ? (existing?.catchUp ?? null) : null;
           transaction
             .insert(workflowSchedules)
             .values({
               activeDefinition: canonicalDefinition,
-              catchUp: existing?.catchUp ?? null,
-              cursor:
-                existing !== undefined && existing.activeDefinition === null
-                  ? inactiveCursor
-                  : (existing?.cursor ?? null),
+              catchUp: nextCatchUp,
+              cursor: nextCursor,
               definitionFingerprint: fingerprint,
               enablement: existing?.enablement ?? "Disabled",
               name: definition.name,
@@ -1038,9 +1065,8 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
             .onConflictDoUpdate({
               set: {
                 activeDefinition: canonicalDefinition,
-                ...(existing?.activeDefinition === null
-                  ? { catchUp: null, cursor: inactiveCursor }
-                  : {}),
+                catchUp: nextCatchUp,
+                cursor: nextCursor,
                 definitionFingerprint: fingerprint,
                 updatedAt: now,
               },
@@ -1049,7 +1075,7 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
             .run();
         }
         const storedSchedules = transaction
-          .select({ name: workflowSchedules.name })
+          .select({ cursor: workflowSchedules.cursor, name: workflowSchedules.name })
           .from(workflowSchedules)
           .where(eq(workflowSchedules.projectId, projectId))
           .all();
@@ -1060,7 +1086,7 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
             .set({
               activeDefinition: null,
               catchUp: null,
-              cursor: inactiveCursor,
+              cursor: monotonicCursor(stored.cursor, inactiveCursor),
               definitionFingerprint: null,
               updatedAt: now,
             })
@@ -1116,17 +1142,30 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
               target: projectSourceState.projectId,
             })
             .run();
-          transaction
-            .update(workflowSchedules)
-            .set({
-              activeDefinition: null,
-              catchUp: null,
-              cursor: currentMinute(),
-              definitionFingerprint: null,
-              updatedAt,
-            })
+          const inactiveCursor = currentMinute();
+          const schedules = transaction
+            .select({ cursor: workflowSchedules.cursor, name: workflowSchedules.name })
+            .from(workflowSchedules)
             .where(eq(workflowSchedules.projectId, projectId))
-            .run();
+            .all();
+          for (const schedule of schedules) {
+            transaction
+              .update(workflowSchedules)
+              .set({
+                activeDefinition: null,
+                catchUp: null,
+                cursor: monotonicCursor(schedule.cursor, inactiveCursor),
+                definitionFingerprint: null,
+                updatedAt,
+              })
+              .where(
+                and(
+                  eq(workflowSchedules.projectId, projectId),
+                  eq(workflowSchedules.name, schedule.name),
+                ),
+              )
+              .run();
+          }
           const stored = transaction
             .select(selectProjectSource)
             .from(projectSourceState)
@@ -2060,8 +2099,10 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
           );
           if (
             novelOccurrences.length === 0 &&
-            evaluation.start !== undefined &&
-            schedule.catchUp === null
+            (evaluation.occurrences.length > 0 ||
+              evaluation.catchUp === null ||
+              schedule.catchUp === null ||
+              schedule.catchUp !== evaluation.catchUp)
           ) {
             return { outcome: "Duplicate", runId: null, status: "stale" as const };
           }
@@ -2168,7 +2209,7 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
           .update(workflowSchedules)
           .set({
             catchUp: null,
-            cursor,
+            cursor: monotonicCursor(schedule.cursor, cursor),
             enablement: "Enabled",
             updatedAt: new Date().toISOString(),
           })
