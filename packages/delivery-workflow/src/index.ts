@@ -190,6 +190,15 @@ const ReviewLimitReached = Schema.TaggedStruct("ReviewLimitReached", {
 const TicketFailed = Schema.TaggedStruct("TicketFailed", {
   ticket: TicketIdentity,
   failure: Schema.Unknown,
+  progress: Schema.optional(
+    Schema.Struct({
+      reviewedCommit: Schema.String,
+      integratedCommit: Schema.String,
+      verifiedCommit: Schema.String,
+      mergeParents: Schema.Tuple([Schema.String, Schema.String]),
+      publication: Schema.optional(PublicationSnapshotSchema),
+    }),
+  ),
 });
 
 export const DeliveryTicketOutcome = Schema.Union([Implemented, ReviewLimitReached, TicketFailed]);
@@ -860,11 +869,7 @@ const verifyIntegrated = (ticketNumber: number, targetCommit: string) =>
     }),
   });
 
-const publishIntegrated = (
-  github: GitHubDeliveryService,
-  rootUrl: ParsedRootUrl,
-  routing: DeliveryRouting,
-  inputGraph: GitHubDeliveryGraph,
+const integrateAndVerify = (
   input: Schema.Schema.Type<typeof DeliveryTicketInput>,
   reviewed: Schema.Schema.Type<typeof Implemented>,
   expectedTargetCommit: string,
@@ -872,7 +877,21 @@ const publishIntegrated = (
   Effect.gen(function* () {
     const integrated = yield* integrateReviewed(input, reviewed, expectedTargetCommit);
     const verifiedCommit = yield* verifyIntegrated(input.ticket.number, integrated.head);
+    return { integrated, verifiedCommit };
+  });
 
+const publishVerified = (
+  github: GitHubDeliveryService,
+  rootUrl: ParsedRootUrl,
+  routing: DeliveryRouting,
+  inputGraph: GitHubDeliveryGraph,
+  input: Schema.Schema.Type<typeof DeliveryTicketInput>,
+  reviewed: Schema.Schema.Type<typeof Implemented>,
+  expectedTargetCommit: string,
+  integrated: Effect.Success<ReturnType<typeof integrateReviewed>>,
+  verifiedCommit: string,
+) =>
+  Effect.gen(function* () {
     const reloadedUnknown = yield* durableGitHub(
       `reload-workstream-${input.ticket.number}`,
       Schema.Unknown,
@@ -887,6 +906,7 @@ const publishIntegrated = (
     const reloadedTicket = revalidated.tickets.find(
       ({ ticket }) => ticket.number === input.ticket.number,
     );
+    const originalTicket = inputGraph.tickets.find(({ number }) => number === input.ticket.number);
     const originalRoot = inputGraph.root;
     if (
       revalidated.diagnostics.length > 0 ||
@@ -905,10 +925,21 @@ const publishIntegrated = (
         JSON.stringify(
           originalRoot.children.nodes.map(({ number }) => number).sort((a, b) => a - b),
         ) ||
+      originalTicket === undefined ||
       reloadedTicket === undefined ||
       JSON.stringify(
         normalizeSpecification(reloadedTicket.ticket, reloadedTicket.publicationKey),
-      ) !== JSON.stringify(input.ticket)
+      ) !== JSON.stringify(input.ticket) ||
+      JSON.stringify(
+        reloadedTicket.ticket.blockedBy.nodes
+          .map(({ number, state }) => ({ number, state }))
+          .sort((left, right) => left.number - right.number),
+      ) !==
+        JSON.stringify(
+          originalTicket.blockedBy.nodes
+            .map(({ number, state }) => ({ number, state }))
+            .sort((left, right) => left.number - right.number),
+        )
     ) {
       return yield* failProof(
         "publication-drift",
@@ -1364,33 +1395,101 @@ export const Delivery = Workflow.make("delivery", {
                 `Implemented ticket #${implementation.ticket.number} has no normalized specification`,
               );
             }
-            const published = yield* publishIntegrated(
-              github,
-              rootUrl,
-              routing,
-              inputGraph,
-              {
-                baseCommit: initialPublication.remoteTargetCommit,
-                branch: `kojo-delivery-ticket-${implementation.ticket.number}`,
-                destinationBranch: routing.destinationBranch,
-                targetBranch: routing.targetBranch,
-                ticket: specification,
-              },
+            const ticketInput = {
+              baseCommit: initialPublication.remoteTargetCommit,
+              branch: `kojo-delivery-ticket-${implementation.ticket.number}`,
+              destinationBranch: routing.destinationBranch,
+              targetBranch: routing.targetBranch,
+              ticket: specification,
+            };
+            const prepared = yield* integrateAndVerify(
+              ticketInput,
               implementation,
               expectedTargetCommit,
             ).pipe(
               Effect.matchCauseEffect({
                 onFailure: (cause) =>
                   Effect.succeed({
-                    _tag: "TicketFailed" as const,
-                    ticket: implementation.ticket,
-                    failure: ticketFailureFromCause(cause),
+                    _tag: "PreparationFailed" as const,
+                    outcome: {
+                      _tag: "TicketFailed" as const,
+                      ticket: implementation.ticket,
+                      failure: ticketFailureFromCause(cause),
+                    },
                   }),
-                onSuccess: Effect.succeed,
+                onSuccess: ({ integrated, verifiedCommit }) =>
+                  Effect.succeed({
+                    _tag: "Prepared" as const,
+                    integrated,
+                    verifiedCommit,
+                  }),
               }),
             );
-            ticketOutcomes.push(published);
-            if (published._tag === "Published") expectedTargetCommit = published.verifiedCommit;
+            if (prepared._tag === "PreparationFailed") {
+              ticketOutcomes.push(prepared.outcome);
+              continue;
+            }
+            const published = yield* publishVerified(
+              github,
+              rootUrl,
+              routing,
+              inputGraph,
+              ticketInput,
+              implementation,
+              expectedTargetCommit,
+              prepared.integrated,
+              prepared.verifiedCommit,
+            ).pipe(
+              Effect.matchCauseEffect({
+                onFailure: (cause) =>
+                  Effect.succeed({
+                    _tag: "PublicationFailed" as const,
+                    cause,
+                  }),
+                onSuccess: (outcome) =>
+                  Effect.succeed({
+                    _tag: "Published" as const,
+                    outcome,
+                  }),
+              }),
+            );
+            if (published._tag === "Published") {
+              ticketOutcomes.push(published.outcome);
+              expectedTargetCommit = published.outcome.verifiedCommit;
+              continue;
+            }
+            const publication = yield* durableGitHub(
+              `reconcile-publication-${implementation.ticket.number}`,
+              PublicationSnapshotSchema,
+              github.readPublication({
+                repository: rootUrl.repository,
+                targetBranch: routing.targetBranch,
+                ticketNumber: implementation.ticket.number,
+              }),
+            ).pipe(
+              Effect.matchCauseEffect({
+                onFailure: () => Effect.succeed(undefined),
+                onSuccess: (snapshot) => Effect.succeed(snapshot),
+              }),
+            );
+            ticketOutcomes.push({
+              _tag: "TicketFailed" as const,
+              ticket: implementation.ticket,
+              failure: ticketFailureFromCause(published.cause),
+              progress: {
+                reviewedCommit: implementation.finalCommit,
+                integratedCommit: prepared.integrated.head,
+                verifiedCommit: prepared.verifiedCommit,
+                mergeParents: prepared.integrated.parents,
+                ...(publication === undefined ? {} : { publication }),
+              },
+            });
+            if (
+              publication?.remoteTargetCommit.toLowerCase() ===
+              prepared.verifiedCommit.toLowerCase()
+            ) {
+              expectedTargetCommit = prepared.verifiedCommit;
+            }
           }
           return {
             _tag: ticketOutcomes.some(({ _tag }) => _tag !== "Published")

@@ -35,7 +35,7 @@ const ticket = (number: number, ordinal: number) => ({
   blockedBy: { totalCount: 0, nodes: [] },
 });
 
-const graph = (tickets: ReadonlyArray<ReturnType<typeof ticket>>): GitHubDeliveryGraph => ({
+const graph = (tickets: GitHubDeliveryGraph["tickets"]): GitHubDeliveryGraph => ({
   root: {
     number: 26,
     title: "Delivery",
@@ -50,7 +50,15 @@ const graph = (tickets: ReadonlyArray<ReturnType<typeof ticket>>): GitHubDeliver
   tickets,
 });
 
-const githubLayer = (loaded: GitHubDeliveryGraph, reloaded = loaded) => {
+interface GitHubLayerOptions {
+  readonly failCloseTicket?: number;
+}
+
+const githubLayer = (
+  loaded: GitHubDeliveryGraph,
+  reloaded = loaded,
+  options: GitHubLayerOptions = {},
+) => {
   let remoteTargetCommit = sourceRevision;
   const closed = new Set<number>();
   let loads = 0;
@@ -58,14 +66,22 @@ const githubLayer = (loaded: GitHubDeliveryGraph, reloaded = loaded) => {
     closeTicket: (input) =>
       WorkflowTest.call(
         { input, layer: "GitHub", operation: "closeTicket" },
-        Effect.sync(() => {
-          closed.add(input.ticketNumber);
-          return {
-            idempotencyKey: input.idempotencyKey,
-            state: "Applied" as const,
-            targetCommit: input.targetCommit,
-          };
-        }),
+        Effect.suspend(() =>
+          input.ticketNumber === options.failCloseTicket
+            ? Effect.fail({
+                _tag: "GitHubDeliveryFailure" as const,
+                message: "close failed",
+                operation: "closeTicket",
+              })
+            : Effect.sync(() => {
+                closed.add(input.ticketNumber);
+                return {
+                  idempotencyKey: input.idempotencyKey,
+                  state: "Applied" as const,
+                  targetCommit: input.targetCommit,
+                };
+              }),
+        ),
       ) as unknown as ReturnType<GitHubDeliveryService["closeTicket"]>,
     isSourceRevisionReachable: (input) =>
       WorkflowTest.call(
@@ -293,10 +309,11 @@ const run = (
   loaded: GitHubDeliveryGraph,
   controlled = providers(),
   reloaded: GitHubDeliveryGraph = loaded,
+  githubOptions: GitHubLayerOptions = {},
 ) =>
   WorkflowTest.make(Delivery, {
     workflows: [DeliveryTicket],
-    layer: Layer.merge(githubLayer(loaded, reloaded), controlled.layer),
+    layer: Layer.merge(githubLayer(loaded, reloaded, githubOptions), controlled.layer),
   }).run({ workstream: rootUrl });
 
 describe("Delivery ready frontier implementation", () => {
@@ -574,5 +591,75 @@ describe("Delivery ready frontier implementation", () => {
     });
     expect(result.calls.filter(({ operation }) => operation === "pushExact")).toEqual([]);
     expect(result.calls.filter(({ operation }) => operation === "closeTicket")).toEqual([]);
+  });
+
+  test("refuses publication when a reviewed ticket's blocker state drifts", async () => {
+    const blocker = {
+      ...ticket(42, 1),
+      state: "CLOSED" as const,
+    };
+    const dependent = {
+      ...ticket(43, 2),
+      blockedBy: { totalCount: 1, nodes: [{ number: 42, state: "CLOSED" as const }] },
+    };
+    const loaded = graph([blocker, dependent]);
+    const reloaded = graph([
+      { ...blocker, state: "OPEN" as const },
+      {
+        ...dependent,
+        blockedBy: { totalCount: 1, nodes: [{ number: 42, state: "OPEN" as const }] },
+      },
+    ]);
+    const result = await run(loaded, providers(), reloaded);
+
+    expect(result.outcome).toMatchObject({
+      _tag: "Success",
+      value: {
+        _tag: "TicketsFailed",
+        ticketOutcomes: [
+          {
+            _tag: "TicketFailed",
+            failure: { _tag: "Delivery.TicketProofFailure", check: "publication-drift" },
+            ticket: { number: 43 },
+          },
+        ],
+      },
+    });
+    expect(result.calls.filter(({ operation }) => operation === "pushExact")).toEqual([]);
+    expect(result.calls.filter(({ operation }) => operation === "closeTicket")).toEqual([]);
+  });
+
+  test("continues serial publication from a reconciled push when ticket closure fails", async () => {
+    const loaded = graph([ticket(43, 1), ticket(44, 2)]);
+    const result = await run(loaded, providers(), loaded, { failCloseTicket: 43 });
+
+    expect(result.outcome).toMatchObject({
+      _tag: "Success",
+      value: {
+        _tag: "TicketsFailed",
+        ticketOutcomes: [
+          {
+            _tag: "TicketFailed",
+            failure: { _tag: "GitHubDeliveryFailure", operation: "closeTicket" },
+            progress: {
+              integratedCommit: "cccccccccccccccccccccccccccccccccccccc2b",
+              publication: {
+                remoteTargetCommit: "cccccccccccccccccccccccccccccccccccccc2b",
+                ticketState: "OPEN",
+              },
+              verifiedCommit: "cccccccccccccccccccccccccccccccccccccc2b",
+            },
+            ticket: { number: 43 },
+          },
+          { _tag: "Published", ticket: { number: 44 } },
+        ],
+      },
+    });
+    expect(
+      result.calls.filter(({ operation }) => operation === "pushExact").map(({ input }) => input),
+    ).toMatchObject([
+      { expectedTargetCommit: sourceRevision },
+      { expectedTargetCommit: "cccccccccccccccccccccccccccccccccccccc2b" },
+    ]);
   });
 });
