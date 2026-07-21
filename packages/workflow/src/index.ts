@@ -10,6 +10,8 @@ export type {
 export { ActivityRetry, Loop } from "./composition";
 export type {
   AgentProviderConfiguration,
+  AgentProviderFailure,
+  AgentProviderLayerOptions,
   AgentProviderService,
   AgentRunOptions,
   CommandExecutionOptions,

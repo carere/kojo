@@ -91,6 +91,19 @@ non-secret configuration (plus the Agent model). The CLI supplies a local Docker
 when a workflow does not replace it. Secrets must be resolved while constructing a provider and
 must not be copied into any durable schema or public metadata.
 
+Use `AgentProvider.layer` when an Agent Provider needs credentials. Its `secrets` Effect resolves
+redacted values when the provider layer is acquired, and `makeAgent` receives plain strings only at
+the process-local Sandcastle construction boundary. The layer may be supplied to a whole workflow
+scope or directly to one `Agent.run`, so separate Agent Steps in one Sandbox can use different
+providers without making the CLI choose an agent or model.
+
+`Agent.run(name, { prompt, success, failure })` expects the controlled Sandcastle adapter to return
+a structured `{ _tag: "Success", value }` or `{ _tag: "Failure", failure }` output and validates
+the selected value with the author schema. Its durable result retains commits and finalized,
+redacted transcript artifact references. Agent evidence records the logical Step and attempt with
+only the provider name, model, and adapter version; provider objects, credentials, configuration
+fingerprints, and transcript text are not rendered into evidence or traces.
+
 `Command.run` schema-checks `{ exitCode, stdout, stderr }`. A nonzero exit code is observed data;
 workflow policy decides whether it is a failure. Rejected executions are typed
 `Command.ExecutionFailed` values and may use the command's `retry` option for durable Activity

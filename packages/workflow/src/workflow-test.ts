@@ -45,7 +45,13 @@ export namespace WorkflowTest {
     readonly outcome?: string;
     readonly sequence: number;
     readonly subject: string;
-    readonly type: "Activity" | "ChildWorkflow" | "DurableClock" | "ExternalCall" | "WorkflowRun";
+    readonly type:
+      | "Activity"
+      | "Agent"
+      | "ChildWorkflow"
+      | "DurableClock"
+      | "ExternalCall"
+      | "WorkflowRun";
   }
 
   export interface RevisionSnapshotEntry {
@@ -146,6 +152,17 @@ const matchesCall = (call: WorkflowTest.CallMatcher, matcher: WorkflowTest.CallM
   call.operation === matcher.operation &&
   (matcher.input === undefined || Equal.equals(call.input, matcher.input));
 
+const safeProviderIdentity = (snapshot: unknown) => {
+  if (typeof snapshot !== "object" || snapshot === null) return undefined;
+  const value = snapshot as Record<string, unknown>;
+  return {
+    adapterVersion: value.adapterVersion,
+    ...(value.kind === "Agent" ? { model: value.model } : {}),
+    name: value.name,
+    publicFields: value.publicFields,
+  };
+};
+
 const spanIdentity = (event: WorkflowTest.EvidenceEvent, type: WorkflowTest.TraceSpan["type"]) => {
   const details =
     typeof event.details === "object" && event.details !== null
@@ -187,13 +204,15 @@ const traceFromEvidence = (
   for (const event of evidence) {
     const type = event.type.endsWith(".Replayed")
       ? undefined
-      : event.type.startsWith("ExternalCall.")
-        ? "ExternalCall"
-        : event.type.startsWith("Activity.")
-          ? "Activity"
-          : event.type === "DurableClock.Scheduled"
-            ? "DurableClock"
-            : undefined;
+      : event.type.startsWith("Agent.")
+        ? "Agent"
+        : event.type.startsWith("ExternalCall.")
+          ? "ExternalCall"
+          : event.type.startsWith("Activity.")
+            ? "Activity"
+            : event.type === "DurableClock.Scheduled"
+              ? "DurableClock"
+              : undefined;
     if (type === undefined) continue;
     const key = spanIdentity(event, type);
     if (seen.has(key)) continue;
@@ -466,7 +485,7 @@ const make = <
             yield* appendWithoutLifecycleCompensation(
               "RuntimeConfiguration.SnapshotRecorded",
               subject,
-              snapshot,
+              safeProviderIdentity(snapshot),
             );
             return;
           }
@@ -474,10 +493,7 @@ const make = <
             yield* appendWithoutLifecycleCompensation(
               "RuntimeConfiguration.Incompatible",
               subject,
-              {
-                available: snapshot,
-                expected: existing,
-              },
+              { provider: safeProviderIdentity(existing) },
             );
             return yield* Effect.die(
               `Runtime Configuration for '${subject}' does not match its durable snapshot`,
@@ -486,7 +502,7 @@ const make = <
           yield* appendWithoutLifecycleCompensation(
             "RuntimeConfiguration.Compatible",
             subject,
-            snapshot,
+            safeProviderIdentity(snapshot),
           );
         }),
     };
