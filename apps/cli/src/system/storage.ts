@@ -89,6 +89,16 @@ const executionLeases = sqliteTable("execution_leases", {
   state: text("state").notNull(),
 });
 
+const activityClaims = sqliteTable("activity_claims", {
+  attempt: integer("attempt").notNull(),
+  completionIdempotencyKey: text("completion_idempotency_key").notNull(),
+  runId: text("run_id")
+    .notNull()
+    .references(() => workflowRuns.runId),
+  startedIdempotencyKey: text("started_idempotency_key").notNull(),
+  subject: text("subject").notNull(),
+});
+
 const workflowJournal = sqliteTable("workflow_journal", {
   attempt: integer("attempt").notNull(),
   idempotencyKey: text("idempotency_key").notNull(),
@@ -263,6 +273,20 @@ const migrations = [
         root_run_id TEXT PRIMARY KEY NOT NULL REFERENCES workflow_runs(run_id),
         snapshot TEXT NOT NULL,
         created_at TEXT NOT NULL
+      )`,
+    ],
+  },
+  {
+    id: 6,
+    statements: [
+      `CREATE TABLE activity_claims (
+        run_id TEXT NOT NULL REFERENCES workflow_runs(run_id),
+        started_idempotency_key TEXT NOT NULL,
+        completion_idempotency_key TEXT NOT NULL,
+        attempt INTEGER NOT NULL CHECK (attempt > 0),
+        subject TEXT NOT NULL,
+        PRIMARY KEY (run_id, started_idempotency_key),
+        UNIQUE (run_id, completion_idempotency_key)
       )`,
     ],
   },
@@ -976,6 +1000,51 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
       transaction.insert(evidenceEvents).values(event).run();
       return event;
     };
+    const appendUncertainActivities = (transaction: StoreTransaction, runId: string) => {
+      const claims = transaction
+        .select()
+        .from(activityClaims)
+        .where(eq(activityClaims.runId, runId))
+        .all();
+      const uncertain: Array<StoredEvidenceEvent> = [];
+      for (const claim of claims) {
+        const completed = transaction
+          .select({ sequence: workflowJournal.sequence })
+          .from(workflowJournal)
+          .where(
+            and(
+              eq(workflowJournal.runId, runId),
+              eq(workflowJournal.idempotencyKey, claim.completionIdempotencyKey),
+            ),
+          )
+          .get();
+        if (completed !== undefined) continue;
+        const started = transaction
+          .select({ eventId: evidenceEvents.eventId })
+          .from(evidenceEvents)
+          .where(
+            and(
+              eq(evidenceEvents.runId, runId),
+              eq(evidenceEvents.idempotencyKey, claim.startedIdempotencyKey),
+            ),
+          )
+          .get();
+        uncertain.push(
+          appendLifecycle(
+            transaction,
+            runId,
+            claim.attempt,
+            "Activity.Uncertain",
+            { activityEventId: started?.eventId ?? null, subject: claim.subject },
+            {
+              idempotencyKey: `${claim.startedIdempotencyKey}:uncertain`,
+              subject: claim.subject,
+            },
+          ),
+        );
+      }
+      return uncertain;
+    };
     const applyPendingLifecycle = (
       transaction: StoreTransaction,
       runId: string,
@@ -1056,6 +1125,7 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
             return false;
           }
         }
+        appendUncertainActivities(transaction, runId);
         const evidence = appendLifecycle(transaction, runId, attempt, "WorkflowRun.Interrupted", {
           reason,
         });
@@ -1114,6 +1184,38 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
               evidence: lifecycle.evidence,
               status: `${lifecycle.control}ed` as "discarded" | "suspended",
             } as const;
+          }
+          const storedClaim = transaction
+            .select()
+            .from(activityClaims)
+            .where(
+              and(
+                eq(activityClaims.runId, record.runId),
+                eq(activityClaims.startedIdempotencyKey, record.idempotencyKey),
+              ),
+            )
+            .get();
+          if (
+            storedClaim !== undefined &&
+            (storedClaim.attempt !== record.attempt ||
+              storedClaim.completionIdempotencyKey !== record.completionIdempotencyKey ||
+              storedClaim.subject !== record.subject)
+          ) {
+            throw new Error(
+              `Workflow Run ${record.runId} reused Activity claim ${record.idempotencyKey} with different data`,
+            );
+          }
+          if (storedClaim === undefined) {
+            transaction
+              .insert(activityClaims)
+              .values({
+                attempt: record.attempt,
+                completionIdempotencyKey: record.completionIdempotencyKey,
+                runId: record.runId,
+                startedIdempotencyKey: record.idempotencyKey,
+                subject: record.subject,
+              })
+              .run();
           }
           const completed = transaction
             .select()
@@ -1175,7 +1277,7 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
               .get()?.number ?? 1;
           if (run.state === "Running") {
             appendLifecycle(transaction, runId, attempt, "WorkflowRun.DiscardRequested", {});
-            return { runId, state: "Running" as const, status: "requested" as const };
+            appendUncertainActivities(transaction, runId);
           }
           const evidence = appendLifecycle(transaction, runId, attempt, "WorkflowRun.Discarded", {
             cleanup: "BestEffort",
@@ -1185,6 +1287,18 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
             .set({ state: "Discarded", updatedAt: evidence.recordedAt })
             .where(eq(workflowRuns.runId, runId))
             .run();
+          if (run.state === "Running") {
+            transaction
+              .update(executionAttempts)
+              .set({ finishedAt: evidence.recordedAt, state: "Discarded" })
+              .where(and(eq(executionAttempts.runId, runId), eq(executionAttempts.number, attempt)))
+              .run();
+            transaction
+              .update(executionLeases)
+              .set({ state: "Released" })
+              .where(and(eq(executionLeases.runId, runId), eq(executionLeases.state, "Active")))
+              .run();
+          }
           return { runId, state: "Discarded" as const, status: "discarded" as const };
         }),
       finalize: (record, scope) => {

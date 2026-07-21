@@ -323,6 +323,30 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
           `Workflow Run ${runId} has no Workflow Revision Snapshot`,
         );
       }
+      const outcome =
+        typeof inspected.outcome === "object" &&
+        inspected.outcome !== null &&
+        "value" in inspected.outcome
+          ? inspected.outcome.value
+          : inspected.outcome;
+      if (
+        inspected.state === "Failed" &&
+        typeof outcome === "object" &&
+        outcome !== null &&
+        "_tag" in outcome &&
+        outcome._tag === "Defect"
+      ) {
+        throw new WorkflowStartError(
+          "WORKFLOW_INCOMPATIBLE",
+          `Workflow Run ${runId} failed with a non-resumable Defect`,
+        );
+      }
+      if (inspected.evidence.some(({ type }) => type === "Activity.Uncertain")) {
+        throw new WorkflowStartError(
+          "WORKFLOW_INCOMPATIBLE",
+          `Workflow Run ${runId} has an Uncertain Activity Outcome that requires reconciliation`,
+        );
+      }
       if (
         inspected.lease?.state === "Active" &&
         inspected.lease.expiresAt > new Date().toISOString()
@@ -343,12 +367,7 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
       return prepareResume({
         attempt: nextAttempt - 1,
         input: decodedValue(store.workflowRuns.find(runId)?.run.input ?? encoded(undefined)),
-        outcome:
-          typeof inspected.outcome === "object" &&
-          inspected.outcome !== null &&
-          "value" in inspected.outcome
-            ? inspected.outcome.value
-            : inspected.outcome,
+        outcome,
         projectId: inspected.projectId,
         revision: inspected.revision,
         revisionSnapshot: inspected.revisionSnapshot,

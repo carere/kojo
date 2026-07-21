@@ -574,6 +574,9 @@ const make = <
       if (latestResult.state !== "Interrupted") {
         throw new Error(`Cannot restart a Workflow Run in ${latestResult.state} state`);
       }
+      if (latestResult.calls.some(({ status }) => status === "Uncertain")) {
+        throw new Error("Cannot restart a Workflow Run with an unreconciled uncertain outcome");
+      }
       latestResult = await execute(latestInput as Schema.Schema.Type<Input>);
       return latestResult;
     },
@@ -592,6 +595,9 @@ const make = <
         latestResult.state === "Failed" &&
         failureTag !== undefined &&
         workflow.recovery[failureTag] !== undefined;
+      if (latestResult.calls.some(({ status }) => status === "Uncertain")) {
+        throw new Error("Cannot resume a Workflow Run with an unreconciled uncertain outcome");
+      }
       if (
         latestResult.state !== "Interrupted" &&
         latestResult.state !== "Suspended" &&

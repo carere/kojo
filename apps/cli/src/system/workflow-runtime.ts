@@ -338,7 +338,9 @@ export const makeProjectWorkflowRuntime = (
           : undefined;
       if (
         request.state === "Failed" &&
-        (failureTag === undefined || validation.recoveryTags?.includes(failureTag) !== true)
+        (failureTag === undefined ||
+          failureTag === "Defect" ||
+          validation.recoveryTags?.includes(failureTag) !== true)
       ) {
         throw new WorkflowStartError(
           "WORKFLOW_INCOMPATIBLE",

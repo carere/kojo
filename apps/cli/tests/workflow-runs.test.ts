@@ -463,6 +463,8 @@ describe("Workflow Run service", () => {
       projectId: "project-1",
       workflowName: "resume",
     });
+    const firstAuthority = store.workflowRuns.find(started.runId)?.lease;
+    if (firstAuthority === undefined) throw new Error("start did not create an Execution Lease");
     store.workflowRuns.interruptRunning();
 
     const resumed = await service.resume(started.runId);
@@ -489,6 +491,20 @@ describe("Workflow Run service", () => {
       runId: started.runId,
       state: "Running",
     });
+    expect(() =>
+      service.recordBoundary({
+        attempt: 1,
+        idempotencyKey: `${started.runId}:delayed`,
+        leaseGeneration: 1,
+        leaseHolder: firstAuthority.holder,
+        operation: "Activity.Completed",
+        payload: {},
+        projectId: "project-1",
+        rootRunId: started.runId,
+        runId: started.runId,
+        subject: "delayed",
+      }),
+    ).toThrow("rejected a delayed execution write");
     store.close();
   });
 
@@ -569,7 +585,69 @@ describe("Workflow Run service", () => {
     store.close();
   });
 
-  test("evidences an uncertain Activity outcome and fences superseded writes", async () => {
+  test("immediately discards a Running run, fences its lease, and preserves uncertain evidence", async () => {
+    const store = await makeStore();
+    const service = makeWorkflowRunService(store, {
+      prepare: async () => ({
+        encodedInput: {},
+        execute: async () => new Promise(() => undefined),
+        ...preparedRevision("running-discard", "running-discard-fingerprint", "5"),
+      }),
+    });
+    const started = await service.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-1",
+      workflowName: "running-discard",
+    });
+    const stored = store.workflowRuns.find(started.runId);
+    if (stored?.lease === undefined) throw new Error("start did not create an Execution Lease");
+    const scope = {
+      attempt: 1,
+      leaseGeneration: 1,
+      leaseHolder: stored.lease.holder,
+      projectId: "project-1",
+      rootRunId: started.runId,
+      runId: started.runId,
+    };
+    service.claimActivity({
+      ...scope,
+      completionIdempotencyKey: `${started.runId}:publish:completed`,
+      idempotencyKey: `${started.runId}:publish:started`,
+      payload: {},
+      subject: "publish",
+    });
+
+    expect(service.discard(started.runId)).toMatchObject({
+      runId: started.runId,
+      state: "Discarded",
+      status: "discarded",
+    });
+    expect(service.inspect(started.runId)).toMatchObject({
+      attempts: [{ state: "Discarded" }],
+      evidence: [
+        { type: "WorkflowRun.Started" },
+        { type: "Activity.Started" },
+        { type: "WorkflowRun.DiscardRequested" },
+        { type: "Activity.Uncertain" },
+        { type: "WorkflowRun.Discarded" },
+      ],
+      lease: { state: "Released" },
+      state: "Discarded",
+    });
+    expect(() =>
+      service.recordBoundary({
+        ...scope,
+        idempotencyKey: `${started.runId}:publish:completed`,
+        operation: "Activity.Completed",
+        payload: {},
+        subject: "publish",
+      }),
+    ).toThrow("rejected a delayed execution write");
+    store.close();
+  });
+
+  test("evidences an uncertain Activity on authority loss and blocks resume before attempt creation", async () => {
     const store = await makeStore();
     const service = makeWorkflowRunService(store, {
       prepare: async () => ({
@@ -610,20 +688,19 @@ describe("Workflow Run service", () => {
       payload: {},
       subject: "publish",
     });
-    expect(
-      service.claimActivity({
-        ...oldScope,
-        completionIdempotencyKey: `${started.runId}:external:completed`,
-        idempotencyKey: startedKey,
-        payload: {},
-        subject: "publish",
-      }),
-    ).toMatchObject({ status: "uncertain" });
-    expect(service.inspect(started.runId)?.evidence.map(({ type }) => type)).toContain(
-      "Activity.Uncertain",
-    );
     store.workflowRuns.interruptRunning();
-    await service.resume(started.runId);
+    expect(service.inspect(started.runId)).toMatchObject({
+      attempts: [{ number: 1, state: "Interrupted" }],
+      evidence: [
+        { type: "WorkflowRun.Started" },
+        { type: "Activity.Started" },
+        { type: "Activity.Uncertain" },
+        { type: "WorkflowRun.Interrupted" },
+      ],
+      state: "Interrupted",
+    });
+    expect(() => service.resume(started.runId)).toThrow("requires reconciliation");
+    expect(service.inspect(started.runId)?.attempts).toHaveLength(1);
     expect(() =>
       service.recordBoundary({
         ...oldScope,
@@ -633,6 +710,42 @@ describe("Workflow Run service", () => {
         subject: "publish",
       }),
     ).toThrow("rejected a delayed execution write");
+    store.close();
+  });
+
+  test("never resumes a Defect even when workflow code registers a matching tag", async () => {
+    const store = await makeStore();
+    const service = makeWorkflowRunService(store, {
+      prepare: async () => ({
+        encodedInput: {},
+        execute: async () => ({
+          state: "Failed" as const,
+          value: { _tag: "Defect", cause: "workflow crashed" },
+        }),
+        ...preparedRevision("defect", "defect-fingerprint", "6"),
+      }),
+      prepareResume: async () => ({
+        execute: async () => new Promise(() => undefined),
+        leaseAvailability: "Available" as const,
+        recoveryPolicy: "Available" as const,
+        revisionCompatibility: "Compatible" as const,
+        runtimeConfigurationCompatibility: "Compatible" as const,
+        sourceAvailability: "Available" as const,
+      }),
+    });
+    const started = await service.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-1",
+      workflowName: "defect",
+    });
+    await service.settle(started.runId);
+
+    expect(() => service.resume(started.runId)).toThrow("non-resumable Defect");
+    expect(service.inspect(started.runId)).toMatchObject({
+      attempts: [{ number: 1, state: "Failed" }],
+      state: "Failed",
+    });
     store.close();
   });
 

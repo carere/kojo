@@ -543,11 +543,13 @@ describe("WorkflowTest", () => {
     const interrupted = await fixture.run("abc123", {
       uncertain: [{ layer: "Git", operation: "push" }],
     });
-    const restarted = await fixture.restart();
+    const restart = fixture.restart();
+    const resume = fixture.resume();
 
     expect(interrupted.state).toBe("Interrupted");
-    expect(restarted.state).toBe("Interrupted");
+    await expect(restart).rejects.toThrow("unreconciled uncertain outcome");
+    await expect(resume).rejects.toThrow("unreconciled uncertain outcome");
     expect(pushes).toBe(1);
-    expect(restarted.evidence.map(({ type }) => type)).toContain("ExternalCall.Uncertain");
+    expect(interrupted.evidence.map(({ type }) => type)).toContain("ExternalCall.Uncertain");
   });
 });
