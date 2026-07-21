@@ -1,0 +1,24 @@
+$schema: "../../.moon/cache/schemas/project.json"
+
+tasks:
+  check:
+    command: bun run ../../node_modules/.bin/biome check --no-errors-on-unmatched .
+    options:
+      mergeArgs: replace
+
+  test:
+    command: bun node_modules/vitest/vitest.mjs run tests/delivery.test.ts
+    description: Run the delivery Developer Workflow Acceptance Tests
+    deps:
+      - workflow:build
+    inputs:
+      - "@group(configs)"
+      - "@group(sources)"
+      - "@group(tests)"
+      - "@group(workspace)"
+    type: test
+
+  tsc:
+    command: bun node_modules/typescript/bin/tsc --build --verbose
+    options:
+      mergeArgs: replace
