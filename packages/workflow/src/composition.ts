@@ -1,4 +1,4 @@
-import { Context, Duration, Effect, Schema } from "effect";
+import { Cause, Context, Duration, Effect, Schema } from "effect";
 import { Activity, DurableClock, type WorkflowEngine } from "effect/unstable/workflow";
 
 export interface DurableBoundary {
@@ -136,10 +136,27 @@ const retryActivity = <Success extends Schema.Constraint, Error extends Schema.C
         activity.pipe(Effect.provideService(Activity.CurrentAttempt, ordinal)),
       );
       if (exit._tag === "Success") return exit.value;
-      const failure = exit.cause.reasons.find((reason) => reason._tag === "Fail")?.error as
-        | Error["Type"]
-        | undefined;
-      if (failure === undefined || ordinal === options.maxAttempts || !options.while(failure)) {
+      const failures = exit.cause.reasons.filter((reason) => reason._tag === "Fail");
+      const failure = failures.length === 1 ? (failures[0]?.error as Error["Type"]) : undefined;
+      if (Cause.hasDies(exit.cause) || Cause.hasInterrupts(exit.cause) || failure === undefined) {
+        return yield* Effect.failCause(exit.cause);
+      }
+      if (ordinal === options.maxAttempts) {
+        yield* recorder.record({
+          details: { failure, maxAttempts: options.maxAttempts, ordinal },
+          idempotencyKey: `activity-retry:${subject}:exhausted`,
+          subject,
+          type: "Activity.RetryExhausted",
+        });
+        return yield* Effect.failCause(exit.cause);
+      }
+      if (!options.while(failure)) {
+        yield* recorder.record({
+          details: { failure, ordinal },
+          idempotencyKey: `activity-retry:${subject}:${ordinal}:declined`,
+          subject,
+          type: "Activity.RetryDeclined",
+        });
         return yield* Effect.failCause(exit.cause);
       }
       const nextOrdinal = ordinal + 1;
@@ -160,6 +177,7 @@ const retryActivity = <Success extends Schema.Constraint, Error extends Schema.C
       });
       yield* DurableClock.sleep({
         duration: backoff,
+        inMemoryThreshold: "0 millis",
         name: `activity-retry:${subject}:${nextOrdinal}:backoff`,
       });
     }

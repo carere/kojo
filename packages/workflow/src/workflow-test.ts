@@ -9,6 +9,7 @@ import {
   Layer,
   Option,
   Schema,
+  Scope,
 } from "effect";
 import { Workflow as EffectWorkflow, WorkflowEngine } from "effect/unstable/workflow";
 import { CompositionRuntime } from "./composition";
@@ -292,6 +293,19 @@ const make = <
       return event;
     };
 
+    const appendWithoutLifecycleCompensation = (type: string, subject: string, details?: unknown) =>
+      Effect.gen(function* () {
+        const instance = yield* WorkflowEngine.WorkflowInstance;
+        try {
+          append(type, subject, details);
+        } catch (error) {
+          if (error instanceof InterruptedSignal || error instanceof SuspendedSignal) {
+            yield* Scope.close(instance.scope, Exit.void);
+          }
+          return yield* Effect.die(error);
+        }
+      });
+
     const boundaryRecorder = {
       record: (boundary: {
         readonly details?: unknown;
@@ -299,11 +313,15 @@ const make = <
         readonly subject: string;
         readonly type: string;
       }) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           if (controlJournal.has(boundary.idempotencyKey)) return;
           controlJournal.add(boundary.idempotencyKey);
-          append(boundary.type, boundary.subject, boundary.details);
-        }),
+          yield* appendWithoutLifecycleCompensation(
+            boundary.type,
+            boundary.subject,
+            boundary.details,
+          );
+        }) as Effect.Effect<void>,
     };
 
     const recorder: RecorderService = {
@@ -442,17 +460,22 @@ const make = <
             }),
           resume: () => Effect.void,
           scheduleClock: (_definition, { clock: durableClock, executionId }) =>
-            Effect.sync(() => {
+            Effect.gen(function* () {
               const key = `${executionId}:${durableClock.deferred.name}`;
               if (deferredJournal.has(key)) return;
-              append("DurableClock.Scheduled", durableClock.name, {
-                duration: Duration.toMillis(durableClock.duration),
-              });
+              yield* appendWithoutLifecycleCompensation(
+                "DurableClock.Scheduled",
+                durableClock.name,
+                { duration: Duration.toMillis(durableClock.duration) },
+              );
               const milliseconds = Duration.toMillis(durableClock.duration);
               if (Number.isFinite(milliseconds)) currentTime += milliseconds;
               deferredJournal.set(key, Exit.void);
-              append("DurableClock.Completed", durableClock.name);
-            }),
+              yield* appendWithoutLifecycleCompensation(
+                "DurableClock.Completed",
+                durableClock.name,
+              );
+            }) as Effect.Effect<void>,
         });
         return engine;
       }),

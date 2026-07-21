@@ -677,7 +677,10 @@ describe("WorkflowTest", () => {
     const fixture = WorkflowTest.make(retried);
 
     const interrupted = await fixture.run(true, {
-      interruptAfter: { subject: "publish", type: "Activity.Failed" },
+      interruptAfter: {
+        subject: "activity-retry:publish:2:backoff",
+        type: "DurableClock.Scheduled",
+      },
     });
     const exhausted = await fixture.restart();
 
@@ -691,9 +694,12 @@ describe("WorkflowTest", () => {
       exhausted.evidence.filter(({ type }) => type === "Activity.RetryScheduled"),
     ).toHaveLength(2);
     expect(
+      exhausted.evidence.filter(({ type }) => type === "Activity.RetryExhausted"),
+    ).toHaveLength(1);
+    expect(
       exhausted.evidence.filter(
         ({ subject, type }) =>
-          type === "Activity.Completed" && subject.startsWith("DurableClock/activity-retry:"),
+          type === "DurableClock.Completed" && subject.startsWith("activity-retry:"),
       ),
     ).toHaveLength(2);
     const attempts = exhausted.evidence
@@ -709,6 +715,43 @@ describe("WorkflowTest", () => {
       failure: { _tag: "RetryFailure", ordinal: 1, retryable: false },
     });
     expect(executions).toBe(1);
+    expect(notSelected.evidence.map(({ type }) => type)).toContain("Activity.RetryDeclined");
+  });
+
+  test("never retries an Activity cause that also contains a Defect", async () => {
+    const RetryFailure = Schema.TaggedStruct("RetryFailure", {});
+    let executions = 0;
+    const defecting = Workflow.make("DefectingRetry", {
+      version: "1",
+      entryPoint: "workflows/defecting-retry.ts",
+      input: Schema.Void,
+      success: Schema.Never,
+      failure: RetryFailure,
+      run: () =>
+        ActivityRetry.run(
+          Activity.make({
+            error: RetryFailure,
+            execute: Effect.suspend(() => {
+              executions += 1;
+              return Effect.fail({ _tag: "RetryFailure" as const }).pipe(
+                Effect.ensuring(Effect.die("activity defect")),
+              );
+            }),
+            name: "defecting",
+          }),
+          {
+            backoff: "1 second",
+            maxAttempts: 3,
+            while: () => true,
+          },
+        ),
+    });
+
+    const result = await WorkflowTest.make(defecting).run(undefined);
+
+    expect(result.outcome._tag).toBe("Defect");
+    expect(executions).toBe(1);
+    expect(result.evidence.map(({ type }) => type)).not.toContain("Activity.RetryScheduled");
   });
 
   test("runs evidenced durable Compensation in reverse order only for terminal failure", async () => {
@@ -768,6 +811,73 @@ describe("WorkflowTest", () => {
       interruptAfter: { subject: "create-first", type: "Activity.Started" },
     });
     expect(interrupted.state).toBe("Interrupted");
+    expect(compensated).toEqual([]);
+
+    compensated.length = 0;
+    const compensationFixture = WorkflowTest.make(compensatedWorkflow);
+    const interruptedCompensation = await compensationFixture.run(undefined, {
+      interruptAfter: { subject: "compensate-second", type: "Activity.Completed" },
+    });
+    expect(interruptedCompensation.state).toBe("Interrupted");
+    expect(compensated).toEqual(["second", "first"]);
+    const restartedCompensation = await compensationFixture.restart();
+    expect(restartedCompensation.state).toBe("Failed");
+    expect(compensated).toEqual(["second", "first"]);
+
+    compensated.length = 0;
+    const suspendedAfterRegistration = Workflow.make("SuspendedCompensation", {
+      version: "1",
+      entryPoint: "workflows/suspended-compensation.ts",
+      input: Schema.Void,
+      success: Schema.Number,
+      failure: Loop.MaximumLimitReached,
+      run: () =>
+        EffectWorkflow.withCompensation(
+          Activity.make({ name: "create", execute: Effect.succeed("created") }),
+          () => Effect.sync(() => compensated.push("suspended")),
+        ).pipe(
+          Effect.andThen(
+            Loop.run("after-registration", {
+              maxIterations: 1,
+              effect: () => Effect.succeed(1),
+              repeatWhile: () => false,
+            }),
+          ),
+        ),
+    });
+    const suspended = await WorkflowTest.make(suspendedAfterRegistration).run(undefined, {
+      suspendAfter: {
+        subject: "after-registration[1]",
+        type: "Loop.IterationStarted",
+      },
+    });
+    expect(suspended.state).toBe("Suspended");
+    expect(compensated).toEqual([]);
+
+    const suspendedDuringBackoff = Workflow.make("SuspendedBackoffCompensation", {
+      version: "1",
+      entryPoint: "workflows/suspended-backoff-compensation.ts",
+      input: Schema.Void,
+      success: Schema.String,
+      failure: Schema.Never,
+      run: () =>
+        EffectWorkflow.withCompensation(
+          Activity.make({ name: "create", execute: Effect.succeed("created") }),
+          () => Effect.sync(() => compensated.push("backoff")),
+        ).pipe(
+          Effect.andThen(
+            DurableClock.sleep({ duration: "2 minutes", name: "suspend-during-backoff" }),
+          ),
+          Effect.as("done"),
+        ),
+    });
+    const backoff = await WorkflowTest.make(suspendedDuringBackoff).run(undefined, {
+      suspendAfter: {
+        subject: "suspend-during-backoff",
+        type: "DurableClock.Scheduled",
+      },
+    });
+    expect(backoff.state).toBe("Suspended");
     expect(compensated).toEqual([]);
   });
 });
