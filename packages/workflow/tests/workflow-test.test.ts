@@ -1,6 +1,7 @@
 import { describe, expect, test } from "@effect/vitest";
 import { Clock, Context, Effect, Layer, Schema } from "effect";
 import { Activity, DurableClock, Workflow as EffectWorkflow } from "effect/unstable/workflow";
+import { CompositionRuntime } from "../src/composition";
 import {
   ActivityRetry,
   Agent,
@@ -12,7 +13,6 @@ import {
   Workflow,
   WorkflowTest,
 } from "../src/index";
-import { CompositionRuntime } from "../src/composition";
 
 const Adapter = Context.Service<{
   readonly invoke: <A>(
