@@ -43,9 +43,10 @@ const revision = (
     readonly timezone?: string;
     readonly workflow: string;
   }>,
+  commit = "a".repeat(40),
 ) =>
   JSON.stringify({
-    commit: "a".repeat(40),
+    commit,
     schedules: schedules.map((schedule) => ({
       input: {},
       missedTimePolicy: "skip",
@@ -58,9 +59,9 @@ const revision = (
     ],
   });
 
-const prepared = (workflowName: string) => {
+const prepared = (workflowName: string, commit = "a".repeat(40)) => {
   const source = {
-    commit: "a".repeat(40),
+    commit,
     dirty: false,
     kind: "ProjectSourceRevision" as const,
   };
@@ -154,11 +155,12 @@ describe("durable Workflow Schedules", () => {
     });
 
     store.projects.update("project-1", { registrationState: "Enabled" });
+    const enabledCursor = schedules.inspect("project-1", "every-minute").cursor;
     schedules.disable("project-1", "every-minute");
     await schedules.evaluate(new Date("2026-01-01T09:10:00.000Z"));
     expect(schedules.inspect("project-1", "every-minute")).toMatchObject({
       catchUp: null,
-      cursor: "2026-01-01T09:05:00.000Z",
+      cursor: enabledCursor,
       history: [],
     });
     store.close();
@@ -217,6 +219,57 @@ describe("durable Workflow Schedules", () => {
     store.close();
   });
 
+  test("does not start a prepared run after the active source revision advances", async () => {
+    const store = await makeStore();
+    const definitions = [
+      {
+        cron: cron([], []),
+        name: "source-fenced",
+        workflow: "alpha",
+      },
+    ];
+    const firstCommit = "a".repeat(40);
+    const secondCommit = "b".repeat(40);
+    store.projectSources.activate(
+      "project-1",
+      "LocalWithFreshnessWarning",
+      revision(definitions, firstCommit),
+    );
+    let preparedCommit = firstCommit;
+    let advanceDuringPreflight = true;
+    const runs = makeWorkflowRunService(store, {
+      prepare: async ({ workflowName }) => {
+        const result = prepared(workflowName, preparedCommit);
+        if (advanceDuringPreflight) {
+          advanceDuringPreflight = false;
+          preparedCommit = secondCommit;
+          store.projectSources.activate(
+            "project-1",
+            "LocalWithFreshnessWarning",
+            revision(definitions, secondCommit),
+          );
+        }
+        return result;
+      },
+    });
+    const schedules = makeWorkflowScheduleService(store, runs);
+    schedules.enable("project-1", "source-fenced", new Date("2026-01-01T09:00:00.000Z"));
+
+    await schedules.evaluate(new Date("2026-01-01T09:01:00.000Z"));
+    expect(store.workflowRuns.list()).toEqual([]);
+
+    await schedules.evaluate(new Date("2026-01-01T09:01:00.000Z"));
+    expect(store.workflowRuns.list()).toHaveLength(1);
+    expect(store.workflowRuns.list()[0]?.revisionFingerprint).toBe("alpha-fingerprint");
+    expect(
+      JSON.parse(
+        store.workflowRuns.find(store.workflowRuns.list()[0]?.runId ?? "")?.revision.source ??
+          "null",
+      ),
+    ).toMatchObject({ commit: secondCommit });
+    store.close();
+  });
+
   test("creates no run before successful preflight and retries one durable catch-up", async () => {
     const store = await makeStore();
     store.projectSources.activate(
@@ -270,6 +323,68 @@ describe("durable Workflow Schedules", () => {
         expect.objectContaining({ scheduledAt: "2026-01-01T09:02:00.000Z" }),
       ],
     });
+    store.close();
+  });
+
+  test("keeps an enabled Schedule's pending catch-up when enable is repeated", async () => {
+    const store = await makeStore();
+    store.projectSources.activate(
+      "project-1",
+      "LocalWithFreshnessWarning",
+      revision([
+        {
+          cron: cron([], []),
+          missedTimePolicy: "catch-up-once",
+          name: "idempotent-enable",
+          workflow: "alpha",
+        },
+      ]),
+    );
+    const runs = makeWorkflowRunService(store, {
+      prepare: async () => {
+        throw new Error("source validation failed");
+      },
+    });
+    const schedules = makeWorkflowScheduleService(store, runs);
+    schedules.enable("project-1", "idempotent-enable", new Date("2026-01-01T09:00:00.000Z"));
+    await schedules.evaluate(new Date("2026-01-01T09:02:00.000Z"));
+    const before = schedules.inspect("project-1", "idempotent-enable");
+
+    schedules.enable("project-1", "idempotent-enable", new Date("2026-01-01T09:03:00.000Z"));
+
+    expect(schedules.inspect("project-1", "idempotent-enable")).toMatchObject({
+      catchUp: before.catchUp,
+      cursor: before.cursor,
+      enablement: "Enabled",
+    });
+    store.close();
+  });
+
+  test("does not admit missed times when a Disabled Project is enabled", async () => {
+    const store = await makeStore("Disabled");
+    store.projectSources.activate(
+      "project-1",
+      "LocalWithFreshnessWarning",
+      revision([
+        {
+          cron: cron([], []),
+          missedTimePolicy: "catch-up-once",
+          name: "project-disabled",
+          workflow: "alpha",
+        },
+      ]),
+    );
+    const runs = makeWorkflowRunService(store, {
+      prepare: async ({ workflowName }) => prepared(workflowName),
+    });
+    const schedules = makeWorkflowScheduleService(store, runs);
+    schedules.enable("project-1", "project-disabled", new Date(Date.now() - 5 * 60_000));
+
+    store.projects.update("project-1", { registrationState: "Enabled" });
+    await schedules.evaluate(new Date());
+
+    expect(store.workflowRuns.list()).toEqual([]);
+    expect(schedules.inspect("project-1", "project-disabled")).toMatchObject({ catchUp: null });
     store.close();
   });
 

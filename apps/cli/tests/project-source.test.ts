@@ -266,6 +266,38 @@ describe("Project Source Revision adapter", () => {
     expect(failure.diagnostics).toContainEqual(expect.objectContaining({ code: "INVALID_CONFIG" }));
   });
 
+  test("rejects out-of-range Effect Cron fields before activating source", async () => {
+    const repository = await makeRepository();
+    const failure = await activateProjectSource({
+      loadRegistry: async () => ({
+        ...registry(),
+        schedules: [
+          {
+            cron: {
+              and: false,
+              days: [],
+              hours: [9],
+              minutes: [60],
+              months: [],
+              seconds: [0],
+              weekdays: [],
+            },
+            input: {},
+            missedTimePolicy: "skip",
+            name: "invalid-cron",
+            timezone: "UTC",
+            workflow: "alpha",
+          },
+        ],
+      }),
+      policy: "LocalWithFreshnessWarning",
+      repository,
+    }).catch((error) => error);
+
+    expect(failure).toBeInstanceOf(ProjectSourceValidationError);
+    expect(failure.diagnostics).toContainEqual(expect.objectContaining({ code: "INVALID_CONFIG" }));
+  });
+
   test("fingerprints each workflow static closure independently", async () => {
     const repository = await makeRepository();
     const first = await activateProjectSource({

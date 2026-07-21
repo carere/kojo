@@ -1215,6 +1215,17 @@ const validEntryPoint = (entryPoint: unknown): entryPoint is string =>
   entryPoint.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..") &&
   /\.(?:ts|mts)$/.test(entryPoint);
 
+const validCronField = (
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  allowEmpty = true,
+): value is ReadonlyArray<number> =>
+  Array.isArray(value) &&
+  (allowEmpty || value.length > 0) &&
+  value.every((entry) => Number.isInteger(entry) && entry >= minimum && entry <= maximum) &&
+  new Set(value).size === value.length;
+
 const validateLoadedRegistry = (registry: LoadedRegistry, configPath: string) => {
   const diagnostics: Array<ProjectSourceDiagnostic> = [];
   if (!Array.isArray(registry.workflows) || !Array.isArray(registry.schedules)) {
@@ -1258,14 +1269,15 @@ const validateLoadedRegistry = (registry: LoadedRegistry, configPath: string) =>
         schedule.workflow.length === 0 ||
         typeof schedule.cron !== "object" ||
         schedule.cron === null ||
-        !Array.isArray(schedule.cron.seconds) ||
+        typeof schedule.cron.and !== "boolean" ||
+        !validCronField(schedule.cron.seconds, 0, 59, false) ||
         schedule.cron.seconds.length !== 1 ||
         schedule.cron.seconds[0] !== 0 ||
-        !Array.isArray(schedule.cron.minutes) ||
-        !Array.isArray(schedule.cron.hours) ||
-        !Array.isArray(schedule.cron.days) ||
-        !Array.isArray(schedule.cron.months) ||
-        !Array.isArray(schedule.cron.weekdays) ||
+        !validCronField(schedule.cron.minutes, 0, 59) ||
+        !validCronField(schedule.cron.hours, 0, 23) ||
+        !validCronField(schedule.cron.days, 1, 31) ||
+        !validCronField(schedule.cron.months, 1, 12) ||
+        !validCronField(schedule.cron.weekdays, 0, 6) ||
         typeof schedule.timezone !== "string" ||
         !validTimeZone(schedule.timezone) ||
         (schedule.missedTimePolicy !== "skip" && schedule.missedTimePolicy !== "catch-up-once")

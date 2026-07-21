@@ -871,27 +871,36 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
           .orderBy(projects.createdAt, projects.id)
           .all()
           .map(decodeProject),
-      update: (id, changes) => {
-        const updatedAt = new Date().toISOString();
-        database
-          .update(projects)
-          .set({ ...changes, updatedAt })
-          .where(eq(projects.id, id))
-          .run();
-        if (changes.registrationState === "Disabled" || changes.registrationState === "Archived") {
-          database
-            .update(workflowSchedules)
-            .set({ catchUp: null, cursor: currentMinute(), updatedAt })
-            .where(eq(workflowSchedules.projectId, id))
+      update: (id, changes) =>
+        database.transaction((transaction) => {
+          const previous = transaction
+            .select({ registrationState: projects.registrationState })
+            .from(projects)
+            .where(eq(projects.id, id))
+            .get();
+          const updatedAt = new Date().toISOString();
+          transaction
+            .update(projects)
+            .set({ ...changes, updatedAt })
+            .where(eq(projects.id, id))
             .run();
-        }
-        const project = database
-          .select(selectProject)
-          .from(projects)
-          .where(eq(projects.id, id))
-          .get();
-        return project === undefined ? undefined : decodeProject(project);
-      },
+          if (
+            changes.registrationState !== undefined &&
+            changes.registrationState !== previous?.registrationState
+          ) {
+            transaction
+              .update(workflowSchedules)
+              .set({ catchUp: null, cursor: currentMinute(), updatedAt })
+              .where(eq(workflowSchedules.projectId, id))
+              .run();
+          }
+          const project = transaction
+            .select(selectProject)
+            .from(projects)
+            .where(eq(projects.id, id))
+            .get();
+          return project === undefined ? undefined : decodeProject(project);
+        }),
     };
 
     const selectProjectSource = {
@@ -974,7 +983,10 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
             .values({
               activeDefinition: canonicalDefinition,
               catchUp: existing?.catchUp ?? null,
-              cursor: existing?.cursor ?? null,
+              cursor:
+                existing !== undefined && existing.activeDefinition === null
+                  ? inactiveCursor
+                  : (existing?.cursor ?? null),
               definitionFingerprint: fingerprint,
               enablement: existing?.enablement ?? "Disabled",
               name: definition.name,
@@ -985,6 +997,9 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
             .onConflictDoUpdate({
               set: {
                 activeDefinition: canonicalDefinition,
+                ...(existing?.activeDefinition === null
+                  ? { catchUp: null, cursor: inactiveCursor }
+                  : {}),
                 definitionFingerprint: fingerprint,
                 updatedAt: now,
               },
@@ -1867,6 +1882,11 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
             .from(projects)
             .where(eq(projects.id, evaluation.projectId))
             .get();
+          const source = transaction
+            .select({ activeRevision: projectSourceState.activeRevision })
+            .from(projectSourceState)
+            .where(eq(projectSourceState.projectId, evaluation.projectId))
+            .get();
           if (
             schedule === undefined ||
             schedule.activeDefinition === null ||
@@ -1900,6 +1920,21 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
           let outcome: string = evaluation.outcome;
           let runId: string | null = null;
           if (evaluation.start !== undefined) {
+            const activeSourceCommit =
+              source?.activeRevision === null || source?.activeRevision === undefined
+                ? undefined
+                : (JSON.parse(source.activeRevision) as { readonly commit?: unknown }).commit;
+            const preparedSourceCommit = (
+              JSON.parse(evaluation.start.revision.source) as { readonly commit?: unknown }
+            ).commit;
+            if (
+              typeof activeSourceCommit !== "string" ||
+              typeof preparedSourceCommit !== "string" ||
+              activeSourceCommit !== preparedSourceCommit ||
+              evaluation.start.revision.stableName !== schedule.workflowName
+            ) {
+              return { outcome: "Stale", runId: null, status: "stale" as const };
+            }
             const overlap = transaction
               .select({ runId: workflowRuns.runId })
               .from(workflowRuns)
@@ -1980,6 +2015,7 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
             `Workflow Schedule '${name}' is absent from the active Project Source Revision`,
           );
         }
+        if (schedule.enablement === "Enabled") return decodeSchedule(schedule);
         database
           .update(workflowSchedules)
           .set({

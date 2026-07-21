@@ -547,7 +547,13 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
           updatedAt: now,
         },
       };
-      const committed = store.workflowSchedules.commitEvaluation({ ...evaluation, start: record });
+      let committed: ReturnType<SystemStore["workflowSchedules"]["commitEvaluation"]>;
+      try {
+        committed = store.workflowSchedules.commitEvaluation({ ...evaluation, start: record });
+      } catch (error) {
+        await prepared.dispose?.().catch(() => undefined);
+        throw error;
+      }
       if (committed.outcome !== "Started") {
         await prepared.dispose?.();
         return { ...committed, runId: committed.runId };

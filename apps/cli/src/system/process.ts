@@ -707,9 +707,6 @@ export const runSystemProcess = async (home: string): Promise<void> => {
         );
       });
     };
-    evaluateSchedules();
-    scheduleEvaluator = setInterval(evaluateSchedules, 60_000);
-    scheduleEvaluator.unref();
     for (const runId of restartRunIds) {
       await workflowRunService?.resume(runId).catch((error) => {
         console.error(
@@ -721,6 +718,9 @@ export const runSystemProcess = async (home: string): Promise<void> => {
         );
       });
     }
+    evaluateSchedules();
+    scheduleEvaluator = setInterval(evaluateSchedules, 60_000);
+    scheduleEvaluator.unref();
     console.log(
       JSON.stringify({
         endpoint: details.endpoint,
