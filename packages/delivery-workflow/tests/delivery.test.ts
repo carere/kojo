@@ -94,12 +94,12 @@ const githubLayer = (loaded: GitHubDeliveryGraph, reachable = true) => {
       ) as unknown as ReturnType<GitHubDeliveryService["pushExact"]>,
     readPublication: (input) =>
       WorkflowTest.call(
-        { input, layer: "GitHub", operation: "readPublication" },
+        { input, layer: "GitHub", operation: `readPublication:${input.checkpoint}` },
         Effect.succeed({ remoteTargetCommit: revision, ticketState: "OPEN" as const }),
       ) as unknown as ReturnType<GitHubDeliveryService["readPublication"]>,
     reconcileFinalization: (input) =>
       WorkflowTest.call(
-        { input, layer: "GitHub", operation: "reconcileFinalization" },
+        { input, layer: "GitHub", operation: `reconcileFinalization:${input.checkpoint}` },
         Effect.succeed({
           activeMerge: "Clean" as const,
           localTargetCommit: revision,
@@ -110,6 +110,7 @@ const githubLayer = (loaded: GitHubDeliveryGraph, reachable = true) => {
               : ("DraftPullRequestApplied" as const),
           pullRequests: pullRequest === undefined ? [] : [pullRequest],
           remoteTargetCommit: revision,
+          rootState: "OPEN" as const,
           sandboxCleanup: "Clean" as const,
           ticketMutations: "Reconciled" as const,
           unownedDirtyState: false,

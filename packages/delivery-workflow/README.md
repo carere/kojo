@@ -10,6 +10,8 @@ blocker graph, proves that the declared source revision is reachable, reads publ
 performs exact guarded pushes and idempotent ticket closure.
 It also reconciles final local/remote target state, owned recovery state, ticket mutations, Sandbox
 cleanup, and managed pull requests before it creates or updates the final draft pull request.
+Reconciliation also proves that the workstream root is still open and preserves any non-draft pull
+request for human handling rather than converting it back to draft.
 The workflow validates and pins that graph before returning one of these typed outcomes:
 
 - `NothingToDo` when the root has no children.
@@ -59,7 +61,8 @@ Reusable Sandbox, pushes only that verified commit, and asks an Agent to author 
 conventional-commit-style title and evidence-bearing description. Mechanical checks require the
 exact route and commit, configured verification receipts, ticket commits, review counts,
 publication receipts, and exactly `Closes #<root>`. The workflow then safely creates or updates one
-owned draft pull request from target to destination; only human merge closes the still-open root.
+owned draft pull request from target to destination, reusing already-valid exact draft content
+without another Agent turn; only human merge closes the still-open root.
 
 To opt in, statically import `Delivery` from `packages/delivery-workflow/src/index.ts` in the
 repository's `kojo.config.ts` and include it in `defineConfig({ workflows: [...] })`. The GitHub

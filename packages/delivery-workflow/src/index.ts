@@ -64,6 +64,7 @@ export interface GitHubDeliveryService {
     readonly targetBranch: string;
   }) => Effect.Effect<boolean, GitHubDeliveryFailure>;
   readonly readPublication: (input: {
+    readonly checkpoint: string;
     readonly repository: string;
     readonly targetBranch: string;
     readonly ticketNumber: number;
@@ -83,6 +84,7 @@ export interface GitHubDeliveryService {
     readonly ticketNumber: number;
   }) => Effect.Effect<PublicationReceipt, GitHubDeliveryFailure>;
   readonly reconcileFinalization: (input: {
+    readonly checkpoint: string;
     readonly destinationBranch: string;
     readonly expectedTargetCommit?: string;
     readonly repository: string;
@@ -203,6 +205,7 @@ const FinalizationRecoverySchema = Schema.Struct({
   ]),
   pullRequests: Schema.Array(PullRequestSnapshotSchema),
   remoteTargetCommit: Schema.String,
+  rootState: IssueState,
   sandboxCleanup: Schema.Literals(["Clean", "OwnedCleaned"]),
   ticketMutations: Schema.Literal("Reconciled"),
   unownedDirtyState: Schema.Boolean,
@@ -963,7 +966,7 @@ const verifyIntegrated = (ticketNumber: number, targetCommit: string) =>
   });
 
 const CONVENTIONAL_PULL_REQUEST_TITLE =
-  /^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([^)]+\))?!?:\s+\S/;
+  /^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([^()\r\n]+\))?!?: \S[^\r\n]*$/;
 const CLOSING_REFERENCE =
   /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?:\s*:\s*|\s+)(?:#(\d+))\b/gi;
 const FINAL_VERIFICATION_COMMANDS = ["moon run :check", "moon run :tsc", "moon run :test"];
@@ -1025,7 +1028,11 @@ const validatePullRequestDraft = (
         "The Agent-authored pull-request body omitted required delivery evidence.",
       );
     }
-    if (closingReferences.length !== 1 || Number(closingReferences[0]?.[1]) !== root.number) {
+    if (
+      closingReferences.length !== 1 ||
+      Number(closingReferences[0]?.[1]) !== root.number ||
+      !body.includes(`Closes #${root.number}`)
+    ) {
       return yield* failProof(
         "pull-request-closure",
         `The draft pull request must close only workstream root #${root.number}.`,
@@ -1039,6 +1046,7 @@ const verifyFinalTarget = (
   routing: DeliveryRouting,
   targetCommit: string,
   ticketOutcomes: ReadonlyArray<Schema.Schema.Type<typeof Published>>,
+  existingPullRequest?: Schema.Schema.Type<typeof PullRequestSnapshotSchema>,
 ) =>
   Sandbox.use(`final-verify-${root.number}`, {
     baseBranch: targetCommit,
@@ -1054,6 +1062,29 @@ const verifyFinalTarget = (
         );
       }
       yield* runConfiguredVerification();
+      if (
+        existingPullRequest?.draft &&
+        existingPullRequest.headCommit.toLowerCase() === targetCommit.toLowerCase()
+      ) {
+        const validatedExisting = yield* validatePullRequestDraft(
+          root,
+          routing,
+          targetCommit,
+          existingPullRequest,
+          ticketOutcomes,
+        ).pipe(
+          Effect.match({
+            onFailure: () => undefined,
+            onSuccess: (draft) => draft,
+          }),
+        );
+        if (validatedExisting !== undefined) {
+          return {
+            draft: validatedExisting,
+            verifiedCommit: opened,
+          };
+        }
+      }
       const beforeAgent = cleanOutput(
         (yield* successfulCommand("pull-request-author-head", "git rev-parse HEAD")).stdout,
       );
@@ -1165,6 +1196,7 @@ const publishVerified = (
         `read-publication-${input.ticket.number}-${suffix}`,
         PublicationSnapshotSchema,
         github.readPublication({
+          checkpoint: `ticket-${input.ticket.number}-${suffix}`,
           repository: rootUrl.repository,
           targetBranch: routing.targetBranch,
           ticketNumber: input.ticket.number,
@@ -1198,11 +1230,7 @@ const publishVerified = (
             targetCommit: verifiedCommit,
           }
         : yield* Effect.gen(function* () {
-            const reconciled = yield* github.readPublication({
-              repository: rootUrl.repository,
-              targetBranch: routing.targetBranch,
-              ticketNumber: input.ticket.number,
-            });
+            const reconciled = yield* read("push-reconciliation");
             if (reconciled.remoteTargetCommit.toLowerCase() === verifiedCommit.toLowerCase()) {
               return {
                 idempotencyKey: pushKey,
@@ -1249,11 +1277,7 @@ const publishVerified = (
             targetCommit: verifiedCommit,
           }
         : yield* Effect.gen(function* () {
-            const reconciled = yield* github.readPublication({
-              repository: rootUrl.repository,
-              targetBranch: routing.targetBranch,
-              ticketNumber: input.ticket.number,
-            });
+            const reconciled = yield* read("close-reconciliation");
             if (reconciled.ticketState === "CLOSED") {
               return {
                 idempotencyKey: closeKey,
@@ -1325,6 +1349,12 @@ const assertRecoverableFinalization = (
         "Finalization found ambiguous or unowned dirty state; it was preserved for human recovery.",
       );
     }
+    if (recovery.rootState !== "OPEN") {
+      return yield* failProof(
+        "finalization-root-state",
+        `Delivery Workstream root #${root.number} is no longer open.`,
+      );
+    }
     if (
       expectedTargetCommit !== undefined &&
       recovery.localTargetCommit.toLowerCase() !== expectedTargetCommit.toLowerCase()
@@ -1344,12 +1374,13 @@ const assertRecoverableFinalization = (
     if (
       pullRequest !== undefined &&
       (!pullRequest.owned ||
+        !pullRequest.draft ||
         pullRequest.destinationBranch !== routing.destinationBranch ||
         pullRequest.targetBranch !== routing.targetBranch)
     ) {
       return yield* failProof(
         "pull-request-ownership",
-        `The existing pull request is not demonstrably owned by workstream root #${root.number}.`,
+        `The existing pull request is not a demonstrably owned draft for workstream root #${root.number}.`,
       );
     }
     return recovery.localTargetCommit;
@@ -1371,14 +1402,26 @@ const finalizeWorkstream = (
       rootNumber: root.number,
       targetBranch: routing.targetBranch,
     };
-    const before = yield* github.reconcileFinalization(recoveryInput);
+    const reconcile = (suffix: string) =>
+      durableGitHub(
+        `reconcile-finalization-${root.number}-${suffix}`,
+        FinalizationRecoverySchema,
+        github.reconcileFinalization({ ...recoveryInput, checkpoint: suffix }),
+      );
+    const before = yield* reconcile("before");
     const targetCommit = yield* assertRecoverableFinalization(
       before,
       root,
       routing,
       expectedTargetCommit,
     );
-    const finalVerification = yield* verifyFinalTarget(root, routing, targetCommit, ticketOutcomes);
+    const finalVerification = yield* verifyFinalTarget(
+      root,
+      routing,
+      targetCommit,
+      ticketOutcomes,
+      before.pullRequests[0],
+    );
     const pushKey = `#${root.number}:final:push:${finalVerification.verifiedCommit}`;
     const pushReceipt =
       before.remoteTargetCommit.toLowerCase() === finalVerification.verifiedCommit.toLowerCase()
@@ -1388,7 +1431,7 @@ const finalizeWorkstream = (
             targetCommit: finalVerification.verifiedCommit,
           }
         : yield* Effect.gen(function* () {
-            const reconciled = yield* github.reconcileFinalization(recoveryInput);
+            const reconciled = yield* reconcile("push");
             if (
               reconciled.remoteTargetCommit.toLowerCase() ===
               finalVerification.verifiedCommit.toLowerCase()
@@ -1429,7 +1472,7 @@ const finalizeWorkstream = (
 
     const pullRequestKey = `#${root.number}:draft-pull-request:${finalVerification.verifiedCommit}`;
     const pullRequestReceipt = yield* Effect.gen(function* () {
-      const reconciled = yield* github.reconcileFinalization(recoveryInput);
+      const reconciled = yield* reconcile("pull-request");
       yield* assertRecoverableFinalization(
         reconciled,
         root,
@@ -1479,7 +1522,7 @@ const finalizeWorkstream = (
       );
     }
 
-    const completed = yield* github.reconcileFinalization(recoveryInput);
+    const completed = yield* reconcile("completed");
     yield* assertRecoverableFinalization(
       completed,
       root,
@@ -1807,6 +1850,7 @@ export const Delivery = Workflow.make("delivery", {
             "capture-target-head",
             PublicationSnapshotSchema,
             github.readPublication({
+              checkpoint: "capture-target-head",
               repository: rootUrl.repository,
               targetBranch: routing.targetBranch,
               ticketNumber: selected[0]?.number ?? rootUrl.number,
@@ -1939,6 +1983,7 @@ export const Delivery = Workflow.make("delivery", {
               `reconcile-publication-${implementation.ticket.number}`,
               PublicationSnapshotSchema,
               github.readPublication({
+                checkpoint: `reconcile-publication-${implementation.ticket.number}`,
                 repository: rootUrl.repository,
                 targetBranch: routing.targetBranch,
                 ticketNumber: implementation.ticket.number,
