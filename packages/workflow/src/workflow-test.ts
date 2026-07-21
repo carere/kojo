@@ -1,4 +1,15 @@
-import { Cause, Clock, Context, Duration, Effect, Exit, Layer, Option, type Schema } from "effect";
+import {
+  Cause,
+  Clock,
+  Context,
+  Duration,
+  Effect,
+  Equal,
+  Exit,
+  Layer,
+  Option,
+  Schema,
+} from "effect";
 import { Workflow as EffectWorkflow, WorkflowEngine } from "effect/unstable/workflow";
 import type { WorkflowDefinition } from "./index";
 
@@ -32,7 +43,7 @@ export namespace WorkflowTest {
     readonly outcome?: string;
     readonly sequence: number;
     readonly subject: string;
-    readonly type: "Activity" | "ExternalCall" | "WorkflowRun";
+    readonly type: "Activity" | "DurableClock" | "ExternalCall" | "WorkflowRun";
   }
 
   export type Outcome<Success, Failure> =
@@ -62,7 +73,7 @@ export namespace WorkflowTest {
   export interface MakeOptions<Requirements> {
     readonly clock?: Date | number | string;
     readonly ids?: Iterable<string>;
-    readonly layer?: Layer.Layer<Requirements, unknown, never>;
+    readonly layer?: Layer.Layer<Requirements, never, never>;
   }
 
   export interface Fixture<Input, Success, Failure> {
@@ -93,7 +104,7 @@ class UncertainSignal extends Error {}
 const matchesCall = (call: WorkflowTest.CallMatcher, matcher: WorkflowTest.CallMatcher) =>
   call.layer === matcher.layer &&
   call.operation === matcher.operation &&
-  (matcher.input === undefined || JSON.stringify(call.input) === JSON.stringify(matcher.input));
+  (matcher.input === undefined || Equal.equals(call.input, matcher.input));
 
 const traceFromEvidence = (
   workflowName: string,
@@ -114,11 +125,15 @@ const traceFromEvidence = (
   ];
   const seen = new Set<string>();
   for (const event of evidence) {
-    const type = event.type.startsWith("ExternalCall.")
-      ? "ExternalCall"
-      : event.type.startsWith("Activity.")
-        ? "Activity"
-        : undefined;
+    const type = event.type.endsWith(".Replayed")
+      ? undefined
+      : event.type.startsWith("ExternalCall.")
+        ? "ExternalCall"
+        : event.type.startsWith("Activity.")
+          ? "Activity"
+          : event.type === "DurableClock.Scheduled"
+            ? "DurableClock"
+            : undefined;
     if (type === undefined) continue;
     const key = `${type}:${event.attempt}:${event.subject}`;
     if (seen.has(key)) continue;
@@ -175,6 +190,7 @@ const make = <
         ? makeOptions.clock
         : new Date(makeOptions.clock).getTime();
   let latestInput: Schema.Schema.Type<Input> | undefined;
+  let hasRun = false;
 
   const clock: Clock.Clock = {
     currentTimeMillis: Effect.sync(() => currentTime),
@@ -219,9 +235,6 @@ const make = <
       }
       return event;
     };
-
-    if (attempt === 1) append("WorkflowRun.Started", workflow.name, { input });
-    else append("WorkflowRun.Restarted", workflow.name);
 
     const recorder: RecorderService = {
       call: (matcher, effect) =>
@@ -306,7 +319,15 @@ const make = <
                 Effect.provideService(WorkflowEngine.WorkflowEngine, engine),
               );
               activityJournal.set(key, result);
-              append("Activity.Completed", activity.name, { activityAttempt, result });
+              const activityOutcome =
+                result._tag === "Suspended"
+                  ? "Suspended"
+                  : Exit.isSuccess(result.exit)
+                    ? "Completed"
+                    : Cause.hasDies(result.exit.cause)
+                      ? "Defected"
+                      : "Failed";
+              append(`Activity.${activityOutcome}`, activity.name, { activityAttempt, result });
               return result;
             }),
           deferredDone: ({ deferredName, executionId, exit }) =>
@@ -364,25 +385,39 @@ const make = <
       payload: { input: workflow.input },
       success: workflow.success,
     });
-    let handler = workflow.run(input) as Effect.Effect<unknown, unknown, unknown>;
+    const validate = (schema: Schema.Top, value: unknown) =>
+      Schema.encodeUnknownEffect(schema)(value).pipe(Effect.as(value), Effect.orDie);
+    let handler = Effect.suspend(() => workflow.run(input)).pipe(
+      Effect.flatMap((value) => validate(workflow.success, value)),
+      Effect.catchCause((cause) => {
+        if (Cause.hasDies(cause)) return Effect.failCause(cause);
+        const failure = Cause.findErrorOption(cause);
+        if (Option.isNone(failure)) return Effect.failCause(cause);
+        return validate(workflow.failure, failure.value).pipe(
+          Effect.andThen(Effect.failCause(cause)),
+        );
+      }),
+    ) as Effect.Effect<unknown, unknown, unknown>;
     if (makeOptions.layer !== undefined) {
-      handler = handler.pipe(
-        Effect.provide(makeOptions.layer as Layer.Layer<never, unknown, never>),
-      );
+      handler = handler.pipe(Effect.provide(makeOptions.layer as Layer.Layer<never, never, never>));
     }
     const handlerLayer = kernel.toLayer(() => handler).pipe(Layer.provide(engineLayer));
-    const program = kernel
-      .execute({ input } as never)
-      .pipe(
-        Effect.provide(Layer.merge(engineLayer, handlerLayer)),
-        Effect.provideService(Recorder, recorder),
-        Effect.provideService(Clock.Clock, clock),
-        Effect.scoped,
-      );
+    const program = Effect.sync(() => {
+      if (attempt === 1) append("WorkflowRun.Started", workflow.name, { input });
+      else append("WorkflowRun.Restarted", workflow.name);
+    }).pipe(
+      Effect.andThen(kernel.execute({ input } as never)),
+      Effect.provide(Layer.merge(engineLayer, handlerLayer)),
+      Effect.provideService(Recorder, recorder),
+      Effect.provideService(Clock.Clock, clock),
+      Effect.scoped,
+    );
     const exit = await Effect.runPromiseExit(program as Effect.Effect<unknown, unknown, never>);
 
     let state: WorkflowTest.Result<SuccessValue, FailureValue>["state"];
     let outcome: WorkflowTest.Outcome<SuccessValue, FailureValue>;
+    // A terminal boundary cannot be interrupted after it has been committed.
+    interruptionConsumed = true;
     if (interrupted) {
       state = "Interrupted";
       outcome = { _tag: "Interrupted" };
@@ -398,7 +433,7 @@ const make = <
     } else {
       state = "Failed";
       const failure = Cause.findErrorOption(exit.cause);
-      if (Option.isSome(failure)) {
+      if (!Cause.hasDies(exit.cause) && Option.isSome(failure)) {
         outcome = { _tag: "Failure", failure: failure.value as FailureValue };
       } else {
         outcome = { _tag: "Defect", cause: Cause.pretty(exit.cause) };
@@ -419,10 +454,11 @@ const make = <
 
   return Object.freeze({
     restart: () => {
-      if (latestInput === undefined) throw new Error("WorkflowTest has not been run yet");
-      return execute(latestInput);
+      if (!hasRun) throw new Error("WorkflowTest has not been run yet");
+      return execute(latestInput as Schema.Schema.Type<Input>);
     },
     run: (input: Schema.Schema.Type<Input>, options?: WorkflowTest.RunOptions) => {
+      hasRun = true;
       latestInput = input;
       return execute(input, options);
     },

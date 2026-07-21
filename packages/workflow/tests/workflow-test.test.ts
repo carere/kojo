@@ -31,7 +31,7 @@ const acceptance = Workflow.make("Acceptance", {
     Effect.gen(function* () {
       const adapter = yield* Adapter;
       for (const layer of ["Agent", "Sandbox", "Command", "Git", "GitHub"] as const) {
-        yield* adapter.invoke(layer, "inspect", { workstream }, `${layer}:ok`);
+        yield* adapter.invoke(layer, "inspect", { kind: "workstream", workstream }, `${layer}:ok`);
       }
       return {
         id: yield* WorkflowTest.nextId,
@@ -82,7 +82,11 @@ describe("WorkflowTest", () => {
         forbidden: [{ layer: "GitHub", operation: "close" }],
         required: [
           { layer: "Agent", operation: "inspect" },
-          { input: { workstream: "#26" }, layer: "GitHub", operation: "inspect" },
+          {
+            input: { workstream: "#26", kind: "workstream" },
+            layer: "GitHub",
+            operation: "inspect",
+          },
         ],
       }),
     ).not.toThrow();
@@ -113,6 +117,41 @@ describe("WorkflowTest", () => {
         required: [],
       }),
     ).not.toThrow();
+  });
+
+  test("rejects outcomes that do not satisfy their public schemas", async () => {
+    const invalidSuccess = Workflow.make("InvalidSuccess", {
+      version: "1",
+      entryPoint: "workflows/invalid-success.ts",
+      input: Schema.Void,
+      success: Schema.String,
+      failure: Schema.Never,
+      run: () => Effect.succeed(42 as never),
+    });
+
+    const invalidFailure = Workflow.make("InvalidFailure", {
+      version: "1",
+      entryPoint: "workflows/invalid-failure.ts",
+      input: Schema.Void,
+      success: Schema.Never,
+      failure: AcceptanceFailure,
+      run: () => Effect.fail({ reason: "missing tag" } as never),
+    });
+
+    const successResult = await WorkflowTest.make(invalidSuccess).run(undefined);
+    const failureResult = await WorkflowTest.make(invalidFailure).run(undefined);
+
+    expect(successResult.state).toBe("Failed");
+    expect(successResult.outcome._tag).toBe("Defect");
+    if (successResult.outcome._tag === "Defect") {
+      expect(successResult.outcome.cause).toContain("Expected string, got 42");
+    }
+    expect(failureResult.state).toBe("Failed");
+    expect(failureResult.outcome._tag).toBe("Defect");
+    if (failureResult.outcome._tag === "Defect") {
+      expect(failureResult.outcome.cause).toContain("Missing key");
+      expect(failureResult.outcome.cause).toContain('["_tag"]');
+    }
   });
 
   test("normalizes generated plumbing without removing behavioral details", () => {
@@ -161,6 +200,13 @@ describe("WorkflowTest", () => {
       state: "Completed",
     });
     expect(result.evidence.map(({ type }) => type)).toContain("DurableClock.Completed");
+    expect(result.trace).toContainEqual({
+      attempt: 1,
+      outcome: "Completed",
+      sequence: 2,
+      subject: "backoff",
+      type: "DurableClock",
+    });
   });
 
   test("interrupts after a durable boundary and replays it on restart", async () => {
@@ -196,6 +242,107 @@ describe("WorkflowTest", () => {
     });
     expect(executions).toBe(1);
     expect(restarted.evidence.map(({ type }) => type)).toContain("Activity.Replayed");
+    expect(restarted.trace.filter(({ type }) => type === "Activity")).toEqual([
+      {
+        attempt: 1,
+        outcome: "Completed",
+        sequence: 2,
+        subject: "commit",
+        type: "Activity",
+      },
+    ]);
+  });
+
+  test("keeps a failed Activity truthful in evidence and trace", async () => {
+    const activityFailure = Workflow.make("ActivityFailure", {
+      version: "1",
+      entryPoint: "workflows/activity-failure.ts",
+      input: Schema.Void,
+      success: Schema.Never,
+      failure: AcceptanceFailure,
+      run: () =>
+        Activity.make({
+          error: AcceptanceFailure,
+          execute: Effect.fail({
+            _tag: "InvalidWorkstream" as const,
+            reason: "activity rejected the graph",
+          }),
+          name: "validate-graph",
+          success: Schema.Never,
+        }),
+    });
+
+    const result = await WorkflowTest.make(activityFailure).run(undefined);
+
+    expect(result).toMatchObject({
+      outcome: {
+        _tag: "Failure",
+        failure: {
+          _tag: "InvalidWorkstream",
+          reason: "activity rejected the graph",
+        },
+      },
+      state: "Failed",
+    });
+    expect(result.evidence.map(({ type }) => type)).toEqual([
+      "WorkflowRun.Started",
+      "Activity.Started",
+      "Activity.Failed",
+      "WorkflowRun.Failed",
+    ]);
+    expect(result.trace).toContainEqual({
+      attempt: 1,
+      outcome: "Failed",
+      sequence: 2,
+      subject: "validate-graph",
+      type: "Activity",
+    });
+  });
+
+  test("restarts a void-input workflow and captures synchronous workflow defects", async () => {
+    const fixture = WorkflowTest.make(
+      Workflow.make("VoidReplay", {
+        version: "1",
+        entryPoint: "workflows/void-replay.ts",
+        input: Schema.Void,
+        success: Schema.String,
+        failure: Schema.Never,
+        run: () =>
+          Activity.make({
+            execute: Effect.succeed("replayed"),
+            name: "void-step",
+            success: Schema.String,
+          }),
+      }),
+    );
+
+    const interrupted = await fixture.run(undefined, {
+      interruptAfter: { subject: "void-step", type: "Activity.Completed" },
+    });
+    const restarted = await fixture.restart();
+    const defect = await WorkflowTest.make(
+      Workflow.make("SynchronousDefect", {
+        version: "1",
+        entryPoint: "workflows/synchronous-defect.ts",
+        input: Schema.Void,
+        success: Schema.Never,
+        failure: Schema.Never,
+        run: () => {
+          throw new Error("workflow construction failed");
+        },
+      }),
+    ).run(undefined);
+
+    expect(interrupted.state).toBe("Interrupted");
+    expect(restarted).toMatchObject({
+      attempt: 2,
+      outcome: { _tag: "Success", value: "replayed" },
+      state: "Completed",
+    });
+    expect(defect).toMatchObject({
+      outcome: { _tag: "Defect" },
+      state: "Failed",
+    });
   });
 
   test("injects an uncertain external outcome in memory without repeating the call", async () => {
