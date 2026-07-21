@@ -192,15 +192,19 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
       })),
       createdAt: stored.run.createdAt,
       evidence: stored.evidence.map((event) => ({
+        artifacts: event.artifacts ?? [],
         attempt: event.attempt,
+        causationId: event.causationId,
         details: decoded(event.details),
         eventId: event.eventId,
+        parentEventId: event.parentEventId,
         recordedAt: event.recordedAt,
         sequence: event.sequence,
         subject: event.subject,
         type: event.type,
       })),
       input: decoded(stored.run.input),
+      invocationKey: stored.run.invocationKey ?? null,
       lease:
         stored.lease === undefined
           ? null

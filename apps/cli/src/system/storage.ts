@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { and, eq, sql } from "drizzle-orm";
@@ -530,6 +531,13 @@ export interface StoredExecutionLease {
 }
 
 export interface StoredEvidenceEvent {
+  readonly artifacts?: ReadonlyArray<{
+    readonly availability: "Available" | "Unavailable";
+    readonly byteLength: number;
+    readonly fingerprint: string;
+    readonly mediaType: string;
+    readonly name: string;
+  }>;
   readonly attempt: number;
   readonly causationId: string | null;
   readonly details: string;
@@ -1860,7 +1868,31 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
             .from(evidenceEvents)
             .where(eq(evidenceEvents.runId, runId))
             .orderBy(evidenceEvents.sequence)
-            .all(),
+            .all()
+            .map((event) => ({
+              ...event,
+              artifacts: database
+                .select({
+                  byteLength: executionArtifacts.byteLength,
+                  fingerprint: executionArtifacts.fingerprint,
+                  mediaType: executionArtifacts.mediaType,
+                  name: evidenceArtifacts.name,
+                  path: executionArtifacts.path,
+                })
+                .from(evidenceArtifacts)
+                .innerJoin(
+                  executionArtifacts,
+                  eq(evidenceArtifacts.artifactFingerprint, executionArtifacts.fingerprint),
+                )
+                .where(eq(evidenceArtifacts.eventId, event.eventId))
+                .all()
+                .map(({ path, ...artifact }) => ({
+                  ...artifact,
+                  availability: existsSync(path)
+                    ? ("Available" as const)
+                    : ("Unavailable" as const),
+                })),
+            })),
           lease: (() => {
             const stored = database
               .select()
