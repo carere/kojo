@@ -7,6 +7,24 @@ export type {
   LoopOptions,
 } from "./composition";
 export { ActivityRetry, Loop } from "./composition";
+export type {
+  AgentProviderConfiguration,
+  AgentProviderService,
+  AgentRunOptions,
+  CommandExecutionOptions,
+  CommandFailure,
+  CommandOptions,
+  ExecutionArtifactReference,
+  ProviderConfiguration,
+  SandboxAgentResult,
+  SandboxCreateOptions,
+  SandboxExecResult,
+  SandboxHandle,
+  SandboxProviderFailure,
+  SandboxProviderService,
+  SandboxUseOptions,
+} from "./sandbox";
+export { Agent, AgentProvider, Command, Sandbox, SandboxProvider } from "./sandbox";
 export { WorkflowTest } from "./workflow-test";
 
 export const COMPATIBILITY = Object.freeze({

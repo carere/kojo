@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { chmod, link, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, link, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { makeProjectService, type Project, ProjectOperationError } from "./projects";
 import { openSystemStore } from "./storage";
@@ -339,6 +339,10 @@ export const runSystemProcess = async (home: string): Promise<void> => {
         const workflowJournalReadMatch = url.pathname.match(
           /^\/v1\/workflow-runs\/([^/]+)\/journal\/read$/,
         );
+        const runtimeConfigurationMatch = url.pathname.match(
+          /^\/v1\/workflow-runs\/([^/]+)\/runtime-configurations\/verify$/,
+        );
+        const artifactMatch = url.pathname.match(/^\/v1\/workflow-runs\/([^/]+)\/artifacts$/);
         if (url.pathname === "/v1/workflow-runs" && request.method === "POST") {
           try {
             const body = (await request.json()) as {
@@ -502,6 +506,127 @@ export const runSystemProcess = async (home: string): Promise<void> => {
               { error: error instanceof Error ? error.message : String(error) },
               { status: 409 },
             );
+          }
+        }
+        if (runtimeConfigurationMatch !== null && request.method === "POST") {
+          try {
+            const runId = decodeURIComponent(runtimeConfigurationMatch[1] ?? "");
+            const body = (await request.json()) as {
+              attempt?: unknown;
+              leaseGeneration?: unknown;
+              leaseHolder?: unknown;
+              projectId?: unknown;
+              rootRunId?: unknown;
+              snapshot?: unknown;
+              subject?: unknown;
+            };
+            if (
+              !Number.isInteger(body.attempt) ||
+              (body.attempt as number) <= 0 ||
+              !Number.isInteger(body.leaseGeneration) ||
+              (body.leaseGeneration as number) <= 0 ||
+              typeof body.leaseHolder !== "string" ||
+              typeof body.projectId !== "string" ||
+              typeof body.rootRunId !== "string" ||
+              typeof body.subject !== "string" ||
+              !("snapshot" in body)
+            ) {
+              return Response.json({ error: "Invalid Runtime Configuration" }, { status: 400 });
+            }
+            const result = workflowRunService?.verifyRuntimeConfiguration({
+              attempt: body.attempt as number,
+              leaseGeneration: body.leaseGeneration as number,
+              leaseHolder: body.leaseHolder,
+              projectId: body.projectId,
+              rootRunId: body.rootRunId,
+              runId,
+              snapshot: body.snapshot,
+              subject: body.subject,
+            });
+            return Response.json(result);
+          } catch (error) {
+            return Response.json(
+              { error: error instanceof Error ? error.message : String(error) },
+              { status: 409 },
+            );
+          }
+        }
+        if (artifactMatch !== null && request.method === "POST") {
+          let stagingPath: string | undefined;
+          try {
+            const runId = decodeURIComponent(artifactMatch[1] ?? "");
+            const body = (await request.json()) as {
+              attempt?: unknown;
+              content?: unknown;
+              fingerprint?: unknown;
+              leaseGeneration?: unknown;
+              leaseHolder?: unknown;
+              mediaType?: unknown;
+              projectId?: unknown;
+              rootRunId?: unknown;
+            };
+            if (
+              !Number.isInteger(body.attempt) ||
+              (body.attempt as number) <= 0 ||
+              typeof body.content !== "string" ||
+              typeof body.fingerprint !== "string" ||
+              !/^[a-f0-9]{64}$/.test(body.fingerprint) ||
+              !Number.isInteger(body.leaseGeneration) ||
+              (body.leaseGeneration as number) <= 0 ||
+              typeof body.leaseHolder !== "string" ||
+              typeof body.mediaType !== "string" ||
+              typeof body.projectId !== "string" ||
+              typeof body.rootRunId !== "string"
+            ) {
+              return Response.json({ error: "Invalid Execution Artifact" }, { status: 400 });
+            }
+            const content = Buffer.from(body.content, "base64");
+            if (createHash("sha256").update(content).digest("hex") !== body.fingerprint) {
+              return Response.json(
+                { error: "Execution Artifact fingerprint mismatch" },
+                { status: 400 },
+              );
+            }
+            const artifactDirectory = join(home, "artifacts");
+            const stagingDirectory = join(artifactDirectory, "staging");
+            await mkdir(stagingDirectory, { mode: 0o700, recursive: true });
+            stagingPath = join(stagingDirectory, `${randomUUID()}.tmp`);
+            const finalPath = join(artifactDirectory, body.fingerprint);
+            await writeFile(stagingPath, content, { flag: "wx", mode: 0o600 });
+            try {
+              await link(stagingPath, finalPath);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+              const existing = await readFile(finalPath);
+              if (!existing.equals(content)) {
+                throw new Error("Execution Artifact fingerprint collision");
+              }
+            }
+            workflowRunService?.registerArtifact({
+              attempt: body.attempt as number,
+              byteLength: content.byteLength,
+              fingerprint: body.fingerprint,
+              leaseGeneration: body.leaseGeneration as number,
+              leaseHolder: body.leaseHolder,
+              mediaType: body.mediaType,
+              path: join("artifacts", body.fingerprint),
+              projectId: body.projectId,
+              rootRunId: body.rootRunId,
+              runId,
+            });
+            return Response.json({
+              byteLength: content.byteLength,
+              fingerprint: body.fingerprint,
+              mediaType: body.mediaType,
+              status: "finalized",
+            });
+          } catch (error) {
+            return Response.json(
+              { error: error instanceof Error ? error.message : String(error) },
+              { status: 409 },
+            );
+          } finally {
+            if (stagingPath !== undefined) await rm(stagingPath, { force: true });
           }
         }
         if (workflowJournalReadMatch !== null && request.method === "POST") {

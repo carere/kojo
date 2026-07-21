@@ -64,6 +64,27 @@ Use Effect Workflow's `withCompensation` for Compensation. Durable Activities us
 finalizers retain ordinary journal identity and evidence, run idempotently in reverse registration
 order after terminal failure, and are not a separate Kojo primitive.
 
+## Reusable Sandboxes
+
+`Sandbox.use` scopes one process-local Sandcastle Sandbox to a stable name and Git branch.
+`Agent.run` and `Command.run` inside that scope share the same live handle. On restart Kojo checks
+the durable Runtime Configuration Snapshot before opening a fresh Sandbox for the same branch.
+The handle, provider object, and credentials are never durable values. Only committed Git work is
+guaranteed to survive; cleanup evidence identifies retained dirty work and cleanup failures, and a
+hard crash can leave an orphan because Sandcastle has no public reopenable identity.
+
+Sandbox and Agent Providers are replaceable Effect services. Their public metadata contains a
+stable name, adapter version, explicitly safe scalar fields, and a fingerprint of all remaining
+non-secret configuration (plus the Agent model). The CLI supplies a local Docker Sandbox Provider
+when a workflow does not replace it. Secrets must be resolved while constructing a provider and
+must not be copied into any durable schema or public metadata.
+
+`Command.run` schema-checks `{ exitCode, stdout, stderr }`. A nonzero exit code is observed data;
+workflow policy decides whether it is a failure. Rejected executions are typed
+`Command.ExecutionFailed` values and may use the command's `retry` option for durable Activity
+Retry. Standard output and error are finalized as fingerprinted immutable Execution Artifacts and
+referenced by command evidence.
+
 The default export of the nearest repository-root `kojo.config.ts` must synchronously call
 `defineConfig` with explicitly imported definitions. `defineConfig` performs no I/O and validates
 the whole registry before returning it.

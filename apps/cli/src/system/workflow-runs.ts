@@ -275,6 +275,18 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
       const entry = store.workflowRuns.readBoundary(scope, idempotencyKey);
       return entry === undefined ? undefined : decodedValue(entry.payload);
     },
+    registerArtifact: (request: {
+      readonly attempt: number;
+      readonly byteLength: number;
+      readonly fingerprint: string;
+      readonly leaseGeneration: number;
+      readonly leaseHolder: string;
+      readonly mediaType: string;
+      readonly path: string;
+      readonly projectId: string;
+      readonly rootRunId: string;
+      readonly runId: string;
+    }) => store.workflowRuns.registerArtifact(request),
     recordBoundary: (request: {
       readonly attempt: number;
       readonly idempotencyKey: string;
@@ -290,6 +302,20 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
       store.workflowRuns.appendBoundary({
         ...request,
         details: encoded(request.payload),
+      }),
+    verifyRuntimeConfiguration: (request: {
+      readonly attempt: number;
+      readonly leaseGeneration: number;
+      readonly leaseHolder: string;
+      readonly projectId: string;
+      readonly rootRunId: string;
+      readonly runId: string;
+      readonly snapshot: unknown;
+      readonly subject: string;
+    }) =>
+      store.workflowRuns.verifyRuntimeConfiguration({
+        ...request,
+        snapshot: encoded(request.snapshot),
       }),
     discard: (runId: string) => {
       const discarded = store.workflowRuns.discard(runId);

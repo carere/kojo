@@ -7,6 +7,7 @@
     "kojo": "./main.ts"
   },
   "dependencies": {
+    "@ai-hero/sandcastle": "0.12.0",
     "@effect/platform-bun": "4.0.0-beta.98",
     "@kojo/domain": "workspace:*",
     "drizzle-orm": "0.45.1",

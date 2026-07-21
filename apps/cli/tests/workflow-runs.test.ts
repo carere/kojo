@@ -52,6 +52,61 @@ afterEach(async () => {
 });
 
 describe("Workflow Run service", () => {
+  test("records and verifies an append-only Runtime Configuration Snapshot", async () => {
+    const store = await makeStore();
+    const service = makeWorkflowRunService(store, {
+      prepare: async () => ({
+        encodedInput: {},
+        execute: async () => new Promise(() => undefined),
+        ...preparedRevision("sandbox-configuration", "sandbox-fingerprint", "c"),
+      }),
+    });
+    const started = await service.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-1",
+      workflowName: "sandbox-configuration",
+    });
+    const stored = store.workflowRuns.find(started.runId);
+    if (stored?.lease === undefined) throw new Error("start did not create an Execution Lease");
+    const scope = {
+      attempt: 1,
+      leaseGeneration: 1,
+      leaseHolder: stored.lease.holder,
+      projectId: "project-1",
+      rootRunId: started.runId,
+      runId: started.runId,
+    };
+    const snapshot = {
+      adapterVersion: "0.12.0",
+      configurationFingerprint: "docker-default",
+      kind: "Sandbox",
+      name: "local-docker",
+      publicFields: { image: "sandcastle:kojo" },
+    };
+
+    expect(
+      service.verifyRuntimeConfiguration({ ...scope, snapshot, subject: "ticket-36" }).status,
+    ).toBe("recorded");
+    expect(
+      service.verifyRuntimeConfiguration({ ...scope, snapshot, subject: "ticket-36" }).status,
+    ).toBe("compatible");
+    expect(
+      service.verifyRuntimeConfiguration({
+        ...scope,
+        snapshot: { ...snapshot, configurationFingerprint: "changed" },
+        subject: "ticket-36",
+      }).status,
+    ).toBe("incompatible");
+    expect(service.inspect(started.runId)?.evidence.map(({ type }) => type)).toEqual([
+      "WorkflowRun.Started",
+      "RuntimeConfiguration.SnapshotRecorded",
+      "RuntimeConfiguration.Compatible",
+      "RuntimeConfiguration.Incompatible",
+    ]);
+    store.close();
+  });
+
   test("reports lifecycle state separately from resume compatibility", async () => {
     const store = await makeStore();
     const service = makeWorkflowRunService(store, {

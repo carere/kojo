@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { createSandbox, type Sandbox as SandcastleSandbox } from "@ai-hero/sandcastle";
+import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { Cause, Context, Duration, Effect, Exit, Layer, Option, Schema, Scope } from "effect";
 import { Workflow as EffectWorkflow, WorkflowEngine } from "effect/unstable/workflow";
 
@@ -13,6 +16,50 @@ const DurableBoundaryRecorder = Context.Reference<{
 });
 const DurablePath = Context.Reference<ReadonlyArray<string>>("@kojo/workflow/DurablePath", {
   defaultValue: () => [],
+});
+const ExecutionAttempt = Context.Reference<number>("@kojo/workflow/ExecutionAttempt", {
+  defaultValue: () => 1,
+});
+const RuntimeConfigurationRecorder = Context.Reference<{
+  readonly verify: (subject: string, snapshot: unknown) => Effect.Effect<void>;
+}>("@kojo/workflow/RuntimeConfigurationRecorder", {
+  defaultValue: () => ({ verify: () => Effect.void }),
+});
+const SandboxProvider = Context.Service<{
+  readonly configuration: {
+    readonly adapterVersion: string;
+    readonly configurationFingerprint: string;
+    readonly name: string;
+    readonly publicFields: Readonly<Record<string, string | number | boolean | null>>;
+  };
+  readonly create: (options: {
+    readonly baseBranch?: string;
+    readonly branch: string;
+  }) => Effect.Effect<
+    SandcastleSandbox,
+    { readonly _tag: "Sandbox.ProviderFailure"; readonly message: string }
+  >;
+}>("@kojo/workflow/SandboxProvider");
+const ExecutionArtifactRecorder = Context.Reference<{
+  readonly finalizeText: (
+    name: string,
+    content: string,
+  ) => Effect.Effect<{
+    readonly byteLength: number;
+    readonly fingerprint: string;
+    readonly mediaType: string;
+    readonly name: string;
+  }>;
+}>("@kojo/workflow/ExecutionArtifactRecorder", {
+  defaultValue: () => ({
+    finalizeText: (name, content) =>
+      Effect.succeed({
+        byteLength: Buffer.byteLength(content),
+        fingerprint: createHash("sha256").update(content).digest("hex"),
+        mediaType: "text/plain; charset=utf-8",
+        name,
+      }),
+  }),
 });
 const activitySubject = (activityName: string) =>
   DurablePath.pipe(Effect.map((path) => [...path, activityName].join("/")));
@@ -190,6 +237,71 @@ const executeWorkflow = async (
     if (recorded.status === "suspend") throw new Error("__KOJO_SUSPENDED__");
     if (recorded.status === "discard") throw new Error("__KOJO_DISCARDED__");
   };
+  const verifyRuntimeConfiguration = async (subject: string, snapshot: unknown) => {
+    const response = await fetch(
+      `http://localhost/v1/workflow-runs/${encodeURIComponent(runtimeRunId)}/runtime-configurations/verify`,
+      {
+        body: JSON.stringify({ ...executionScope, snapshot, subject }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+        unix: request.endpoint,
+      },
+    );
+    if (!response.ok) throw new Error("System Process rejected Runtime Configuration");
+    const result = (await response.json()) as { readonly status?: string };
+    if (result.status === "incompatible") {
+      throw new Error(`Runtime Configuration for '${subject}' does not match its durable snapshot`);
+    }
+  };
+  const finalizeTextArtifact = async (name: string, content: string) => {
+    const mediaType = "text/plain; charset=utf-8";
+    const fingerprint = createHash("sha256").update(content).digest("hex");
+    const response = await fetch(
+      `http://localhost/v1/workflow-runs/${encodeURIComponent(runtimeRunId)}/artifacts`,
+      {
+        body: JSON.stringify({
+          ...executionScope,
+          content: Buffer.from(content).toString("base64"),
+          fingerprint,
+          mediaType,
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+        unix: request.endpoint,
+      },
+    );
+    if (!response.ok) throw new Error("System Process rejected an Execution Artifact");
+    const artifact = (await response.json()) as {
+      readonly byteLength: number;
+      readonly fingerprint: string;
+      readonly mediaType: string;
+    };
+    return { ...artifact, name };
+  };
+  const dockerImage = process.env.KOJO_SANDBOX_IMAGE ?? "sandcastle:kojo";
+  const sandboxProviderLayer = Layer.succeed(SandboxProvider, {
+    configuration: {
+      adapterVersion: "@ai-hero/sandcastle@0.12.0",
+      configurationFingerprint: createHash("sha256")
+        .update(JSON.stringify({ provider: "docker" }))
+        .digest("hex"),
+      name: "local-docker",
+      publicFields: { image: dockerImage },
+    },
+    create: (options) =>
+      Effect.tryPromise({
+        try: () =>
+          createSandbox({
+            ...options,
+            cwd: process.cwd(),
+            sandbox: docker({ imageName: dockerImage }),
+          }),
+        catch: (error) => ({
+          _tag: "Sandbox.ProviderFailure" as const,
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      }),
+  });
   const kernel = EffectWorkflow.make(`kojo:${workflow.name}`, {
     error: workflow.failure,
     idempotencyKey: () => request.runId ?? "validation",
@@ -217,6 +329,20 @@ const executeWorkflow = async (
               ),
             ) as Effect.Effect<void>,
         }),
+        Effect.provideService(RuntimeConfigurationRecorder, {
+          verify: (subject, snapshot) =>
+            suppressCompensationForLifecycleControl(
+              Effect.promise(() => verifyRuntimeConfiguration(subject, snapshot)),
+            ) as Effect.Effect<void>,
+        }),
+        Effect.provideService(ExecutionArtifactRecorder, {
+          finalizeText: (name, content) =>
+            suppressCompensationForLifecycleControl(
+              Effect.promise(() => finalizeTextArtifact(name, content)),
+            ),
+        }),
+        Effect.provideService(ExecutionAttempt, runtimeAttempt),
+        Effect.provide(sandboxProviderLayer),
       ),
     )
     .pipe(Layer.provide(engineLayer));
