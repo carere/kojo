@@ -106,6 +106,20 @@ const matchesCall = (call: WorkflowTest.CallMatcher, matcher: WorkflowTest.CallM
   call.operation === matcher.operation &&
   (matcher.input === undefined || Equal.equals(call.input, matcher.input));
 
+const spanIdentity = (event: WorkflowTest.EvidenceEvent, type: WorkflowTest.TraceSpan["type"]) => {
+  const details =
+    typeof event.details === "object" && event.details !== null
+      ? (event.details as Record<string, unknown>)
+      : undefined;
+  const ordinal =
+    type === "ExternalCall"
+      ? details?.ordinal
+      : type === "Activity"
+        ? details?.activityAttempt
+        : undefined;
+  return `${type}:${event.attempt}:${event.subject}:${String(ordinal ?? "")}`;
+};
+
 const traceFromEvidence = (
   workflowName: string,
   evidence: ReadonlyArray<WorkflowTest.EvidenceEvent>,
@@ -135,14 +149,15 @@ const traceFromEvidence = (
             ? "DurableClock"
             : undefined;
     if (type === undefined) continue;
-    const key = `${type}:${event.attempt}:${event.subject}`;
+    const key = spanIdentity(event, type);
     if (seen.has(key)) continue;
     seen.add(key);
     const finished = evidence.findLast(
       (candidate) =>
         candidate.attempt === event.attempt &&
         candidate.subject === event.subject &&
-        candidate.type.startsWith(`${type}.`),
+        candidate.type.startsWith(`${type}.`) &&
+        spanIdentity(candidate, type) === key,
     );
     spans.push({
       attempt: event.attempt,
@@ -458,6 +473,9 @@ const make = <
       return execute(latestInput as Schema.Schema.Type<Input>);
     },
     run: (input: Schema.Schema.Type<Input>, options?: WorkflowTest.RunOptions) => {
+      if (hasRun) {
+        throw new Error("WorkflowTest has already been run; use restart or create a new fixture");
+      }
       hasRun = true;
       latestInput = input;
       return execute(input, options);

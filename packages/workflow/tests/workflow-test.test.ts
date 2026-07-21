@@ -299,6 +299,53 @@ describe("WorkflowTest", () => {
     });
   });
 
+  test("keeps repeated calls and Activity Retry attempts as distinct trace spans", async () => {
+    let activityAttempts = 0;
+    const repeated = Workflow.make("RepeatedOperations", {
+      version: "1",
+      entryPoint: "workflows/repeated-operations.ts",
+      input: Schema.Void,
+      success: Schema.String,
+      failure: Schema.String,
+      run: () =>
+        Effect.gen(function* () {
+          yield* WorkflowTest.call(
+            { input: { page: 1 }, layer: "GitHub", operation: "load" },
+            Effect.void,
+          );
+          yield* WorkflowTest.call(
+            { input: { page: 2 }, layer: "GitHub", operation: "load" },
+            Effect.void,
+          );
+          return yield* Activity.retry(
+            Activity.make({
+              error: Schema.String,
+              execute: Effect.suspend(() => {
+                activityAttempts += 1;
+                return activityAttempts === 1 ? Effect.fail("retry") : Effect.succeed("done");
+              }),
+              name: "verify",
+              success: Schema.String,
+            }),
+            { times: 1 },
+          );
+        }),
+    });
+    const fixture = WorkflowTest.make(repeated);
+
+    const result = await fixture.run(undefined);
+
+    expect(result.state).toBe("Completed");
+    expect(result.trace.filter(({ type }) => type === "ExternalCall")).toHaveLength(2);
+    expect(result.trace.filter(({ type }) => type === "Activity")).toMatchObject([
+      { outcome: "Failed", subject: "verify" },
+      { outcome: "Completed", subject: "verify" },
+    ]);
+    expect(() => fixture.run(undefined)).toThrow(
+      "WorkflowTest has already been run; use restart or create a new fixture",
+    );
+  });
+
   test("restarts a void-input workflow and captures synchronous workflow defects", async () => {
     const fixture = WorkflowTest.make(
       Workflow.make("VoidReplay", {
