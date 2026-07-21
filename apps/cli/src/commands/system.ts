@@ -14,6 +14,16 @@ const failureCode = (command: string, message: string) => {
   if (message.includes("KOJO_HOME")) {
     return "STARTUP_INVALID_HOME";
   }
+  if (message.includes("schema version") || message.includes("newer than this Kojo version")) {
+    return "SCHEMA_VERSION_INCOMPATIBLE";
+  }
+  if (
+    message.includes("integrity check") ||
+    message.includes("not a database") ||
+    message.includes("database disk image is malformed")
+  ) {
+    return "DATABASE_CORRUPT";
+  }
   if (message.includes("state.sqlite") || message.includes("migration")) {
     return "MIGRATION_FAILED";
   }
