@@ -138,9 +138,6 @@ export function DenseInspector() {
         <Match when={runs.error}>
           <p class="inspector-message failure">System Process unavailable</p>
         </Match>
-        <Match when={(runs()?.length ?? 0) === 0}>
-          <p class="inspector-message">No Workflow Runs match this installation.</p>
-        </Match>
         <Match when={runs()}>
           <div class="inspector-grid">
             <aside class="run-pane">

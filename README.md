@@ -47,10 +47,10 @@ bun run apps/cli/main.ts stop
 The System Process uses an owner-only private local socket and is the sole normal owner of
 `KOJO_HOME/state.sqlite`. These commands do not install an operating-system login service.
 
-Run the server for a project:
+Start the Dense Inspector gateway for the local System Process:
 
 ```sh
-moon run cli:serve -- .
+moon run cli:serve
 ```
 
 In another terminal, run the visualizer:
@@ -59,8 +59,8 @@ In another terminal, run the visualizer:
 moon run visualizer:dev
 ```
 
-The visualizer is available at `http://localhost:5173` and checks the server through the typed
-`GET /api/health` contract.
+The visualizer is available at `http://localhost:5173`. It reads aggregate Workflow Runs and
+source-independent Execution Evidence through the gateway's read-only System Process API.
 
 Run the workspace checks:
 

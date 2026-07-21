@@ -50,7 +50,12 @@ interface InspectedRun {
   readonly runId: string;
   readonly runtimeConfigurationCompatibility: { readonly status: string };
   readonly state: WorkflowRunState;
-  readonly revision: { readonly stableName: string };
+  readonly revision: {
+    readonly declaredVersion: string;
+    readonly fingerprint: string;
+    readonly stableName: string;
+    readonly workflowAbi: string;
+  };
 }
 
 const decodeVersioned = (value: unknown) => {
@@ -102,19 +107,18 @@ const runtimeConfigurationCompatibilityFor = (run: InspectedRun): CompatibilityF
     .filter(({ type }) => type === "RuntimeConfiguration.Incompatible")
     .map(({ subject }) => subject)
     .sort();
-  return incompatibleSubjects.length === 0
+  if (incompatibleSubjects.length > 0) {
+    return {
+      reason: `Runtime configuration is incompatible for ${incompatibleSubjects.join(", ")}`,
+      status: "Incompatible",
+    };
+  }
+  return latestBySubject.size === 0
     ? run.runtimeConfigurationCompatibility
-    : {
-        reason: `Runtime configuration is incompatible for ${incompatibleSubjects.join(", ")}`,
-        status: "Incompatible",
-      };
+    : { status: "Compatible" };
 };
 
-const resumeCompatibilityFor = (
-  run: InspectedRun,
-  project: Project,
-  runtimeConfigurationCompatibility: CompatibilityFact,
-): CompatibilityFact => {
+const resumeCompatibilityFor = (run: InspectedRun, project: Project): CompatibilityFact => {
   if (run.state === "Completed" || run.state === "Discarded" || run.state === "Running") {
     return { status: "NotApplicable" };
   }
@@ -130,8 +134,44 @@ const resumeCompatibilityFor = (
       status: "Unavailable",
     };
   }
-  if (runtimeConfigurationCompatibility.status === "Incompatible") {
-    return runtimeConfigurationCompatibility;
+  const activeRevision = project.source?.revision?.workflows.find(
+    ({ name }) => name === run.revision.stableName,
+  );
+  if (
+    project.source?.revision !== null &&
+    project.source !== null &&
+    activeRevision === undefined
+  ) {
+    return {
+      reason: `Developer Workflow ${run.revision.stableName} is not available in the active Project Source Revision`,
+      status: "Incompatible",
+    };
+  }
+  if (activeRevision === undefined) return run.resumeCompatibility;
+  const compatible =
+    activeRevision.version === run.revision.declaredVersion &&
+    activeRevision.fingerprint === run.revision.fingerprint &&
+    activeRevision.manifest.workflowAbi === run.revision.workflowAbi;
+  if (!compatible) {
+    return {
+      reason: `The active Project source does not match the pinned revision of ${run.revision.stableName}`,
+      status: "Incompatible",
+    };
+  }
+  return { status: "Compatible" };
+};
+
+const resumeBlockerFor = (
+  run: InspectedRun,
+  project: Project,
+  resumeCompatibility: CompatibilityFact,
+  runtimeConfigurationCompatibility: CompatibilityFact,
+): string | undefined => {
+  if (project.registrationState !== "Enabled") {
+    return `Project registration is ${project.registrationState}`;
+  }
+  if (project.availability.status === "Unavailable") {
+    return project.availability.reasons[0]?.message ?? "Project source is unavailable";
   }
   const outcome = decodeVersioned(run.outcome).value;
   if (
@@ -141,21 +181,27 @@ const resumeCompatibilityFor = (
     "_tag" in outcome &&
     outcome._tag === "Defect"
   ) {
-    return {
-      reason: "The Workflow Run failed with a non-resumable Defect",
-      status: "Incompatible",
-    };
+    return "The Workflow Run failed with a non-resumable Defect";
   }
   if (run.evidence.some(({ type }) => type === "Activity.Uncertain")) {
-    return {
-      reason: "An Uncertain Activity Outcome requires reconciliation",
-      status: "Incompatible",
-    };
+    return "An Uncertain Activity Outcome requires reconciliation";
   }
-  return run.resumeCompatibility;
+  if (runtimeConfigurationCompatibility.status === "Incompatible") {
+    return runtimeConfigurationCompatibility.reason ?? "Runtime configuration is incompatible";
+  }
+  if (resumeCompatibility.status !== "Compatible") {
+    return resumeCompatibility.reason ?? "Resume compatibility has not been established";
+  }
+  return undefined;
 };
 
-const actionsFor = (run: InspectedRun, root: boolean, resumeCompatibility: CompatibilityFact) => {
+const actionsFor = (
+  run: InspectedRun,
+  project: Project,
+  root: boolean,
+  resumeCompatibility: CompatibilityFact,
+  runtimeConfigurationCompatibility: CompatibilityFact,
+) => {
   if (!root || run.state === "Completed" || run.state === "Discarded") return [];
   if (run.state === "Running") {
     return [
@@ -163,15 +209,17 @@ const actionsFor = (run: InspectedRun, root: boolean, resumeCompatibility: Compa
       { enabled: true, name: "discard" },
     ];
   }
-  const resumeDisabled =
-    resumeCompatibility.status === "Unavailable" || resumeCompatibility.status === "Incompatible";
+  const resumeBlocker = resumeBlockerFor(
+    run,
+    project,
+    resumeCompatibility,
+    runtimeConfigurationCompatibility,
+  );
   return [
     {
-      enabled: !resumeDisabled,
+      enabled: resumeBlocker === undefined,
       name: "resume",
-      ...(resumeDisabled
-        ? { reason: resumeCompatibility.reason ?? "The Workflow Run cannot be resumed" }
-        : {}),
+      ...(resumeBlocker === undefined ? {} : { reason: resumeBlocker }),
     },
     { enabled: true, name: "discard" },
   ];
@@ -188,13 +236,9 @@ const projectRun = (run: InspectedRun, project: Project, root = true): unknown =
     };
   });
   const runtimeConfigurationCompatibility = runtimeConfigurationCompatibilityFor(run);
-  const resumeCompatibility = resumeCompatibilityFor(
-    run,
-    project,
-    runtimeConfigurationCompatibility,
-  );
+  const resumeCompatibility = resumeCompatibilityFor(run, project);
   return {
-    actions: actionsFor(run, root, resumeCompatibility),
+    actions: actionsFor(run, project, root, resumeCompatibility, runtimeConfigurationCompatibility),
     attempts: run.attempts,
     children: run.children.map((child) => projectRun(child, project, false)),
     createdAt: run.createdAt,

@@ -43,6 +43,54 @@ const revisionFor = (stableName: string) => {
   };
 };
 
+const activeSourceFor = (stableName: string): NonNullable<Project["source"]> => {
+  const toolchain = {
+    bun: "1.3.14",
+    cli: "0.1.0",
+    effect: "4.0.0-beta.98",
+    platformBun: "4.0.0-beta.98",
+    typesBun: "1.3.14",
+    typescript: "7.0.2",
+    workflow: "0.1.0",
+    workflowAbi: "1",
+  };
+  return {
+    diagnostics: [],
+    policy: "LocalWithFreshnessWarning",
+    revision: {
+      commit: "a".repeat(40),
+      configPath: "kojo.config.ts",
+      freshness: { localCommit: "a".repeat(40), status: "Current" },
+      lockfileDigest: "lockfile",
+      policy: "LocalWithFreshnessWarning",
+      provenance: {
+        defaultBranch: "main",
+        remote: null,
+        repository: "/project",
+        selectedAt: new Date().toISOString(),
+      },
+      schedules: [],
+      toolchain,
+      workflows: [
+        {
+          entryPoint: "workflows/resumable.ts",
+          fingerprint: `fingerprint-${stableName}`,
+          manifest: {
+            entryPoint: "workflows/resumable.ts",
+            lockfileResolutions: [],
+            modules: [],
+            resolver: { conditions: ["import"], identity: "bun" },
+            toolchain,
+            workflowAbi: "1",
+          },
+          name: stableName,
+          version: "v1",
+        },
+      ],
+    },
+  };
+};
+
 describe("Dense Inspector projections", () => {
   test("preserves unknown evidence and reports unavailable facts without changing run state", async () => {
     const home = await mkdtemp(join(tmpdir(), "kojo-inspector-test-"));
@@ -172,8 +220,7 @@ describe("Dense Inspector projections", () => {
         { enabled: true, name: "discard" },
       ],
       resumeCompatibility: {
-        reason: "Runtime configuration is incompatible for review-step",
-        status: "Incompatible",
+        status: "NotChecked",
       },
       runtimeConfigurationCompatibility: {
         reason: "Runtime configuration is incompatible for review-step",
@@ -198,7 +245,7 @@ describe("Dense Inspector projections", () => {
         },
         { enabled: true, name: "discard" },
       ],
-      resumeCompatibility: { status: "Incompatible" },
+      resumeCompatibility: { status: "NotChecked" },
       state: "Failed",
     });
 
@@ -212,6 +259,25 @@ describe("Dense Inspector projections", () => {
       ],
       resumeCompatibility: { reason: "Project registration is Disabled", status: "Unavailable" },
       state: "Failed",
+    });
+
+    const resumable = await runs.start({
+      fromCheckout: false,
+      input: {},
+      projectId: project.id,
+      workflowName: "resumable",
+    });
+    store.workflowRuns.interruptRunning();
+    const compatibleInspector = makeInspectorService(store, runs, async () => [
+      { ...project, source: activeSourceFor("resumable") },
+    ]);
+    expect(await compatibleInspector.inspect(resumable.runId)).toMatchObject({
+      actions: [
+        { enabled: true, name: "resume" },
+        { enabled: true, name: "discard" },
+      ],
+      resumeCompatibility: { status: "Compatible" },
+      state: "Interrupted",
     });
     store.close();
   });

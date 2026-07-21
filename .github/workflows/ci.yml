@@ -33,6 +33,7 @@ jobs:
           command: check
 
       - name: Install Playwright browser
+        working-directory: apps/visualizer
         run: bun --bun playwright install --with-deps --only-shell chromium
 
       - name: Generate i18n files, build, and run tests

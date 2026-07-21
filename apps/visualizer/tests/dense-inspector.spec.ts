@@ -320,3 +320,44 @@ test("keeps Archived history behind explicit opt-in", async ({ page }) => {
   await page.getByLabel("Archived history").check();
   await expect(page.getByRole("button", { name: /run-archived-003/ })).toBeVisible();
 });
+
+test("can opt into Archived history when no active Project has runs", async ({ page }) => {
+  await expect(page.getByTestId("run-state")).toHaveText("Failed");
+  await page.unroute("**/api/inspector/**");
+  await page.route("**/api/inspector/**", (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/inspector/runs") {
+      return route.fulfill({
+        json: {
+          schemaVersion: 1,
+          runs: url.searchParams.get("includeArchived") === "true" ? [archivedRoot] : [],
+        },
+      });
+    }
+    if (url.pathname === "/api/inspector/runs/run-archived-003") {
+      return route.fulfill({
+        json: {
+          run: {
+            ...failedRun,
+            actions: [],
+            children: [],
+            evidence: [failedRun.evidence[0]],
+            projectId: "project-legacy-3c1",
+            resumeCompatibility: { status: "NotApplicable" },
+            rootRunId: "run-archived-003",
+            runId: "run-archived-003",
+            state: "Discarded",
+          },
+          schemaVersion: 1,
+        },
+      });
+    }
+    return route.fulfill({ json: { error: "Not found" }, status: 404 });
+  });
+
+  await page.reload();
+  await expect(page.getByText("No runs match these filters.")).toBeVisible();
+  await page.getByLabel("Archived history").check();
+  await expect(page.locator(".run-row").filter({ hasText: "run-archived-003" })).toBeVisible();
+  await expect(page.getByTestId("run-state")).toHaveText("Discarded");
+});
