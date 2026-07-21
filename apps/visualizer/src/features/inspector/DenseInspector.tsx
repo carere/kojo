@@ -254,6 +254,18 @@ export function DenseInspector() {
                   <>
                     <div class="run-facts">
                       <div>
+                        <small>PROJECT REGISTRATION</small>
+                        <strong data-testid="project-registration-state">
+                          {root().project.registrationState}
+                        </strong>
+                      </div>
+                      <div>
+                        <small>PROJECT AVAILABILITY</small>
+                        <strong data-testid="project-availability">
+                          {root().project.availability.status}
+                        </strong>
+                      </div>
+                      <div>
                         <small>RUN STATE</small>
                         <strong
                           class={`state-${root().state.toLowerCase()}`}
@@ -282,6 +294,16 @@ export function DenseInspector() {
                         </For>
                       </div>
                     </div>
+                    <Show when={root().project.availability.reason}>
+                      {(reason) => <p class="project-availability-reason">{reason()}</p>}
+                    </Show>
+                    <For each={root().actions.filter((action) => !action.enabled && action.reason)}>
+                      {(action) => (
+                        <p class="action-disabled-reason" data-testid="action-disabled-reason">
+                          {titleCase(action.name)}: {action.reason}
+                        </p>
+                      )}
+                    </For>
                     <Show when={root().resumeCompatibility.reason}>
                       {(reason) => <p class="compatibility-reason">{reason()}</p>}
                     </Show>

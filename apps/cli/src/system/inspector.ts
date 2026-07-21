@@ -247,6 +247,7 @@ const projectRun = (run: InspectedRun, project: Project, root = true): unknown =
     invocationKey: run.invocationKey ?? null,
     outcome: run.outcome === null ? null : decodeVersioned(run.outcome).value,
     parentRunId: run.parentRunId,
+    project: projectSummary(project),
     projectId: run.projectId,
     resumeCompatibility,
     rootRunId: run.rootRunId,
