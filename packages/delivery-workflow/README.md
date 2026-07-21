@@ -6,14 +6,17 @@ authors, not Kojo core.
 
 The workflow accepts `{ workstream: "https://github.com/OWNER/REPOSITORY/issues/NUMBER" }`. Provide
 the `GitHubDelivery` Effect service with an adapter that loads the root's complete native child and
-blocker graph and proves that the declared source revision is reachable from the target branch.
+blocker graph, proves that the declared source revision is reachable, reads publication state, and
+performs exact guarded pushes and idempotent ticket closure.
 The workflow validates and pins that graph before returning one of these typed outcomes:
 
 - `NothingToDo` when the root has no children.
 - `AlreadyComplete` when every child is closed.
 - `OpenWorkNoReadyTicket` when open work exists but every open ticket is blocked.
-- `OpenWork` with up to two ready tickets selected in publication-key order and their final ticket
+- `OpenWork` with up to two ready tickets selected in publication-key order and their published
   outcomes.
+- `TicketsFailed` after all already-started tickets settle when any selected ticket cannot be
+  reviewed, integrated, verified, or published.
 - `InvalidDeliveryWorkstream` when routing, identity, relationship, or graph invariants fail.
 
 Each successful outcome carries schema-validated evidence for the normalized input graph, routing,
@@ -32,6 +35,18 @@ Zero findings produces `Implemented`. Three Reviewer Steps with remaining findin
 ticket outcome `ReviewLimitReached`, retaining the shared `Loop.MaximumLimitReached` failure and
 the full finding/disposition history. Other ticket failures become `TicketFailed`, allowing
 an already-started sibling ticket to settle and retain its own outcome and evidence.
+
+Reviewed tickets integrate serially from the captured target HEAD. Every successful integration is
+an exact two-parent `--no-ff` merge of that expected HEAD and the reviewed commit. Conflicts route
+through a bounded, mechanically read-only integration Review Loop and repeat the configured
+commands without changing either accepted parent. The resulting commit is opened and verified in a
+fresh Reusable Sandbox before publication.
+
+Publication reloads and validates the workstream and ticket, then reads mutable target and ticket
+state before each write. Push and close operations carry stable idempotency keys and expected-state
+guards, and the workflow reads their results back before recording `Published`. A moved target or
+drifted specification fails only that ticket; reviewed issue branches and open tickets remain
+intact while other already-started successes are still published.
 
 To opt in, statically import `Delivery` from `packages/delivery-workflow/src/index.ts` in the
 repository's `kojo.config.ts` and include it in `defineConfig({ workflows: [...] })`. The GitHub
