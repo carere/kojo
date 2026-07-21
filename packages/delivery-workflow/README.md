@@ -15,7 +15,6 @@ request for human handling rather than converting it back to draft.
 The workflow validates and pins that graph before returning one of these typed outcomes:
 
 - `NothingToDo` when the root has no children.
-- `AlreadyComplete` when every child is closed.
 - `OpenWorkNoReadyTicket` when open work exists but every open ticket is blocked.
 - `OpenWork` with up to two ready tickets selected in publication-key order and their published
   outcomes.

@@ -697,6 +697,21 @@ describe("Delivery ready frontier implementation", () => {
 
     expect(interruptedClosure.state).toBe("Interrupted");
     expect(completedAfterClosure.state).toBe("Completed");
+    expect(completedAfterClosure.outcome).toMatchObject({
+      _tag: "Success",
+      value: {
+        _tag: "CompletedWorkstream",
+        finalization: { recovery: { publicationProgress: "DraftPullRequestApplied" } },
+        ticketOutcomes: [
+          {
+            _tag: "Published",
+            closeReceipt: { state: "Applied" },
+            reviewAttempts: 1,
+            ticket: { number: 43 },
+          },
+        ],
+      },
+    });
     expect(
       completedAfterClosure.calls.filter(({ operation }) => operation === "closeTicket"),
     ).toHaveLength(1);
