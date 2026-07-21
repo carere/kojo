@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { describe, expect, test } from "@effect/vitest";
-import { Clock, Context, Effect, Layer, Schema } from "effect";
+import { Clock, Context, Effect, Layer, Redacted, Schema } from "effect";
 import { Activity, DurableClock, Workflow as EffectWorkflow } from "effect/unstable/workflow";
 import { CompositionRuntime } from "../src/composition";
 import {
@@ -370,7 +371,11 @@ describe("WorkflowTest", () => {
             },
             run: async () => {
               uses.push({ handle, operation: "agent" });
-              return { commits: [{ sha: "abc123" }], stdout: "committed" };
+              return {
+                commits: [{ sha: "abc123" }],
+                output: { _tag: "Success", value: { committed: true } },
+                stdout: "committed",
+              };
             },
           };
         }),
@@ -385,7 +390,11 @@ describe("WorkflowTest", () => {
         Sandbox.use("ticket-36", {
           branch: "sandcastle/workstream-26/issue-36",
           effect: Effect.gen(function* () {
-            yield* Agent.run("implement", { prompt: "Commit the ticket" });
+            yield* Agent.run("implement", {
+              failure: Schema.Never,
+              prompt: "Commit the ticket",
+              success: Schema.Struct({ committed: Schema.Boolean }),
+            });
             const result = yield* Command.run("check", { command: "moon run :check" });
             return result.exitCode;
           }),
@@ -437,6 +446,326 @@ describe("WorkflowTest", () => {
       exitCode: 7,
     });
     expect(JSON.stringify(commandEvidence?.details)).not.toContain("checked");
+  });
+
+  test("runs schema-checked Agent Steps with scoped providers and secret-safe evidence", async () => {
+    const ReviewFailure = Schema.TaggedStruct("ReviewRejected", { reason: Schema.String });
+    const observations: Array<{ readonly agent: unknown; readonly provider: string }> = [];
+    const secret = "provider-secret-value";
+    const unsafeName = "AGENT_TOKEN";
+    const secretFingerprint = "secret-derived-fingerprint";
+    const outcomes = new Map<string, unknown>([
+      ["implementer", { _tag: "Success", value: { commit: "abc123" } }],
+      ["reviewer", { _tag: "Failure", failure: { _tag: "ReviewRejected", reason: "P1" } }],
+    ]);
+    const provider = (name: string, model: string) =>
+      AgentProvider.layer({
+        configuration: {
+          adapterVersion: "1.2.3",
+          configurationFingerprint: `${name}-safe-configuration`,
+          model,
+          name,
+          publicFields: { region: "local" },
+        },
+        makeAgent: ([token]) => ({ secretFingerprint, token, unsafeName }),
+        secrets: Effect.succeed([Redacted.make(secret)]),
+      });
+    const sandboxLayer = Layer.succeed(SandboxProvider, {
+      configuration: {
+        adapterVersion: "0.12.0",
+        configurationFingerprint: "sandbox-safe-configuration",
+        name: "controlled-sandbox",
+        publicFields: {},
+      },
+      create: ({ branch }) =>
+        Effect.succeed({
+          branch,
+          close: () => Promise.resolve({}),
+          exec: () => Promise.resolve({ exitCode: 0, stderr: "", stdout: "" }),
+          run: ({ agent, prompt }) => {
+            const providerName = prompt.startsWith("Implement") ? "implementer" : "reviewer";
+            observations.push({ agent, provider: providerName });
+            return Promise.resolve({
+              commits: [],
+              output: outcomes.get(providerName),
+              stdout: `transcript accidentally contained ${secret}`,
+            });
+          },
+        }),
+    });
+    const definition = Workflow.make("SafeAgents", {
+      version: "1",
+      entryPoint: "workflows/safe-agents.ts",
+      input: Schema.Void,
+      success: Schema.Never,
+      failure: ReviewFailure,
+      run: () =>
+        Sandbox.use("shared", {
+          branch: "ticket/shared-agents",
+          effect: Effect.gen(function* () {
+            yield* Agent.run("implement", {
+              failure: Schema.Never,
+              prompt: "Implement",
+              success: Schema.Struct({ commit: Schema.String }),
+            }).pipe(Effect.provide(provider("implementer", "model-a")));
+            return yield* Agent.run("review", {
+              failure: ReviewFailure,
+              prompt: "Review",
+              success: Schema.Never,
+            }).pipe(Effect.provide(provider("reviewer", "model-b")));
+          }),
+        }),
+    });
+
+    const result = await WorkflowTest.make(definition, { layer: sandboxLayer }).run(undefined);
+
+    expect(result.outcome).toEqual({
+      _tag: "Failure",
+      failure: { _tag: "ReviewRejected", reason: "P1" },
+    });
+    expect(observations).toEqual([
+      { agent: { secretFingerprint, token: secret, unsafeName }, provider: "implementer" },
+      { agent: { secretFingerprint, token: secret, unsafeName }, provider: "reviewer" },
+    ]);
+    expect(result.trace.filter(({ type }) => type === "Agent")).toMatchObject([
+      { outcome: "Completed", subject: "shared/implement" },
+      { outcome: "Failed", subject: "shared/review" },
+    ]);
+    const rendered = JSON.stringify({ evidence: result.evidence, trace: result.trace });
+    expect(rendered).not.toContain(secret);
+    expect(rendered).not.toContain(unsafeName);
+    expect(rendered).not.toContain(secretFingerprint);
+    expect(rendered).toContain("implementer-safe-configuration");
+    expect(rendered).toContain('"name":"implementer"');
+    expect(rendered).toContain('"model":"model-a"');
+    expect(rendered).toContain('"adapterVersion":"1.2.3"');
+    expect(result.evidence.map(({ type }) => type)).toContain("Agent.Failed");
+    const completed = result.evidence.find(({ type }) => type === "Agent.Completed");
+    const transcript = `transcript accidentally contained [REDACTED]`;
+    expect(completed?.details).toMatchObject({
+      artifacts: [
+        {
+          fingerprint: createHash("sha256").update(transcript).digest("hex"),
+          name: "transcript",
+        },
+      ],
+    });
+  });
+
+  test("rejects an Agent result that does not match the author schema", async () => {
+    let calls = 0;
+    const definition = Workflow.make("InvalidAgentResult", {
+      version: "1",
+      entryPoint: "workflows/invalid-agent-result.ts",
+      input: Schema.Void,
+      success: Schema.Number,
+      failure: Schema.Never,
+      run: () =>
+        Sandbox.use("shared", {
+          branch: "ticket/invalid-agent-result",
+          effect: Agent.run("invalid", {
+            failure: Schema.Never,
+            prompt: "Return a number",
+            success: Schema.Number,
+          }),
+        }),
+    });
+    const result = await WorkflowTest.make(definition, {
+      layer: Layer.merge(
+        Layer.succeed(AgentProvider, {
+          agent: {},
+          configuration: {
+            adapterVersion: "1",
+            configurationFingerprint: "controlled",
+            model: "controlled",
+            name: "controlled",
+            publicFields: {},
+          },
+        }),
+        Layer.succeed(SandboxProvider, {
+          configuration: {
+            adapterVersion: "1",
+            configurationFingerprint: "sandbox",
+            name: "sandbox",
+            publicFields: {},
+          },
+          create: ({ branch }) =>
+            Effect.succeed({
+              branch,
+              close: () => Promise.resolve({}),
+              exec: () => Promise.resolve({ exitCode: 0, stderr: "", stdout: "" }),
+              run: () => {
+                calls += 1;
+                return Promise.resolve({
+                  commits: [],
+                  output: { _tag: "Success", value: "not-a-number" },
+                  stdout: "invalid",
+                });
+              },
+            }),
+        }),
+      ),
+    }).run(undefined);
+
+    expect(result.outcome._tag).toBe("Defect");
+    expect(calls).toBe(1);
+    expect(result.evidence.map(({ type }) => type)).not.toContain("Agent.Completed");
+  });
+
+  test("extracts a structured Agent result from the Sandcastle transcript", async () => {
+    let receivedPrompt = "";
+    let receivedLogging: unknown;
+    const definition = Workflow.make("SandcastleAgentResult", {
+      version: "1",
+      entryPoint: "workflows/sandcastle-agent-result.ts",
+      input: Schema.Void,
+      success: Schema.BigIntFromString,
+      failure: Schema.Never,
+      run: () =>
+        Sandbox.use("shared", {
+          branch: "ticket/sandcastle-agent-result",
+          effect: Agent.run("agent", {
+            failure: Schema.Never,
+            prompt: "Return the answer",
+            success: Schema.BigIntFromString,
+          }),
+        }),
+    });
+    const result = await WorkflowTest.make(definition, {
+      layer: Layer.merge(
+        Layer.succeed(AgentProvider, {
+          agent: {},
+          configuration: {
+            adapterVersion: "1",
+            configurationFingerprint: "controlled",
+            model: "controlled",
+            name: "controlled",
+            publicFields: {},
+          },
+        }),
+        Layer.succeed(SandboxProvider, {
+          configuration: {
+            adapterVersion: "1",
+            configurationFingerprint: "sandbox",
+            name: "sandbox",
+            publicFields: {},
+          },
+          create: ({ branch }) =>
+            Effect.succeed({
+              branch,
+              close: () => Promise.resolve({}),
+              exec: () => Promise.resolve({ exitCode: 0, stderr: "", stdout: "" }),
+              run: ({ logging, prompt }) => {
+                receivedLogging = logging;
+                receivedPrompt = prompt;
+                return Promise.resolve({
+                  commits: [{ sha: "abc123" }],
+                  stdout:
+                    'work log\n<kojo-agent-output>{"_tag":"Success","value":"42"}</kojo-agent-output>',
+                });
+              },
+            }),
+        }),
+      ),
+    }).run(undefined);
+
+    expect(result.outcome).toEqual({ _tag: "Success", value: 42n });
+    expect(receivedPrompt).toContain("<kojo-agent-output>");
+    expect(receivedLogging).toEqual({ type: "stdout", verbose: false });
+    const completed = result.evidence.find(({ type }) => type === "Agent.Completed");
+    expect(completed?.details).toMatchObject({ result: "42" });
+    expect(() => JSON.stringify(completed?.details)).not.toThrow();
+  });
+
+  test("checks Agent compatibility before a later external call", async () => {
+    let configurationFingerprint = "behavior-a";
+    let secret = "first-secret";
+    let calls = 0;
+    const provider = {
+      get configuration() {
+        return {
+          adapterVersion: "1",
+          configurationFingerprint,
+          model: "controlled",
+          name: "controlled-agent",
+          publicFields: {},
+        };
+      },
+      get agent() {
+        return { token: secret };
+      },
+      get redact() {
+        const resolvedSecret = secret;
+        return (value: string) => value.split(resolvedSecret).join("[REDACTED]");
+      },
+    };
+    const sandboxLayer = Layer.succeed(SandboxProvider, {
+      configuration: {
+        adapterVersion: "1",
+        configurationFingerprint: "sandbox",
+        name: "sandbox",
+        publicFields: {},
+      },
+      create: ({ branch }) =>
+        Effect.succeed({
+          branch,
+          close: () => Promise.resolve({}),
+          exec: () => Promise.resolve({ exitCode: 0, stderr: "", stdout: "" }),
+          run: () => {
+            calls += 1;
+            return Promise.resolve({
+              commits: [],
+              output: { _tag: "Success", value: "done" },
+              stdout: "done",
+            });
+          },
+        }),
+    });
+    const definition = Workflow.make("AgentCompatibility", {
+      version: "1",
+      entryPoint: "workflows/agent-compatibility.ts",
+      input: Schema.Void,
+      success: Schema.String,
+      failure: Schema.Never,
+      run: () =>
+        Sandbox.use("shared", {
+          branch: "ticket/agent-compatibility",
+          effect: Agent.run("agent", {
+            failure: Schema.Never,
+            prompt: "Run",
+            success: Schema.String,
+          }),
+        }),
+    });
+    const makeFixture = () =>
+      WorkflowTest.make(definition, {
+        layer: Layer.merge(sandboxLayer, Layer.succeed(AgentProvider, provider)),
+      });
+    const compatibleFixture = makeFixture();
+
+    const interrupted = await compatibleFixture.run(undefined, {
+      interruptAfter: { subject: "shared/agent", type: "Agent.Completed" },
+    });
+    secret = "rotated-secret";
+    const compatible = await compatibleFixture.restart();
+
+    expect(interrupted.state).toBe("Interrupted");
+    expect(compatible.state).toBe("Completed");
+    expect(calls).toBe(1);
+
+    const incompatibleFixture = makeFixture();
+    const interruptedAgain = await incompatibleFixture.run(undefined, {
+      interruptAfter: { subject: "shared/agent", type: "Agent.Completed" },
+    });
+    configurationFingerprint = "behavior-b";
+    const incompatible = await incompatibleFixture.restart();
+
+    expect(interruptedAgain.state).toBe("Interrupted");
+    expect(incompatible.state).toBe("Failed");
+    expect(calls).toBe(2);
+    expect(incompatible.evidence.map(({ type }) => type)).toContain(
+      "RuntimeConfiguration.Incompatible",
+    );
   });
 
   test("rejects changed Sandbox configuration before creating an external resource", async () => {

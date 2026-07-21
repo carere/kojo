@@ -45,7 +45,13 @@ export namespace WorkflowTest {
     readonly outcome?: string;
     readonly sequence: number;
     readonly subject: string;
-    readonly type: "Activity" | "ChildWorkflow" | "DurableClock" | "ExternalCall" | "WorkflowRun";
+    readonly type:
+      | "Activity"
+      | "Agent"
+      | "ChildWorkflow"
+      | "DurableClock"
+      | "ExternalCall"
+      | "WorkflowRun";
   }
 
   export interface RevisionSnapshotEntry {
@@ -187,13 +193,15 @@ const traceFromEvidence = (
   for (const event of evidence) {
     const type = event.type.endsWith(".Replayed")
       ? undefined
-      : event.type.startsWith("ExternalCall.")
-        ? "ExternalCall"
-        : event.type.startsWith("Activity.")
-          ? "Activity"
-          : event.type === "DurableClock.Scheduled"
-            ? "DurableClock"
-            : undefined;
+      : event.type.startsWith("Agent.")
+        ? "Agent"
+        : event.type.startsWith("ExternalCall.")
+          ? "ExternalCall"
+          : event.type.startsWith("Activity.")
+            ? "Activity"
+            : event.type === "DurableClock.Scheduled"
+              ? "DurableClock"
+              : undefined;
     if (type === undefined) continue;
     const key = spanIdentity(event, type);
     if (seen.has(key)) continue;
