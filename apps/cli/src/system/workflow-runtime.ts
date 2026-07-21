@@ -55,6 +55,7 @@ const invokeRuntime = async (
     readonly runId?: string;
     readonly workflowName: string;
   },
+  signal?: AbortSignal,
 ) => {
   const cli = await projectLocalCli(checkout);
   const encodedRequest = Buffer.from(JSON.stringify({ configPath, ...request })).toString(
@@ -75,11 +76,14 @@ const invokeRuntime = async (
     stderr: "pipe",
     stdout: "pipe",
   });
+  const abort = () => child.kill();
+  if (signal?.aborted === true) abort();
+  else signal?.addEventListener("abort", abort, { once: true });
   const [exitCode, stderr, stdout] = await Promise.all([
     child.exited,
     new Response(child.stderr).text(),
     new Response(child.stdout).text(),
-  ]);
+  ]).finally(() => signal?.removeEventListener("abort", abort));
   let result: RuntimeResult;
   try {
     result = decodeProjectRuntimeResult(stdout) as RuntimeResult;
@@ -180,20 +184,33 @@ export const makeProjectWorkflowRuntime = (
       const fixed = prepared;
       return {
         encodedInput: validation.encodedInput,
-        execute: async ({ attempt, leaseGeneration, leaseHolder, projectId, rootRunId, runId }) => {
+        execute: async ({
+          attempt,
+          leaseGeneration,
+          leaseHolder,
+          projectId,
+          rootRunId,
+          runId,
+          signal,
+        }) => {
           try {
-            const result = await invokeRuntime(fixed.checkout.path, fixed.revision.configPath, {
-              attempt,
-              endpoint,
-              input: validation.encodedInput,
-              leaseGeneration,
-              leaseHolder,
-              mode: "execute",
-              projectId,
-              rootRunId,
-              runId,
-              workflowName: request.workflowName,
-            });
+            const result = await invokeRuntime(
+              fixed.checkout.path,
+              fixed.revision.configPath,
+              {
+                attempt,
+                endpoint,
+                input: validation.encodedInput,
+                leaseGeneration,
+                leaseHolder,
+                mode: "execute",
+                projectId,
+                rootRunId,
+                runId,
+                workflowName: request.workflowName,
+              },
+              signal,
+            );
             if (
               result.state !== "Completed" &&
               result.state !== "Discarded" &&
@@ -349,21 +366,34 @@ export const makeProjectWorkflowRuntime = (
       }
       const fixed = prepared;
       return {
-        execute: async ({ attempt, leaseGeneration, leaseHolder, projectId, rootRunId, runId }) => {
+        execute: async ({
+          attempt,
+          leaseGeneration,
+          leaseHolder,
+          projectId,
+          rootRunId,
+          runId,
+          signal,
+        }) => {
           try {
-            const result = await invokeRuntime(fixed.checkout.path, fixed.revision.configPath, {
-              attempt,
-              endpoint,
-              input: validation.encodedInput,
-              leaseGeneration,
-              leaseHolder,
-              mode: "execute",
-              projectId,
-              ...(request.state === "Failed" ? { recoveryFailure: request.outcome } : {}),
-              rootRunId,
-              runId,
-              workflowName: request.revision.stableName,
-            });
+            const result = await invokeRuntime(
+              fixed.checkout.path,
+              fixed.revision.configPath,
+              {
+                attempt,
+                endpoint,
+                input: validation.encodedInput,
+                leaseGeneration,
+                leaseHolder,
+                mode: "execute",
+                projectId,
+                ...(request.state === "Failed" ? { recoveryFailure: request.outcome } : {}),
+                rootRunId,
+                runId,
+                workflowName: request.revision.stableName,
+              },
+              signal,
+            );
             if (
               result.state !== "Completed" &&
               result.state !== "Discarded" &&

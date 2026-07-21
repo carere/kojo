@@ -57,6 +57,7 @@ export interface PreparedWorkflowRun {
     readonly projectId: string;
     readonly rootRunId: string;
     readonly runId: string;
+    readonly signal: AbortSignal;
   }) => Promise<WorkflowExecutionOutcome>;
   readonly revision: PinnedWorkflowRevision;
   readonly revisionSnapshot: WorkflowRevisionSnapshot;
@@ -103,6 +104,7 @@ const decoded = <A>(value: string | null): A | null =>
 const decodedValue = <A>(value: string): A => (JSON.parse(value) as { readonly value: A }).value;
 
 export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRuntimeAdapter) => {
+  const executionControllers = new Map<string, AbortController>();
   const settlements = new Map<string, Promise<void>>();
 
   const finalize = (
@@ -209,6 +211,7 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
   const executeAttempt = async (
     execute: PreparedWorkflowRun["execute"],
     scope: ExecutionWriteScope,
+    controller: AbortController,
   ) => {
     const heartbeat = setInterval(() => {
       try {
@@ -220,12 +223,15 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
     heartbeat.unref();
     let outcome: WorkflowExecutionOutcome;
     try {
-      outcome = await execute(scope);
+      outcome = await execute({ ...scope, signal: controller.signal });
     } catch {
       store.workflowRuns.interruptScope(scope, "ProjectRuntimeProcessLost");
       return;
     } finally {
       clearInterval(heartbeat);
+      if (executionControllers.get(scope.runId) === controller) {
+        executionControllers.delete(scope.runId);
+      }
     }
     if (outcome.state === "Completed" || outcome.state === "Failed") {
       finalize(scope.runId, outcome, scope);
@@ -285,7 +291,11 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
         ...request,
         details: encoded(request.payload),
       }),
-    discard: (runId: string) => store.workflowRuns.discard(runId),
+    discard: (runId: string) => {
+      const discarded = store.workflowRuns.discard(runId);
+      if (discarded.state === "Discarded") executionControllers.get(runId)?.abort();
+      return discarded;
+    },
     gracefulStop: async () => {
       const runningRoots = store.workflowRuns
         .list()
@@ -436,8 +446,10 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
           rootRunId: inspected.rootRunId,
           runId,
         };
+        const controller = new AbortController();
+        executionControllers.set(runId, controller);
         const settlement = Promise.resolve().then(() =>
-          executeAttempt(prepared.execute, executionScope),
+          executeAttempt(prepared.execute, executionScope, controller),
         );
         settlements.set(runId, settlement);
         void settlement.catch(() => undefined);
@@ -533,8 +545,10 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
         rootRunId: runId,
         runId,
       };
+      const controller = new AbortController();
+      executionControllers.set(runId, controller);
       const settlement = Promise.resolve().then(async () => {
-        await executeAttempt(prepared.execute, executionScope);
+        await executeAttempt(prepared.execute, executionScope, controller);
       });
       settlements.set(runId, settlement);
       void settlement.catch(() => undefined);

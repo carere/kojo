@@ -587,10 +587,19 @@ describe("Workflow Run service", () => {
 
   test("immediately discards a Running run, fences its lease, and preserves uncertain evidence", async () => {
     const store = await makeStore();
+    let cleanupAttempted = false;
     const service = makeWorkflowRunService(store, {
       prepare: async () => ({
         encodedInput: {},
-        execute: async () => new Promise(() => undefined),
+        execute: ({ signal }) =>
+          new Promise((_, reject) => {
+            const abort = () => {
+              cleanupAttempted = true;
+              reject(new Error("discarded"));
+            };
+            if (signal.aborted) abort();
+            else signal.addEventListener("abort", abort, { once: true });
+          }),
         ...preparedRevision("running-discard", "running-discard-fingerprint", "5"),
       }),
     });
@@ -644,6 +653,8 @@ describe("Workflow Run service", () => {
         subject: "publish",
       }),
     ).toThrow("rejected a delayed execution write");
+    await service.settle(started.runId);
+    expect(cleanupAttempted).toBe(true);
     store.close();
   });
 
