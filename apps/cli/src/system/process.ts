@@ -419,6 +419,10 @@ export const runSystemProcess = async (home: string): Promise<void> => {
           /^\/v1\/workflow-runs\/([^/]+)\/runtime-configurations\/verify$/,
         );
         const artifactMatch = url.pathname.match(/^\/v1\/workflow-runs\/([^/]+)\/artifacts$/);
+        const childWorkflowMatch = url.pathname.match(/^\/v1\/workflow-runs\/([^/]+)\/children$/);
+        const childFinalizeMatch = url.pathname.match(
+          /^\/v1\/workflow-runs\/([^/]+)\/children\/finalize$/,
+        );
         if (url.pathname === "/v1/workflow-runs" && request.method === "POST") {
           try {
             const body = (await request.json()) as {
@@ -466,7 +470,7 @@ export const runSystemProcess = async (home: string): Promise<void> => {
         }
         if (workflowRunMatch !== null && request.method === "GET") {
           const runId = decodeURIComponent(workflowRunMatch[1] ?? "");
-          const run = workflowRunService?.inspect(runId);
+          const run = workflowRunService?.inspectTree(runId);
           if (run === undefined) {
             return Response.json(
               {
@@ -484,6 +488,114 @@ export const runSystemProcess = async (home: string): Promise<void> => {
             schemaVersion: 1,
             status: "succeeded",
           });
+        }
+        if (childWorkflowMatch !== null && request.method === "POST") {
+          try {
+            const runId = decodeURIComponent(childWorkflowMatch[1] ?? "");
+            const body = (await request.json()) as Record<string, unknown>;
+            if (
+              !Number.isInteger(body.attempt) ||
+              !Number.isInteger(body.leaseGeneration) ||
+              typeof body.leaseHolder !== "string" ||
+              typeof body.projectId !== "string" ||
+              typeof body.rootRunId !== "string" ||
+              typeof body.invocationKey !== "string" ||
+              !Array.isArray(body.recoveryTags) ||
+              !body.recoveryTags.every((tag) => typeof tag === "string") ||
+              !Array.isArray(body.recoveryPolicies) ||
+              !body.recoveryPolicies.every(
+                (policy) =>
+                  typeof policy === "object" &&
+                  policy !== null &&
+                  "workflowName" in policy &&
+                  typeof policy.workflowName === "string" &&
+                  "recoveryTags" in policy &&
+                  Array.isArray(policy.recoveryTags) &&
+                  policy.recoveryTags.every((tag: unknown) => typeof tag === "string"),
+              ) ||
+              typeof body.workflowName !== "string" ||
+              !("input" in body)
+            ) {
+              return Response.json({ error: "Invalid Child Workflow invocation" }, { status: 400 });
+            }
+            return Response.json(
+              workflowRunService?.startChild({
+                attempt: body.attempt as number,
+                input: body.input,
+                invocationKey: body.invocationKey,
+                leaseGeneration: body.leaseGeneration as number,
+                leaseHolder: body.leaseHolder,
+                projectId: body.projectId,
+                recoveryPolicies: body.recoveryPolicies as ReadonlyArray<{
+                  readonly recoveryTags: ReadonlyArray<string>;
+                  readonly workflowName: string;
+                }>,
+                recoveryTags: body.recoveryTags as ReadonlyArray<string>,
+                rootRunId: body.rootRunId,
+                runId,
+                workflowName: body.workflowName,
+              }),
+            );
+          } catch (error) {
+            return Response.json(
+              { error: error instanceof Error ? error.message : String(error) },
+              { status: 409 },
+            );
+          }
+        }
+        if (childFinalizeMatch !== null && request.method === "POST") {
+          try {
+            const runId = decodeURIComponent(childFinalizeMatch[1] ?? "");
+            const body = (await request.json()) as Record<string, unknown>;
+            const parentScope = body.parentScope as Record<string, unknown> | undefined;
+            if (
+              !Number.isInteger(body.attempt) ||
+              !Number.isInteger(body.leaseGeneration) ||
+              typeof body.leaseHolder !== "string" ||
+              typeof body.projectId !== "string" ||
+              typeof body.rootRunId !== "string" ||
+              typeof body.invocationKey !== "string" ||
+              typeof body.workflowName !== "string" ||
+              parentScope === undefined ||
+              !Number.isInteger(parentScope.attempt) ||
+              !Number.isInteger(parentScope.leaseGeneration) ||
+              typeof parentScope.leaseHolder !== "string" ||
+              typeof parentScope.projectId !== "string" ||
+              typeof parentScope.rootRunId !== "string" ||
+              typeof parentScope.runId !== "string" ||
+              (body.state !== "Completed" && body.state !== "Failed") ||
+              !("value" in body)
+            ) {
+              return Response.json({ error: "Invalid Child Workflow outcome" }, { status: 400 });
+            }
+            return Response.json(
+              workflowRunService?.finalizeChild({
+                attempt: body.attempt as number,
+                leaseGeneration: body.leaseGeneration as number,
+                leaseHolder: body.leaseHolder,
+                invocationKey: body.invocationKey,
+                parentScope: {
+                  attempt: parentScope.attempt as number,
+                  leaseGeneration: parentScope.leaseGeneration as number,
+                  leaseHolder: parentScope.leaseHolder,
+                  projectId: parentScope.projectId,
+                  rootRunId: parentScope.rootRunId,
+                  runId: parentScope.runId,
+                },
+                projectId: body.projectId,
+                rootRunId: body.rootRunId,
+                runId,
+                state: body.state,
+                value: body.value,
+                workflowName: body.workflowName,
+              }),
+            );
+          } catch (error) {
+            return Response.json(
+              { error: error instanceof Error ? error.message : String(error) },
+              { status: 409 },
+            );
+          }
         }
         if (workflowLifecycleMatch !== null && request.method === "POST") {
           const runId = decodeURIComponent(workflowLifecycleMatch[1] ?? "");

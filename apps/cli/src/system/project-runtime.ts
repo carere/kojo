@@ -29,6 +29,36 @@ const RuntimeConfigurationRecorder = Context.Reference<{
 }>("@kojo/workflow/RuntimeConfigurationRecorder", {
   defaultValue: () => ({ verify: () => Effect.void }),
 });
+interface RuntimeExecutionScope {
+  readonly attempt: number;
+  readonly leaseGeneration: number;
+  readonly leaseHolder: string;
+  readonly projectId: string;
+  readonly rootRunId: string;
+  readonly runId: string;
+}
+const CurrentExecutionScope = Context.Reference<RuntimeExecutionScope>(
+  "@kojo/workflow/RuntimeExecutionScope",
+  {
+    defaultValue: () => ({
+      attempt: 1,
+      leaseGeneration: 1,
+      leaseHolder: "",
+      projectId: "",
+      rootRunId: "",
+      runId: "",
+    }),
+  },
+);
+const ChildWorkflowInvoker = Context.Reference<{
+  readonly invoke: (
+    workflow: unknown,
+    key: string,
+    input: unknown,
+  ) => Effect.Effect<unknown, unknown, unknown>;
+}>("@kojo/workflow/ChildWorkflowInvoker", {
+  defaultValue: () => ({ invoke: () => Effect.die("Child Workflow runtime is unavailable") }),
+});
 const SandboxProvider = Context.Service<{
   readonly configuration: {
     readonly adapterVersion: string;
@@ -120,7 +150,7 @@ const decodeSchemaValue = async (schema: Schema.Top, value: unknown) =>
     Schema.decodeUnknownEffect(schema)(value) as Effect.Effect<unknown, unknown, never>,
   );
 
-const loadWorkflow = async (request: RuntimeRequest) => {
+const loadWorkflowRegistry = async (request: RuntimeRequest) => {
   const module = await import(new URL(request.configPath, `file://${process.cwd()}/`).href);
   const config = module.default as {
     readonly workflows?: ReadonlyArray<{
@@ -137,7 +167,12 @@ const loadWorkflow = async (request: RuntimeRequest) => {
   if (!Array.isArray(config?.workflows)) {
     throw new Error("kojo.config.ts did not expose a valid Workflow Registry");
   }
-  const workflow = config.workflows.find((candidate) => candidate.name === request.workflowName);
+  return config.workflows;
+};
+
+const loadWorkflow = async (request: RuntimeRequest) => {
+  const workflows = await loadWorkflowRegistry(request);
+  const workflow = workflows.find((candidate) => candidate.name === request.workflowName);
   if (workflow === undefined)
     throw new Error(`Developer Workflow '${request.workflowName}' was not found`);
   return workflow;
@@ -171,18 +206,19 @@ const executeWorkflow = async (
     rootRunId: request.rootRunId,
   };
   const recordActivity = async (
+    scope: RuntimeExecutionScope,
     executionId: string,
     name: string,
     attempt: number,
     operation: "Activity.Completed" | "Activity.Started",
     result: unknown,
   ) => {
-    const activityKey = `${runtimeRunId}:activity:${executionId}:${name}:${attempt}`;
+    const activityKey = `${scope.runId}:activity:${executionId}:${name}:${attempt}`;
     const response = await fetch(
-      `http://localhost/v1/workflow-runs/${encodeURIComponent(runtimeRunId)}/boundaries`,
+      `http://localhost/v1/workflow-runs/${encodeURIComponent(scope.runId)}/boundaries`,
       {
         body: JSON.stringify({
-          ...executionScope,
+          ...scope,
           ...(operation === "Activity.Started"
             ? { completionIdempotencyKey: `${activityKey}:Activity.Completed` }
             : {}),
@@ -210,11 +246,11 @@ const executeWorkflow = async (
         | "uncertain";
     };
   };
-  const readBoundary = async (idempotencyKey: string) => {
+  const readBoundary = async (scope: RuntimeExecutionScope, idempotencyKey: string) => {
     const response = await fetch(
-      `http://localhost/v1/workflow-runs/${encodeURIComponent(runtimeRunId)}/journal/read`,
+      `http://localhost/v1/workflow-runs/${encodeURIComponent(scope.runId)}/journal/read`,
       {
-        body: JSON.stringify({ ...executionScope, idempotencyKey }),
+        body: JSON.stringify({ ...scope, idempotencyKey }),
         headers: { "content-type": "application/json" },
         method: "POST",
         unix: request.endpoint,
@@ -227,16 +263,17 @@ const executeWorkflow = async (
     };
   };
   const recordKernelBoundary = async (
+    scope: RuntimeExecutionScope,
     idempotencyKey: string,
     operation: string,
     payload: unknown,
     subject: string,
   ) => {
     const response = await fetch(
-      `http://localhost/v1/workflow-runs/${encodeURIComponent(runtimeRunId)}/boundaries`,
+      `http://localhost/v1/workflow-runs/${encodeURIComponent(scope.runId)}/boundaries`,
       {
         body: JSON.stringify({
-          ...executionScope,
+          ...scope,
           idempotencyKey,
           operation,
           payload,
@@ -254,11 +291,15 @@ const executeWorkflow = async (
     if (recorded.status === "suspend") throw new Error("__KOJO_SUSPENDED__");
     if (recorded.status === "discard") throw new Error("__KOJO_DISCARDED__");
   };
-  const verifyRuntimeConfiguration = async (subject: string, snapshot: unknown) => {
+  const verifyRuntimeConfiguration = async (
+    scope: RuntimeExecutionScope,
+    subject: string,
+    snapshot: unknown,
+  ) => {
     const response = await fetch(
-      `http://localhost/v1/workflow-runs/${encodeURIComponent(runtimeRunId)}/runtime-configurations/verify`,
+      `http://localhost/v1/workflow-runs/${encodeURIComponent(scope.runId)}/runtime-configurations/verify`,
       {
-        body: JSON.stringify({ ...executionScope, snapshot, subject }),
+        body: JSON.stringify({ ...scope, snapshot, subject }),
         headers: { "content-type": "application/json" },
         method: "POST",
         unix: request.endpoint,
@@ -270,14 +311,18 @@ const executeWorkflow = async (
       throw new Error(`Runtime Configuration for '${subject}' does not match its durable snapshot`);
     }
   };
-  const finalizeTextArtifact = async (name: string, content: string) => {
+  const finalizeTextArtifact = async (
+    scope: RuntimeExecutionScope,
+    name: string,
+    content: string,
+  ) => {
     const mediaType = "text/plain; charset=utf-8";
     const fingerprint = createHash("sha256").update(content).digest("hex");
     const response = await fetch(
-      `http://localhost/v1/workflow-runs/${encodeURIComponent(runtimeRunId)}/artifacts`,
+      `http://localhost/v1/workflow-runs/${encodeURIComponent(scope.runId)}/artifacts`,
       {
         body: JSON.stringify({
-          ...executionScope,
+          ...scope,
           content: Buffer.from(content).toString("base64"),
           fingerprint,
           mediaType,
@@ -315,6 +360,189 @@ const executeWorkflow = async (
         }),
       }),
   });
+  const workflowRegistry = await loadWorkflowRegistry(request);
+  const childWorkflowInvoker = {
+    invoke: (candidate: unknown, invocationKey: string, childInput: unknown) =>
+      Effect.gen(function* () {
+        if (invocationKey.length === 0 || invocationKey !== invocationKey.trim()) {
+          return yield* Effect.die("Child Workflow invocation requires a non-empty stable key");
+        }
+        const child = candidate as (typeof workflowRegistry)[number];
+        if (!workflowRegistry.includes(child)) {
+          return yield* Effect.die(
+            `Child Workflow '${child.name}' is not part of the loaded Workflow Registry`,
+          );
+        }
+        const parentScope = yield* CurrentExecutionScope;
+        const parentPath = yield* DurablePath;
+        const durableInvocationKey = JSON.stringify([...parentPath, invocationKey]);
+        const encodedChildInput = yield* Effect.promise(() =>
+          encodeSchemaValue(child.input, childInput),
+        );
+        const response = yield* Effect.promise(() =>
+          fetch(
+            `http://localhost/v1/workflow-runs/${encodeURIComponent(parentScope.runId)}/children`,
+            {
+              body: JSON.stringify({
+                ...parentScope,
+                input: encodedChildInput,
+                invocationKey: durableInvocationKey,
+                recoveryPolicies: workflowRegistry.map((definition) => ({
+                  recoveryTags: Object.keys(definition.recovery ?? {}),
+                  workflowName: definition.name,
+                })),
+                recoveryTags: Object.keys(child.recovery ?? {}),
+                workflowName: child.name,
+              }),
+              headers: { "content-type": "application/json" },
+              method: "POST",
+              unix: request.endpoint,
+            },
+          ),
+        );
+        if (!response.ok) return yield* Effect.die(yield* Effect.promise(() => response.text()));
+        const started = (yield* Effect.promise(() => response.json())) as {
+          readonly attempt: number;
+          readonly leaseGeneration: number;
+          readonly leaseHolder: string;
+          readonly outcome: unknown;
+          readonly runId: string;
+          readonly state: string;
+          readonly status: "created" | "rejoined" | "resumed";
+        };
+        if (started.status === "rejoined") {
+          const value = (started.outcome as { readonly value?: unknown } | null)?.value;
+          if (started.state === "Completed") {
+            return yield* Effect.promise(() => decodeSchemaValue(child.success, value));
+          }
+          if (started.state === "Failed") {
+            const defect = value as { readonly _tag?: string; readonly cause?: string } | undefined;
+            if (defect?._tag === "Defect") return yield* Effect.die(defect.cause ?? "Child defect");
+            return yield* Effect.promise(() => decodeSchemaValue(child.failure, value)).pipe(
+              Effect.flatMap(Effect.fail),
+            );
+          }
+          return yield* Effect.die(`Child Workflow Run ${started.runId} is not ready to rejoin`);
+        }
+        const childScope: RuntimeExecutionScope = {
+          attempt: started.attempt,
+          leaseGeneration: started.leaseGeneration,
+          leaseHolder: started.leaseHolder,
+          projectId: parentScope.projectId,
+          rootRunId: parentScope.rootRunId,
+          runId: started.runId,
+        };
+        const parentInstance = yield* WorkflowEngine.WorkflowInstance;
+        const childInstance = WorkflowEngine.WorkflowInstance.initial(
+          parentInstance.workflow,
+          started.runId,
+        );
+        if (started.status === "resumed" && started.outcome !== null) {
+          const encodedFailure = (started.outcome as { readonly value?: unknown }).value;
+          const recoveredFailure = yield* Effect.promise(() =>
+            decodeSchemaValue(child.failure, encodedFailure),
+          );
+          const tag =
+            typeof recoveredFailure === "object" &&
+            recoveredFailure !== null &&
+            "_tag" in recoveredFailure &&
+            typeof recoveredFailure._tag === "string"
+              ? recoveredFailure._tag
+              : undefined;
+          const recover = tag === undefined ? undefined : child.recovery?.[tag];
+          if (recover !== undefined && tag !== undefined) {
+            yield* Effect.promise(() =>
+              recordKernelBoundary(
+                childScope,
+                `${childScope.runId}:recovery:${childScope.attempt}:${tag}:started`,
+                "Recovery.Started",
+                { failure: recoveredFailure },
+                tag,
+              ),
+            );
+            const recoveryExit = yield* Effect.exit(
+              recover(recoveredFailure).pipe(
+                Effect.provideService(CurrentExecutionScope, childScope),
+                Effect.provideService(WorkflowEngine.WorkflowInstance, childInstance),
+              ),
+            );
+            yield* Effect.promise(() =>
+              recordKernelBoundary(
+                childScope,
+                `${childScope.runId}:recovery:${childScope.attempt}:${tag}:${Exit.isSuccess(recoveryExit) ? "completed" : "failed"}`,
+                Exit.isSuccess(recoveryExit) ? "Recovery.Completed" : "Recovery.Failed",
+                Exit.isSuccess(recoveryExit) ? {} : { cause: Cause.pretty(recoveryExit.cause) },
+                tag,
+              ),
+            );
+            if (Exit.isFailure(recoveryExit)) return yield* Effect.failCause(recoveryExit.cause);
+          }
+        }
+        const childExit = yield* Effect.exit(
+          (child.run(childInput) as Effect.Effect<unknown, unknown, unknown>).pipe(
+            Effect.provideService(CurrentExecutionScope, childScope),
+            Effect.provideService(DurablePath, []),
+            Effect.provideService(ExecutionAttempt, started.attempt),
+            Effect.provideService(WorkflowEngine.WorkflowInstance, childInstance),
+          ),
+        );
+        yield* Scope.close(childInstance.scope, childExit);
+        if (Exit.isFailure(childExit)) {
+          const renderedCause = Cause.pretty(childExit.cause);
+          if (
+            renderedCause.includes("__KOJO_SUSPENDED__") ||
+            renderedCause.includes("__KOJO_DISCARDED__")
+          ) {
+            return yield* Effect.failCause(childExit.cause);
+          }
+        }
+        const failure = Exit.isFailure(childExit)
+          ? Cause.findErrorOption(childExit.cause)
+          : Option.none();
+        const terminal = Exit.isSuccess(childExit)
+          ? {
+              state: "Completed" as const,
+              value: yield* Effect.promise(() => encodeSchemaValue(child.success, childExit.value)),
+            }
+          : Option.isSome(failure) && !Cause.hasDies(childExit.cause)
+            ? {
+                state: "Failed" as const,
+                value: yield* Effect.promise(() => encodeSchemaValue(child.failure, failure.value)),
+              }
+            : Cause.hasInterrupts(childExit.cause)
+              ? {
+                  state: "Failed" as const,
+                  value: {
+                    _tag: "ChildWorkflow.Cancelled",
+                    reason: "ParentStoppedAwaiting",
+                  },
+                }
+              : {
+                  state: "Failed" as const,
+                  value: { _tag: "Defect", cause: Cause.pretty(childExit.cause) },
+                };
+        const finalized = yield* Effect.promise(() =>
+          fetch(
+            `http://localhost/v1/workflow-runs/${encodeURIComponent(started.runId)}/children/finalize`,
+            {
+              body: JSON.stringify({
+                ...childScope,
+                ...terminal,
+                invocationKey: durableInvocationKey,
+                parentScope,
+                workflowName: child.name,
+              }),
+              headers: { "content-type": "application/json" },
+              method: "POST",
+              unix: request.endpoint,
+            },
+          ),
+        );
+        if (!finalized.ok) return yield* Effect.die(yield* Effect.promise(() => finalized.text()));
+        if (Exit.isSuccess(childExit)) return childExit.value;
+        return yield* Effect.failCause(childExit.cause);
+      }),
+  };
   const kernel = EffectWorkflow.make(`kojo:${workflow.name}`, {
     error: workflow.failure,
     idempotencyKey: () => request.runId ?? "validation",
@@ -332,12 +560,17 @@ const executeWorkflow = async (
         Effect.provideService(DurableBoundaryRecorder, {
           record: (boundary) =>
             suppressCompensationForLifecycleControl(
-              Effect.promise(() =>
-                recordKernelBoundary(
-                  `${runtimeRunId}:${boundary.idempotencyKey}`,
-                  boundary.type,
-                  boundary.details ?? {},
-                  boundary.subject,
+              CurrentExecutionScope.pipe(
+                Effect.flatMap((scope) =>
+                  Effect.promise(() =>
+                    recordKernelBoundary(
+                      scope,
+                      `${scope.runId}:${boundary.idempotencyKey}`,
+                      boundary.type,
+                      boundary.details ?? {},
+                      boundary.subject,
+                    ),
+                  ),
                 ),
               ),
             ) as Effect.Effect<void>,
@@ -345,16 +578,26 @@ const executeWorkflow = async (
         Effect.provideService(RuntimeConfigurationRecorder, {
           verify: (subject, snapshot) =>
             suppressCompensationForLifecycleControl(
-              Effect.promise(() => verifyRuntimeConfiguration(subject, snapshot)),
+              CurrentExecutionScope.pipe(
+                Effect.flatMap((scope) =>
+                  Effect.promise(() => verifyRuntimeConfiguration(scope, subject, snapshot)),
+                ),
+              ),
             ) as Effect.Effect<void>,
         }),
         Effect.provideService(ExecutionArtifactRecorder, {
           finalizeText: (name, content) =>
             suppressCompensationForLifecycleControl(
-              Effect.promise(() => finalizeTextArtifact(name, content)),
+              CurrentExecutionScope.pipe(
+                Effect.flatMap((scope) =>
+                  Effect.promise(() => finalizeTextArtifact(scope, name, content)),
+                ),
+              ),
             ),
         }),
         Effect.provideService(ExecutionAttempt, runtimeAttempt),
+        Effect.provideService(ChildWorkflowInvoker, childWorkflowInvoker),
+        Effect.provideService(CurrentExecutionScope, { ...executionScope, runId: runtimeRunId }),
         Effect.provide(sandboxProviderLayer),
       ),
     )
@@ -382,6 +625,7 @@ const executeWorkflow = async (
           yield* suppressCompensationForLifecycleControl(
             Effect.promise(() =>
               recordKernelBoundary(
+                { ...executionScope, runId: runtimeRunId },
                 `${recoveryKey}:Recovery.Started`,
                 "Recovery.Started",
                 { failure },
@@ -393,6 +637,7 @@ const executeWorkflow = async (
           yield* suppressCompensationForLifecycleControl(
             Effect.promise(() =>
               recordKernelBoundary(
+                { ...executionScope, runId: runtimeRunId },
                 `${recoveryKey}:Recovery.${Exit.isSuccess(recoveryExit) ? "Completed" : "Failed"}`,
                 Exit.isSuccess(recoveryExit) ? "Recovery.Completed" : "Recovery.Failed",
                 Exit.isSuccess(recoveryExit) ? {} : { cause: Cause.pretty(recoveryExit.cause) },
@@ -434,9 +679,11 @@ const executeWorkflow = async (
 
 const makeDurableEngineLayer = (journal: {
   readonly readBoundary: (
+    scope: RuntimeExecutionScope,
     idempotencyKey: string,
   ) => Promise<{ readonly payload?: unknown; readonly status: "found" | "missing" }>;
   readonly recordActivity: (
+    scope: RuntimeExecutionScope,
     executionId: string,
     name: string,
     attempt: number,
@@ -455,6 +702,7 @@ const makeDurableEngineLayer = (journal: {
       | "uncertain";
   }>;
   readonly recordKernelBoundary: (
+    scope: RuntimeExecutionScope,
     idempotencyKey: string,
     operation: string,
     payload: unknown,
@@ -474,18 +722,26 @@ const makeDurableEngineLayer = (journal: {
         activityExecute: (activity, attempt) =>
           Effect.gen(function* () {
             const parent = yield* WorkflowEngine.WorkflowInstance;
+            const scope = yield* CurrentExecutionScope;
             const subject = yield* activitySubject(activity.name);
             const activityInstance = WorkflowEngine.WorkflowInstance.initial(
               parent.workflow,
               parent.executionId,
             );
             const claimed = yield* Effect.promise(() =>
-              journal.recordActivity(parent.executionId, subject, attempt, "Activity.Started", {
+              journal.recordActivity(
+                scope,
+                parent.executionId,
+                subject,
                 attempt,
-                idempotencyKey: `${parent.executionId}:${subject}`,
-                logicalIdentity: subject,
-                ordinal: attempt,
-              }),
+                "Activity.Started",
+                {
+                  attempt,
+                  idempotencyKey: `${parent.executionId}:${subject}`,
+                  logicalIdentity: subject,
+                  ordinal: attempt,
+                },
+              ),
             );
             if (claimed.status === "replay") {
               return claimed.payload as EffectWorkflow.Result<unknown, unknown>;
@@ -508,6 +764,7 @@ const makeDurableEngineLayer = (journal: {
             );
             const completion = yield* Effect.promise(() =>
               journal.recordActivity(
+                scope,
                 parent.executionId,
                 subject,
                 attempt,
@@ -526,19 +783,24 @@ const makeDurableEngineLayer = (journal: {
             return result;
           }),
         deferredDone: ({ deferredName, executionId, exit }) =>
-          Effect.promise(() =>
-            journal.recordKernelBoundary(
-              `${executionId}:deferred:${deferredName}`,
-              "Deferred.Completed",
-              exit,
-              deferredName,
-            ),
-          ),
+          Effect.gen(function* () {
+            const scope = yield* CurrentExecutionScope;
+            yield* Effect.promise(() =>
+              journal.recordKernelBoundary(
+                scope,
+                `${executionId}:deferred:${deferredName}`,
+                "Deferred.Completed",
+                exit,
+                deferredName,
+              ),
+            );
+          }),
         deferredResult: (value) =>
           Effect.gen(function* () {
             const instance = yield* WorkflowEngine.WorkflowInstance;
+            const scope = yield* CurrentExecutionScope;
             const stored = yield* Effect.promise(() =>
-              journal.readBoundary(`${instance.executionId}:deferred:${value.name}`),
+              journal.readBoundary(scope, `${instance.executionId}:deferred:${value.name}`),
             );
             return stored.status === "missing"
               ? Option.none()
@@ -566,8 +828,9 @@ const makeDurableEngineLayer = (journal: {
         resume: () => Effect.void,
         scheduleClock: (_workflow, { clock, executionId }) =>
           Effect.gen(function* () {
+            const scope = yield* CurrentExecutionScope;
             const idempotencyKey = `${executionId}:clock:${clock.name}`;
-            const stored = yield* Effect.promise(() => journal.readBoundary(idempotencyKey));
+            const stored = yield* Effect.promise(() => journal.readBoundary(scope, idempotencyKey));
             const deadline =
               stored.status === "found"
                 ? (stored.payload as { readonly deadline: number }).deadline
@@ -576,6 +839,7 @@ const makeDurableEngineLayer = (journal: {
               yield* suppressCompensationForLifecycleControl(
                 Effect.promise(() =>
                   journal.recordKernelBoundary(
+                    scope,
                     idempotencyKey,
                     "DurableClock.Scheduled",
                     { deadline },

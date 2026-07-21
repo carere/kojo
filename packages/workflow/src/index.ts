@@ -1,4 +1,5 @@
-import { Cron, type Effect, Schema } from "effect";
+import { Cron, Effect, Schema } from "effect";
+import { CompositionRuntime } from "./composition";
 
 export type {
   ActivityRetryBackoffContext,
@@ -60,9 +61,19 @@ export interface WorkflowDefinition<
       (failure: Schema.Schema.Type<Failure>) => Effect.Effect<void, never, Requirements>
     >
   >;
-  readonly run: (
-    input: Schema.Schema.Type<Input>,
-  ) => Effect.Effect<Schema.Schema.Type<Success>, Schema.Schema.Type<Failure>, Requirements>;
+  readonly run: {
+    (
+      input: Schema.Schema.Type<Input>,
+    ): Effect.Effect<Schema.Schema.Type<Success>, Schema.Schema.Type<Failure>, Requirements>;
+    (
+      key: string,
+      input: Schema.Schema.Type<Input>,
+    ): Effect.Effect<
+      Schema.Schema.Type<Success>,
+      Schema.Schema.Type<Failure>,
+      Requirements | import("effect/unstable/workflow").WorkflowEngine.WorkflowInstance
+    >;
+  };
 }
 
 export interface WorkflowOptions<
@@ -98,8 +109,8 @@ const makeWorkflow = <
 >(
   name: Name,
   options: WorkflowOptions<Input, Success, Failure, Requirements>,
-): WorkflowDefinition<Name, Input, Success, Failure, Requirements> =>
-  Object.freeze({
+): WorkflowDefinition<Name, Input, Success, Failure, Requirements> => {
+  const definition = {
     [WorkflowDefinitionTypeId]: WorkflowDefinitionTypeId,
     name,
     version: options.version,
@@ -108,8 +119,15 @@ const makeWorkflow = <
     success: options.success,
     failure: options.failure,
     recovery: Object.freeze({ ...options.recovery }),
-    run: options.run,
-  }) as WorkflowDefinition<Name, Input, Success, Failure, Requirements>;
+    run: ((...arguments_: [Schema.Schema.Type<Input>] | [string, Schema.Schema.Type<Input>]) =>
+      arguments_.length === 1
+        ? options.run(arguments_[0] as Schema.Schema.Type<Input>)
+        : CompositionRuntime.ChildWorkflowInvoker.pipe(
+            Effect.flatMap((invoker) => invoker.invoke(definition, arguments_[0], arguments_[1])),
+          )) as WorkflowDefinition<Name, Input, Success, Failure, Requirements>["run"],
+  } as WorkflowDefinition<Name, Input, Success, Failure, Requirements>;
+  return Object.freeze(definition);
+};
 
 export const Workflow = Object.freeze({ make: makeWorkflow });
 

@@ -356,11 +356,42 @@ export const makeProjectWorkflowRuntime = (
         typeof request.outcome._tag === "string"
           ? request.outcome._tag
           : undefined;
+      const rootRecoveryAvailable =
+        failureTag !== undefined && validation.recoveryTags?.includes(failureTag) === true;
+      let descendantRecoveryAvailable = false;
+      if (request.state === "Failed" && !rootRecoveryAvailable && failureTag !== "Defect") {
+        for (const descendant of request.descendantFailures) {
+          const descendantValidation = await invokeRuntime(
+            prepared.checkout.path,
+            prepared.revision.configPath,
+            {
+              input: descendant.input,
+              mode: "validate",
+              workflowName: descendant.workflowName,
+            },
+          );
+          const descendantTag =
+            typeof descendant.outcome === "object" &&
+            descendant.outcome !== null &&
+            "_tag" in descendant.outcome &&
+            typeof descendant.outcome._tag === "string"
+              ? descendant.outcome._tag
+              : undefined;
+          if (
+            descendantTag !== undefined &&
+            descendantTag !== "Defect" &&
+            descendantValidation.recoveryTags?.includes(descendantTag) === true
+          ) {
+            descendantRecoveryAvailable = true;
+            break;
+          }
+        }
+      }
       if (
         request.state === "Failed" &&
         (failureTag === undefined ||
           failureTag === "Defect" ||
-          validation.recoveryTags?.includes(failureTag) !== true)
+          (!rootRecoveryAvailable && !descendantRecoveryAvailable))
       ) {
         throw new WorkflowStartError(
           "WORKFLOW_INCOMPATIBLE",
@@ -391,7 +422,9 @@ export const makeProjectWorkflowRuntime = (
                 mode: "execute",
                 projectId,
                 projectPath: project.path,
-                ...(request.state === "Failed" ? { recoveryFailure: request.outcome } : {}),
+                ...(request.state === "Failed" && rootRecoveryAvailable
+                  ? { recoveryFailure: request.outcome }
+                  : {}),
                 rootRunId,
                 runId,
                 workflowName: request.revision.stableName,

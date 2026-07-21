@@ -130,6 +130,322 @@ export default defineConfig({ workflows: [example] });
     }
   });
 
+  test("executes a keyed Child Workflow with its own durable run scope", async () => {
+    const fixture = await mkdtemp(join(resolve(import.meta.dir, "../../.."), ".runtime-test-"));
+    cleanup.add(fixture);
+    const socketDirectory = await mkdtemp(join(tmpdir(), "kojo-runtime-child-socket-"));
+    cleanup.add(socketDirectory);
+    const socket = join(socketDirectory, "system.sock");
+    const requests: Array<{ readonly body: Record<string, unknown>; readonly path: string }> = [];
+    const server = Bun.serve({
+      async fetch(request) {
+        const path = new URL(request.url).pathname;
+        const body = (await request.json()) as Record<string, unknown>;
+        requests.push({ body, path });
+        if (path.endsWith("/children")) {
+          return Response.json({
+            attempt: 1,
+            leaseGeneration: 1,
+            leaseHolder: "lease-holder",
+            outcome: null,
+            runId: "run-child",
+            state: "Running",
+            status: "created",
+          });
+        }
+        if (path.endsWith("/children/finalize")) return Response.json({ state: "Completed" });
+        return Response.json({
+          status: body.operation === "Activity.Started" ? "execute" : "recorded",
+        });
+      },
+      unix: socket,
+    });
+    await Bun.write(
+      join(fixture, "workflow.ts"),
+      `import { Effect, Schema } from "../packages/workflow/node_modules/effect/src/index.ts";
+import { Activity } from "../packages/workflow/node_modules/effect/src/unstable/workflow/index.ts";
+import { Workflow, defineConfig } from "../packages/workflow/src/index.ts";
+const child = Workflow.make("child", {
+  version: "v1", entryPoint: "workflow.ts", input: Schema.String, success: Schema.String,
+  failure: Schema.Never,
+  run: (message) => Activity.make({ name: "child-echo", success: Schema.String, execute: Effect.succeed(message) }),
+});
+const parent = Workflow.make("parent", {
+  version: "v1", entryPoint: "workflow.ts", input: Schema.String, success: Schema.String,
+  failure: Schema.Never, run: (message) => child.run("stable-child", message),
+});
+export default defineConfig({ workflows: [parent, child] });
+`,
+    );
+
+    try {
+      const runtimeRequest = Buffer.from(
+        JSON.stringify({
+          attempt: 1,
+          configPath: "workflow.ts",
+          endpoint: socket,
+          input: "hello child",
+          leaseGeneration: 1,
+          leaseHolder: "lease-holder",
+          mode: "execute",
+          projectId: "project-1",
+          projectPath: fixture,
+          rootRunId: "run-root",
+          runId: "run-root",
+          workflowName: "parent",
+        }),
+      ).toString("base64url");
+      const runtimeProcess = Bun.spawn(
+        [process.execPath, "run", resolve(import.meta.dir, "../main.ts")],
+        {
+          cwd: fixture,
+          env: {
+            ...Bun.env,
+            KOJO_INTERNAL_PROJECT_RUNTIME: "1",
+            KOJO_RUNTIME_REQUEST: runtimeRequest,
+          },
+          stderr: "pipe",
+          stdout: "pipe",
+        },
+      );
+      const [exitCode, stderr, stdout] = await Promise.all([
+        runtimeProcess.exited,
+        new Response(runtimeProcess.stderr).text(),
+        new Response(runtimeProcess.stdout).text(),
+      ]);
+
+      expect(stderr).toBe("");
+      expect(exitCode).toBe(0);
+      expect(decodeProjectRuntimeResult(stdout)).toEqual({
+        state: "Completed",
+        value: "hello child",
+      });
+      expect(requests).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ path: "/v1/workflow-runs/run-root/children" }),
+          expect.objectContaining({
+            body: expect.objectContaining({ runId: "run-child" }),
+            path: "/v1/workflow-runs/run-child/boundaries",
+          }),
+          expect.objectContaining({ path: "/v1/workflow-runs/run-child/children/finalize" }),
+        ]),
+      );
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("binds Child Workflow keys within the parent durable path and resets the child path", async () => {
+    const fixture = await mkdtemp(join(resolve(import.meta.dir, "../../.."), ".runtime-test-"));
+    cleanup.add(fixture);
+    const socketDirectory = await mkdtemp(join(tmpdir(), "kojo-runtime-child-path-socket-"));
+    cleanup.add(socketDirectory);
+    const socket = join(socketDirectory, "system.sock");
+    const requests: Array<{ readonly body: Record<string, unknown>; readonly path: string }> = [];
+    let childOrdinal = 0;
+    const server = Bun.serve({
+      async fetch(request) {
+        const path = new URL(request.url).pathname;
+        const body = (await request.json()) as Record<string, unknown>;
+        requests.push({ body, path });
+        if (path.endsWith("/children")) {
+          childOrdinal += 1;
+          return Response.json({
+            attempt: 1,
+            leaseGeneration: 1,
+            leaseHolder: "lease-holder",
+            outcome: null,
+            runId: `run-child-${childOrdinal}`,
+            state: "Running",
+            status: "created",
+          });
+        }
+        if (path.endsWith("/children/finalize")) return Response.json({ state: "Completed" });
+        return Response.json({
+          status: body.operation === "Activity.Started" ? "execute" : "recorded",
+        });
+      },
+      unix: socket,
+    });
+    await Bun.write(
+      join(fixture, "workflow.ts"),
+      `import { Effect, Schema } from "../packages/workflow/node_modules/effect/src/index.ts";
+import { Activity } from "../packages/workflow/node_modules/effect/src/unstable/workflow/index.ts";
+import { Loop, Workflow, defineConfig } from "../packages/workflow/src/index.ts";
+const child = Workflow.make("child", {
+  version: "v1", entryPoint: "workflow.ts", input: Schema.String, success: Schema.String,
+  failure: Schema.Never,
+  run: (message) => Activity.make({ name: "child-echo", success: Schema.String, execute: Effect.succeed(message) }),
+});
+const parent = Workflow.make("parent", {
+  version: "v1", entryPoint: "workflow.ts", input: Schema.String, success: Schema.String,
+  failure: Loop.MaximumLimitReached,
+  run: (message) => Loop.run("tickets", {
+    maxIterations: 2,
+    effect: ({ iteration }) => child.run("stable-child", message + "-" + iteration),
+    repeatWhile: (value) => value.endsWith("-1"),
+  }),
+});
+export default defineConfig({ workflows: [parent, child] });
+`,
+    );
+
+    try {
+      const runtimeRequest = Buffer.from(
+        JSON.stringify({
+          attempt: 1,
+          configPath: "workflow.ts",
+          endpoint: socket,
+          input: "hello",
+          leaseGeneration: 1,
+          leaseHolder: "lease-holder",
+          mode: "execute",
+          projectId: "project-1",
+          projectPath: fixture,
+          rootRunId: "run-root",
+          runId: "run-root",
+          workflowName: "parent",
+        }),
+      ).toString("base64url");
+      const runtimeProcess = Bun.spawn(
+        [process.execPath, "run", resolve(import.meta.dir, "../main.ts")],
+        {
+          cwd: fixture,
+          env: {
+            ...Bun.env,
+            KOJO_INTERNAL_PROJECT_RUNTIME: "1",
+            KOJO_RUNTIME_REQUEST: runtimeRequest,
+          },
+          stderr: "pipe",
+          stdout: "pipe",
+        },
+      );
+      const [exitCode, stderr, stdout] = await Promise.all([
+        runtimeProcess.exited,
+        new Response(runtimeProcess.stderr).text(),
+        new Response(runtimeProcess.stdout).text(),
+      ]);
+
+      expect(stderr).toBe("");
+      expect(exitCode).toBe(0);
+      expect(decodeProjectRuntimeResult(stdout)).toEqual({ state: "Completed", value: "hello-2" });
+      expect(
+        requests
+          .filter(({ path }) => path.endsWith("/children"))
+          .map(({ body }) => body.invocationKey),
+      ).toEqual(['["tickets[1]","stable-child"]', '["tickets[2]","stable-child"]']);
+      expect(
+        requests
+          .filter(
+            ({ body, path }) =>
+              path.includes("run-child-") && body.operation === "Activity.Started",
+          )
+          .map(({ body }) => body.subject),
+      ).toEqual(["child-echo", "child-echo"]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("propagates suspension from a Child Workflow boundary without finalizing it as failed", async () => {
+    const fixture = await mkdtemp(join(resolve(import.meta.dir, "../../.."), ".runtime-test-"));
+    cleanup.add(fixture);
+    const socketDirectory = await mkdtemp(join(tmpdir(), "kojo-runtime-child-suspend-socket-"));
+    cleanup.add(socketDirectory);
+    const socket = join(socketDirectory, "system.sock");
+    const paths: Array<string> = [];
+    const server = Bun.serve({
+      async fetch(request) {
+        const path = new URL(request.url).pathname;
+        const body = (await request.json()) as Record<string, unknown>;
+        paths.push(path);
+        if (path.endsWith("/children")) {
+          return Response.json({
+            attempt: 1,
+            leaseGeneration: 1,
+            leaseHolder: "lease-holder",
+            outcome: null,
+            runId: "run-child",
+            state: "Running",
+            status: "created",
+          });
+        }
+        if (path.endsWith("/children/finalize")) {
+          return Response.json({ error: "Child is already Suspended" }, { status: 409 });
+        }
+        return Response.json({
+          status:
+            body.operation === "Activity.Started"
+              ? "execute"
+              : body.operation === "Activity.Completed"
+                ? "suspend"
+                : "recorded",
+        });
+      },
+      unix: socket,
+    });
+    await Bun.write(
+      join(fixture, "workflow.ts"),
+      `import { Effect, Schema } from "../packages/workflow/node_modules/effect/src/index.ts";
+import { Activity } from "../packages/workflow/node_modules/effect/src/unstable/workflow/index.ts";
+import { Workflow, defineConfig } from "../packages/workflow/src/index.ts";
+const child = Workflow.make("child", {
+  version: "v1", entryPoint: "workflow.ts", input: Schema.Void, success: Schema.String,
+  failure: Schema.Never,
+  run: () => Activity.make({ name: "child-work", success: Schema.String, execute: Effect.succeed("done") }),
+});
+const parent = Workflow.make("parent", {
+  version: "v1", entryPoint: "workflow.ts", input: Schema.Void, success: Schema.String,
+  failure: Schema.Never, run: () => child.run("stable-child", undefined),
+});
+export default defineConfig({ workflows: [parent, child] });
+`,
+    );
+
+    try {
+      const runtimeRequest = Buffer.from(
+        JSON.stringify({
+          attempt: 1,
+          configPath: "workflow.ts",
+          endpoint: socket,
+          leaseGeneration: 1,
+          leaseHolder: "lease-holder",
+          mode: "execute",
+          projectId: "project-1",
+          projectPath: fixture,
+          rootRunId: "run-root",
+          runId: "run-root",
+          workflowName: "parent",
+        }),
+      ).toString("base64url");
+      const runtimeProcess = Bun.spawn(
+        [process.execPath, "run", resolve(import.meta.dir, "../main.ts")],
+        {
+          cwd: fixture,
+          env: {
+            ...Bun.env,
+            KOJO_INTERNAL_PROJECT_RUNTIME: "1",
+            KOJO_RUNTIME_REQUEST: runtimeRequest,
+          },
+          stderr: "pipe",
+          stdout: "pipe",
+        },
+      );
+      const [exitCode, stderr, stdout] = await Promise.all([
+        runtimeProcess.exited,
+        new Response(runtimeProcess.stderr).text(),
+        new Response(runtimeProcess.stdout).text(),
+      ]);
+
+      expect(stderr).toBe("");
+      expect(exitCode).toBe(0);
+      expect(decodeProjectRuntimeResult(stdout)).toEqual({ state: "Suspended" });
+      expect(paths.some((path) => path.endsWith("/children/finalize"))).toBe(false);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("does not run Compensation when a settled Activity suspends the Workflow Run", async () => {
     const fixture = await mkdtemp(join(resolve(import.meta.dir, "../../.."), ".runtime-test-"));
     cleanup.add(fixture);
