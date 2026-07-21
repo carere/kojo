@@ -151,6 +151,39 @@ const isAncestor = Effect.fn("isAncestor")(function* (
   return result.exitCode === 0;
 });
 
+const hasExactCompletedIntegration = Effect.fn("hasExactCompletedIntegration")(function* (
+  target: PreparedTarget,
+  active: ActiveTargetIntegration,
+  localHead: string,
+) {
+  const issueHeadResult = yield* runProcess(
+    ["git", "rev-parse", "--verify", `${active.issueBranch}^{commit}`],
+    target.path,
+  );
+  if (issueHeadResult.exitCode !== 0) return false;
+  const issueHead = issueHeadResult.stdout.trim();
+  const firstParentMerges = yield* runText(
+    [
+      "git",
+      "rev-list",
+      "--first-parent",
+      "--merges",
+      "--parents",
+      `${active.baseSha}..${localHead}`,
+    ],
+    target.path,
+  );
+  return firstParentMerges
+    .split("\n")
+    .filter(Boolean)
+    .some((line) => {
+      const [, firstParent, secondParent, ...extraParents] = line.split(/\s+/);
+      return (
+        firstParent === active.baseSha && secondParent === issueHead && extraParents.length === 0
+      );
+    });
+});
+
 const ownerProcessIsAlive = (owner: string) => {
   const pid = Number(/^pid=(\d+)(?:\s|$)/.exec(owner.trim())?.[1]);
   if (!Number.isSafeInteger(pid) || pid < 1) return false;
@@ -381,6 +414,28 @@ const reconcileTargetCheckpoint = Effect.fn("reconcileTargetCheckpoint")(functio
     );
   }
   yield* runRequired(["git", "cat-file", "-e", `${checkpoint.safeSha}^{commit}`], target.path);
+
+  const completedIntegration =
+    !status &&
+    localHead !== checkpoint.safeSha &&
+    (yield* isAncestor(target.path, checkpoint.safeSha, localHead)) &&
+    (yield* hasExactCompletedIntegration(target, active, localHead));
+  if (completedIntegration) {
+    if (mergeHead.exitCode === 0) {
+      // Some commit tools create the correct merge commit but leave Git's
+      // transient merge files behind. The exact two-parent ancestry above is
+      // durable; only discard the stale operation metadata.
+      yield* runRequired(["git", "merge", "--quit"], target.path);
+    }
+    yield* ensureCleanWorktree(target.path);
+    yield* writeTargetCheckpoint(target.path, {
+      version: 1,
+      targetBranch: checkpoint.targetBranch,
+      safeSha: localHead,
+      ...(checkpoint.publishedSha ? { publishedSha: checkpoint.publishedSha } : {}),
+    });
+    return localHead;
+  }
 
   const needsReset =
     mergeHead.exitCode === 0 || Boolean(status) || localHead !== checkpoint.safeSha;

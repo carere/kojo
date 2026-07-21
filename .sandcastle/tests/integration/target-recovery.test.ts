@@ -88,6 +88,43 @@ const createTargetRepository = async () => {
 };
 
 describe("delivery target recovery", () => {
+  test("retains a clean reviewed integration with stale merge metadata", async () => {
+    const { issueBranch, repository, workstream } = await createTargetRepository();
+    await runGit(repository, "switch", "-c", issueBranch, workstream.delivery.sourceRevision);
+    await Bun.write(join(repository, "integrated.txt"), "reviewed issue\n");
+    await runGit(repository, "add", "integrated.txt");
+    await runGit(repository, "commit", "-m", "feat: reviewed issue");
+    const issueHead = await runGit(repository, "rev-parse", "HEAD");
+    await runGit(repository, "switch", "feat/delivery");
+
+    const target = await withBunServices(prepareTarget(repository, workstream));
+    const safeHead = await runGit(repository, "rev-parse", "HEAD");
+    await withBunServices(beginTargetIntegration(target, safeHead, issueBranch));
+    await runGit(repository, "merge", "--no-ff", "-m", "feat: integrate reviewed issue", issueHead);
+    await Bun.write(join(repository, "post-merge-repair.txt"), "reviewed repair\n");
+    await runGit(repository, "add", "post-merge-repair.txt");
+    await runGit(repository, "commit", "-m", "fix: reviewed integration");
+    const reviewedHead = await runGit(repository, "rev-parse", "HEAD");
+
+    await Bun.write(join(repository, ".git", "MERGE_HEAD"), `${issueHead}\n`);
+    await Bun.write(join(repository, ".git", "MERGE_MODE"), "no-ff\n");
+    await Bun.write(join(repository, ".git", "MERGE_MSG"), "stale completed merge\n");
+
+    const recovered = await withBunServices(prepareTarget(repository, workstream));
+    const repeated = await withBunServices(prepareTarget(repository, workstream));
+    const mergeHead = Bun.spawn(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"], {
+      cwd: repository,
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+
+    expect(recovered.baseSha).toBe(reviewedHead);
+    expect(repeated.baseSha).toBe(reviewedHead);
+    expect(await runGit(repository, "rev-parse", "HEAD")).toBe(reviewedHead);
+    expect(await mergeHead.exited).not.toBe(0);
+    expect(await recoveryRefs(repository)).toEqual([]);
+  });
+
   test("rewinds a rejected clean integration before retrying", async () => {
     const { issueBranch, repository, workstream } = await createTargetRepository();
     const target = await withBunServices(prepareTarget(repository, workstream));
