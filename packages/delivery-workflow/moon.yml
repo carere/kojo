@@ -7,7 +7,7 @@ tasks:
       mergeArgs: replace
 
   test:
-    command: bun node_modules/vitest/vitest.mjs run tests/delivery.test.ts
+    command: bun node_modules/vitest/vitest.mjs run tests
     description: Run the delivery Developer Workflow Acceptance Tests
     deps:
       - workflow:build
