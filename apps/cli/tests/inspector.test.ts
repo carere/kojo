@@ -225,6 +225,13 @@ describe("Dense Inspector projections", () => {
     expect((await inspector.list({ includeArchived: true })).map(({ runId }) => runId)).toContain(
       archivedDelivery.runId,
     );
+    const deliveryRunIds = (
+      await inspector.list({ includeArchived: true, workflowName: "delivery" })
+    ).map(({ runId }) => runId);
+    expect(deliveryRunIds).toEqual(
+      expect.arrayContaining([activeDelivery.runId, archivedDelivery.runId]),
+    );
+    expect(deliveryRunIds).not.toContain(activeOther.runId);
     store.close();
   });
 

@@ -305,18 +305,29 @@ test("navigates child runs and failure history without Project source", async ({
 test("composes facets, disambiguates workflows, and pins investigations", async ({ page }) => {
   await expect(page.getByRole("combobox", { name: "Workflow" }).locator("option")).toHaveText([
     "All workflows",
-    "checkout · project…t-1f9 / delivery",
-    "kojo · project…o-7a2 / delivery",
+    "delivery",
   ]);
+  await expect(
+    page.locator(".run-list .run-row").filter({ hasText: "run-failed-001" }),
+  ).toContainText("checkout · project…t-1f9");
+  await expect(
+    page.locator(".run-list .run-row").filter({ hasText: "run-completed-002" }),
+  ).toContainText("kojo · project…o-7a2");
 
-  await page.getByRole("combobox", { name: "Workflow" }).selectOption("project-kojo-7a2:delivery");
-  await expect(page.getByRole("button", { name: /run-completed-002/ })).toBeVisible();
-  await expect(page.getByText("PINNED OUTSIDE FILTERS")).toBeVisible();
+  await page.getByRole("combobox", { name: "Workflow" }).selectOption("delivery");
+  await expect(
+    page.locator(".run-list .run-row").filter({ hasText: "run-failed-001" }),
+  ).toBeVisible();
+  await expect(
+    page.locator(".run-list .run-row").filter({ hasText: "run-completed-002" }),
+  ).toBeVisible();
+  await expect(page.getByText("PINNED OUTSIDE FILTERS")).toHaveCount(0);
 
-  await page.getByRole("combobox", { name: "Workflow" }).selectOption("all");
   await page.getByRole("combobox", { name: "Project" }).selectOption("project-kojo-7a2");
   await expect(page.getByText("PINNED OUTSIDE FILTERS")).toBeVisible();
-  await expect(page.getByRole("button", { name: /run-completed-002/ })).toBeVisible();
+  await expect(
+    page.locator(".run-list .run-row").filter({ hasText: "run-completed-002" }),
+  ).toBeVisible();
   await expect(page.getByTestId("selected-subject")).toContainText("run-failed-001");
 
   await page.getByRole("combobox", { name: "State" }).selectOption("Failed");
