@@ -9,8 +9,10 @@ import {
   Layer,
   Option,
   Schema,
+  Scope,
 } from "effect";
 import { Workflow as EffectWorkflow, WorkflowEngine } from "effect/unstable/workflow";
+import { CompositionRuntime } from "./composition";
 import type { WorkflowDefinition } from "./index";
 
 export namespace WorkflowTest {
@@ -210,6 +212,7 @@ const make = <
     string,
     { readonly exit?: Exit.Exit<unknown, unknown>; readonly uncertain: boolean }
   >();
+  const controlJournal = new Set<string>();
   const ids = [...(makeOptions.ids ?? [])];
   let generatedId = 0;
   let attempt = 0;
@@ -226,12 +229,19 @@ const make = <
   const clock: Clock.Clock = {
     currentTimeMillis: Effect.sync(() => currentTime),
     currentTimeMillisUnsafe: () => currentTime,
-    currentTimeNanos: Effect.sync(() => BigInt(currentTime) * 1_000_000n),
-    currentTimeNanosUnsafe: () => BigInt(currentTime) * 1_000_000n,
-    sleep: (duration) =>
-      Effect.sync(() => {
-        currentTime += Duration.toMillis(duration);
-      }),
+    currentTimeNanos: Effect.sync(
+      () => BigInt(Number.isFinite(currentTime) ? Math.trunc(currentTime) : 0) * 1_000_000n,
+    ),
+    currentTimeNanosUnsafe: () =>
+      BigInt(Number.isFinite(currentTime) ? Math.trunc(currentTime) : 0) * 1_000_000n,
+    sleep: (duration) => {
+      const milliseconds = Duration.toMillis(duration);
+      return Number.isFinite(milliseconds)
+        ? Effect.sync(() => {
+            currentTime += milliseconds;
+          })
+        : Effect.never;
+    },
   };
 
   const execute = async (
@@ -281,6 +291,37 @@ const make = <
         throw new SuspendedSignal();
       }
       return event;
+    };
+
+    const appendWithoutLifecycleCompensation = (type: string, subject: string, details?: unknown) =>
+      Effect.gen(function* () {
+        const instance = yield* WorkflowEngine.WorkflowInstance;
+        try {
+          append(type, subject, details);
+        } catch (error) {
+          if (error instanceof InterruptedSignal || error instanceof SuspendedSignal) {
+            yield* Scope.close(instance.scope, Exit.void);
+          }
+          return yield* Effect.die(error);
+        }
+      });
+
+    const boundaryRecorder = {
+      record: (boundary: {
+        readonly details?: unknown;
+        readonly idempotencyKey: string;
+        readonly subject: string;
+        readonly type: string;
+      }) =>
+        Effect.gen(function* () {
+          if (controlJournal.has(boundary.idempotencyKey)) return;
+          controlJournal.add(boundary.idempotencyKey);
+          yield* appendWithoutLifecycleCompensation(
+            boundary.type,
+            boundary.subject,
+            boundary.details,
+          );
+        }) as Effect.Effect<void>,
     };
 
     const recorder: RecorderService = {
@@ -349,13 +390,21 @@ const make = <
           activityExecute: (activity, activityAttempt) =>
             Effect.gen(function* () {
               const parent = yield* WorkflowEngine.WorkflowInstance;
-              const key = `${parent.executionId}:${activity.name}:${activityAttempt}`;
+              const subject = yield* CompositionRuntime.activitySubject(activity.name);
+              const idempotencyKey = `${parent.executionId}:${subject}`;
+              const details = {
+                activityAttempt,
+                idempotencyKey,
+                logicalIdentity: subject,
+                ordinal: activityAttempt,
+              };
+              const key = `${idempotencyKey}:${activityAttempt}`;
               const stored = activityJournal.get(key);
               if (stored !== undefined) {
-                append("Activity.Replayed", activity.name, { activityAttempt });
+                append("Activity.Replayed", subject, details);
                 return stored;
               }
-              append("Activity.Started", activity.name, { activityAttempt });
+              append("Activity.Started", subject, details);
               const instance = WorkflowEngine.WorkflowInstance.initial(
                 parent.workflow,
                 parent.executionId,
@@ -374,7 +423,7 @@ const make = <
                     : Cause.hasDies(result.exit.cause)
                       ? "Defected"
                       : "Failed";
-              append(`Activity.${activityOutcome}`, activity.name, { activityAttempt, result });
+              append(`Activity.${activityOutcome}`, subject, { ...details, result });
               return result;
             }),
           deferredDone: ({ deferredName, executionId, exit }) =>
@@ -411,16 +460,22 @@ const make = <
             }),
           resume: () => Effect.void,
           scheduleClock: (_definition, { clock: durableClock, executionId }) =>
-            Effect.sync(() => {
+            Effect.gen(function* () {
               const key = `${executionId}:${durableClock.deferred.name}`;
               if (deferredJournal.has(key)) return;
-              append("DurableClock.Scheduled", durableClock.name, {
-                duration: Duration.toMillis(durableClock.duration),
-              });
-              currentTime += Duration.toMillis(durableClock.duration);
+              yield* appendWithoutLifecycleCompensation(
+                "DurableClock.Scheduled",
+                durableClock.name,
+                { duration: Duration.toMillis(durableClock.duration) },
+              );
+              const milliseconds = Duration.toMillis(durableClock.duration);
+              if (Number.isFinite(milliseconds)) currentTime += milliseconds;
               deferredJournal.set(key, Exit.void);
-              append("DurableClock.Completed", durableClock.name);
-            }),
+              yield* appendWithoutLifecycleCompensation(
+                "DurableClock.Completed",
+                durableClock.name,
+              );
+            }) as Effect.Effect<void>,
         });
         return engine;
       }),
@@ -445,6 +500,9 @@ const make = <
         );
       }),
     ) as Effect.Effect<unknown, unknown, unknown>;
+    handler = handler.pipe(
+      Effect.provideService(CompositionRuntime.BoundaryRecorder, boundaryRecorder),
+    );
     if (makeOptions.layer !== undefined) {
       handler = handler.pipe(Effect.provide(makeOptions.layer as Layer.Layer<never, never, never>));
     }

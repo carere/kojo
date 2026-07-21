@@ -32,6 +32,38 @@ export default defineConfig({
 });
 ```
 
+## Durable composition
+
+`Loop.run` requires an explicit stable name and a positive `maxIterations`. Its body receives a
+one-based `iteration` and the previous successful value. `repeatWhile` decides whether to continue;
+when it remains true at the limit, the Loop fails with `Loop.MaximumLimitReached`. Nested Loop
+names and iterations become part of every Activity's durable identity.
+
+```ts
+const verified = yield* Loop.run("implement-and-verify", {
+  maxIterations: 3,
+  effect: ({ iteration, previous }) => implementAndVerify({ iteration, previous }),
+  repeatWhile: (result) => !result.verified,
+});
+```
+
+`ActivityRetry.run` retries an Effect Workflow Activity only when its typed `while` predicate
+selects the failure. `maxAttempts` includes the initial attempt. Every attempt keeps one logical
+identity and idempotency key, receives a new ordinal, and waits through a named durable backoff.
+Replay consumes the same total budget and preserves the final Typed Failure at exhaustion.
+
+```ts
+const receipt = yield* ActivityRetry.run(publishActivity, {
+  maxAttempts: 3,
+  while: (failure) => failure._tag === "TemporarilyUnavailable",
+  backoff: ({ ordinal }) => `${ordinal * 5} seconds`,
+});
+```
+
+Use Effect Workflow's `withCompensation` for Compensation. Durable Activities used by its
+finalizers retain ordinary journal identity and evidence, run idempotently in reverse registration
+order after terminal failure, and are not a separate Kojo primitive.
+
 The default export of the nearest repository-root `kojo.config.ts` must synchronously call
 `defineConfig` with explicitly imported definitions. `defineConfig` performs no I/O and validates
 the whole registry before returning it.

@@ -1,5 +1,35 @@
-import { Cause, Duration, Effect, Exit, Layer, Option, Schema } from "effect";
+import { Cause, Context, Duration, Effect, Exit, Layer, Option, Schema, Scope } from "effect";
 import { Workflow as EffectWorkflow, WorkflowEngine } from "effect/unstable/workflow";
+
+const DurableBoundaryRecorder = Context.Reference<{
+  readonly record: (boundary: {
+    readonly details?: unknown;
+    readonly idempotencyKey: string;
+    readonly subject: string;
+    readonly type: string;
+  }) => Effect.Effect<void>;
+}>("@kojo/workflow/DurableBoundaryRecorder", {
+  defaultValue: () => ({ record: () => Effect.void }),
+});
+const DurablePath = Context.Reference<ReadonlyArray<string>>("@kojo/workflow/DurablePath", {
+  defaultValue: () => [],
+});
+const activitySubject = (activityName: string) =>
+  DurablePath.pipe(Effect.map((path) => [...path, activityName].join("/")));
+
+const suppressCompensationForLifecycleControl = <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R | WorkflowEngine.WorkflowInstance> =>
+  Effect.gen(function* () {
+    const instance = yield* WorkflowEngine.WorkflowInstance;
+    const exit = yield* Effect.exit(effect);
+    if (Exit.isSuccess(exit)) return exit.value;
+    const cause = Cause.pretty(exit.cause);
+    if (cause.includes("__KOJO_SUSPENDED__") || cause.includes("__KOJO_DISCARDED__")) {
+      yield* Scope.close(instance.scope, Exit.void);
+    }
+    return yield* Effect.failCause(exit.cause);
+  });
 
 interface RuntimeRequest {
   readonly attempt?: number;
@@ -172,7 +202,23 @@ const executeWorkflow = async (
     recordKernelBoundary,
   });
   const handlerLayer = kernel
-    .toLayer(({ input }) => workflow.run(input) as Effect.Effect<unknown, unknown>)
+    .toLayer(({ input }) =>
+      (workflow.run(input) as Effect.Effect<unknown, unknown>).pipe(
+        Effect.provideService(DurableBoundaryRecorder, {
+          record: (boundary) =>
+            suppressCompensationForLifecycleControl(
+              Effect.promise(() =>
+                recordKernelBoundary(
+                  `${runtimeRunId}:${boundary.idempotencyKey}`,
+                  boundary.type,
+                  boundary.details ?? {},
+                  boundary.subject,
+                ),
+              ),
+            ) as Effect.Effect<void>,
+        }),
+      ),
+    )
     .pipe(Layer.provide(engineLayer));
   const recoveryInstance = WorkflowEngine.WorkflowInstance.initial(kernel, runtimeRunId);
   const recovery =
@@ -194,21 +240,25 @@ const executeWorkflow = async (
             return yield* Effect.die("The Failed Workflow Run has no matching Recovery Handler");
           }
           const recoveryKey = `${runtimeRunId}:recovery:${runtimeAttempt}:${tag}`;
-          yield* Effect.promise(() =>
-            recordKernelBoundary(
-              `${recoveryKey}:Recovery.Started`,
-              "Recovery.Started",
-              { failure },
-              tag,
+          yield* suppressCompensationForLifecycleControl(
+            Effect.promise(() =>
+              recordKernelBoundary(
+                `${recoveryKey}:Recovery.Started`,
+                "Recovery.Started",
+                { failure },
+                tag,
+              ),
             ),
           );
           const recoveryExit = yield* Effect.exit(handler(failure));
-          yield* Effect.promise(() =>
-            recordKernelBoundary(
-              `${recoveryKey}:Recovery.${Exit.isSuccess(recoveryExit) ? "Completed" : "Failed"}`,
-              Exit.isSuccess(recoveryExit) ? "Recovery.Completed" : "Recovery.Failed",
-              Exit.isSuccess(recoveryExit) ? {} : { cause: Cause.pretty(recoveryExit.cause) },
-              tag,
+          yield* suppressCompensationForLifecycleControl(
+            Effect.promise(() =>
+              recordKernelBoundary(
+                `${recoveryKey}:Recovery.${Exit.isSuccess(recoveryExit) ? "Completed" : "Failed"}`,
+                Exit.isSuccess(recoveryExit) ? "Recovery.Completed" : "Recovery.Failed",
+                Exit.isSuccess(recoveryExit) ? {} : { cause: Cause.pretty(recoveryExit.cause) },
+                tag,
+              ),
             ),
           );
           if (Exit.isFailure(recoveryExit)) return yield* Effect.failCause(recoveryExit.cause);
@@ -285,32 +335,32 @@ const makeDurableEngineLayer = (journal: {
         activityExecute: (activity, attempt) =>
           Effect.gen(function* () {
             const parent = yield* WorkflowEngine.WorkflowInstance;
+            const subject = yield* activitySubject(activity.name);
             const activityInstance = WorkflowEngine.WorkflowInstance.initial(
               parent.workflow,
               parent.executionId,
             );
             const claimed = yield* Effect.promise(() =>
-              journal.recordActivity(
-                parent.executionId,
-                activity.name,
+              journal.recordActivity(parent.executionId, subject, attempt, "Activity.Started", {
                 attempt,
-                "Activity.Started",
-                { attempt },
-              ),
+                idempotencyKey: `${parent.executionId}:${subject}`,
+                logicalIdentity: subject,
+                ordinal: attempt,
+              }),
             );
             if (claimed.status === "replay") {
               return claimed.payload as EffectWorkflow.Result<unknown, unknown>;
             }
             if (claimed.status === "suspend" || claimed.status === "suspended") {
+              yield* Scope.close(parent.scope, Exit.void);
               return yield* Effect.die("__KOJO_SUSPENDED__");
             }
             if (claimed.status === "discard" || claimed.status === "discarded") {
+              yield* Scope.close(parent.scope, Exit.void);
               return yield* Effect.die("__KOJO_DISCARDED__");
             }
             if (claimed.status !== "execute") {
-              return yield* Effect.die(
-                `Activity '${activity.name}' has an Uncertain Activity Outcome`,
-              );
+              return yield* Effect.die(`Activity '${subject}' has an Uncertain Activity Outcome`);
             }
             const result = yield* activity.executeEncoded.pipe(
               EffectWorkflow.intoResult,
@@ -320,16 +370,18 @@ const makeDurableEngineLayer = (journal: {
             const completion = yield* Effect.promise(() =>
               journal.recordActivity(
                 parent.executionId,
-                activity.name,
+                subject,
                 attempt,
                 "Activity.Completed",
                 result,
               ),
             );
             if (completion.status === "suspend" || completion.status === "suspended") {
+              yield* Scope.close(parent.scope, Exit.void);
               return yield* Effect.die("__KOJO_SUSPENDED__");
             }
             if (completion.status === "discard" || completion.status === "discarded") {
+              yield* Scope.close(parent.scope, Exit.void);
               return yield* Effect.die("__KOJO_DISCARDED__");
             }
             return result;
@@ -382,12 +434,14 @@ const makeDurableEngineLayer = (journal: {
                 ? (stored.payload as { readonly deadline: number }).deadline
                 : Date.now() + Duration.toMillis(clock.duration);
             if (stored.status === "missing") {
-              yield* Effect.promise(() =>
-                journal.recordKernelBoundary(
-                  idempotencyKey,
-                  "DurableClock.Scheduled",
-                  { deadline },
-                  clock.name,
+              yield* suppressCompensationForLifecycleControl(
+                Effect.promise(() =>
+                  journal.recordKernelBoundary(
+                    idempotencyKey,
+                    "DurableClock.Scheduled",
+                    { deadline },
+                    clock.name,
+                  ),
                 ),
               );
             }
@@ -404,7 +458,7 @@ const makeDurableEngineLayer = (journal: {
                 }),
               ).catch(() => undefined);
             }, remaining);
-          }),
+          }) as Effect.Effect<void>,
       });
       return engine;
     }),

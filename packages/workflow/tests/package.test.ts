@@ -39,7 +39,9 @@ describe("published package", () => {
     const root = await import("@kojo/workflow");
 
     expect(Object.keys(root).sort()).toEqual([
+      "ActivityRetry",
       "COMPATIBILITY",
+      "Loop",
       "RegistryValidationError",
       "Schedule",
       "Workflow",

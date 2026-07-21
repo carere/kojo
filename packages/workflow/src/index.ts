@@ -1,5 +1,12 @@
 import { Cron, type Effect, Schema } from "effect";
 
+export type {
+  ActivityRetryBackoffContext,
+  ActivityRetryOptions,
+  LoopIteration,
+  LoopOptions,
+} from "./composition";
+export { ActivityRetry, Loop } from "./composition";
 export { WorkflowTest } from "./workflow-test";
 
 export const COMPATIBILITY = Object.freeze({
