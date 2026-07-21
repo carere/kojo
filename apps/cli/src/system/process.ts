@@ -502,6 +502,17 @@ export const runSystemProcess = async (home: string): Promise<void> => {
               typeof body.invocationKey !== "string" ||
               !Array.isArray(body.recoveryTags) ||
               !body.recoveryTags.every((tag) => typeof tag === "string") ||
+              !Array.isArray(body.recoveryPolicies) ||
+              !body.recoveryPolicies.every(
+                (policy) =>
+                  typeof policy === "object" &&
+                  policy !== null &&
+                  "workflowName" in policy &&
+                  typeof policy.workflowName === "string" &&
+                  "recoveryTags" in policy &&
+                  Array.isArray(policy.recoveryTags) &&
+                  policy.recoveryTags.every((tag: unknown) => typeof tag === "string"),
+              ) ||
               typeof body.workflowName !== "string" ||
               !("input" in body)
             ) {
@@ -515,6 +526,10 @@ export const runSystemProcess = async (home: string): Promise<void> => {
                 leaseGeneration: body.leaseGeneration as number,
                 leaseHolder: body.leaseHolder,
                 projectId: body.projectId,
+                recoveryPolicies: body.recoveryPolicies as ReadonlyArray<{
+                  readonly recoveryTags: ReadonlyArray<string>;
+                  readonly workflowName: string;
+                }>,
                 recoveryTags: body.recoveryTags as ReadonlyArray<string>,
                 rootRunId: body.rootRunId,
                 runId,

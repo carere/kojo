@@ -584,7 +584,7 @@ const make = <
           if (parent === undefined)
             return yield* Effect.die(`Workflow Run ${current.runId} is missing`);
           const path = yield* CompositionRuntime.DurablePath;
-          const invocationKey = `${parent.runId}:${[...path, key].join("/")}`;
+          const invocationKey = `${parent.runId}:${JSON.stringify([...path, key])}`;
           const existing = childBindings.get(invocationKey);
           let child: RunRecord;
           if (existing === undefined) {

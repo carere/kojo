@@ -159,6 +159,39 @@ describe("WorkflowTest", () => {
     );
   });
 
+  test("keeps Child Workflow key segments structural when author keys contain path syntax", async () => {
+    const child = Workflow.make("StructuralKeyChild", {
+      version: "1",
+      entryPoint: "workflows/structural-key-child.ts",
+      input: Schema.String,
+      success: Schema.String,
+      failure: Schema.Never,
+      run: Effect.succeed,
+    });
+    const parent = Workflow.make("StructuralKeyParent", {
+      version: "1",
+      entryPoint: "workflows/structural-key-parent.ts",
+      input: Schema.Void,
+      success: Schema.Void,
+      failure: Loop.MaximumLimitReached,
+      run: () =>
+        Effect.gen(function* () {
+          yield* child.run("tickets[1]/same", "root");
+          yield* Loop.run("tickets", {
+            maxIterations: 1,
+            effect: () => child.run("same", "nested"),
+            repeatWhile: () => false,
+          });
+        }),
+    });
+
+    const result = await WorkflowTest.make(parent, { workflows: [child] }).run(undefined);
+
+    expect(result.state).toBe("Completed");
+    expect(result.children.map(({ input }) => input)).toEqual(["root", "nested"]);
+    expect(result.children[0]?.runId).not.toBe(result.children[1]?.runId);
+  });
+
   test("lets a parent handle a Child Workflow Typed Failure without rewriting child history", async () => {
     const ChildFailure = Schema.TaggedStruct("ChildFailure", { reason: Schema.String });
     const child = Workflow.make("FailingChild", {
@@ -265,6 +298,52 @@ describe("WorkflowTest", () => {
     expect(discarded.children[0]?.state).toBe("Discarded");
     expect(discarded.children[0]?.evidence.at(-1)?.type).toBe("WorkflowRun.Discarded");
     expect(discarded.evidence.at(-1)?.type).toBe("WorkflowRun.Discarded");
+  });
+
+  test("reopens failed ancestors to reach a recoverable deepest descendant", async () => {
+    const Recoverable = Schema.TaggedStruct("DeepRecovery", {});
+    let recovered = false;
+    const leaf = Workflow.make("RecoveryLeaf", {
+      version: "1",
+      entryPoint: "workflows/recovery-leaf.ts",
+      input: Schema.Void,
+      success: Schema.String,
+      failure: Recoverable,
+      recovery: {
+        DeepRecovery: () => Effect.sync(() => (recovered = true)),
+      },
+      run: () =>
+        recovered ? Effect.succeed("deeply recovered") : Effect.fail({ _tag: "DeepRecovery" }),
+    });
+    const branch = Workflow.make("RecoveryBranch", {
+      version: "1",
+      entryPoint: "workflows/recovery-branch.ts",
+      input: Schema.Void,
+      success: Schema.String,
+      failure: Recoverable,
+      run: () => leaf.run("leaf", undefined),
+    });
+    const root = Workflow.make("RecoveryRoot", {
+      version: "1",
+      entryPoint: "workflows/recovery-root.ts",
+      input: Schema.Void,
+      success: Schema.String,
+      failure: Recoverable,
+      run: () => branch.run("branch", undefined),
+    });
+    const fixture = WorkflowTest.make(root, { workflows: [branch, leaf] });
+
+    const failed = await fixture.run(undefined);
+    const resumed = await fixture.resume();
+
+    expect(failed.children[0]?.children[0]).toMatchObject({ state: "Failed" });
+    expect(resumed).toMatchObject({ state: "Completed" });
+    expect(resumed.children[0]).toMatchObject({ attempt: 2, state: "Completed" });
+    expect(resumed.children[0]?.children[0]).toMatchObject({
+      attempt: 2,
+      outcome: { _tag: "Success", value: "deeply recovered" },
+      state: "Completed",
+    });
   });
 
   test("recreates one named Sandbox around committed work and reuses it within an attempt", async () => {

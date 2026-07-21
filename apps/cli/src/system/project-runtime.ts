@@ -374,6 +374,8 @@ const executeWorkflow = async (
           );
         }
         const parentScope = yield* CurrentExecutionScope;
+        const parentPath = yield* DurablePath;
+        const durableInvocationKey = JSON.stringify([...parentPath, invocationKey]);
         const encodedChildInput = yield* Effect.promise(() =>
           encodeSchemaValue(child.input, childInput),
         );
@@ -384,7 +386,11 @@ const executeWorkflow = async (
               body: JSON.stringify({
                 ...parentScope,
                 input: encodedChildInput,
-                invocationKey,
+                invocationKey: durableInvocationKey,
+                recoveryPolicies: workflowRegistry.map((definition) => ({
+                  recoveryTags: Object.keys(definition.recovery ?? {}),
+                  workflowName: definition.name,
+                })),
                 recoveryTags: Object.keys(child.recovery ?? {}),
                 workflowName: child.name,
               }),
@@ -475,11 +481,21 @@ const executeWorkflow = async (
         const childExit = yield* Effect.exit(
           (child.run(childInput) as Effect.Effect<unknown, unknown, unknown>).pipe(
             Effect.provideService(CurrentExecutionScope, childScope),
+            Effect.provideService(DurablePath, []),
             Effect.provideService(ExecutionAttempt, started.attempt),
             Effect.provideService(WorkflowEngine.WorkflowInstance, childInstance),
           ),
         );
         yield* Scope.close(childInstance.scope, childExit);
+        if (Exit.isFailure(childExit)) {
+          const renderedCause = Cause.pretty(childExit.cause);
+          if (
+            renderedCause.includes("__KOJO_SUSPENDED__") ||
+            renderedCause.includes("__KOJO_DISCARDED__")
+          ) {
+            return yield* Effect.failCause(childExit.cause);
+          }
+        }
         const failure = Exit.isFailure(childExit)
           ? Cause.findErrorOption(childExit.cause)
           : Option.none();
@@ -512,7 +528,7 @@ const executeWorkflow = async (
               body: JSON.stringify({
                 ...childScope,
                 ...terminal,
-                invocationKey,
+                invocationKey: durableInvocationKey,
                 parentScope,
                 workflowName: child.name,
               }),

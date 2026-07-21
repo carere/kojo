@@ -432,6 +432,21 @@ export const kojoSchemaVersion = migrations.length;
 
 const encodePayload = (value: unknown) => JSON.stringify({ encodingVersion: 1, value });
 const decodePayload = <A>(value: string): A => (JSON.parse(value) as { readonly value: A }).value;
+const decodeChildInvocationBinding = (value: string) => {
+  try {
+    const segments = JSON.parse(value) as unknown;
+    if (
+      Array.isArray(segments) &&
+      segments.length > 0 &&
+      segments.every((segment) => typeof segment === "string")
+    ) {
+      return { key: segments.at(-1) as string, path: segments.slice(0, -1) };
+    }
+  } catch {
+    // Earlier callers and repository-level tests use an unscoped root key.
+  }
+  return { key: value, path: [] };
+};
 
 const chmodIfPresent = async (path: string) => {
   try {
@@ -1786,12 +1801,33 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
           transaction.insert(evidenceEvents).values(record.evidence).run();
           if (record.parentNotification !== undefined) {
             assertExecutionScope(transaction, record.parentNotification.scope);
+            const outcome = decodePayload<unknown>(record.outcome);
+            const isDefect =
+              record.state === "Failed" &&
+              typeof outcome === "object" &&
+              outcome !== null &&
+              "_tag" in outcome &&
+              outcome._tag === "Defect";
             insertBoundary(transaction, {
               ...record.parentNotification.scope,
-              details: record.outcome,
+              details: encodePayload({
+                childRunId: record.runId,
+                ...(record.state === "Completed"
+                  ? { result: outcome }
+                  : {
+                      cause: {
+                        runId: record.runId,
+                        type: isDefect ? "Defect" : "TypedFailure",
+                      },
+                    }),
+              }),
               idempotencyKey: `${record.parentNotification.scope.runId}:child:${record.parentNotification.invocationKey}:observed`,
               operation:
-                record.state === "Completed" ? "ChildWorkflow.Completed" : "ChildWorkflow.Failed",
+                record.state === "Completed"
+                  ? "ChildWorkflow.Completed"
+                  : isDefect
+                    ? "ChildWorkflow.Defected"
+                    : "ChildWorkflow.Failed",
               subject: record.parentNotification.workflowName,
             });
           }
@@ -2016,6 +2052,7 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
         reconcileExpiredScope(record.parentScope);
         return database.transaction((transaction) => {
           assertExecutionScope(transaction, record.parentScope);
+          const binding = decodeChildInvocationBinding(record.invocationKey);
           const existing = transaction
             .select()
             .from(workflowRuns)
@@ -2039,7 +2076,7 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
               ...record.parentScope,
               details: JSON.stringify({
                 encodingVersion: 1,
-                value: { childRunId: existing.runId, key: record.invocationKey },
+                value: { childRunId: existing.runId, ...binding },
               }),
               idempotencyKey: `${record.parentScope.runId}:child:${record.invocationKey}:rejoined:${record.parentScope.attempt}`,
               operation: "ChildWorkflow.Rejoined",
@@ -2116,7 +2153,7 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
               value: {
                 childRunId: record.run.runId,
                 input: JSON.parse(record.run.input),
-                key: record.invocationKey,
+                ...binding,
                 workflow: record.revision.stableName,
               },
             }),

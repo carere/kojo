@@ -73,10 +73,14 @@ export interface WorkflowRuntimeAdapter {
 
 export interface WorkflowResumePreflightRequest {
   readonly attempt: number;
+  readonly descendantFailures: ReadonlyArray<{
+    readonly input: unknown;
+    readonly outcome: unknown;
+    readonly workflowName: string;
+  }>;
   readonly input: unknown;
   readonly outcome: unknown;
   readonly projectId: string;
-  readonly propagatedChildFailure?: boolean;
   readonly revision: PinnedWorkflowRevision;
   readonly revisionSnapshot: WorkflowRevisionSnapshot;
   readonly rootRunId: string;
@@ -235,10 +239,30 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
     controller: AbortController,
   ) => {
     const heartbeat = setInterval(() => {
-      try {
-        store.workflowRuns.renewLease(scope, new Date(Date.now() + 5 * 60_000).toISOString());
-      } catch {
-        // The next fenced write or finalization will reconcile lost authority.
+      const expiresAt = new Date(Date.now() + 5 * 60_000).toISOString();
+      const runningTree = store.workflowRuns
+        .list()
+        .filter((run) => run.rootRunId === scope.rootRunId && run.state === "Running");
+      for (const run of runningTree) {
+        try {
+          const stored = store.workflowRuns.find(run.runId);
+          const lease = stored?.lease;
+          const attempt = stored?.attempts.at(-1);
+          if (lease === undefined || attempt === undefined) continue;
+          store.workflowRuns.renewLease(
+            {
+              attempt: attempt.number,
+              leaseGeneration: lease.generation,
+              leaseHolder: lease.holder,
+              projectId: run.projectId,
+              rootRunId: run.rootRunId,
+              runId: run.runId,
+            },
+            expiresAt,
+          );
+        } catch {
+          // The next fenced write or finalization will reconcile lost authority.
+        }
       }
     }, 60_000);
     heartbeat.unref();
@@ -315,6 +339,10 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
       request: ExecutionWriteScope & {
         readonly input: unknown;
         readonly invocationKey: string;
+        readonly recoveryPolicies?: ReadonlyArray<{
+          readonly recoveryTags: ReadonlyArray<string>;
+          readonly workflowName: string;
+        }>;
         readonly recoveryTags: ReadonlyArray<string>;
         readonly workflowName: string;
       },
@@ -351,6 +379,42 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
         typeof existingOutcome._tag === "string"
           ? existingOutcome._tag
           : undefined;
+      const recoveryPolicies = new Map(
+        (
+          request.recoveryPolicies ?? [
+            { recoveryTags: request.recoveryTags, workflowName: request.workflowName },
+          ]
+        ).map((policy) => [policy.workflowName, policy.recoveryTags]),
+      );
+      const allRuns = store.workflowRuns.list();
+      const isInExistingSubtree = (candidate: (typeof allRuns)[number]) => {
+        if (existingChild === undefined) return false;
+        let current: (typeof allRuns)[number] | undefined = candidate;
+        while (current?.parentRunId !== null && current?.parentRunId !== undefined) {
+          if (current.parentRunId === existingChild.runId) return true;
+          current = allRuns.find(
+            ({ runId: candidateRunId }) => candidateRunId === current?.parentRunId,
+          );
+        }
+        return false;
+      };
+      const recoverableDescendant = allRuns.some((candidate) => {
+        if (candidate.state !== "Failed" || !isInExistingSubtree(candidate)) return false;
+        const stored = store.workflowRuns.find(candidate.runId);
+        if (stored?.run.outcome === null || stored?.run.outcome === undefined) return false;
+        const outcome = decodedValue<unknown>(stored.run.outcome);
+        const tag =
+          typeof outcome === "object" &&
+          outcome !== null &&
+          "_tag" in outcome &&
+          typeof outcome._tag === "string"
+            ? outcome._tag
+            : undefined;
+        return (
+          tag !== undefined &&
+          recoveryPolicies.get(stored.revision.stableName)?.includes(tag) === true
+        );
+      });
       const start = store.workflowRuns.startChild({
         attempt: { finishedAt: null, number: 1, runId, startedAt: now, state: "Running" },
         evidence: {
@@ -386,7 +450,8 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
         },
         parentScope: request,
         resumeFailed:
-          existingFailureTag !== undefined && request.recoveryTags.includes(existingFailureTag),
+          (existingFailureTag !== undefined && request.recoveryTags.includes(existingFailureTag)) ||
+          recoverableDescendant,
         revision: {
           createdAt: now,
           declaredVersion: revision.declaredVersion,
@@ -623,13 +688,32 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
         );
       }
       const nextAttempt = (inspected.attempts.at(-1)?.number ?? 0) + 1;
+      const descendantFailures = store.workflowRuns
+        .list()
+        .filter(
+          (run) =>
+            run.rootRunId === inspected.rootRunId &&
+            run.runId !== inspected.runId &&
+            run.state === "Failed",
+        )
+        .flatMap((run) => {
+          const stored = store.workflowRuns.find(run.runId);
+          if (stored?.run.outcome === null || stored?.run.outcome === undefined) return [];
+          const descendantOutcome = decodedValue<unknown>(stored.run.outcome);
+          if (canonicalJson(descendantOutcome) !== canonicalJson(outcome)) return [];
+          return [
+            {
+              input: decodedValue<unknown>(stored.run.input),
+              outcome: descendantOutcome,
+              workflowName: stored.revision.stableName,
+            },
+          ];
+        });
       return prepareResume({
         attempt: nextAttempt - 1,
+        descendantFailures,
         input: decodedValue(store.workflowRuns.find(runId)?.run.input ?? encoded(undefined)),
         outcome,
-        propagatedChildFailure: inspected.evidence.some(
-          ({ type }) => type === "ChildWorkflow.Failed" || type === "ChildWorkflow.Defected",
-        ),
         projectId: inspected.projectId,
         revision: inspected.revision,
         revisionSnapshot: inspected.revisionSnapshot,
