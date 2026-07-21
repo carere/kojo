@@ -501,6 +501,61 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
 
   try {
     const database = drizzle(sqlite);
+    const integrity = database.get<[unknown]>(sql.raw("PRAGMA integrity_check"))?.[0];
+    if (integrity !== "ok") {
+      throw new Error("state.sqlite failed its integrity check");
+    }
+    const metadataTable = sqlite
+      .query(
+        "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'system_metadata'",
+      )
+      .get() as { readonly present: number } | null;
+    const recordedSchemaVersion =
+      metadataTable === null
+        ? undefined
+        : (
+            sqlite
+              .query("SELECT value FROM system_metadata WHERE key = 'schema_version'")
+              .get() as { readonly value: string } | null
+          )?.value;
+    if (recordedSchemaVersion !== undefined) {
+      const parsedSchemaVersion = Number(recordedSchemaVersion);
+      if (!Number.isSafeInteger(parsedSchemaVersion) || parsedSchemaVersion < 0) {
+        throw new Error(
+          `state.sqlite schema version ${recordedSchemaVersion} is invalid and cannot be migrated safely`,
+        );
+      }
+      if (parsedSchemaVersion > kojoSchemaVersion) {
+        throw new Error(
+          `state.sqlite schema version ${parsedSchemaVersion} is newer than supported version ${kojoSchemaVersion}`,
+        );
+      }
+    }
+    const migrationTable = sqlite
+      .query(
+        "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'kojo_migrations'",
+      )
+      .get() as { readonly present: number } | null;
+    const applied =
+      migrationTable === null
+        ? []
+        : (sqlite
+            .query("SELECT id, checksum FROM kojo_migrations ORDER BY id")
+            .all() as ReadonlyArray<{ readonly checksum: string; readonly id: number }>);
+    for (const [index, appliedMigration] of applied.entries()) {
+      const expected = migrations[index];
+      if (expected === undefined) {
+        throw new Error(
+          `state.sqlite schema migration ${appliedMigration.id} is newer than this Kojo version`,
+        );
+      }
+      if (appliedMigration.id !== expected.id) {
+        throw new Error(
+          `state.sqlite migrations are not an ordered prefix; expected ${expected.id} but found ${appliedMigration.id}`,
+        );
+      }
+    }
+
     database.get(sql.raw("PRAGMA journal_mode = WAL"));
     database.run(sql.raw("PRAGMA synchronous = FULL"));
     database.run(sql.raw("PRAGMA foreign_keys = ON"));
@@ -518,10 +573,6 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
     ) {
       throw new Error("state.sqlite could not enable its required durability settings");
     }
-    const integrity = database.get<[unknown]>(sql.raw("PRAGMA integrity_check"))?.[0];
-    if (integrity !== "ok") {
-      throw new Error("state.sqlite failed its integrity check");
-    }
 
     database.run(
       sql.raw(`CREATE TABLE IF NOT EXISTS kojo_migrations (
@@ -530,25 +581,6 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
       applied_at TEXT NOT NULL
     )`),
     );
-
-    const applied = database
-      .select({ checksum: kojoMigrations.checksum, id: kojoMigrations.id })
-      .from(kojoMigrations)
-      .orderBy(kojoMigrations.id)
-      .all();
-    for (const [index, appliedMigration] of applied.entries()) {
-      const expected = migrations[index];
-      if (expected === undefined) {
-        throw new Error(
-          `state.sqlite schema migration ${appliedMigration.id} is newer than this Kojo version`,
-        );
-      }
-      if (appliedMigration.id !== expected.id) {
-        throw new Error(
-          `state.sqlite migrations are not an ordered prefix; expected ${expected.id} but found ${appliedMigration.id}`,
-        );
-      }
-    }
 
     for (const migration of migrations) {
       const checksum = migrationChecksum(migration.statements);

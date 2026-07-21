@@ -665,13 +665,44 @@ describe("Kojo System Process", () => {
       home,
       error: {
         action: expect.any(String),
-        code: "MIGRATION_FAILED",
+        code: "DATABASE_CORRUPT",
         message: expect.stringContaining("state.sqlite"),
       },
       process: null,
       schemaVersion: 1,
       status: "failed",
     });
+    expect(await Bun.file(join(home, "state.sqlite")).text()).toBe("not a sqlite database");
+  }, 20_000);
+
+  test("refuses a newer schema without silently downgrading its metadata", async () => {
+    const home = await makeHome();
+    const initialized = await openSystemStore(home);
+    initialized.close();
+    const database = new Database(join(home, "state.sqlite"));
+    database.run("UPDATE system_metadata SET value = '999' WHERE key = 'schema_version'");
+    database.close();
+
+    const result = runCli(home, "start");
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.json).toMatchObject({
+      command: "start",
+      home,
+      error: {
+        action: expect.any(String),
+        code: "SCHEMA_VERSION_INCOMPATIBLE",
+        message: expect.stringContaining("newer than supported version"),
+      },
+      process: null,
+      schemaVersion: 1,
+      status: "failed",
+    });
+    const unchanged = new Database(join(home, "state.sqlite"), { readonly: true });
+    expect(
+      unchanged.query("SELECT value FROM system_metadata WHERE key = 'schema_version'").get(),
+    ).toEqual({ value: "999" });
+    unchanged.close();
   }, 20_000);
 
   test("refuses a changed migration with an actionable machine result", async () => {

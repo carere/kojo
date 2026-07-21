@@ -1,7 +1,17 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import {
   backupKojoHome,
@@ -89,6 +99,35 @@ describe("Kojo Home maintenance", () => {
     ).rejects.toThrow("checksum");
   });
 
+  test("replaces an artifact symlink instead of restoring outside Kojo Home", async () => {
+    const home = await makeTemporaryDirectory("restore-symlink-home");
+    const destination = join(await makeTemporaryDirectory("restore-symlink-backup"), "snapshot");
+    const outside = join(await makeTemporaryDirectory("restore-symlink-outside"), "artifact");
+    const store = await openSystemStore(home);
+    const artifact = Buffer.from("immutable artifact\n");
+    const fingerprint = sha256(artifact);
+    const artifactPath = join("artifacts", fingerprint);
+    await mkdir(join(home, "artifacts"), { recursive: true });
+    await writeFile(join(home, artifactPath), artifact);
+    const database = new Database(join(home, "state.sqlite"));
+    database.run(
+      "INSERT INTO execution_artifacts (fingerprint, path, media_type, byte_length, created_at) VALUES (?, ?, ?, ?, ?)",
+      [fingerprint, artifactPath, "text/plain", artifact.byteLength, new Date().toISOString()],
+    );
+    database.close();
+    await backupKojoHome(home, destination);
+    store.close();
+    await rm(join(home, artifactPath));
+    await writeFile(outside, artifact);
+    await symlink(outside, join(home, artifactPath));
+
+    await withStoppedKojoHome(home, () => restoreKojoHome(home, destination));
+
+    expect((await lstat(join(home, artifactPath))).isFile()).toBe(true);
+    expect(await readFile(join(home, artifactPath), "utf8")).toBe("immutable artifact\n");
+    expect(await readFile(outside, "utf8")).toBe("immutable artifact\n");
+  });
+
   test("requires stopped lock authority for destructive maintenance and preserves canonical history", async () => {
     const home = await makeTemporaryDirectory("verify-home");
     const store = await openSystemStore(home);
@@ -154,6 +193,29 @@ describe("Kojo Home maintenance", () => {
     expect(backups).toHaveLength(1);
     expect(backups[0]).toStartWith("before-migration-5-");
     expect((await verifyBackup(join(home, "backups", backups[0] ?? ""))).schemaVersion).toBe(4);
+  });
+
+  test("refuses a newer schema without rewriting or compacting it", async () => {
+    const home = await makeTemporaryDirectory("newer-schema-home");
+    const initialized = await openSystemStore(home);
+    initialized.close();
+    const databasePath = join(home, "state.sqlite");
+    const database = new Database(databasePath);
+    database.run("UPDATE system_metadata SET value = '999' WHERE key = 'schema_version'");
+    database.close();
+    const before = sha256(await readFile(databasePath));
+
+    await expect(openSystemStore(home)).rejects.toThrow("newer than supported version");
+    await expect(withStoppedKojoHome(home, () => compactKojoHome(home))).rejects.toThrow(
+      "Compaction stopped without modifying",
+    );
+
+    const unchanged = new Database(databasePath, { readonly: true });
+    expect(
+      unchanged.query("SELECT value FROM system_metadata WHERE key = 'schema_version'").get(),
+    ).toEqual({ value: "999" });
+    unchanged.close();
+    expect(sha256(await readFile(databasePath))).toBe(before);
   });
 
   test("refuses maintenance while a live System Process lock exists", async () => {

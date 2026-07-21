@@ -87,6 +87,30 @@ const resolveInside = (root: string, path: string) => {
   return resolvedPath;
 };
 
+const assertNoSymbolicLinkComponents = async (
+  root: string,
+  path: string,
+  options?: { readonly allowFinal?: boolean },
+) => {
+  const parts = path.split(/[\\/]/).filter((part) => part.length > 0);
+  let current = resolve(root);
+  for (const [index, part] of parts.entries()) {
+    current = join(current, part);
+    try {
+      const details = await lstat(current);
+      if (
+        details.isSymbolicLink() &&
+        !(options?.allowFinal === true && index === parts.length - 1)
+      ) {
+        throw new Error(`Execution Artifact path contains a symbolic link: ${path}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+  }
+};
+
 const readArtifacts = (database: Database): ReadonlyArray<ArtifactRecord> => {
   const table = database
     .query(
@@ -181,7 +205,9 @@ const inspectDatabase = async (home: string, databasePath: string) => {
     if (!Number.isSafeInteger(schemaVersion) || schemaVersion > kojoSchemaVersion) {
       diagnostics.push({
         code: "SCHEMA_VERSION_INCOMPATIBLE",
-        message: `state.sqlite schema version ${String(schemaVersion)} is newer than supported version ${kojoSchemaVersion}.`,
+        message: Number.isSafeInteger(schemaVersion)
+          ? `state.sqlite schema version ${String(schemaVersion)} is newer than supported version ${kojoSchemaVersion}.`
+          : "state.sqlite schema version is invalid; restore a verified backup or repair the migration metadata.",
       });
     }
     diagnostics.push(...inspectMigrations(database));
@@ -190,6 +216,7 @@ const inspectDatabase = async (home: string, databasePath: string) => {
       let artifactPath: string;
       try {
         artifactPath = resolveInside(home, artifact.path);
+        await assertNoSymbolicLinkComponents(home, artifact.path);
       } catch (error) {
         diagnostics.push({
           code: "ARTIFACT_MISSING",
@@ -326,6 +353,7 @@ export const backupKojoHome = async (home: string, destination: string) => {
     for (const artifact of artifacts) {
       const sourcePath = resolveInside(canonicalHome, artifact.path);
       const destinationPath = resolveInside(staging, artifact.path);
+      await assertNoSymbolicLinkComponents(canonicalHome, artifact.path);
       const details = await lstat(sourcePath).catch((error) => {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") {
           throw new Error(
@@ -344,11 +372,22 @@ export const backupKojoHome = async (home: string, destination: string) => {
       await mkdir(dirname(destinationPath), { mode: 0o700, recursive: true });
       await copyFile(sourcePath, destinationPath);
       await chmod(destinationPath, 0o600);
+      const copiedDetails = await lstat(destinationPath);
+      const copiedChecksum = await checksumFile(destinationPath);
+      if (
+        !copiedDetails.isFile() ||
+        copiedDetails.size !== artifact.byte_length ||
+        copiedChecksum !== artifact.fingerprint
+      ) {
+        throw new Error(
+          `Copied Execution Artifact ${artifact.path} does not match its durable fingerprint`,
+        );
+      }
       manifestArtifacts.push({
-        byteLength: details.size,
+        byteLength: copiedDetails.size,
         fingerprint: artifact.fingerprint,
         path: artifact.path,
-        sha256: checksum,
+        sha256: copiedChecksum,
       });
     }
 
@@ -370,6 +409,7 @@ export const backupKojoHome = async (home: string, destination: string) => {
     };
     const manifestPath = join(staging, "manifest.json");
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+    await verifyBackup(staging);
     await rename(staging, canonicalDestination);
     return {
       artifactCount: manifestArtifacts.length,
@@ -384,29 +424,52 @@ export const backupKojoHome = async (home: string, destination: string) => {
 };
 
 const decodeManifest = async (backup: string): Promise<BackupManifest> => {
-  let manifest: BackupManifest;
+  let decoded: unknown;
   try {
-    manifest = JSON.parse(await readFile(join(backup, "manifest.json"), "utf8")) as BackupManifest;
+    decoded = JSON.parse(await readFile(join(backup, "manifest.json"), "utf8")) as unknown;
   } catch (error) {
     throw new Error(
       `Backup manifest could not be read: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  const manifest = decoded as Partial<BackupManifest>;
   if (
+    typeof decoded !== "object" ||
+    decoded === null ||
     manifest.formatVersion !== backupFormatVersion ||
     !Array.isArray(manifest.artifacts) ||
+    !manifest.artifacts.every(
+      (artifact) =>
+        typeof artifact === "object" &&
+        artifact !== null &&
+        Number.isSafeInteger(artifact.byteLength) &&
+        artifact.byteLength >= 0 &&
+        typeof artifact.fingerprint === "string" &&
+        artifact.fingerprint.length > 0 &&
+        typeof artifact.path === "string" &&
+        artifact.path.length > 0 &&
+        typeof artifact.sha256 === "string" &&
+        artifact.sha256.length > 0,
+    ) ||
     typeof manifest.createdAt !== "string" ||
+    typeof manifest.database !== "object" ||
+    manifest.database === null ||
+    manifest.database.path !== "state.sqlite" ||
+    !Number.isSafeInteger(manifest.database.byteLength) ||
+    manifest.database.byteLength < 0 ||
     typeof manifest.database?.sha256 !== "string" ||
     typeof manifest.manifestChecksum !== "string" ||
-    !Number.isSafeInteger(manifest.schemaVersion)
+    !Number.isSafeInteger(manifest.schemaVersion) ||
+    (manifest.schemaVersion ?? -1) < 0
   ) {
     throw new Error("Backup manifest is invalid or incompatible");
   }
-  const { manifestChecksum, ...body } = manifest;
+  const validManifest = manifest as BackupManifest;
+  const { manifestChecksum, ...body } = validManifest;
   if (sha256(canonicalManifestBody(body)) !== manifestChecksum) {
     throw new Error("Backup manifest checksum does not match its contents");
   }
-  return manifest;
+  return validManifest;
 };
 
 export const verifyBackup = async (backup: string) => {
@@ -418,8 +481,10 @@ export const verifyBackup = async (backup: string) => {
     );
   }
   const databasePath = resolveInside(canonicalBackup, manifest.database.path);
-  const databaseDetails = await stat(databasePath);
+  await assertNoSymbolicLinkComponents(canonicalBackup, manifest.database.path);
+  const databaseDetails = await lstat(databasePath);
   if (
+    !databaseDetails.isFile() ||
     databaseDetails.size !== manifest.database.byteLength ||
     (await checksumFile(databasePath)) !== manifest.database.sha256
   ) {
@@ -427,6 +492,7 @@ export const verifyBackup = async (backup: string) => {
   }
   for (const artifact of manifest.artifacts) {
     const path = resolveInside(canonicalBackup, artifact.path);
+    await assertNoSymbolicLinkComponents(canonicalBackup, artifact.path);
     const details = await lstat(path).catch((error) => {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         throw new Error(`Backup Execution Artifact ${artifact.path} is missing`);
@@ -489,36 +555,70 @@ export const restoreKojoHome = async (home: string, backup: string) => {
   const canonicalBackup = resolve(backup);
   const verified = await verifyBackup(canonicalBackup);
   const manifest = await decodeManifest(canonicalBackup);
+  if (manifest.manifestChecksum !== verified.manifestChecksum) {
+    throw new Error("Backup manifest changed while restore was preparing");
+  }
 
   for (const artifact of manifest.artifacts) {
     const sourcePath = resolveInside(canonicalBackup, artifact.path);
     const destinationPath = resolveInside(canonicalHome, artifact.path);
+    await assertNoSymbolicLinkComponents(canonicalBackup, artifact.path);
+    await assertNoSymbolicLinkComponents(canonicalHome, artifact.path, { allowFinal: true });
     await mkdir(dirname(destinationPath), { mode: 0o700, recursive: true });
-    const existingChecksum = await checksumFile(destinationPath).catch(() => undefined);
+    const existingDetails = await lstat(destinationPath).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    });
+    const existingChecksum = existingDetails?.isFile()
+      ? await checksumFile(destinationPath)
+      : undefined;
     if (existingChecksum !== artifact.sha256) {
       const staging = `${destinationPath}.${randomUUID()}.restore`;
-      await copyFile(sourcePath, staging);
-      await chmod(staging, 0o600);
-      await rename(staging, destinationPath);
+      try {
+        await copyFile(sourcePath, staging);
+        await chmod(staging, 0o600);
+        const stagedDetails = await lstat(staging);
+        if (
+          !stagedDetails.isFile() ||
+          stagedDetails.size !== artifact.byteLength ||
+          (await checksumFile(staging)) !== artifact.sha256
+        ) {
+          throw new Error(`Restored Execution Artifact ${artifact.path} checksum does not match`);
+        }
+        await rename(staging, destinationPath);
+      } finally {
+        await rm(staging, { force: true });
+      }
     }
   }
 
   const databasePath = join(canonicalHome, "state.sqlite");
   const stagedDatabase = join(canonicalHome, `.state.${randomUUID()}.restore.sqlite`);
-  await copyFile(join(canonicalBackup, "state.sqlite"), stagedDatabase);
-  await chmod(stagedDatabase, 0o600);
   const previousDatabase = join(
     canonicalHome,
-    `state.before-restore-${new Date().toISOString().replaceAll(":", "-")}.sqlite`,
+    `state.before-restore-${new Date().toISOString().replaceAll(":", "-")}-${randomUUID()}.sqlite`,
   );
   try {
-    await rename(databasePath, previousDatabase);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    await copyFile(join(canonicalBackup, "state.sqlite"), stagedDatabase);
+    await chmod(stagedDatabase, 0o600);
+    const stagedDetails = await stat(stagedDatabase);
+    if (
+      stagedDetails.size !== manifest.database.byteLength ||
+      (await checksumFile(stagedDatabase)) !== manifest.database.sha256
+    ) {
+      throw new Error("Restored state.sqlite checksum does not match the manifest");
+    }
+    try {
+      await link(databasePath, previousDatabase);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await rm(`${databasePath}-wal`, { force: true });
+    await rm(`${databasePath}-shm`, { force: true });
+    await rename(stagedDatabase, databasePath);
+  } finally {
+    await rm(stagedDatabase, { force: true });
   }
-  await rm(`${databasePath}-wal`, { force: true });
-  await rm(`${databasePath}-shm`, { force: true });
-  await rename(stagedDatabase, databasePath);
   return { ...verified, previousDatabase, status: "restored" as const };
 };
 
@@ -543,8 +643,13 @@ const removeStagingContents = async (path: string): Promise<number> => {
 export const compactKojoHome = async (home: string) => {
   assertMaintenanceLock(home);
   const verification = await verifyKojoHome(home);
-  if (verification.diagnostics.some(({ code }) => code === "DATABASE_CORRUPT")) {
-    throw new Error("state.sqlite is corrupt; compaction stopped without replacing it");
+  const unsafeDatabase = verification.diagnostics.filter(({ code }) =>
+    ["DATABASE_CORRUPT", "MIGRATION_FAILED", "SCHEMA_VERSION_INCOMPATIBLE"].includes(code),
+  );
+  if (unsafeDatabase.length > 0) {
+    throw new Error(
+      `${unsafeDatabase.map(({ message }) => message).join(" ")} Compaction stopped without modifying state.sqlite.`,
+    );
   }
   const database = new Database(join(resolve(home), "state.sqlite"), { strict: true });
   try {
