@@ -414,6 +414,19 @@ const canonicalJson = (value: unknown): string => {
   return JSON.stringify(value);
 };
 
+const canonicalCron = (value: unknown): unknown => {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const cron = value as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.entries(cron).map(([field, entry]) => [
+      field,
+      Array.isArray(entry) && field !== "and"
+        ? [...entry].sort((left, right) => Number(left) - Number(right))
+        : entry,
+    ]),
+  );
+};
+
 const currentMinute = () => {
   const value = new Date();
   value.setUTCSeconds(0, 0);
@@ -1043,26 +1056,16 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
             throw new Error("Project Source Revision contains an invalid Workflow Schedule");
           }
           activeNames.add(definition.name);
-          const canonicalDefinition = canonicalJson({
-            cron: definition.cron,
+          const definitionSemantics = {
+            cron: canonicalCron(definition.cron),
             input: definition.input,
             missedTimePolicy: definition.missedTimePolicy,
             name: definition.name,
             timezone: definition.timezone,
             workflow: definition.workflow,
-          });
-          const fingerprint = createHash("sha256")
-            .update(
-              canonicalJson({
-                cron: definition.cron,
-                input: definition.input,
-                missedTimePolicy: definition.missedTimePolicy,
-                name: definition.name,
-                timezone: definition.timezone,
-                workflow: definition.workflow,
-              }),
-            )
-            .digest("hex");
+          };
+          const canonicalDefinition = canonicalJson(definitionSemantics);
+          const fingerprint = createHash("sha256").update(canonicalDefinition).digest("hex");
           const existing = transaction
             .select()
             .from(workflowSchedules)
