@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 const roots = {
   schemaVersion: 1,
@@ -30,6 +30,20 @@ const roots = {
       workflowName: "delivery",
     },
   ],
+};
+
+const archivedRoot = {
+  attempt: 1,
+  createdAt: "2026-07-20T08:00:00.000Z",
+  project: {
+    availability: { reason: "Registered folder is missing", status: "Unavailable" },
+    displayName: "legacy",
+    id: "project-legacy-3c1",
+    registrationState: "Archived",
+  },
+  runId: "run-archived-003",
+  state: "Discarded",
+  workflowName: "delivery",
 };
 
 const failedRun = {
@@ -117,6 +131,13 @@ const failedRun = {
           mediaType: "application/json",
           name: "review-report",
         },
+        {
+          availability: "Unavailable",
+          byteLength: 0,
+          fingerprint: "sha256:missing-provider-output",
+          mediaType: "application/json",
+          name: "provider-output",
+        },
       ],
       attempt: 2,
       details: { findings: [{ severity: "P2", title: "Lease fence is missing" }] },
@@ -131,7 +152,11 @@ const failedRun = {
     {
       artifacts: [],
       attempt: 2,
-      details: { raw: { futureField: true }, schemaVersion: 99 },
+      details: {
+        encodingVersion: 99,
+        futureEnvelopeField: { retained: true },
+        value: { futureField: true },
+      },
       eventId: "event-unknown",
       parentEventId: "event-root-started",
       recordedAt: "2026-07-21T10:55:00.000Z",
@@ -166,8 +191,19 @@ const failedRun = {
 
 const installControlledApi = async (page: Page) => {
   await page.route("**/api/inspector/**", (route) => {
-    const path = new URL(route.request().url()).pathname;
-    if (path === "/api/inspector/runs") return route.fulfill({ json: roots });
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    if (path === "/api/inspector/runs") {
+      return route.fulfill({
+        json: {
+          ...roots,
+          runs:
+            url.searchParams.get("includeArchived") === "true"
+              ? [...roots.runs, archivedRoot]
+              : roots.runs,
+        },
+      });
+    }
     if (path === "/api/inspector/runs/run-failed-001") {
       return route.fulfill({ json: { run: failedRun, schemaVersion: 1 } });
     }
@@ -184,6 +220,24 @@ const installControlledApi = async (page: Page) => {
             runId: "run-completed-002",
             rootRunId: "run-completed-002",
             state: "Completed",
+          },
+          schemaVersion: 1,
+        },
+      });
+    }
+    if (path === "/api/inspector/runs/run-archived-003") {
+      return route.fulfill({
+        json: {
+          run: {
+            ...failedRun,
+            actions: [],
+            children: [],
+            evidence: [failedRun.evidence[0]],
+            projectId: "project-legacy-3c1",
+            resumeCompatibility: { status: "NotApplicable" },
+            runId: "run-archived-003",
+            rootRunId: "run-archived-003",
+            state: "Discarded",
           },
           schemaVersion: 1,
         },
@@ -215,10 +269,15 @@ test("navigates chronological evidence, artifacts, and unknown schemas", async (
   await expect(page.getByRole("heading", { name: "Review.FindingsRecorded" })).toBeVisible();
   await expect(page.getByText("Lease fence is missing")).toBeVisible();
   await expect(page.getByText("review-report", { exact: true })).toBeVisible();
+  await expect(page.getByText("provider-output", { exact: true })).toBeVisible();
+  await expect(page.locator(".artifact").filter({ hasText: "provider-output" })).toContainText(
+    "Unavailable",
+  );
 
   await page.getByRole("button", { name: /Provider.FutureEvidence/ }).click();
   await expect(page.getByText("Unknown schema v99")).toBeVisible();
   await expect(page.getByText('"futureField": true')).toBeVisible();
+  await expect(page.getByText('"retained": true')).toBeVisible();
   await expect(page.getByTestId("run-state")).toHaveText("Failed");
 });
 
@@ -231,4 +290,33 @@ test("navigates child runs and failure history without Project source", async ({
   await page.getByTestId("run-tree-run-failed-001").click();
   await expect(page.getByText("Attempt 1 · Interrupted")).toBeVisible();
   await expect(page.getByText("Attempt 2 · Failed")).toBeVisible();
+});
+
+test("composes facets, disambiguates workflows, and pins investigations", async ({ page }) => {
+  await expect(page.getByRole("combobox", { name: "Workflow" }).locator("option")).toHaveText([
+    "All workflows",
+    "checkout · project…t-1f9 / delivery",
+    "kojo · project…o-7a2 / delivery",
+  ]);
+
+  await page.getByRole("combobox", { name: "Workflow" }).selectOption("project-kojo-7a2:delivery");
+  await expect(page.getByRole("button", { name: /run-completed-002/ })).toBeVisible();
+  await expect(page.getByText("PINNED OUTSIDE FILTERS")).toBeVisible();
+
+  await page.getByRole("combobox", { name: "Workflow" }).selectOption("all");
+  await page.getByRole("combobox", { name: "Project" }).selectOption("project-kojo-7a2");
+  await expect(page.getByText("PINNED OUTSIDE FILTERS")).toBeVisible();
+  await expect(page.getByRole("button", { name: /run-completed-002/ })).toBeVisible();
+  await expect(page.getByTestId("selected-subject")).toContainText("run-failed-001");
+
+  await page.getByRole("combobox", { name: "State" }).selectOption("Failed");
+  await expect(page.getByText("No runs match these filters.")).toBeVisible();
+  await expect(page.getByText("PINNED OUTSIDE FILTERS")).toBeVisible();
+  await expect(page.getByTestId("selected-subject")).toContainText("run-failed-001");
+});
+
+test("keeps Archived history behind explicit opt-in", async ({ page }) => {
+  await expect(page.getByRole("button", { name: /run-archived-003/ })).toHaveCount(0);
+  await page.getByLabel("Archived history").check();
+  await expect(page.getByRole("button", { name: /run-archived-003/ })).toBeVisible();
 });

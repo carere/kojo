@@ -36,11 +36,10 @@ implicitInputs:
 
 tasks:
   check:
-    command: "biome check --no-errors-on-unmatched ."
+    command: "bun --bun biome check --no-errors-on-unmatched ."
 
   fix:
-    command: "biome check --write --no-errors-on-unmatched ."
+    command: "bun --bun biome check --write --no-errors-on-unmatched ."
 
   tsc:
-    command: "tsc --build --verbose"
-
+    command: "bun --bun tsc --build --verbose"

@@ -61,11 +61,14 @@ const decodeVersioned = (value: unknown) => {
     typeof value.encodingVersion === "number" &&
     "value" in value
   ) {
+    if (value.encodingVersion !== 1) {
+      return {
+        schema: { status: "Unknown", version: value.encodingVersion } as const,
+        value,
+      };
+    }
     return {
-      schema:
-        value.encodingVersion === 1
-          ? ({ status: "Known", version: 1 } as const)
-          : ({ status: "Unknown", version: value.encodingVersion } as const),
+      schema: { status: "Known", version: 1 } as const,
       value: value.value,
     };
   }
@@ -85,7 +88,74 @@ const projectSummary = (project: Project) => ({
   registrationState: project.registrationState,
 });
 
-const actionsFor = (run: InspectedRun, root: boolean, project: Project) => {
+interface CompatibilityFact {
+  readonly reason?: string;
+  readonly status: string;
+}
+
+const runtimeConfigurationCompatibilityFor = (run: InspectedRun): CompatibilityFact => {
+  const latestBySubject = new Map<string, InspectedEvidence>();
+  for (const event of run.evidence) {
+    if (event.type.startsWith("RuntimeConfiguration.")) latestBySubject.set(event.subject, event);
+  }
+  const incompatibleSubjects = [...latestBySubject.values()]
+    .filter(({ type }) => type === "RuntimeConfiguration.Incompatible")
+    .map(({ subject }) => subject)
+    .sort();
+  return incompatibleSubjects.length === 0
+    ? run.runtimeConfigurationCompatibility
+    : {
+        reason: `Runtime configuration is incompatible for ${incompatibleSubjects.join(", ")}`,
+        status: "Incompatible",
+      };
+};
+
+const resumeCompatibilityFor = (
+  run: InspectedRun,
+  project: Project,
+  runtimeConfigurationCompatibility: CompatibilityFact,
+): CompatibilityFact => {
+  if (run.state === "Completed" || run.state === "Discarded" || run.state === "Running") {
+    return { status: "NotApplicable" };
+  }
+  if (project.registrationState !== "Enabled") {
+    return {
+      reason: `Project registration is ${project.registrationState}`,
+      status: "Unavailable",
+    };
+  }
+  if (project.availability.status === "Unavailable") {
+    return {
+      reason: project.availability.reasons[0]?.message ?? "Project source is unavailable",
+      status: "Unavailable",
+    };
+  }
+  if (runtimeConfigurationCompatibility.status === "Incompatible") {
+    return runtimeConfigurationCompatibility;
+  }
+  const outcome = decodeVersioned(run.outcome).value;
+  if (
+    run.state === "Failed" &&
+    typeof outcome === "object" &&
+    outcome !== null &&
+    "_tag" in outcome &&
+    outcome._tag === "Defect"
+  ) {
+    return {
+      reason: "The Workflow Run failed with a non-resumable Defect",
+      status: "Incompatible",
+    };
+  }
+  if (run.evidence.some(({ type }) => type === "Activity.Uncertain")) {
+    return {
+      reason: "An Uncertain Activity Outcome requires reconciliation",
+      status: "Incompatible",
+    };
+  }
+  return run.resumeCompatibility;
+};
+
+const actionsFor = (run: InspectedRun, root: boolean, resumeCompatibility: CompatibilityFact) => {
   if (!root || run.state === "Completed" || run.state === "Discarded") return [];
   if (run.state === "Running") {
     return [
@@ -93,15 +163,15 @@ const actionsFor = (run: InspectedRun, root: boolean, project: Project) => {
       { enabled: true, name: "discard" },
     ];
   }
-  const availabilityReason =
-    project.availability.status === "Unavailable"
-      ? (project.availability.reasons[0]?.message ?? "Project source is unavailable")
-      : undefined;
+  const resumeDisabled =
+    resumeCompatibility.status === "Unavailable" || resumeCompatibility.status === "Incompatible";
   return [
     {
-      enabled: availabilityReason === undefined,
+      enabled: !resumeDisabled,
       name: "resume",
-      ...(availabilityReason === undefined ? {} : { reason: availabilityReason }),
+      ...(resumeDisabled
+        ? { reason: resumeCompatibility.reason ?? "The Workflow Run cannot be resumed" }
+        : {}),
     },
     { enabled: true, name: "discard" },
   ];
@@ -117,17 +187,14 @@ const projectRun = (run: InspectedRun, project: Project, root = true): unknown =
       schema: decoded.schema,
     };
   });
-  const resumeCompatibility =
-    run.state === "Completed" || run.state === "Discarded" || run.state === "Running"
-      ? ({ status: "NotApplicable" } as const)
-      : project.availability.status === "Unavailable"
-        ? {
-            reason: project.availability.reasons[0]?.message ?? "Project source is unavailable",
-            status: "Unavailable" as const,
-          }
-        : run.resumeCompatibility;
+  const runtimeConfigurationCompatibility = runtimeConfigurationCompatibilityFor(run);
+  const resumeCompatibility = resumeCompatibilityFor(
+    run,
+    project,
+    runtimeConfigurationCompatibility,
+  );
   return {
-    actions: actionsFor(run, root, project),
+    actions: actionsFor(run, root, resumeCompatibility),
     attempts: run.attempts,
     children: run.children.map((child) => projectRun(child, project, false)),
     createdAt: run.createdAt,
@@ -140,7 +207,7 @@ const projectRun = (run: InspectedRun, project: Project, root = true): unknown =
     resumeCompatibility,
     rootRunId: run.rootRunId,
     runId: run.runId,
-    runtimeConfigurationCompatibility: run.runtimeConfigurationCompatibility,
+    runtimeConfigurationCompatibility,
     state: run.state,
     workflowName: run.revision.stableName,
   };

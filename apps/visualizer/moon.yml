@@ -20,7 +20,7 @@ tasks:
     type: build
 
   test:
-    command: bun playwright test
+    command: bun --bun playwright test
     description: Test the Dense Inspector against a controlled System Process API
     inputs:
       - "@group(configs)"

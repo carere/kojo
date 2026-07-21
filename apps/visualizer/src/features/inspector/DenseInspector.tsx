@@ -20,6 +20,8 @@ const shortId = (value: string) =>
   value.length > 15 ? `${value.slice(0, 7)}…${value.slice(-5)}` : value;
 const timestamp = (value: string) => value.replace("T", " ").replace(".000Z", "Z");
 const titleCase = (value: string) => `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
+const workflowFacetKey = (projectId: string, workflowName: string) =>
+  `${encodeURIComponent(projectId)}:${encodeURIComponent(workflowName)}`;
 
 const flattenRuns = (run: InspectorRun): ReadonlyArray<InspectorRun> => [
   run,
@@ -74,7 +76,8 @@ export function DenseInspector() {
       (candidate) =>
         (includeArchived() || candidate.project.registrationState !== "Archived") &&
         (projectFilter() === "all" || candidate.project.id === projectFilter()) &&
-        (workflowFilter() === "all" || candidate.workflowName === workflowFilter()) &&
+        (workflowFilter() === "all" ||
+          workflowFacetKey(candidate.project.id, candidate.workflowName) === workflowFilter()) &&
         (stateFilter() === "all" || candidate.state === stateFilter()),
     ),
   );
@@ -105,9 +108,15 @@ export function DenseInspector() {
     );
     return [...unique.values()];
   });
-  const workflows = createMemo(() => [
-    ...new Set((runs() ?? []).map(({ workflowName }) => workflowName)),
-  ]);
+  const workflows = createMemo(() => {
+    const unique = new Map(
+      (runs() ?? []).map((candidate) => [
+        workflowFacetKey(candidate.project.id, candidate.workflowName),
+        candidate,
+      ]),
+    );
+    return [...unique.entries()];
+  });
 
   return (
     <main class="dense-inspector">
@@ -138,8 +147,9 @@ export function DenseInspector() {
               <PaneHeading label="ROOT WORKFLOW RUNS" count={visibleRuns().length} />
               <div class="filters">
                 <label>
-                  PROJECT
+                  <span>PROJECT</span>
                   <select
+                    aria-label="Project"
                     value={projectFilter()}
                     onChange={(event) => setProjectFilter(event.currentTarget.value)}
                   >
@@ -154,20 +164,28 @@ export function DenseInspector() {
                   </select>
                 </label>
                 <label>
-                  WORKFLOW
+                  <span>WORKFLOW</span>
                   <select
+                    aria-label="Workflow"
                     value={workflowFilter()}
                     onChange={(event) => setWorkflowFilter(event.currentTarget.value)}
                   >
                     <option value="all">All workflows</option>
                     <For each={workflows()}>
-                      {(workflow) => <option value={workflow}>{workflow}</option>}
+                      {([value, workflow]) => (
+                        <option value={value}>
+                          {workflow.project.displayName} · {shortId(workflow.project.id)}
+                          {" / "}
+                          {workflow.workflowName}
+                        </option>
+                      )}
                     </For>
                   </select>
                 </label>
                 <label>
-                  STATE
+                  <span>STATE</span>
                   <select
+                    aria-label="State"
                     value={stateFilter()}
                     onChange={(event) =>
                       setStateFilter(event.currentTarget.value as "all" | WorkflowRunState)
@@ -227,7 +245,7 @@ export function DenseInspector() {
                     />
                   )}
                 </For>
-                <Show when={visibleRuns().length === 0 && pinned() === undefined}>
+                <Show when={visibleRuns().length === 0}>
                   <p class="empty-filter">No runs match these filters.</p>
                 </Show>
               </div>
@@ -268,6 +286,9 @@ export function DenseInspector() {
                       </div>
                     </div>
                     <Show when={root().resumeCompatibility.reason}>
+                      {(reason) => <p class="compatibility-reason">{reason()}</p>}
+                    </Show>
+                    <Show when={root().runtimeConfigurationCompatibility.reason}>
                       {(reason) => <p class="compatibility-reason">{reason()}</p>}
                     </Show>
                     <PaneHeading label="WORKFLOW RUN TREE" count={flattenRuns(root()).length} />
