@@ -341,8 +341,11 @@ describe("WorkflowTest", () => {
       { outcome: "Failed", subject: "verify" },
       { outcome: "Completed", subject: "verify" },
     ]);
-    expect(() => fixture.run(undefined)).toThrow(
+    await expect(fixture.run(undefined)).rejects.toThrow(
       "WorkflowTest has already been run; use restart or create a new fixture",
+    );
+    await expect(fixture.restart()).rejects.toThrow(
+      "Cannot restart a Workflow Run in Completed state",
     );
   });
 

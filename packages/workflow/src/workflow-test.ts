@@ -206,6 +206,7 @@ const make = <
         : new Date(makeOptions.clock).getTime();
   let latestInput: Schema.Schema.Type<Input> | undefined;
   let hasRun = false;
+  let latestResult: WorkflowTest.Result<SuccessValue, FailureValue> | undefined;
 
   const clock: Clock.Clock = {
     currentTimeMillis: Effect.sync(() => currentTime),
@@ -468,17 +469,23 @@ const make = <
   };
 
   return Object.freeze({
-    restart: () => {
+    restart: async () => {
       if (!hasRun) throw new Error("WorkflowTest has not been run yet");
-      return execute(latestInput as Schema.Schema.Type<Input>);
+      if (latestResult === undefined) throw new Error("WorkflowTest is still running");
+      if (latestResult.state !== "Interrupted") {
+        throw new Error(`Cannot restart a Workflow Run in ${latestResult.state} state`);
+      }
+      latestResult = await execute(latestInput as Schema.Schema.Type<Input>);
+      return latestResult;
     },
-    run: (input: Schema.Schema.Type<Input>, options?: WorkflowTest.RunOptions) => {
+    run: async (input: Schema.Schema.Type<Input>, options?: WorkflowTest.RunOptions) => {
       if (hasRun) {
         throw new Error("WorkflowTest has already been run; use restart or create a new fixture");
       }
       hasRun = true;
       latestInput = input;
-      return execute(input, options);
+      latestResult = await execute(input, options);
+      return latestResult;
     },
   });
 };
