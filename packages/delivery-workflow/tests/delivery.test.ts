@@ -51,6 +51,15 @@ const graph = (overrides: Partial<GitHubDeliveryGraph> = {}): GitHubDeliveryGrap
 
 const githubLayer = (loaded: GitHubDeliveryGraph, reachable = true) =>
   Layer.succeed(GitHubDelivery, {
+    closeTicket: (input) =>
+      WorkflowTest.call(
+        { input, layer: "GitHub", operation: "closeTicket" },
+        Effect.succeed({
+          idempotencyKey: input.idempotencyKey,
+          state: "Applied" as const,
+          targetCommit: input.targetCommit,
+        }),
+      ) as unknown as ReturnType<GitHubDeliveryService["closeTicket"]>,
     isSourceRevisionReachable: (input) =>
       WorkflowTest.call(
         { input, layer: "GitHub", operation: "isSourceRevisionReachable" },
@@ -61,6 +70,20 @@ const githubLayer = (loaded: GitHubDeliveryGraph, reachable = true) =>
         { input: { url }, layer: "GitHub", operation: "loadDeliveryWorkstream" },
         Effect.succeed(loaded),
       ) as unknown as Effect.Effect<unknown, GitHubDeliveryFailure>,
+    pushExact: (input) =>
+      WorkflowTest.call(
+        { input, layer: "Git", operation: "pushExact" },
+        Effect.succeed({
+          idempotencyKey: input.idempotencyKey,
+          state: "Applied" as const,
+          targetCommit: input.targetCommit,
+        }),
+      ) as unknown as ReturnType<GitHubDeliveryService["pushExact"]>,
+    readPublication: (input) =>
+      WorkflowTest.call(
+        { input, layer: "GitHub", operation: "readPublication" },
+        Effect.succeed({ remoteTargetCommit: revision, ticketState: "OPEN" as const }),
+      ) as unknown as ReturnType<GitHubDeliveryService["readPublication"]>,
   } satisfies GitHubDeliveryService);
 
 const unavailableExecutionLayer = Layer.merge(
@@ -158,7 +181,7 @@ describe("Delivery workstream loading", () => {
     expect(result.outcome).toMatchObject({
       _tag: "Success",
       value: {
-        _tag: "OpenWork",
+        _tag: "TicketsFailed",
         evidence: {
           inputGraph: { root: { number: 26 }, tickets: [{ number: 44 }, { number: 43 }] },
           routing: {

@@ -50,8 +50,23 @@ const graph = (tickets: ReadonlyArray<ReturnType<typeof ticket>>): GitHubDeliver
   tickets,
 });
 
-const githubLayer = (loaded: GitHubDeliveryGraph) =>
-  Layer.succeed(GitHubDelivery, {
+const githubLayer = (loaded: GitHubDeliveryGraph, reloaded = loaded) => {
+  let remoteTargetCommit = sourceRevision;
+  const closed = new Set<number>();
+  let loads = 0;
+  return Layer.succeed(GitHubDelivery, {
+    closeTicket: (input) =>
+      WorkflowTest.call(
+        { input, layer: "GitHub", operation: "closeTicket" },
+        Effect.sync(() => {
+          closed.add(input.ticketNumber);
+          return {
+            idempotencyKey: input.idempotencyKey,
+            state: "Applied" as const,
+            targetCommit: input.targetCommit,
+          };
+        }),
+      ) as unknown as ReturnType<GitHubDeliveryService["closeTicket"]>,
     isSourceRevisionReachable: (input) =>
       WorkflowTest.call(
         { input, layer: "GitHub", operation: "isSourceRevisionReachable" },
@@ -60,9 +75,32 @@ const githubLayer = (loaded: GitHubDeliveryGraph) =>
     load: (url) =>
       WorkflowTest.call(
         { input: { url }, layer: "GitHub", operation: "loadDeliveryWorkstream" },
-        Effect.succeed(loaded),
+        Effect.sync(() => (loads++ === 0 ? loaded : reloaded)),
       ) as unknown as Effect.Effect<unknown, GitHubDeliveryFailure>,
+    pushExact: (input) =>
+      WorkflowTest.call(
+        { input, layer: "Git", operation: "pushExact" },
+        Effect.sync(() => {
+          if (remoteTargetCommit !== input.expectedTargetCommit)
+            throw new Error("unexpected target");
+          remoteTargetCommit = input.targetCommit;
+          return {
+            idempotencyKey: input.idempotencyKey,
+            state: "Applied" as const,
+            targetCommit: input.targetCommit,
+          };
+        }),
+      ) as unknown as ReturnType<GitHubDeliveryService["pushExact"]>,
+    readPublication: (input) =>
+      WorkflowTest.call(
+        { input, layer: "GitHub", operation: "readPublication" },
+        Effect.sync(() => ({
+          remoteTargetCommit,
+          ticketState: closed.has(input.ticketNumber) ? ("CLOSED" as const) : ("OPEN" as const),
+        })),
+      ) as unknown as ReturnType<GitHubDeliveryService["readPublication"]>,
   } satisfies GitHubDeliveryService);
+};
 
 interface Finding {
   readonly id: string;
@@ -75,6 +113,7 @@ interface ProviderOptions {
   readonly defectingReviewTicket?: number;
   readonly dirtyAfterChecksTicket?: number;
   readonly failingCheckTicket?: number;
+  readonly mergeConflictTicket?: number;
   readonly requireConcurrentImplementation?: boolean;
   readonly reviews?: Readonly<Record<number, ReadonlyArray<ReadonlyArray<Finding>>>>;
   readonly slowReviewTicket?: number;
@@ -85,6 +124,7 @@ const providers = (options: ProviderOptions = {}) => {
     defectingReviewTicket,
     dirtyAfterChecksTicket,
     failingCheckTicket,
+    mergeConflictTicket,
     requireConcurrentImplementation = false,
     reviews = {},
     slowReviewTicket,
@@ -93,6 +133,8 @@ const providers = (options: ProviderOptions = {}) => {
   const agentPrompts: Array<{ readonly branch: string; readonly prompt: string }> = [];
   const reviewOrdinals = new Map<number, number>();
   const commits = new Map<number, string>();
+  const heads = new Map<string, string>();
+  const parents = new Map<string, string>();
   const completedChecks = new Set<number>();
   const concurrency = { active: 0, maximum: 0 };
   let releaseImplementers: (() => void) | undefined;
@@ -104,7 +146,21 @@ const providers = (options: ProviderOptions = {}) => {
     const number = Number(branch.split("-").at(-1));
     const commit = commits.get(number) ?? String(number).padStart(40, "b").slice(-40);
     commits.set(number, commit);
-    if (command === "git rev-parse HEAD") return { exitCode: 0, stderr: "", stdout: `${commit}\n` };
+    const head = heads.get(branch) ?? commit;
+    if (command === "git rev-parse HEAD") return { exitCode: 0, stderr: "", stdout: `${head}\n` };
+    if (command.startsWith("git merge --no-ff --no-edit ")) {
+      if (number === mergeConflictTicket) {
+        parents.set(branch, `${head} ${commit}`);
+        return { exitCode: 1, stderr: "merge conflict", stdout: "" };
+      }
+      const integrated = `${number.toString(16).padStart(40, "c")}`.slice(-40);
+      parents.set(branch, `${head} ${commit}`);
+      heads.set(branch, integrated);
+      return { exitCode: 0, stderr: "", stdout: "merged" };
+    }
+    if (command === "git show -s --format=%P HEAD") {
+      return { exitCode: 0, stderr: "", stdout: `${parents.get(branch) ?? ""}\n` };
+    }
     if (command.startsWith("git merge-base --is-ancestor ")) {
       return { exitCode: 0, stderr: "", stdout: "" };
     }
@@ -141,6 +197,9 @@ const providers = (options: ProviderOptions = {}) => {
     run: async ({ prompt }): Promise<SandboxAgentResult> => {
       const number = Number(branch.split("-").at(-1));
       agentPrompts.push({ branch, prompt });
+      if (prompt.startsWith("Repair the active merge conflict")) {
+        heads.set(branch, `${number.toString(16).padStart(40, "c")}`.slice(-40));
+      }
       if (prompt.includes("mechanically read-only reviewer")) {
         const ordinal = (reviewOrdinals.get(number) ?? 0) + 1;
         reviewOrdinals.set(number, ordinal);
@@ -204,6 +263,15 @@ const providers = (options: ProviderOptions = {}) => {
     create: (options) =>
       Effect.sync(() => {
         acquisitions.push(options);
+        if (options.baseBranch !== undefined) heads.set(options.branch, options.baseBranch);
+        if (options.branch.startsWith("kojo-delivery-ticket-"))
+          heads.set(
+            options.branch,
+            commits.get(Number(options.branch.split("-").at(-1))) ??
+              String(Number(options.branch.split("-").at(-1)))
+                .padStart(40, "b")
+                .slice(-40),
+          );
         return handle(options.branch);
       }),
   });
@@ -221,10 +289,14 @@ const providers = (options: ProviderOptions = {}) => {
   return { acquisitions, agentPrompts, concurrency, layer: Layer.merge(sandbox, agent) };
 };
 
-const run = (loaded: GitHubDeliveryGraph, controlled = providers()) =>
+const run = (
+  loaded: GitHubDeliveryGraph,
+  controlled = providers(),
+  reloaded: GitHubDeliveryGraph = loaded,
+) =>
   WorkflowTest.make(Delivery, {
     workflows: [DeliveryTicket],
-    layer: Layer.merge(githubLayer(loaded), controlled.layer),
+    layer: Layer.merge(githubLayer(loaded, reloaded), controlled.layer),
   }).run({ workstream: rootUrl });
 
 describe("Delivery ready frontier implementation", () => {
@@ -242,6 +314,13 @@ describe("Delivery ready frontier implementation", () => {
     expect(controlled.acquisitions).toEqual([
       { baseBranch: sourceRevision, branch: "kojo-delivery-ticket-43" },
       { baseBranch: sourceRevision, branch: "kojo-delivery-ticket-44" },
+      { baseBranch: sourceRevision, branch: "kojo-delivery-integration-43" },
+      { baseBranch: "cccccccccccccccccccccccccccccccccccccc2b", branch: "kojo-delivery-verify-43" },
+      {
+        baseBranch: "cccccccccccccccccccccccccccccccccccccc2b",
+        branch: "kojo-delivery-integration-44",
+      },
+      { baseBranch: "cccccccccccccccccccccccccccccccccccccc2c", branch: "kojo-delivery-verify-44" },
     ]);
     expect(controlled.concurrency.maximum).toBe(2);
     expect(result.outcome).toMatchObject({
@@ -250,11 +329,29 @@ describe("Delivery ready frontier implementation", () => {
         _tag: "OpenWork",
         evidence: { frontier: { tickets: [{ number: 43 }, { number: 44 }] } },
         ticketOutcomes: [
-          { _tag: "Implemented", reviewAttempts: 1, ticket: { number: 43 } },
-          { _tag: "Implemented", reviewAttempts: 1, ticket: { number: 44 } },
+          { _tag: "Published", reviewAttempts: 1, ticket: { number: 43 } },
+          { _tag: "Published", reviewAttempts: 1, ticket: { number: 44 } },
         ],
       },
     });
+    expect(
+      result.calls.filter(({ operation }) => operation === "pushExact").map(({ input }) => input),
+    ).toEqual([
+      {
+        expectedTargetCommit: sourceRevision,
+        idempotencyKey: "#26::01:push:cccccccccccccccccccccccccccccccccccccc2b",
+        repository: "carere/kojo",
+        targetBranch: "feat/add-delivery-workflow-vertical",
+        targetCommit: "cccccccccccccccccccccccccccccccccccccc2b",
+      },
+      {
+        expectedTargetCommit: "cccccccccccccccccccccccccccccccccccccc2b",
+        idempotencyKey: "#26::02:push:cccccccccccccccccccccccccccccccccccccc2c",
+        repository: "carere/kojo",
+        targetBranch: "feat/add-delivery-workflow-vertical",
+        targetCommit: "cccccccccccccccccccccccccccccccccccccc2c",
+      },
+    ]);
     for (const child of result.children) {
       const commands = child.evidence
         .filter(({ type }) => type === "Command.OutputArtifactsRecorded")
@@ -290,7 +387,7 @@ describe("Delivery ready frontier implementation", () => {
       value: {
         ticketOutcomes: [
           {
-            _tag: "Implemented",
+            _tag: "Published",
             findingHistory: [
               {
                 attempt: 1,
@@ -327,7 +424,7 @@ describe("Delivery ready frontier implementation", () => {
             failure: { _tag: "Delivery.TicketProofFailure", check: "check" },
             ticket: { number: 43 },
           },
-          { _tag: "Implemented", ticket: { number: 44 } },
+          { _tag: "Published", ticket: { number: 44 } },
         ],
       },
     });
@@ -375,7 +472,7 @@ describe("Delivery ready frontier implementation", () => {
             failure: { _tag: "Delivery.TicketDefect" },
             ticket: { number: 43 },
           },
-          { _tag: "Implemented", ticket: { number: 44 } },
+          { _tag: "Published", ticket: { number: 44 } },
         ],
       },
     });
@@ -414,5 +511,68 @@ describe("Delivery ready frontier implementation", () => {
         ],
       },
     });
+  });
+
+  test("repairs a merge conflict without changing either parent, reviews it, and verifies freshly", async () => {
+    const integrationFinding = {
+      id: "integration-1",
+      priority: "P1" as const,
+      summary: "Repair needs adjustment",
+      detail: "Keep the accepted merge parents while adjusting the resolution.",
+    };
+    const controlled = providers({
+      mergeConflictTicket: 43,
+      reviews: { 43: [[], [integrationFinding], []] },
+    });
+    const result = await run(graph([ticket(43, 1)]), controlled);
+
+    expect(result.outcome).toMatchObject({
+      _tag: "Success",
+      value: {
+        _tag: "OpenWork",
+        ticketOutcomes: [
+          {
+            _tag: "Published",
+            mergeParents: [sourceRevision, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb43"],
+            repairedConflict: true,
+            repairReviewAttempts: 2,
+            ticket: { number: 43 },
+          },
+        ],
+      },
+    });
+    expect(controlled.acquisitions.at(-1)).toMatchObject({
+      baseBranch: "cccccccccccccccccccccccccccccccccccccc2b",
+      branch: "kojo-delivery-verify-43",
+    });
+    expect(
+      controlled.agentPrompts.some(({ prompt }) =>
+        prompt.includes(`accepted target base must remain ${sourceRevision}`),
+      ),
+    ).toBe(true);
+  });
+
+  test("refuses push and close when the ticket specification drifts after review", async () => {
+    const loaded = graph([ticket(43, 1)]);
+    const drifted = graph([
+      { ...ticket(43, 1), body: `${ticket(43, 1).body}\n\nChanged after review.` },
+    ]);
+    const result = await run(loaded, providers(), drifted);
+
+    expect(result.outcome).toMatchObject({
+      _tag: "Success",
+      value: {
+        _tag: "TicketsFailed",
+        ticketOutcomes: [
+          {
+            _tag: "TicketFailed",
+            failure: { _tag: "Delivery.TicketProofFailure", check: "publication-drift" },
+            ticket: { number: 43 },
+          },
+        ],
+      },
+    });
+    expect(result.calls.filter(({ operation }) => operation === "pushExact")).toEqual([]);
+    expect(result.calls.filter(({ operation }) => operation === "closeTicket")).toEqual([]);
   });
 });

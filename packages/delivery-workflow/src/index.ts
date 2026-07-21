@@ -8,6 +8,7 @@ import {
   Workflow,
 } from "@kojo/workflow";
 import { Cause, Context, Effect, Option, Schema } from "effect";
+import { Activity } from "effect/unstable/workflow";
 
 const IssueState = Schema.Literals(["OPEN", "CLOSED"]);
 const PositiveInteger = Schema.Int.check(Schema.isGreaterThan(0));
@@ -62,6 +63,25 @@ export interface GitHubDeliveryService {
     readonly revision: string;
     readonly targetBranch: string;
   }) => Effect.Effect<boolean, GitHubDeliveryFailure>;
+  readonly readPublication: (input: {
+    readonly repository: string;
+    readonly targetBranch: string;
+    readonly ticketNumber: number;
+  }) => Effect.Effect<PublicationSnapshot, GitHubDeliveryFailure>;
+  readonly pushExact: (input: {
+    readonly expectedTargetCommit: string;
+    readonly idempotencyKey: string;
+    readonly repository: string;
+    readonly targetBranch: string;
+    readonly targetCommit: string;
+  }) => Effect.Effect<PublicationReceipt, GitHubDeliveryFailure>;
+  readonly closeTicket: (input: {
+    readonly expectedState: "OPEN";
+    readonly idempotencyKey: string;
+    readonly repository: string;
+    readonly targetCommit: string;
+    readonly ticketNumber: number;
+  }) => Effect.Effect<PublicationReceipt, GitHubDeliveryFailure>;
 }
 
 export const GitHubDelivery = Context.Service<GitHubDeliveryService>(
@@ -128,6 +148,35 @@ const Implemented = Schema.TaggedStruct("Implemented", {
   findingHistory: Schema.Array(FindingHistory),
 });
 
+const PublicationSnapshotSchema = Schema.Struct({
+  remoteTargetCommit: Schema.String,
+  ticketState: IssueState,
+});
+
+export type PublicationSnapshot = Schema.Schema.Type<typeof PublicationSnapshotSchema>;
+
+const PublicationReceiptSchema = Schema.Struct({
+  idempotencyKey: Schema.String,
+  state: Schema.Literals(["Applied", "AlreadyApplied"]),
+  targetCommit: Schema.String,
+});
+
+export type PublicationReceipt = Schema.Schema.Type<typeof PublicationReceiptSchema>;
+
+const Published = Schema.TaggedStruct("Published", {
+  ticket: TicketIdentity,
+  reviewedCommit: Schema.String,
+  integratedCommit: Schema.String,
+  verifiedCommit: Schema.String,
+  mergeParents: Schema.Tuple([Schema.String, Schema.String]),
+  repairedConflict: Schema.Boolean,
+  repairReviewAttempts: NonNegativeInteger,
+  reviewAttempts: PositiveInteger,
+  findingHistory: Schema.Array(FindingHistory),
+  pushReceipt: PublicationReceiptSchema,
+  closeReceipt: PublicationReceiptSchema,
+});
+
 const ReviewLimitReached = Schema.TaggedStruct("ReviewLimitReached", {
   ticket: TicketIdentity,
   sandbox: Schema.Struct({ name: Schema.String, branch: Schema.String }),
@@ -175,7 +224,11 @@ const OpenWorkNoReadyTicket = Schema.TaggedStruct("OpenWorkNoReadyTicket", {
 });
 const OpenWork = Schema.TaggedStruct("OpenWork", {
   evidence: DeliveryEvidence,
-  ticketOutcomes: Schema.Array(DeliveryTicketOutcome),
+  ticketOutcomes: Schema.Array(Schema.Union([Published, ReviewLimitReached, TicketFailed])),
+});
+const TicketsFailed = Schema.TaggedStruct("TicketsFailed", {
+  evidence: DeliveryEvidence,
+  ticketOutcomes: Schema.Array(Schema.Union([Published, ReviewLimitReached, TicketFailed])),
 });
 
 export const DeliveryResult = Schema.Union([
@@ -183,6 +236,7 @@ export const DeliveryResult = Schema.Union([
   AlreadyComplete,
   OpenWorkNoReadyTicket,
   OpenWork,
+  TicketsFailed,
 ]);
 export type DeliveryResult = Schema.Schema.Type<typeof DeliveryResult>;
 
@@ -590,6 +644,390 @@ const ticketFailureFromCause = (cause: Cause.Cause<unknown>) => {
   };
 };
 
+const normalizeSpecification = (
+  ticket: GitHubDeliveryGraph["tickets"][number],
+  publicationKey: string,
+) => ({
+  number: ticket.number,
+  title: ticket.title.trim(),
+  body: ticket.body.replace(/\r\n/g, "\n").trim(),
+  publicationKey,
+  parentNumber: ticket.parent?.number ?? 0,
+  blockerNumbers: ticket.blockedBy.nodes.map(({ number }) => number).sort((a, b) => a - b),
+});
+
+const exactCommit = (value: string) => /^[0-9a-f]{40,64}$/i.test(value);
+
+const durableGitHub = <A, E>(
+  name: string,
+  success: Schema.Schema<A>,
+  execute: Effect.Effect<A, E>,
+) =>
+  Activity.make({
+    name,
+    success,
+    error: GitHubDeliveryFailure,
+    execute: execute as Effect.Effect<A, GitHubDeliveryFailure>,
+  });
+
+const proveExactMerge = (expectedTargetCommit: string, reviewedCommit: string) =>
+  Effect.gen(function* () {
+    const head = cleanOutput(
+      (yield* successfulCommand("integrated-head", "git rev-parse HEAD")).stdout,
+    );
+    if (!exactCommit(head)) {
+      return yield* failProof("integrated-head", `Integration produced invalid commit '${head}'.`);
+    }
+    const parents = cleanOutput(
+      (yield* successfulCommand("merge-parents", "git show -s --format=%P HEAD")).stdout,
+    ).split(/\s+/);
+    if (
+      parents.length !== 2 ||
+      parents[0]?.toLowerCase() !== expectedTargetCommit.toLowerCase() ||
+      parents[1]?.toLowerCase() !== reviewedCommit.toLowerCase()
+    ) {
+      return yield* failProof(
+        "merge-parents",
+        "The integrated commit is not the exact two-parent no-fast-forward transition.",
+      );
+    }
+    yield* successfulCommand("integrated-clean-worktree", "git status --porcelain").pipe(
+      Effect.flatMap((status) =>
+        cleanOutput(status.stdout) === ""
+          ? Effect.void
+          : failProof("integrated-clean-worktree", "Integration left uncommitted work."),
+      ),
+    );
+    return { head, parents: [parents[0] ?? "", parents[1] ?? ""] as const };
+  });
+
+const runConfiguredVerification = () =>
+  Effect.gen(function* () {
+    yield* successfulCommand("check", "moon run :check");
+    yield* successfulCommand("typecheck", "moon run :tsc");
+    yield* successfulCommand("test", "moon run :test");
+    const clean = yield* successfulCommand("verification-clean-worktree", "git status --porcelain");
+    if (cleanOutput(clean.stdout) !== "") {
+      return yield* failProof("verification-clean-worktree", "Verification changed the worktree.");
+    }
+  });
+
+const repairPrompt = (
+  input: Schema.Schema.Type<typeof DeliveryTicketInput>,
+  expectedTargetCommit: string,
+  reviewedCommit: string,
+  history: ReadonlyArray<Schema.Schema.Type<typeof FindingHistory>>,
+) => {
+  const findings = history.at(-1)?.findings ?? [];
+  const feedback = findings
+    .map(
+      (finding) =>
+        `Finding ${finding.id}: ${finding.priority} ${finding.summary}\n${finding.detail}`,
+    )
+    .join("\n\n");
+  return `Repair the active merge conflict for Delivery ticket #${input.ticket.number}.
+The accepted target base must remain ${expectedTargetCommit} and the reviewed second parent must remain ${reviewedCommit}.
+Resolve and commit the merge without rebasing, squashing, resetting, or changing either parent.
+${findings.length > 0 ? "Amend the existing merge commit in place; do not add a commit on top of it." : ""}
+
+Ticket specification:
+${input.ticket.body}
+
+Review finding history:
+${JSON.stringify(history)}
+
+Findings to address in this turn:
+${feedback || "There are no prior integration findings."}`;
+};
+
+const integrateReviewed = (
+  input: Schema.Schema.Type<typeof DeliveryTicketInput>,
+  reviewed: Schema.Schema.Type<typeof Implemented>,
+  expectedTargetCommit: string,
+) =>
+  Sandbox.use(`integrate-${input.ticket.number}`, {
+    baseBranch: expectedTargetCommit,
+    branch: `kojo-delivery-integration-${input.ticket.number}`,
+    effect: Effect.gen(function* () {
+      const openedHead = cleanOutput(
+        (yield* successfulCommand("expected-target-head", "git rev-parse HEAD")).stdout,
+      );
+      if (openedHead.toLowerCase() !== expectedTargetCommit.toLowerCase()) {
+        return yield* failProof(
+          "expected-target-head",
+          `Integration opened ${openedHead}, expected ${expectedTargetCommit}.`,
+        );
+      }
+      const merge = yield* Command.run("merge-reviewed-commit", {
+        command: `git merge --no-ff --no-edit ${reviewed.finalCommit}`,
+      });
+      let repairedConflict = false;
+      let repairReviewAttempts = 0;
+      if (merge.exitCode !== 0) {
+        repairedConflict = true;
+        let history: Array<Schema.Schema.Type<typeof FindingHistory>> = [];
+        yield* Agent.run("repair-integration", {
+          prompt: repairPrompt(input, expectedTargetCommit, reviewed.finalCommit, history),
+          success: ImplementerResult,
+          failure: AgentStepFailure,
+        });
+        yield* Loop.run("integration-review", {
+          maxIterations: 3,
+          effect: ({ iteration }) =>
+            Effect.gen(function* () {
+              yield* proveExactMerge(expectedTargetCommit, reviewed.finalCommit);
+              yield* runConfiguredVerification();
+              const diff = yield* successfulCommand(
+                "integration-cumulative-diff",
+                `git diff --binary ${expectedTargetCommit}...HEAD`,
+              );
+              const before = yield* successfulCommand(
+                "integration-review-head",
+                "git rev-parse HEAD",
+              );
+              const review = yield* Agent.run("integration-reviewer", {
+                prompt: reviewPrompt(input, diff.stdout, history),
+                success: ReviewerResult,
+                failure: AgentStepFailure,
+              });
+              const after = yield* successfulCommand(
+                "integration-review-head-proof",
+                "git rev-parse HEAD",
+              );
+              const status = yield* successfulCommand(
+                "integration-review-worktree-proof",
+                "git status --porcelain",
+              );
+              if (
+                cleanOutput(before.stdout) !== cleanOutput(after.stdout) ||
+                cleanOutput(status.stdout) !== ""
+              ) {
+                return yield* failProof(
+                  "integration-read-only-review",
+                  "The reviewer changed the integration.",
+                );
+              }
+              let dispositions: ReadonlyArray<Schema.Schema.Type<typeof FindingDisposition>> = [];
+              if (review.findings.length > 0) {
+                const repair = yield* Agent.run("repair-integration-findings", {
+                  prompt: repairPrompt(input, expectedTargetCommit, reviewed.finalCommit, [
+                    ...history,
+                    { attempt: iteration, findings: review.findings, dispositions: [] },
+                  ]),
+                  success: ImplementerResult,
+                  failure: AgentStepFailure,
+                });
+                dispositions = repair.dispositions;
+                if (!dispositionsMatch(review.findings, dispositions)) {
+                  return yield* failProof(
+                    "integration-dispositions",
+                    "The repair did not disposition every integration finding exactly once.",
+                  );
+                }
+              }
+              history = [
+                ...history,
+                { attempt: iteration, findings: review.findings, dispositions: [...dispositions] },
+              ];
+              repairReviewAttempts = history.length;
+              return history.at(-1) as Schema.Schema.Type<typeof FindingHistory>;
+            }),
+          repeatWhile: (entry: Schema.Schema.Type<typeof FindingHistory>) =>
+            entry.findings.length > 0,
+        });
+      }
+      const proof = yield* proveExactMerge(expectedTargetCommit, reviewed.finalCommit);
+      return { ...proof, repairedConflict, repairReviewAttempts };
+    }),
+  });
+
+const verifyIntegrated = (ticketNumber: number, targetCommit: string) =>
+  Sandbox.use(`verify-${ticketNumber}`, {
+    baseBranch: targetCommit,
+    branch: `kojo-delivery-verify-${ticketNumber}`,
+    effect: Effect.gen(function* () {
+      const opened = cleanOutput(
+        (yield* successfulCommand("verified-target-head", "git rev-parse HEAD")).stdout,
+      );
+      if (opened.toLowerCase() !== targetCommit.toLowerCase()) {
+        return yield* failProof(
+          "verified-target-head",
+          `Verification opened ${opened}, expected ${targetCommit}.`,
+        );
+      }
+      yield* runConfiguredVerification();
+      return opened;
+    }),
+  });
+
+const publishIntegrated = (
+  github: GitHubDeliveryService,
+  rootUrl: ParsedRootUrl,
+  routing: DeliveryRouting,
+  inputGraph: GitHubDeliveryGraph,
+  input: Schema.Schema.Type<typeof DeliveryTicketInput>,
+  reviewed: Schema.Schema.Type<typeof Implemented>,
+  expectedTargetCommit: string,
+) =>
+  Effect.gen(function* () {
+    const integrated = yield* integrateReviewed(input, reviewed, expectedTargetCommit);
+    const verifiedCommit = yield* verifyIntegrated(input.ticket.number, integrated.head);
+
+    const reloadedUnknown = yield* durableGitHub(
+      `reload-workstream-${input.ticket.number}`,
+      Schema.Unknown,
+      github.load(rootUrl.canonical),
+    );
+    const reloaded = yield* Effect.try({
+      try: () => decodeGraphSync(reloadedUnknown),
+      catch: (error) => invalid([`GitHub returned an invalid publication graph: ${error}`]),
+    });
+    const reloadedRouting = parseDelivery(reloaded.root.body);
+    const revalidated = validateGraph(reloaded, rootUrl);
+    const reloadedTicket = revalidated.tickets.find(
+      ({ ticket }) => ticket.number === input.ticket.number,
+    );
+    const originalRoot = inputGraph.root;
+    if (
+      revalidated.diagnostics.length > 0 ||
+      reloadedRouting === undefined ||
+      reloadedRouting.targetBranch !== routing.targetBranch ||
+      reloadedRouting.destinationBranch !== routing.destinationBranch ||
+      reloadedRouting.sourceRevision !== routing.sourceRevision ||
+      reloaded.root.number !== originalRoot.number ||
+      reloaded.root.title !== originalRoot.title ||
+      reloaded.root.body !== originalRoot.body ||
+      reloaded.root.url !== originalRoot.url ||
+      reloaded.root.children.totalCount !== originalRoot.children.totalCount ||
+      JSON.stringify(
+        reloaded.root.children.nodes.map(({ number }) => number).sort((a, b) => a - b),
+      ) !==
+        JSON.stringify(
+          originalRoot.children.nodes.map(({ number }) => number).sort((a, b) => a - b),
+        ) ||
+      reloadedTicket === undefined ||
+      JSON.stringify(
+        normalizeSpecification(reloadedTicket.ticket, reloadedTicket.publicationKey),
+      ) !== JSON.stringify(input.ticket)
+    ) {
+      return yield* failProof(
+        "publication-drift",
+        `Ticket #${input.ticket.number}, its relationships, routing, or provenance changed after review.`,
+      );
+    }
+
+    const read = (suffix: string) =>
+      durableGitHub(
+        `read-publication-${input.ticket.number}-${suffix}`,
+        PublicationSnapshotSchema,
+        github.readPublication({
+          repository: rootUrl.repository,
+          targetBranch: routing.targetBranch,
+          ticketNumber: input.ticket.number,
+        }),
+      );
+    const before = yield* read("before");
+    if (
+      before.remoteTargetCommit.toLowerCase() !== expectedTargetCommit.toLowerCase() &&
+      before.remoteTargetCommit.toLowerCase() !== verifiedCommit.toLowerCase()
+    ) {
+      return yield* failProof(
+        "publication-expected-state",
+        `Remote target moved to ${before.remoteTargetCommit}; expected ${expectedTargetCommit}.`,
+      );
+    }
+    if (
+      before.ticketState === "CLOSED" &&
+      before.remoteTargetCommit.toLowerCase() !== verifiedCommit.toLowerCase()
+    ) {
+      return yield* failProof(
+        "publication-ticket-state",
+        `Ticket #${input.ticket.number} closed before its verified commit was published.`,
+      );
+    }
+    const pushKey = `${input.ticket.publicationKey}:push:${verifiedCommit}`;
+    const pushReceipt =
+      before.remoteTargetCommit.toLowerCase() === verifiedCommit.toLowerCase()
+        ? {
+            idempotencyKey: pushKey,
+            state: "AlreadyApplied" as const,
+            targetCommit: verifiedCommit,
+          }
+        : yield* durableGitHub(
+            `push-ticket-${input.ticket.number}`,
+            PublicationReceiptSchema,
+            github.pushExact({
+              expectedTargetCommit,
+              idempotencyKey: pushKey,
+              repository: rootUrl.repository,
+              targetBranch: routing.targetBranch,
+              targetCommit: verifiedCommit,
+            }),
+          );
+    if (
+      pushReceipt.idempotencyKey !== pushKey ||
+      pushReceipt.targetCommit.toLowerCase() !== verifiedCommit.toLowerCase()
+    ) {
+      return yield* failProof("publication-push-receipt", "Push receipt did not match its intent.");
+    }
+    const afterPush = yield* read("after-push");
+    if (afterPush.remoteTargetCommit.toLowerCase() !== verifiedCommit.toLowerCase()) {
+      return yield* failProof(
+        "publication-push-proof",
+        "The exact verified commit was not published.",
+      );
+    }
+    const closeKey = `${input.ticket.publicationKey}:close:${verifiedCommit}`;
+    const closeReceipt =
+      afterPush.ticketState === "CLOSED"
+        ? {
+            idempotencyKey: closeKey,
+            state: "AlreadyApplied" as const,
+            targetCommit: verifiedCommit,
+          }
+        : yield* durableGitHub(
+            `close-ticket-${input.ticket.number}`,
+            PublicationReceiptSchema,
+            github.closeTicket({
+              expectedState: "OPEN",
+              idempotencyKey: closeKey,
+              repository: rootUrl.repository,
+              targetCommit: verifiedCommit,
+              ticketNumber: input.ticket.number,
+            }),
+          );
+    if (
+      closeReceipt.idempotencyKey !== closeKey ||
+      closeReceipt.targetCommit.toLowerCase() !== verifiedCommit.toLowerCase()
+    ) {
+      return yield* failProof(
+        "publication-close-receipt",
+        "Close receipt did not match its intent.",
+      );
+    }
+    const completed = yield* read("completed");
+    if (
+      completed.remoteTargetCommit.toLowerCase() !== verifiedCommit.toLowerCase() ||
+      completed.ticketState !== "CLOSED"
+    ) {
+      return yield* failProof("publication-completion-proof", "Publication did not converge.");
+    }
+    return {
+      _tag: "Published" as const,
+      ticket: reviewed.ticket,
+      reviewedCommit: reviewed.finalCommit,
+      integratedCommit: integrated.head,
+      verifiedCommit,
+      mergeParents: integrated.parents,
+      repairedConflict: integrated.repairedConflict,
+      repairReviewAttempts: integrated.repairReviewAttempts,
+      reviewAttempts: reviewed.reviewAttempts,
+      findingHistory: reviewed.findingHistory,
+      pushReceipt,
+      closeReceipt,
+    };
+  });
+
 export const DeliveryTicket = Workflow.make("delivery-ticket", {
   version: "1",
   entryPoint: "packages/delivery-workflow/src/index.ts",
@@ -856,39 +1294,112 @@ export const Delivery = Workflow.make("delivery", {
           return { _tag: "AlreadyComplete" as const, evidence };
         case "OpenWorkNoReadyTicket":
           return { _tag: "OpenWorkNoReadyTicket" as const, evidence };
-        case "Ready":
-          return {
-            _tag: "OpenWork" as const,
-            evidence,
-            ticketOutcomes: yield* Effect.all(
-              selected.map((selectedTicket) => {
-                const specification = normalizedSpecifications.find(
-                  ({ number }) => number === selectedTicket.number,
+        case "Ready": {
+          const initialPublication = yield* durableGitHub(
+            "capture-target-head",
+            PublicationSnapshotSchema,
+            github.readPublication({
+              repository: rootUrl.repository,
+              targetBranch: routing.targetBranch,
+              ticketNumber: selected[0]?.number ?? rootUrl.number,
+            }),
+          );
+          if (!exactCommit(initialPublication.remoteTargetCommit)) {
+            return yield* Effect.fail(
+              invalid(["The target branch did not resolve to an exact commit."], inputGraph),
+            );
+          }
+          if (initialPublication.ticketState !== "OPEN") {
+            return yield* Effect.fail(
+              invalid(
+                ["The selected ticket changed state while the target HEAD was captured."],
+                inputGraph,
+              ),
+            );
+          }
+          const implementations = yield* Effect.all(
+            selected.map((selectedTicket) => {
+              const specification = normalizedSpecifications.find(
+                ({ number }) => number === selectedTicket.number,
+              );
+              if (specification === undefined) {
+                return Effect.die(
+                  `Ready ticket #${selectedTicket.number} has no normalized specification`,
                 );
-                if (specification === undefined) {
-                  return Effect.die(
-                    `Ready ticket #${selectedTicket.number} has no normalized specification`,
-                  );
-                }
-                return DeliveryTicket.run(`ticket-${selectedTicket.number}`, {
-                  baseCommit: routing.sourceRevision,
-                  branch: `kojo-delivery-ticket-${selectedTicket.number}`,
-                  destinationBranch: routing.destinationBranch,
-                  targetBranch: routing.targetBranch,
-                  ticket: specification,
-                }).pipe(
-                  Effect.catchCause((cause) =>
-                    Effect.succeed({
-                      _tag: "TicketFailed" as const,
-                      ticket: selectedTicket,
-                      failure: ticketFailureFromCause(cause),
-                    }),
-                  ),
-                );
+              }
+              return DeliveryTicket.run(`ticket-${selectedTicket.number}`, {
+                baseCommit: initialPublication.remoteTargetCommit,
+                branch: `kojo-delivery-ticket-${selectedTicket.number}`,
+                destinationBranch: routing.destinationBranch,
+                targetBranch: routing.targetBranch,
+                ticket: specification,
+              }).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.succeed({
+                    _tag: "TicketFailed" as const,
+                    ticket: selectedTicket,
+                    failure: ticketFailureFromCause(cause),
+                  }),
+                ),
+              );
+            }),
+            { concurrency: 2 },
+          );
+          const ticketOutcomes: Array<
+            | Schema.Schema.Type<typeof Published>
+            | Schema.Schema.Type<typeof ReviewLimitReached>
+            | Schema.Schema.Type<typeof TicketFailed>
+          > = [];
+          let expectedTargetCommit = initialPublication.remoteTargetCommit;
+          for (const implementation of implementations) {
+            if (implementation._tag !== "Implemented") {
+              ticketOutcomes.push(implementation);
+              continue;
+            }
+            const specification = normalizedSpecifications.find(
+              ({ number }) => number === implementation.ticket.number,
+            );
+            if (specification === undefined) {
+              return yield* Effect.die(
+                `Implemented ticket #${implementation.ticket.number} has no normalized specification`,
+              );
+            }
+            const published = yield* publishIntegrated(
+              github,
+              rootUrl,
+              routing,
+              inputGraph,
+              {
+                baseCommit: initialPublication.remoteTargetCommit,
+                branch: `kojo-delivery-ticket-${implementation.ticket.number}`,
+                destinationBranch: routing.destinationBranch,
+                targetBranch: routing.targetBranch,
+                ticket: specification,
+              },
+              implementation,
+              expectedTargetCommit,
+            ).pipe(
+              Effect.matchCauseEffect({
+                onFailure: (cause) =>
+                  Effect.succeed({
+                    _tag: "TicketFailed" as const,
+                    ticket: implementation.ticket,
+                    failure: ticketFailureFromCause(cause),
+                  }),
+                onSuccess: Effect.succeed,
               }),
-              { concurrency: 2 },
-            ),
+            );
+            ticketOutcomes.push(published);
+            if (published._tag === "Published") expectedTargetCommit = published.verifiedCommit;
+          }
+          return {
+            _tag: ticketOutcomes.some(({ _tag }) => _tag !== "Published")
+              ? ("TicketsFailed" as const)
+              : ("OpenWork" as const),
+            evidence,
+            ticketOutcomes,
           };
+        }
       }
     }) as Effect.Effect<
       DeliveryResult,
