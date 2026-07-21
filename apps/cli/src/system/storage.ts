@@ -440,6 +440,11 @@ export interface WorkflowRunRepository {
     | undefined;
   readonly list: () => ReadonlyArray<StoredWorkflowRun>;
   readonly interruptRunning: () => ReadonlyArray<string>;
+  readonly interruptScope: (
+    scope: ExecutionWriteScope,
+    reason: "ProjectRuntimeProcessLost",
+  ) => boolean;
+  readonly reconcileExpiredLeases: () => ReadonlyArray<string>;
   readonly requestSuspend: (
     runId: string,
     reason?: "Operator" | "SystemProcessStop",
@@ -1012,14 +1017,18 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
         .run();
       return { control, evidence };
     };
-    const interruptRun = (runId: string, reason: "LeaseExpired" | "SystemProcessRestart") => {
+    const interruptRun = (
+      runId: string,
+      reason: "LeaseExpired" | "ProjectRuntimeProcessLost" | "SystemProcessRestart",
+      scope?: ExecutionWriteScope,
+    ) =>
       database.transaction((transaction) => {
         const run = transaction
           .select({ state: workflowRuns.state })
           .from(workflowRuns)
           .where(eq(workflowRuns.runId, runId))
           .get();
-        if (run?.state !== "Running") return;
+        if (run?.state !== "Running") return false;
         const attempt =
           transaction
             .select({ number: executionAttempts.number })
@@ -1027,6 +1036,26 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
             .where(eq(executionAttempts.runId, runId))
             .orderBy(sql`${executionAttempts.number} desc`)
             .get()?.number ?? 1;
+        if (scope !== undefined) {
+          const lease = transaction
+            .select()
+            .from(executionLeases)
+            .where(
+              and(
+                eq(executionLeases.runId, scope.runId),
+                eq(executionLeases.generation, scope.leaseGeneration),
+              ),
+            )
+            .get();
+          if (
+            attempt !== scope.attempt ||
+            runId !== scope.runId ||
+            lease?.state !== "Active" ||
+            lease.holder !== scope.leaseHolder
+          ) {
+            return false;
+          }
+        }
         const evidence = appendLifecycle(transaction, runId, attempt, "WorkflowRun.Interrupted", {
           reason,
         });
@@ -1045,8 +1074,8 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
           .set({ state: "Expired" })
           .where(and(eq(executionLeases.runId, runId), eq(executionLeases.state, "Active")))
           .run();
+        return true;
       });
-    };
     const reconcileExpiredScope = (scope: ExecutionWriteScope) => {
       const lease = database
         .select()
@@ -1058,11 +1087,7 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
           ),
         )
         .get();
-      if (
-        lease?.state === "Active" &&
-        lease.holder === scope.leaseHolder &&
-        lease.expiresAt <= new Date().toISOString()
-      ) {
+      if (lease?.state === "Active" && lease.expiresAt <= new Date().toISOString()) {
         interruptRun(scope.runId, "LeaseExpired");
         throw new Error(`Workflow Run ${scope.runId} rejected a delayed execution write`);
       }
@@ -1073,10 +1098,7 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
         return database.transaction((transaction) => {
           assertExecutionScope(transaction, record);
           const evidence = insertBoundary(transaction, record);
-          const lifecycle =
-            record.operation === "Activity.Completed"
-              ? applyPendingLifecycle(transaction, record.runId, record.attempt)
-              : undefined;
+          const lifecycle = applyPendingLifecycle(transaction, record.runId, record.attempt);
           return lifecycle === undefined
             ? evidence
             : Object.assign(evidence, { control: lifecycle.control });
@@ -1260,6 +1282,22 @@ export const openSystemStore = async (home: string): Promise<SystemStore> => {
           .all();
         for (const { runId } of running) interruptRun(runId, "SystemProcessRestart");
         return running.map(({ runId }) => runId);
+      },
+      interruptScope: (scope, reason) => interruptRun(scope.runId, reason, scope),
+      reconcileExpiredLeases: () => {
+        const now = new Date().toISOString();
+        const expired = database
+          .select({ runId: executionLeases.runId })
+          .from(executionLeases)
+          .where(
+            and(eq(executionLeases.state, "Active"), sql`${executionLeases.expiresAt} <= ${now}`),
+          )
+          .all();
+        const interrupted: Array<string> = [];
+        for (const { runId } of expired) {
+          if (interruptRun(runId, "LeaseExpired")) interrupted.push(runId);
+        }
+        return interrupted;
       },
       requestSuspend: (runId, reason = "Operator") =>
         database.transaction((transaction) => {

@@ -323,7 +323,9 @@ describe("WorkflowTest", () => {
       failure: AcceptanceFailure,
       recovery: {
         InvalidWorkstream: () =>
-          Effect.sync(() => {
+          Effect.gen(function* () {
+            const adapter = yield* Adapter;
+            yield* adapter.invoke("Git", "reconcile", {}, undefined);
             recovered = true;
           }),
       },
@@ -335,7 +337,7 @@ describe("WorkflowTest", () => {
               reason: "repair external state",
             }),
     });
-    const fixture = WorkflowTest.make(recoverable);
+    const fixture = WorkflowTest.make(recoverable, { layer: adapterLayer });
     const failed = await fixture.run(undefined);
     const resumed = await fixture.resume();
 
@@ -347,6 +349,34 @@ describe("WorkflowTest", () => {
       state: "Completed",
     });
     expect(resumed.evidence.map(({ type }) => type)).toContain("Recovery.Completed");
+    expect(resumed.calls).toContainEqual(
+      expect.objectContaining({ layer: "Git", operation: "reconcile", status: "Completed" }),
+    );
+  });
+
+  test("keeps a Recovery Handler defect truthful in evidence", async () => {
+    const recoveryDefect = Workflow.make("RecoveryDefect", {
+      version: "1",
+      entryPoint: "workflows/recovery-defect.ts",
+      input: Schema.Void,
+      success: Schema.Never,
+      failure: AcceptanceFailure,
+      recovery: {
+        InvalidWorkstream: () => Effect.die("recovery crashed"),
+      },
+      run: () =>
+        Effect.fail({
+          _tag: "InvalidWorkstream" as const,
+          reason: "repair external state",
+        }),
+    });
+    const fixture = WorkflowTest.make(recoveryDefect);
+    await fixture.run(undefined);
+
+    const resumed = await fixture.resume();
+
+    expect(resumed).toMatchObject({ outcome: { _tag: "Defect" }, state: "Failed" });
+    expect(resumed.evidence.map(({ type }) => type)).toContain("Recovery.Failed");
   });
 
   test("keeps a failed Activity truthful in evidence and trace", async () => {

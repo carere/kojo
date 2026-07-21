@@ -337,6 +337,43 @@ describe("Workflow Run service", () => {
     store.close();
   });
 
+  test("reconciles Project Runtime Process loss as Interrupted instead of Failed", async () => {
+    const store = await makeStore();
+    const service = makeWorkflowRunService(store, {
+      prepare: async () => ({
+        encodedInput: {},
+        execute: async () => {
+          throw new Error("runtime process exited");
+        },
+        ...preparedRevision("runtime-loss", "runtime-loss-fingerprint", "e"),
+      }),
+    });
+    const started = await service.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-1",
+      workflowName: "runtime-loss",
+    });
+
+    await service.settle(started.runId);
+
+    expect(service.inspect(started.runId)).toMatchObject({
+      attempts: [{ state: "Interrupted" }],
+      evidence: [
+        { type: "WorkflowRun.Started" },
+        {
+          details: {
+            encodingVersion: 1,
+            value: { reason: "ProjectRuntimeProcessLost" },
+          },
+          type: "WorkflowRun.Interrupted",
+        },
+      ],
+      state: "Interrupted",
+    });
+    store.close();
+  });
+
   test("suspends after the current Activity settles and starts no next Activity", async () => {
     const store = await makeStore();
     const service = makeWorkflowRunService(store, {
@@ -643,6 +680,43 @@ describe("Workflow Run service", () => {
           type: "WorkflowRun.Interrupted",
         },
       ],
+      lease: { state: "Expired" },
+      state: "Interrupted",
+    });
+    store.close();
+  });
+
+  test("reconciles an expired lease without waiting for a delayed writer", async () => {
+    const store = await makeStore();
+    const service = makeWorkflowRunService(store, {
+      prepare: async () => ({
+        encodedInput: {},
+        execute: async () => new Promise(() => undefined),
+        ...preparedRevision("expired-idle", "expired-idle-fingerprint", "7"),
+      }),
+    });
+    const started = await service.start({
+      fromCheckout: false,
+      input: {},
+      projectId: "project-1",
+      workflowName: "expired-idle",
+    });
+    const stored = store.workflowRuns.find(started.runId);
+    if (stored?.lease === undefined) throw new Error("start did not create an Execution Lease");
+    store.workflowRuns.renewLease(
+      {
+        attempt: 1,
+        leaseGeneration: 1,
+        leaseHolder: stored.lease.holder,
+        projectId: "project-1",
+        rootRunId: started.runId,
+        runId: started.runId,
+      },
+      new Date(0).toISOString(),
+    );
+
+    expect(store.workflowRuns.reconcileExpiredLeases()).toEqual([started.runId]);
+    expect(service.inspect(started.runId)).toMatchObject({
       lease: { state: "Expired" },
       state: "Interrupted",
     });

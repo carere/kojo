@@ -170,6 +170,7 @@ export const runSystemProcess = async (home: string): Promise<void> => {
   let endpointReady = false;
   let lockToken: string | undefined;
   let homeDiagnostics: ReadonlyArray<unknown> = [];
+  let leaseReconciler: ReturnType<typeof setInterval> | undefined;
   let projectService: ReturnType<typeof makeProjectService> | undefined;
   let restartRunIds: ReadonlyArray<string> = [];
   let workflowRunService: ReturnType<typeof makeWorkflowRunService> | undefined;
@@ -180,6 +181,7 @@ export const runSystemProcess = async (home: string): Promise<void> => {
   });
 
   const cleanup = async () => {
+    if (leaseReconciler !== undefined) clearInterval(leaseReconciler);
     server?.stop(true);
     try {
       store?.close();
@@ -606,6 +608,19 @@ export const runSystemProcess = async (home: string): Promise<void> => {
     await replaceLockRecord(paths.lock, details);
     await rm(paths.startupError, { force: true });
     endpointReady = true;
+    leaseReconciler = setInterval(() => {
+      try {
+        store?.workflowRuns.reconcileExpiredLeases();
+      } catch (error) {
+        console.error(
+          JSON.stringify({
+            event: "workflow-lease-reconciliation-failed",
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
+    }, 60_000);
+    leaseReconciler.unref();
     for (const runId of restartRunIds) {
       await workflowRunService?.resume(runId).catch((error) => {
         console.error(

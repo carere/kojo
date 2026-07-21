@@ -68,6 +68,7 @@ const executeWorkflow = async (
     throw new Error("Project Runtime execution scope is incomplete");
   }
   const runtimeRunId = request.runId;
+  const runtimeAttempt = request.attempt;
   const executionScope = {
     attempt: request.attempt,
     leaseGeneration: request.leaseGeneration,
@@ -153,6 +154,11 @@ const executeWorkflow = async (
       },
     );
     if (!response.ok) throw new Error(`System Process rejected durable boundary '${operation}'`);
+    const recorded = (await response.json()) as {
+      readonly status?: "discard" | "recorded" | "suspend";
+    };
+    if (recorded.status === "suspend") throw new Error("__KOJO_SUSPENDED__");
+    if (recorded.status === "discard") throw new Error("__KOJO_DISCARDED__");
   };
   const kernel = EffectWorkflow.make(`kojo:${workflow.name}`, {
     error: workflow.failure,
@@ -168,6 +174,7 @@ const executeWorkflow = async (
   const handlerLayer = kernel
     .toLayer(({ input }) => workflow.run(input) as Effect.Effect<unknown, unknown>)
     .pipe(Layer.provide(engineLayer));
+  const recoveryInstance = WorkflowEngine.WorkflowInstance.initial(kernel, runtimeRunId);
   const recovery =
     request.recoveryFailure === undefined
       ? Effect.void
@@ -183,11 +190,29 @@ const executeWorkflow = async (
               ? failure._tag
               : undefined;
           const handler = tag === undefined ? undefined : workflow.recovery?.[tag];
-          if (handler === undefined) {
+          if (handler === undefined || tag === undefined) {
             return yield* Effect.die("The Failed Workflow Run has no matching Recovery Handler");
           }
-          yield* handler(failure);
-        });
+          const recoveryKey = `${runtimeRunId}:recovery:${runtimeAttempt}:${tag}`;
+          yield* Effect.promise(() =>
+            recordKernelBoundary(
+              `${recoveryKey}:Recovery.Started`,
+              "Recovery.Started",
+              { failure },
+              tag,
+            ),
+          );
+          const recoveryExit = yield* Effect.exit(handler(failure));
+          yield* Effect.promise(() =>
+            recordKernelBoundary(
+              `${recoveryKey}:Recovery.${Exit.isSuccess(recoveryExit) ? "Completed" : "Failed"}`,
+              Exit.isSuccess(recoveryExit) ? "Recovery.Completed" : "Recovery.Failed",
+              Exit.isSuccess(recoveryExit) ? {} : { cause: Cause.pretty(recoveryExit.cause) },
+              tag,
+            ),
+          );
+          if (Exit.isFailure(recoveryExit)) return yield* Effect.failCause(recoveryExit.cause);
+        }).pipe(Effect.provideService(WorkflowEngine.WorkflowInstance, recoveryInstance));
   const program = recovery
     .pipe(Effect.andThen(kernel.execute({ input } as never)))
     .pipe(Effect.provide(Layer.merge(engineLayer, handlerLayer)), Effect.scoped);

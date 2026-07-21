@@ -457,12 +457,31 @@ const make = <
         ? recoveryFailure._tag
         : undefined;
     const recoveryHandler = recoveryTag === undefined ? undefined : workflow.recovery[recoveryTag];
-    const recovery =
+    const recoveryInstance = WorkflowEngine.WorkflowInstance.initial(
+      kernel as EffectWorkflow.Any,
+      runId,
+    );
+    const recoveryEffect = (
       recoveryHandler === undefined || recoveryTag === undefined
         ? Effect.void
-        : Effect.sync(() => append("Recovery.Started", recoveryTag)).pipe(
-            Effect.andThen(recoveryHandler(recoveryFailure as never)),
-            Effect.andThen(Effect.sync(() => append("Recovery.Completed", recoveryTag))),
+        : Effect.gen(function* () {
+            append("Recovery.Started", recoveryTag);
+            const recoveryExit = yield* Effect.exit(recoveryHandler(recoveryFailure as never));
+            append(
+              Exit.isSuccess(recoveryExit) ? "Recovery.Completed" : "Recovery.Failed",
+              recoveryTag,
+              Exit.isSuccess(recoveryExit)
+                ? undefined
+                : { cause: Cause.pretty(recoveryExit.cause) },
+            );
+            if (Exit.isFailure(recoveryExit)) return yield* Effect.failCause(recoveryExit.cause);
+          })
+    ).pipe(Effect.provideService(WorkflowEngine.WorkflowInstance, recoveryInstance));
+    const recovery =
+      makeOptions.layer === undefined
+        ? recoveryEffect
+        : recoveryEffect.pipe(
+            Effect.provide(makeOptions.layer as Layer.Layer<never, never, never>),
           );
     const program = Effect.sync(() => {
       if (attempt === 1) append("WorkflowRun.Started", workflow.name, { input });

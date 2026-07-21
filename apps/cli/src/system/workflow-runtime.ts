@@ -7,6 +7,7 @@ import {
   type ProjectSourceRevision,
   ProjectSourceValidationError,
   type RuntimeSourceCheckout,
+  validatePinnedProjectSource,
 } from "./project-source";
 import type { SystemStore } from "./storage";
 import {
@@ -125,9 +126,11 @@ const prepareRevision = async (
     revision,
     source: {
       commit: revision.commit,
+      defaultBranch: revision.provenance.defaultBranch,
       dirty: false,
       kind: "ProjectSourceRevision" as const,
       policy: revision.policy,
+      remote: revision.provenance.remote,
     },
   };
 };
@@ -259,9 +262,42 @@ export const makeProjectWorkflowRuntime = (
       );
     }
 
-    let prepared: Awaited<ReturnType<typeof prepareRevision>> | undefined;
+    let prepared:
+      | {
+          readonly checkout: RuntimeSourceCheckout;
+          readonly revision: ProjectSourceRevision;
+          readonly source: PreparedWorkflowRun["revision"]["source"];
+        }
+      | undefined;
     try {
-      prepared = await prepareRevision(store, project, false);
+      const policy = request.revision.source.policy;
+      if (policy !== "LocalWithFreshnessWarning" && policy !== "RemoteLatest") {
+        throw new WorkflowStartError(
+          "WORKFLOW_INCOMPATIBLE",
+          "The pinned Workflow Revision has no reproducible Project Source Policy",
+        );
+      }
+      const revision = await validatePinnedProjectSource({
+        commit: request.revision.source.commit,
+        defaultBranch:
+          typeof request.revision.source.defaultBranch === "string"
+            ? request.revision.source.defaultBranch
+            : undefined,
+        policy,
+        remote:
+          typeof request.revision.source.remote === "string" ||
+          request.revision.source.remote === null
+            ? request.revision.source.remote
+            : undefined,
+        repository: project.path,
+      });
+      prepared = {
+        checkout: await materializeRuntimeSourceCheckout(project.path, revision, {
+          installDependencies: true,
+        }),
+        revision,
+        source: request.revision.source,
+      };
       const workflow = prepared.revision.workflows.find(
         (candidate) => candidate.name === request.revision.stableName,
       );

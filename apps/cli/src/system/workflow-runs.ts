@@ -206,6 +206,32 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
     };
   };
 
+  const executeAttempt = async (
+    execute: PreparedWorkflowRun["execute"],
+    scope: ExecutionWriteScope,
+  ) => {
+    const heartbeat = setInterval(() => {
+      try {
+        store.workflowRuns.renewLease(scope, new Date(Date.now() + 5 * 60_000).toISOString());
+      } catch {
+        // The next fenced write or finalization will reconcile lost authority.
+      }
+    }, 60_000);
+    heartbeat.unref();
+    let outcome: WorkflowExecutionOutcome;
+    try {
+      outcome = await execute(scope);
+    } catch {
+      store.workflowRuns.interruptScope(scope, "ProjectRuntimeProcessLost");
+      return;
+    } finally {
+      clearInterval(heartbeat);
+    }
+    if (outcome.state === "Completed" || outcome.state === "Failed") {
+      finalize(scope.runId, outcome, scope);
+    }
+  };
+
   return {
     inspect,
     claimActivity: (request: {
@@ -265,13 +291,21 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
         .list()
         .filter((run) => run.runId === run.rootRunId && run.state === "Running")
         .map(({ runId }) => runId);
+      const requestedRoots: Array<string> = [];
       for (const runId of runningRoots) {
-        store.workflowRuns.requestSuspend(runId, "SystemProcessStop");
+        try {
+          store.workflowRuns.requestSuspend(runId, "SystemProcessStop");
+          requestedRoots.push(runId);
+        } catch {
+          // A terminal boundary may win the race after the Running roots were listed.
+        }
       }
       await Promise.allSettled(
-        runningRoots.map((runId) => settlements.get(runId)).filter((value) => value !== undefined),
+        requestedRoots
+          .map((runId) => settlements.get(runId))
+          .filter((value) => value !== undefined),
       );
-      return runningRoots;
+      return requestedRoots;
     },
     resume: (runId: string) => {
       const inspected = inspect(runId);
@@ -287,6 +321,15 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
         throw new WorkflowStartError(
           "WORKFLOW_INCOMPATIBLE",
           `Workflow Run ${runId} has no Workflow Revision Snapshot`,
+        );
+      }
+      if (
+        inspected.lease?.state === "Active" &&
+        inspected.lease.expiresAt > new Date().toISOString()
+      ) {
+        throw new WorkflowStartError(
+          "WORKFLOW_INCOMPATIBLE",
+          `Workflow Run ${runId} still has active execution authority`,
         );
       }
       const prepareResume = runtime.prepareResume;
@@ -374,18 +417,9 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
           rootRunId: inspected.rootRunId,
           runId,
         };
-        const settlement = Promise.resolve().then(async () => {
-          const outcome = await prepared.execute(executionScope).catch((error) => ({
-            state: "Failed" as const,
-            value: {
-              _tag: "RuntimeDefect",
-              message: error instanceof Error ? error.message : String(error),
-            },
-          }));
-          if (outcome.state === "Completed" || outcome.state === "Failed") {
-            finalize(runId, outcome, executionScope);
-          }
-        });
+        const settlement = Promise.resolve().then(() =>
+          executeAttempt(prepared.execute, executionScope),
+        );
         settlements.set(runId, settlement);
         void settlement.catch(() => undefined);
         return { attempt: nextAttempt, runId, state: "Running" as const };
@@ -481,34 +515,7 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
         runId,
       };
       const settlement = Promise.resolve().then(async () => {
-        const heartbeat = setInterval(() => {
-          try {
-            store.workflowRuns.renewLease(
-              executionScope,
-              new Date(Date.now() + 5 * 60_000).toISOString(),
-            );
-          } catch {
-            // The next fenced write or finalization will reconcile lost authority.
-          }
-        }, 60_000);
-        heartbeat.unref();
-        let outcome: WorkflowExecutionOutcome;
-        try {
-          outcome = await prepared.execute(executionScope);
-        } catch (error) {
-          outcome = {
-            state: "Failed",
-            value: {
-              _tag: "RuntimeDefect",
-              message: error instanceof Error ? error.message : String(error),
-            },
-          };
-        } finally {
-          clearInterval(heartbeat);
-        }
-        if (outcome.state === "Completed" || outcome.state === "Failed") {
-          finalize(runId, outcome, executionScope);
-        }
+        await executeAttempt(prepared.execute, executionScope);
       });
       settlements.set(runId, settlement);
       void settlement.catch(() => undefined);
