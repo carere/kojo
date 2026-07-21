@@ -184,6 +184,7 @@ export const makeProjectWorkflowRuntime = (
       });
       const fixed = prepared;
       return {
+        dispose: () => fixed.checkout.dispose(),
         encodedInput: validation.encodedInput,
         execute: async ({
           attempt,

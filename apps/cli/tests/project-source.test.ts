@@ -241,11 +241,51 @@ describe("Project Source Revision adapter", () => {
         ...registry(),
         schedules: [
           {
-            cron: "Cron({seconds:[0]})",
+            cron: {
+              and: false,
+              days: [],
+              hours: [9],
+              minutes: [0],
+              months: [],
+              seconds: [0],
+              weekdays: [],
+            },
             input: {},
             missedTimePolicy: "skip",
             name: "daily",
             timezone: "+01:00",
+            workflow: "alpha",
+          },
+        ],
+      }),
+      policy: "LocalWithFreshnessWarning",
+      repository,
+    }).catch((error) => error);
+
+    expect(failure).toBeInstanceOf(ProjectSourceValidationError);
+    expect(failure.diagnostics).toContainEqual(expect.objectContaining({ code: "INVALID_CONFIG" }));
+  });
+
+  test("rejects out-of-range Effect Cron fields before activating source", async () => {
+    const repository = await makeRepository();
+    const failure = await activateProjectSource({
+      loadRegistry: async () => ({
+        ...registry(),
+        schedules: [
+          {
+            cron: {
+              and: false,
+              days: [],
+              hours: [9],
+              minutes: [60],
+              months: [],
+              seconds: [0],
+              weekdays: [],
+            },
+            input: {},
+            missedTimePolicy: "skip",
+            name: "invalid-cron",
+            timezone: "UTC",
             workflow: "alpha",
           },
         ],

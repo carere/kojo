@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ExecutionWriteScope, SystemStore } from "./storage";
+import type { ExecutionWriteScope, ScheduleEvaluationCommit, SystemStore } from "./storage";
 
 export type WorkflowStartErrorCode =
   | "INVALID_CONFIGURATION"
@@ -49,6 +49,7 @@ export type WorkflowExecutionOutcome =
   | { readonly state: "Discarded" | "Suspended"; readonly value?: unknown };
 
 export interface PreparedWorkflowRun {
+  readonly dispose?: () => Promise<void>;
   readonly encodedInput: unknown;
   readonly execute: (scope: {
     readonly attempt: number;
@@ -499,6 +500,119 @@ export const makeWorkflowRunService = (store: SystemStore, runtime: WorkflowRunt
       return inspect(runId);
     },
     suspend: (runId: string) => store.workflowRuns.requestSuspend(runId, "Operator"),
+    startScheduled: async (
+      request: Omit<WorkflowStartRequest, "fromCheckout">,
+      evaluation: Omit<ScheduleEvaluationCommit, "start">,
+      trigger: {
+        readonly catchUp?: {
+          readonly count: number;
+          readonly earliest: string;
+          readonly latest: string;
+        };
+        readonly occurrence: string;
+        readonly scheduleName: string;
+        readonly scheduledAt: string;
+        readonly type: "Scheduled";
+      },
+    ) => {
+      const prepared = await runtime.prepare({ ...request, fromCheckout: false });
+      const runId = randomUUID();
+      const leaseHolder = randomUUID();
+      const now = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 5 * 60_000).toISOString();
+      const startEventId = randomUUID();
+      const record = {
+        attempt: {
+          finishedAt: null,
+          number: 1,
+          runId,
+          startedAt: now,
+          state: "Running" as const,
+        },
+        evidence: {
+          attempt: 1,
+          causationId: null,
+          details: encoded({ trigger }),
+          eventId: startEventId,
+          idempotencyKey: `${runId}:start`,
+          parentEventId: null,
+          recordedAt: now,
+          runId,
+          sequence: 1,
+          subject: runId,
+          type: "WorkflowRun.Started",
+        },
+        journal: {
+          attempt: 1,
+          idempotencyKey: `${runId}:start`,
+          operation: "WorkflowRun.Started",
+          payload: encoded({ trigger }),
+          runId,
+          sequence: 1,
+          writtenAt: now,
+        },
+        lease: {
+          acquiredAt: now,
+          expiresAt,
+          generation: 1,
+          holder: leaseHolder,
+          runId,
+          state: "Active" as const,
+        },
+        revision: {
+          createdAt: now,
+          declaredVersion: prepared.revision.declaredVersion,
+          fingerprint: prepared.revision.fingerprint,
+          source: JSON.stringify(prepared.revision.source),
+          stableName: prepared.revision.stableName,
+          workflowAbi: prepared.revision.workflowAbi,
+        },
+        revisionSnapshot: {
+          createdAt: now,
+          rootRunId: runId,
+          snapshot: encoded(prepared.revisionSnapshot),
+        },
+        run: {
+          createdAt: now,
+          input: encoded(prepared.encodedInput),
+          outcome: null,
+          projectId: request.projectId,
+          revisionFingerprint: prepared.revision.fingerprint,
+          rootRunId: runId,
+          runId,
+          state: "Running" as const,
+          trigger: JSON.stringify(trigger),
+          updatedAt: now,
+        },
+      };
+      let committed: ReturnType<SystemStore["workflowSchedules"]["commitEvaluation"]>;
+      try {
+        committed = store.workflowSchedules.commitEvaluation({ ...evaluation, start: record });
+      } catch (error) {
+        await prepared.dispose?.().catch(() => undefined);
+        throw error;
+      }
+      if (committed.outcome !== "Started") {
+        await prepared.dispose?.();
+        return { ...committed, runId: committed.runId };
+      }
+      const executionScope = {
+        attempt: 1 as const,
+        leaseGeneration: 1 as const,
+        leaseHolder,
+        projectId: request.projectId,
+        rootRunId: runId,
+        runId,
+      };
+      const controller = new AbortController();
+      executionControllers.set(runId, controller);
+      const settlement = Promise.resolve().then(() =>
+        executeAttempt(prepared.execute, executionScope, controller),
+      );
+      settlements.set(runId, settlement);
+      void settlement.catch(() => undefined);
+      return { ...committed, runId };
+    },
     start: async (request: WorkflowStartRequest) => {
       // Preparation owns Project/source discovery, complete registry validation,
       // runtime configuration preflight, and schema decoding. Nothing durable is

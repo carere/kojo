@@ -79,7 +79,15 @@ export interface LoadedWorkflow {
 }
 
 export interface LoadedSchedule {
-  readonly cron: string;
+  readonly cron: {
+    readonly and: boolean;
+    readonly days: ReadonlyArray<number>;
+    readonly hours: ReadonlyArray<number>;
+    readonly minutes: ReadonlyArray<number>;
+    readonly months: ReadonlyArray<number>;
+    readonly seconds: ReadonlyArray<number>;
+    readonly weekdays: ReadonlyArray<number>;
+  };
   readonly input: unknown;
   readonly missedTimePolicy: "catch-up-once" | "skip";
   readonly name: string;
@@ -586,8 +594,16 @@ const defaultLoadRegistry = async (
     const schedules = config.schedules.map((schedule) => ({
       name: schedule.name,
       workflow: schedule.workflow.name,
-      input: schedule.input,
-      cron: String(schedule.cron),
+      input: Schema.encodeUnknownSync(schedule.workflow.input)(schedule.input),
+      cron: {
+        and: schedule.cron.and,
+        days: [...schedule.cron.days],
+        hours: [...schedule.cron.hours],
+        minutes: [...schedule.cron.minutes],
+        months: [...schedule.cron.months],
+        seconds: [...schedule.cron.seconds],
+        weekdays: [...schedule.cron.weekdays],
+      },
       timezone: schedule.timezone,
       missedTimePolicy: schedule.missedTimePolicy,
     }));
@@ -1199,6 +1215,17 @@ const validEntryPoint = (entryPoint: unknown): entryPoint is string =>
   entryPoint.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..") &&
   /\.(?:ts|mts)$/.test(entryPoint);
 
+const validCronField = (
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  allowEmpty = true,
+): value is ReadonlyArray<number> =>
+  Array.isArray(value) &&
+  (allowEmpty || value.length > 0) &&
+  value.every((entry) => Number.isInteger(entry) && entry >= minimum && entry <= maximum) &&
+  new Set(value).size === value.length;
+
 const validateLoadedRegistry = (registry: LoadedRegistry, configPath: string) => {
   const diagnostics: Array<ProjectSourceDiagnostic> = [];
   if (!Array.isArray(registry.workflows) || !Array.isArray(registry.schedules)) {
@@ -1240,8 +1267,17 @@ const validateLoadedRegistry = (registry: LoadedRegistry, configPath: string) =>
         schedule.name.length === 0 ||
         typeof schedule.workflow !== "string" ||
         schedule.workflow.length === 0 ||
-        typeof schedule.cron !== "string" ||
-        schedule.cron.length === 0 ||
+        typeof schedule.cron !== "object" ||
+        schedule.cron === null ||
+        typeof schedule.cron.and !== "boolean" ||
+        !validCronField(schedule.cron.seconds, 0, 59, false) ||
+        schedule.cron.seconds.length !== 1 ||
+        schedule.cron.seconds[0] !== 0 ||
+        !validCronField(schedule.cron.minutes, 0, 59) ||
+        !validCronField(schedule.cron.hours, 0, 23) ||
+        !validCronField(schedule.cron.days, 1, 31) ||
+        !validCronField(schedule.cron.months, 1, 12) ||
+        !validCronField(schedule.cron.weekdays, 0, 6) ||
         typeof schedule.timezone !== "string" ||
         !validTimeZone(schedule.timezone) ||
         (schedule.missedTimePolicy !== "skip" && schedule.missedTimePolicy !== "catch-up-once")

@@ -98,6 +98,78 @@ afterEach(async () => {
 });
 
 describe("Kojo System Process", () => {
+  test("lists, inspects, enables, and disables durable Workflow Schedules", async () => {
+    const home = await makeHome();
+    const store = await openSystemStore(home);
+    const now = new Date().toISOString();
+    store.projects.create({
+      createdAt: now,
+      id: "scheduled-project",
+      metadata: "{}",
+      path: join(home, "missing-project"),
+      registrationState: "Enabled",
+      updatedAt: now,
+    });
+    store.projectSources.activate(
+      "scheduled-project",
+      "LocalWithFreshnessWarning",
+      JSON.stringify({
+        schedules: [
+          {
+            cron: {
+              and: false,
+              days: [],
+              hours: [9],
+              minutes: [0],
+              months: [],
+              seconds: [0],
+              weekdays: [],
+            },
+            input: { fixed: true },
+            missedTimePolicy: "skip",
+            name: "morning",
+            timezone: "UTC",
+            workflow: "alpha",
+          },
+        ],
+        workflows: [{ fingerprint: "alpha-fingerprint", name: "alpha", version: "v1" }],
+      }),
+    );
+    store.close();
+    expect(runCli(home, "start").exitCode).toBe(0);
+
+    const listed = runCli(home, "schedule", "list", "scheduled-project");
+    expect(listed.exitCode).toBe(0);
+    expect(listed.json as unknown).toMatchObject({
+      command: "schedule.list",
+      schedules: [{ enablement: "Disabled", name: "morning", workflowName: "alpha" }],
+      schemaVersion: 1,
+      status: "succeeded",
+    });
+
+    expect(
+      runCli(home, "schedule", "enable", "scheduled-project", "morning").json as unknown,
+    ).toMatchObject({
+      command: "schedule.enable",
+      schedule: { enablement: "Enabled", name: "morning" },
+      status: "enabled",
+    });
+    expect(
+      runCli(home, "schedule", "inspect", "scheduled-project", "morning").json as unknown,
+    ).toMatchObject({
+      command: "schedule.inspect",
+      schedule: { catchUp: null, history: [], name: "morning", occurrences: [] },
+      status: "succeeded",
+    });
+    expect(
+      runCli(home, "schedule", "disable", "scheduled-project", "morning").json as unknown,
+    ).toMatchObject({
+      command: "schedule.disable",
+      schedule: { enablement: "Disabled", name: "morning" },
+      status: "disabled",
+    });
+  });
+
   test("inspects a terminal Workflow Run by Run ID without valid Project source", async () => {
     const home = await makeHome();
     const store = await openSystemStore(home);
@@ -654,6 +726,10 @@ describe("Kojo System Process", () => {
         {
           checksum: expect.stringMatching(/^[a-f0-9]{64}$/),
           id: 7,
+        },
+        {
+          checksum: expect.stringMatching(/^[a-f0-9]{64}$/),
+          id: 8,
         },
       ]);
     } finally {
