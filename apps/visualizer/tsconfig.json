@@ -14,7 +14,7 @@
     },
     "outDir": "../../.moon/cache/types/apps/visualizer"
   },
-  "include": ["../../packages/domain/src/**/*", "src/**/*", "*.ts", "*.tsx"],
+  "include": ["../../packages/domain/src/**/*", "src/**/*", "tests/**/*", "*.ts", "*.tsx"],
   "references": [
     {
       "path": "../../packages/domain"

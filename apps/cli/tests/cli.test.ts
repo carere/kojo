@@ -16,11 +16,65 @@ const runCommand = (arguments_: ReadonlyArray<string>) =>
   );
 
 describe("Kojo CLI", () => {
-  test("documents the server and direct delivery surfaces", async () => {
+  test("documents system lifecycle, server, and direct delivery surfaces", async () => {
     const help = await runCommand(["--help"]);
 
     expect(help).toContain("kojo <subcommand> [flags]");
     expect(help).toContain("serve");
     expect(help).toContain("delivery");
+    expect(help).toContain("start");
+    expect(help).toContain("stop");
+    expect(help).toContain("restart");
+    expect(help).toContain("status");
+    expect(help).toContain("logs");
+    expect(help).toContain("project");
+    expect(help).toContain("workflow");
+    expect(help).toContain("schedule");
+    expect(help).toContain("home");
+  });
+
+  test("documents the aggregate Dense Inspector gateway without a Project argument", async () => {
+    const help = await runCommand(["serve", "--help"]);
+
+    expect(help).toContain("Dense Inspector API");
+    expect(help).not.toContain("<project>");
+  });
+
+  test("documents durable Workflow Schedule operations", async () => {
+    const help = await runCommand(["schedule", "--help"]);
+
+    expect(help).toContain("list");
+    expect(help).toContain("inspect");
+    expect(help).toContain("enable");
+    expect(help).toContain("disable");
+  });
+
+  test("documents Kojo Home protection operations", async () => {
+    const help = await runCommand(["home", "--help"]);
+
+    expect(help).toContain("backup");
+    expect(help).toContain("restore");
+    expect(help).toContain("verify");
+    expect(help).toContain("repair-migrations");
+    expect(help).toContain("compact");
+  });
+
+  test("documents versioned Project operations", async () => {
+    const help = await runCommand(["project", "--help"]);
+
+    expect(help).toContain("add");
+    expect(help).toContain("list");
+    expect(help).toContain("enable");
+    expect(help).toContain("disable");
+    expect(help).toContain("relink");
+    expect(help).toContain("archive");
+  });
+
+  test("documents typed Workflow Run start and source-independent inspection", async () => {
+    const help = await runCommand(["workflow", "--help"]);
+
+    expect(help).toContain("start");
+    expect(help).toContain("inspect");
+    expect(await runCommand(["workflow", "start", "--help"])).toContain("--from-checkout");
   });
 });

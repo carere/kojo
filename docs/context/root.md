@@ -35,6 +35,18 @@ Run from its registered folder and compatible Workflow Registry. Availability re
 reasons without changing Project Registration State.
 _Avoid_: Project Registration State, Resume Compatibility
 
+**Project Initialization**:
+The one-time repository-local preparation that makes an existing non-bare Git repository root
+capable of declaring a Workflow Registry by establishing its compatible authoring environment and
+explicit Registry. It neither creates the Git repository nor registers or enables the Project in
+Kojo Home.
+_Avoid_: Project Registration, Project Enablement, Kojo-ready
+
+**Repository Kojo Directory**:
+The repository-owned `.kojo/` directory containing committed Developer Workflow source and its
+supporting files. It contains no Kojo Home state, generated runtime data, or secrets.
+_Avoid_: Kojo Home, state directory, cache
+
 **Kojo Home**:
 The user-scoped home of one local Kojo installation. It holds installation-wide Project and
 Workflow Run state rather than repository-authored workflow behavior or secrets.
@@ -164,8 +176,8 @@ _Avoid_: System end-to-end test, adapter contract test
 
 **Workflow Registry**:
 The validated, explicitly configured set of Developer Workflows available from one repository.
-Every member has a unique repository-scoped stable name; Kojo never discovers members by scanning
-for files.
+The set may be empty; every member has a unique repository-scoped stable name, and Kojo never
+discovers members by scanning for files.
 _Avoid_: Workflow catalog, auto-discovered workflows
 
 **Workflow Entry Point**:
@@ -348,12 +360,13 @@ A workflow step whose work is delegated to an AI agent in an isolated execution 
 _Avoid_: Agent, task
 
 **Agent Provider**:
-The runtime capability that supplies a configured Sandcastle agent implementation and model to an
-Agent Step. The Developer Workflow chooses this capability and may replace it within a narrower
-scope, including using different Agent Providers for different Agent Steps in one Sandbox. The CLI
-supplies configuration sources but does not choose an agent. Kojo pairs the process-local provider
-object with a stable name and explicitly safe description; only that description may enter the
-Runtime Configuration Snapshot and Execution Evidence.
+The runtime capability that supplies an object implementing Sandcastle's `AgentProvider` to an
+Agent Step, with model metadata when that provider uses a model. The Developer Workflow chooses
+this capability and may replace it within a narrower scope, including using different Agent
+Providers for different Agent Steps in one Sandbox. The CLI supplies configuration sources but
+does not choose an agent. Kojo pairs the process-local provider object with a stable name and
+explicitly safe description; only that description may enter the Runtime Configuration Snapshot
+and Execution Evidence.
 _Avoid_: Agent, model name, durable provider
 
 **Reviewer Step**:
@@ -377,7 +390,8 @@ be backed by a local container, cloud compute, or another provider.
 _Avoid_: Container, worker
 
 **Sandbox Provider**:
-The runtime capability that creates a Sandbox through a configured Sandcastle provider. Kojo's CLI
+The runtime capability that creates a Sandbox through any object implementing Sandcastle's
+`SandboxProvider`, including bind-mount, isolated, no-sandbox, and custom providers. Kojo's CLI
 supplies a local Docker fallback, while a Developer Workflow may replace that capability within a
 narrower scope. One Sandbox keeps the Sandbox Provider it was created with for its entire lifetime;
 Kojo pairs the process-local provider object with a stable name and explicitly safe description;

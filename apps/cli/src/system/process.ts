@@ -1,0 +1,1067 @@
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, link, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { makeInspectorService } from "./inspector";
+import { makeProjectService, type Project, ProjectOperationError } from "./projects";
+import { openSystemStore } from "./storage";
+import { makeWorkflowRunService, WorkflowStartError } from "./workflow-runs";
+import { makeProjectWorkflowRuntime } from "./workflow-runtime";
+import { makeWorkflowScheduleService } from "./workflow-schedules";
+
+export interface ProcessDetails {
+  readonly diagnostics?: ReadonlyArray<unknown>;
+  readonly endpoint: string;
+  readonly pid: number;
+}
+
+interface LockRecord {
+  readonly endpoint?: string;
+  readonly phase: "ready" | "starting";
+  readonly pid: number;
+  readonly token: string;
+}
+
+export const systemPaths = (home: string) => ({
+  launchLock: join(home, "launch.lock"),
+  lock: join(home, "system.lock"),
+  log: join(home, "system.log"),
+  endpoint: join(home, "system.sock"),
+  startupError: join(home, "startup-error.json"),
+});
+
+export const isProcessAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+};
+
+const decodeLockRecord = (value: string): LockRecord | undefined => {
+  try {
+    const parsed = JSON.parse(value) as Partial<LockRecord>;
+    if (
+      !Number.isInteger(parsed.pid) ||
+      (parsed.pid ?? 0) <= 0 ||
+      typeof parsed.token !== "string" ||
+      parsed.token.length === 0 ||
+      (parsed.phase !== "ready" && parsed.phase !== "starting") ||
+      (parsed.phase === "ready" &&
+        (typeof parsed.endpoint !== "string" || parsed.endpoint.length === 0)) ||
+      (parsed.phase === "starting" && parsed.endpoint !== undefined)
+    ) {
+      throw new Error("Kojo Home lock record is invalid");
+    }
+    return parsed as LockRecord;
+  } catch (error) {
+    if (error instanceof Error && error.message === "Kojo Home lock record is invalid") {
+      throw error;
+    }
+    throw new Error("Kojo Home lock record is invalid");
+  }
+};
+
+export const readLockRecord = async (home: string): Promise<LockRecord | undefined> => {
+  try {
+    return decodeLockRecord(await readFile(systemPaths(home).lock, "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+};
+
+export const pingSystem = async (details: ProcessDetails): Promise<boolean> => {
+  try {
+    const response = await fetch("http://localhost/status", {
+      signal: AbortSignal.timeout(500),
+      unix: details.endpoint,
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+};
+
+const readSystemDiagnostics = async (details: ProcessDetails) => {
+  try {
+    const response = await fetch("http://localhost/status", {
+      signal: AbortSignal.timeout(500),
+      unix: details.endpoint,
+    });
+    if (!response.ok) return undefined;
+    const body = (await response.json()) as { diagnostics?: unknown };
+    return Array.isArray(body.diagnostics) ? body.diagnostics : [];
+  } catch {
+    return undefined;
+  }
+};
+
+export const inspectSystem = async (home: string): Promise<ProcessDetails | undefined> => {
+  const record = await readLockRecord(home);
+  if (record?.phase !== "ready" || record.endpoint === undefined || !isProcessAlive(record.pid)) {
+    return undefined;
+  }
+  const details = { endpoint: record.endpoint, pid: record.pid };
+  const diagnostics = await readSystemDiagnostics(details);
+  return diagnostics === undefined ? undefined : { ...details, diagnostics };
+};
+
+const writeExclusiveLockRecord = async (path: string, record: LockRecord) => {
+  const candidate = `${path}.${record.pid}.${record.token}.tmp`;
+  await writeFile(candidate, JSON.stringify(record), { flag: "wx", mode: 0o600 });
+  try {
+    await link(candidate, path);
+  } finally {
+    await rm(candidate, { force: true });
+  }
+};
+
+const replaceLockRecord = async (path: string, record: LockRecord) => {
+  const candidate = `${path}.${record.pid}.${record.token}.next`;
+  await writeFile(candidate, JSON.stringify(record), { flag: "wx", mode: 0o600 });
+  try {
+    await rename(candidate, path);
+  } finally {
+    await rm(candidate, { force: true });
+  }
+};
+
+const releaseSystemLock = async (home: string, token: string) => {
+  const owner = await readLockRecord(home).catch(() => undefined);
+  if (owner?.token === token) {
+    await rm(systemPaths(home).lock, { force: true });
+  }
+};
+
+const acquireSystemLock = async (home: string) => {
+  const lockPath = systemPaths(home).lock;
+  const record = {
+    phase: "starting",
+    pid: process.pid,
+    token: randomUUID(),
+  } satisfies LockRecord;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await writeExclusiveLockRecord(lockPath, record);
+      return record;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
+      }
+      const owner = await readLockRecord(home);
+      if (owner === undefined) {
+        throw new Error("Kojo Home lock exists but its owner cannot be read");
+      }
+      if (isProcessAlive(owner.pid)) {
+        throw new Error(`Kojo Home is locked by System Process ${owner.pid}`);
+      }
+      await rm(lockPath, { force: true });
+    }
+  }
+  throw new Error("Kojo Home lock could not be acquired");
+};
+
+export const runSystemProcess = async (home: string): Promise<void> => {
+  const paths = systemPaths(home);
+  let ownsLock = false;
+  let store: Awaited<ReturnType<typeof openSystemStore>> | undefined;
+  let server: ReturnType<typeof Bun.serve> | undefined;
+  let endpointReady = false;
+  let lockToken: string | undefined;
+  let homeDiagnostics: ReadonlyArray<unknown> = [];
+  let leaseReconciler: ReturnType<typeof setInterval> | undefined;
+  let scheduleEvaluator: ReturnType<typeof setInterval> | undefined;
+  let projectService: ReturnType<typeof makeProjectService> | undefined;
+  let inspectorService: ReturnType<typeof makeInspectorService> | undefined;
+  let restartRunIds: ReadonlyArray<string> = [];
+  let workflowRunService: ReturnType<typeof makeWorkflowRunService> | undefined;
+  let workflowScheduleService: ReturnType<typeof makeWorkflowScheduleService> | undefined;
+  let resolveStopped: (() => void) | undefined;
+
+  const stopped = new Promise<void>((resolve) => {
+    resolveStopped = resolve;
+  });
+
+  const cleanup = async () => {
+    if (leaseReconciler !== undefined) clearInterval(leaseReconciler);
+    if (scheduleEvaluator !== undefined) clearInterval(scheduleEvaluator);
+    server?.stop(true);
+    try {
+      store?.close();
+    } finally {
+      await rm(paths.endpoint, { force: true });
+      if (lockToken !== undefined) {
+        await releaseSystemLock(home, lockToken);
+      }
+    }
+  };
+
+  try {
+    const authority = await acquireSystemLock(home);
+    lockToken = authority.token;
+    ownsLock = true;
+    try {
+      store = await openSystemStore(home);
+      const { diagnoseKojoHomeStartup } = await import("./home-maintenance");
+      homeDiagnostics = await diagnoseKojoHomeStartup(home);
+      for (const diagnostic of homeDiagnostics) {
+        console.error(JSON.stringify({ diagnostic, event: "kojo-home-diagnostic" }));
+      }
+      store.workflowRuns.interruptRunning();
+      projectService = makeProjectService(store);
+      workflowRunService = makeWorkflowRunService(
+        store,
+        makeProjectWorkflowRuntime(store, paths.endpoint),
+      );
+      inspectorService = makeInspectorService(store, workflowRunService, projectService.list);
+      workflowScheduleService = makeWorkflowScheduleService(store, workflowRunService);
+      restartRunIds = store.workflowRuns
+        .list()
+        .filter((run) => {
+          if (run.runId !== run.rootRunId || run.state !== "Suspended") return false;
+          const requested = store?.workflowRuns
+            .find(run.runId)
+            ?.evidence.findLast(({ type }) => type === "WorkflowRun.SuspendRequested");
+          if (requested === undefined) return false;
+          try {
+            const details = JSON.parse(requested.details) as {
+              readonly value?: { readonly reason?: unknown };
+            };
+            return details.value?.reason === "SystemProcessStop";
+          } catch {
+            return false;
+          }
+        })
+        .map(({ runId }) => runId);
+    } catch (error) {
+      throw new Error(
+        `state.sqlite initialization failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (paths.endpoint.length > 100) {
+      throw new Error("Kojo Home path is too long for its private local endpoint");
+    }
+    await rm(paths.endpoint, { force: true });
+    server = Bun.serve({
+      async fetch(request) {
+        if (!endpointReady) {
+          return Response.json({ status: "starting" }, { status: 503 });
+        }
+        const url = new URL(request.url);
+        if (url.pathname === "/status") {
+          return Response.json({ diagnostics: homeDiagnostics, service: "kojo", status: "ok" });
+        }
+        if (url.pathname === "/stop" && request.method === "POST") {
+          setTimeout(() => {
+            void workflowRunService?.gracefulStop().finally(() => resolveStopped?.());
+          }, 10);
+          return Response.json({ status: "stopping" });
+        }
+        if (url.pathname === "/api/inspector/runs" && request.method === "GET") {
+          const state = url.searchParams.get("state");
+          const allowedStates = [
+            "Running",
+            "Suspended",
+            "Interrupted",
+            "Failed",
+            "Completed",
+            "Discarded",
+          ] as const;
+          if (state !== null && !allowedStates.some((candidate) => candidate === state)) {
+            return Response.json({ error: "Unknown Workflow Run State" }, { status: 400 });
+          }
+          const runs = await inspectorService?.list({
+            includeArchived: url.searchParams.get("includeArchived") === "true",
+            projectId: url.searchParams.get("projectId") ?? undefined,
+            state: (state ?? undefined) as (typeof allowedStates)[number] | undefined,
+            workflowName: url.searchParams.get("workflowName") ?? undefined,
+          });
+          return Response.json({ runs: runs ?? [], schemaVersion: 1 });
+        }
+        const inspectorRunMatch = url.pathname.match(/^\/api\/inspector\/runs\/([^/]+)$/);
+        if (inspectorRunMatch !== null && request.method === "GET") {
+          const runId = decodeURIComponent(inspectorRunMatch[1] ?? "");
+          const run = await inspectorService?.inspect(runId);
+          if (run === undefined) {
+            return Response.json(
+              { error: { code: "RUN_NOT_FOUND", message: `Workflow Run ${runId} was not found` } },
+              { status: 404 },
+            );
+          }
+          return Response.json({ run, schemaVersion: 1 });
+        }
+        if (url.pathname === "/v1/home/backups" && request.method === "POST") {
+          try {
+            const body = (await request.json()) as { destination?: unknown };
+            if (typeof body.destination !== "string" || body.destination.length === 0) {
+              return Response.json(
+                {
+                  command: "home.backup",
+                  error: { code: "INVALID_REQUEST", message: "Backup destination is required" },
+                  schemaVersion: 1,
+                  status: "failed",
+                },
+                { status: 400 },
+              );
+            }
+            const { backupKojoHome } = await import("./home-maintenance");
+            const result = await backupKojoHome(home, body.destination);
+            return Response.json({
+              command: "home.backup",
+              home,
+              result,
+              schemaVersion: 1,
+              status: "succeeded",
+            });
+          } catch (error) {
+            return Response.json(
+              {
+                command: "home.backup",
+                error: {
+                  action: "Correct the reported backup or Kojo Home problem and retry.",
+                  code: "HOME_BACKUP_FAILED",
+                  message: error instanceof Error ? error.message : String(error),
+                },
+                home,
+                schemaVersion: 1,
+                status: "failed",
+              },
+              { status: 409 },
+            );
+          }
+        }
+        const projectMatch = url.pathname.match(
+          /^\/v1\/projects\/([^/]+)\/(enable|disable|relink|archive)$/,
+        );
+        if (url.pathname === "/v1/projects" && request.method === "GET") {
+          const projects = await projectService?.list();
+          return Response.json({
+            command: "project.list",
+            projects: projects ?? [],
+            schemaVersion: 1,
+            status: "succeeded",
+          });
+        }
+        if (url.pathname === "/v1/projects" && request.method === "POST") {
+          try {
+            const body = (await request.json()) as { path?: unknown };
+            if (typeof body.path !== "string" || body.path.length === 0) {
+              return Response.json(
+                {
+                  command: "project.add",
+                  error: { code: "INVALID_REQUEST", message: "Project path is required" },
+                  schemaVersion: 1,
+                  status: "failed",
+                },
+                { status: 400 },
+              );
+            }
+            const project = await projectService?.add(body.path);
+            return Response.json({
+              command: "project.add",
+              project,
+              schemaVersion: 1,
+              status: "created",
+            });
+          } catch (error) {
+            return projectFailure("project.add", error);
+          }
+        }
+        const workflowRunMatch = url.pathname.match(/^\/v1\/workflow-runs\/([^/]+)$/);
+        const scheduleListMatch = url.pathname.match(/^\/v1\/projects\/([^/]+)\/schedules$/);
+        const scheduleInspectMatch = url.pathname.match(
+          /^\/v1\/projects\/([^/]+)\/schedules\/([^/]+)$/,
+        );
+        const scheduleStateMatch = url.pathname.match(
+          /^\/v1\/projects\/([^/]+)\/schedules\/([^/]+)\/(enable|disable)$/,
+        );
+        if (scheduleListMatch !== null && request.method === "GET") {
+          const projectId = decodeURIComponent(scheduleListMatch[1] ?? "");
+          return Response.json({
+            command: "schedule.list",
+            schedules: workflowScheduleService?.list(projectId) ?? [],
+            schemaVersion: 1,
+            status: "succeeded",
+          });
+        }
+        if (scheduleInspectMatch !== null && request.method === "GET") {
+          try {
+            const projectId = decodeURIComponent(scheduleInspectMatch[1] ?? "");
+            const name = decodeURIComponent(scheduleInspectMatch[2] ?? "");
+            return Response.json({
+              command: "schedule.inspect",
+              schedule: workflowScheduleService?.inspect(projectId, name),
+              schemaVersion: 1,
+              status: "succeeded",
+            });
+          } catch (error) {
+            return Response.json(
+              {
+                command: "schedule.inspect",
+                error: {
+                  code: "SCHEDULE_NOT_FOUND",
+                  message: error instanceof Error ? error.message : String(error),
+                },
+                schemaVersion: 1,
+                status: "failed",
+              },
+              { status: 404 },
+            );
+          }
+        }
+        if (scheduleStateMatch !== null && request.method === "POST") {
+          const projectId = decodeURIComponent(scheduleStateMatch[1] ?? "");
+          const name = decodeURIComponent(scheduleStateMatch[2] ?? "");
+          const operation = scheduleStateMatch[3] as "disable" | "enable";
+          try {
+            const schedule =
+              operation === "enable"
+                ? workflowScheduleService?.enable(projectId, name)
+                : workflowScheduleService?.disable(projectId, name);
+            return Response.json({
+              command: `schedule.${operation}`,
+              schedule,
+              schemaVersion: 1,
+              status: `${operation}d`,
+            });
+          } catch (error) {
+            return Response.json(
+              {
+                command: `schedule.${operation}`,
+                error: {
+                  code: "SCHEDULE_OPERATION_FAILED",
+                  message: error instanceof Error ? error.message : String(error),
+                },
+                schemaVersion: 1,
+                status: "failed",
+              },
+              { status: 409 },
+            );
+          }
+        }
+        const workflowLifecycleMatch = url.pathname.match(
+          /^\/v1\/workflow-runs\/([^/]+)\/(suspend|resume|discard)$/,
+        );
+        const workflowBoundaryMatch = url.pathname.match(
+          /^\/v1\/workflow-runs\/([^/]+)\/boundaries$/,
+        );
+        const workflowJournalReadMatch = url.pathname.match(
+          /^\/v1\/workflow-runs\/([^/]+)\/journal\/read$/,
+        );
+        const runtimeConfigurationMatch = url.pathname.match(
+          /^\/v1\/workflow-runs\/([^/]+)\/runtime-configurations\/verify$/,
+        );
+        const artifactMatch = url.pathname.match(/^\/v1\/workflow-runs\/([^/]+)\/artifacts$/);
+        const childWorkflowMatch = url.pathname.match(/^\/v1\/workflow-runs\/([^/]+)\/children$/);
+        const childFinalizeMatch = url.pathname.match(
+          /^\/v1\/workflow-runs\/([^/]+)\/children\/finalize$/,
+        );
+        if (url.pathname === "/v1/workflow-runs" && request.method === "POST") {
+          try {
+            const body = (await request.json()) as {
+              fromCheckout?: unknown;
+              input?: unknown;
+              projectId?: unknown;
+              workflowName?: unknown;
+            };
+            if (
+              typeof body.projectId !== "string" ||
+              body.projectId.length === 0 ||
+              typeof body.workflowName !== "string" ||
+              body.workflowName.length === 0 ||
+              typeof body.fromCheckout !== "boolean" ||
+              !("input" in body)
+            ) {
+              return Response.json(
+                {
+                  command: "workflow.start",
+                  error: {
+                    code: "INVALID_REQUEST",
+                    message: "A complete start request is required",
+                  },
+                  schemaVersion: 1,
+                  status: "failed",
+                },
+                { status: 400 },
+              );
+            }
+            const started = await workflowRunService?.start({
+              fromCheckout: body.fromCheckout,
+              input: body.input,
+              projectId: body.projectId,
+              workflowName: body.workflowName,
+            });
+            return Response.json({
+              command: "workflow.start",
+              run: started,
+              schemaVersion: 1,
+              status: "started",
+            });
+          } catch (error) {
+            return workflowFailure("workflow.start", error);
+          }
+        }
+        if (workflowRunMatch !== null && request.method === "GET") {
+          const runId = decodeURIComponent(workflowRunMatch[1] ?? "");
+          const run = workflowRunService?.inspectTree(runId);
+          if (run === undefined) {
+            return Response.json(
+              {
+                command: "workflow.inspect",
+                error: { code: "RUN_NOT_FOUND", message: `Workflow Run ${runId} was not found` },
+                schemaVersion: 1,
+                status: "failed",
+              },
+              { status: 404 },
+            );
+          }
+          return Response.json({
+            command: "workflow.inspect",
+            run,
+            schemaVersion: 1,
+            status: "succeeded",
+          });
+        }
+        if (childWorkflowMatch !== null && request.method === "POST") {
+          try {
+            const runId = decodeURIComponent(childWorkflowMatch[1] ?? "");
+            const body = (await request.json()) as Record<string, unknown>;
+            if (
+              !Number.isInteger(body.attempt) ||
+              !Number.isInteger(body.leaseGeneration) ||
+              typeof body.leaseHolder !== "string" ||
+              typeof body.projectId !== "string" ||
+              typeof body.rootRunId !== "string" ||
+              typeof body.invocationKey !== "string" ||
+              !Array.isArray(body.recoveryTags) ||
+              !body.recoveryTags.every((tag) => typeof tag === "string") ||
+              !Array.isArray(body.recoveryPolicies) ||
+              !body.recoveryPolicies.every(
+                (policy) =>
+                  typeof policy === "object" &&
+                  policy !== null &&
+                  "workflowName" in policy &&
+                  typeof policy.workflowName === "string" &&
+                  "recoveryTags" in policy &&
+                  Array.isArray(policy.recoveryTags) &&
+                  policy.recoveryTags.every((tag: unknown) => typeof tag === "string"),
+              ) ||
+              typeof body.workflowName !== "string" ||
+              !("input" in body)
+            ) {
+              return Response.json({ error: "Invalid Child Workflow invocation" }, { status: 400 });
+            }
+            return Response.json(
+              workflowRunService?.startChild({
+                attempt: body.attempt as number,
+                input: body.input,
+                invocationKey: body.invocationKey,
+                leaseGeneration: body.leaseGeneration as number,
+                leaseHolder: body.leaseHolder,
+                projectId: body.projectId,
+                recoveryPolicies: body.recoveryPolicies as ReadonlyArray<{
+                  readonly recoveryTags: ReadonlyArray<string>;
+                  readonly workflowName: string;
+                }>,
+                recoveryTags: body.recoveryTags as ReadonlyArray<string>,
+                rootRunId: body.rootRunId,
+                runId,
+                workflowName: body.workflowName,
+              }),
+            );
+          } catch (error) {
+            return Response.json(
+              { error: error instanceof Error ? error.message : String(error) },
+              { status: 409 },
+            );
+          }
+        }
+        if (childFinalizeMatch !== null && request.method === "POST") {
+          try {
+            const runId = decodeURIComponent(childFinalizeMatch[1] ?? "");
+            const body = (await request.json()) as Record<string, unknown>;
+            const parentScope = body.parentScope as Record<string, unknown> | undefined;
+            if (
+              !Number.isInteger(body.attempt) ||
+              !Number.isInteger(body.leaseGeneration) ||
+              typeof body.leaseHolder !== "string" ||
+              typeof body.projectId !== "string" ||
+              typeof body.rootRunId !== "string" ||
+              typeof body.invocationKey !== "string" ||
+              typeof body.workflowName !== "string" ||
+              parentScope === undefined ||
+              !Number.isInteger(parentScope.attempt) ||
+              !Number.isInteger(parentScope.leaseGeneration) ||
+              typeof parentScope.leaseHolder !== "string" ||
+              typeof parentScope.projectId !== "string" ||
+              typeof parentScope.rootRunId !== "string" ||
+              typeof parentScope.runId !== "string" ||
+              (body.state !== "Completed" && body.state !== "Failed") ||
+              !("value" in body)
+            ) {
+              return Response.json({ error: "Invalid Child Workflow outcome" }, { status: 400 });
+            }
+            return Response.json(
+              workflowRunService?.finalizeChild({
+                attempt: body.attempt as number,
+                leaseGeneration: body.leaseGeneration as number,
+                leaseHolder: body.leaseHolder,
+                invocationKey: body.invocationKey,
+                parentScope: {
+                  attempt: parentScope.attempt as number,
+                  leaseGeneration: parentScope.leaseGeneration as number,
+                  leaseHolder: parentScope.leaseHolder,
+                  projectId: parentScope.projectId,
+                  rootRunId: parentScope.rootRunId,
+                  runId: parentScope.runId,
+                },
+                projectId: body.projectId,
+                rootRunId: body.rootRunId,
+                runId,
+                state: body.state,
+                value: body.value,
+                workflowName: body.workflowName,
+              }),
+            );
+          } catch (error) {
+            return Response.json(
+              { error: error instanceof Error ? error.message : String(error) },
+              { status: 409 },
+            );
+          }
+        }
+        if (workflowLifecycleMatch !== null && request.method === "POST") {
+          const runId = decodeURIComponent(workflowLifecycleMatch[1] ?? "");
+          const operation = workflowLifecycleMatch[2] as "discard" | "resume" | "suspend";
+          const command = `workflow.${operation}`;
+          try {
+            const service = workflowRunService;
+            if (service === undefined) throw new Error("Workflow Run service is unavailable");
+            const run =
+              operation === "resume"
+                ? await service.resume(runId)
+                : operation === "suspend"
+                  ? service.suspend(runId)
+                  : service.discard(runId);
+            const status =
+              operation === "resume"
+                ? "started"
+                : operation === "suspend"
+                  ? "requested"
+                  : "status" in run
+                    ? run.status
+                    : "discarded";
+            return Response.json({
+              command,
+              run,
+              schemaVersion: 1,
+              status,
+            });
+          } catch (error) {
+            return workflowFailure(command, error);
+          }
+        }
+        if (workflowBoundaryMatch !== null && request.method === "POST") {
+          try {
+            const runId = decodeURIComponent(workflowBoundaryMatch[1] ?? "");
+            const body = (await request.json()) as {
+              attempt?: unknown;
+              completionIdempotencyKey?: unknown;
+              idempotencyKey?: unknown;
+              leaseGeneration?: unknown;
+              leaseHolder?: unknown;
+              operation?: unknown;
+              payload?: unknown;
+              projectId?: unknown;
+              rootRunId?: unknown;
+              subject?: unknown;
+            };
+            if (
+              !Number.isInteger(body.attempt) ||
+              (body.attempt as number) <= 0 ||
+              !Number.isInteger(body.leaseGeneration) ||
+              (body.leaseGeneration as number) <= 0 ||
+              typeof body.leaseHolder !== "string" ||
+              typeof body.idempotencyKey !== "string" ||
+              typeof body.operation !== "string" ||
+              typeof body.projectId !== "string" ||
+              typeof body.rootRunId !== "string" ||
+              typeof body.subject !== "string" ||
+              !("payload" in body)
+            ) {
+              return Response.json({ error: "Invalid durable boundary" }, { status: 400 });
+            }
+            const scope = {
+              attempt: body.attempt as number,
+              idempotencyKey: body.idempotencyKey,
+              leaseGeneration: body.leaseGeneration as number,
+              leaseHolder: body.leaseHolder,
+              payload: body.payload,
+              projectId: body.projectId,
+              rootRunId: body.rootRunId,
+              runId,
+              subject: body.subject,
+            };
+            if (body.operation === "Activity.Started") {
+              if (typeof body.completionIdempotencyKey !== "string") {
+                return Response.json({ error: "Invalid Activity claim" }, { status: 400 });
+              }
+              const claimed = workflowRunService?.claimActivity({
+                ...scope,
+                completionIdempotencyKey: body.completionIdempotencyKey,
+              });
+              return Response.json(claimed);
+            }
+            const event = workflowRunService?.recordBoundary({
+              ...scope,
+              operation: body.operation,
+            });
+            return Response.json({
+              event,
+              ...(event !== undefined && "control" in event
+                ? { status: event.control }
+                : { status: "recorded" }),
+            });
+          } catch (error) {
+            return Response.json(
+              { error: error instanceof Error ? error.message : String(error) },
+              { status: 409 },
+            );
+          }
+        }
+        if (runtimeConfigurationMatch !== null && request.method === "POST") {
+          try {
+            const runId = decodeURIComponent(runtimeConfigurationMatch[1] ?? "");
+            const body = (await request.json()) as {
+              attempt?: unknown;
+              leaseGeneration?: unknown;
+              leaseHolder?: unknown;
+              projectId?: unknown;
+              rootRunId?: unknown;
+              snapshot?: unknown;
+              subject?: unknown;
+            };
+            if (
+              !Number.isInteger(body.attempt) ||
+              (body.attempt as number) <= 0 ||
+              !Number.isInteger(body.leaseGeneration) ||
+              (body.leaseGeneration as number) <= 0 ||
+              typeof body.leaseHolder !== "string" ||
+              typeof body.projectId !== "string" ||
+              typeof body.rootRunId !== "string" ||
+              typeof body.subject !== "string" ||
+              !("snapshot" in body)
+            ) {
+              return Response.json({ error: "Invalid Runtime Configuration" }, { status: 400 });
+            }
+            const result = workflowRunService?.verifyRuntimeConfiguration({
+              attempt: body.attempt as number,
+              leaseGeneration: body.leaseGeneration as number,
+              leaseHolder: body.leaseHolder,
+              projectId: body.projectId,
+              rootRunId: body.rootRunId,
+              runId,
+              snapshot: body.snapshot,
+              subject: body.subject,
+            });
+            return Response.json(result);
+          } catch (error) {
+            return Response.json(
+              { error: error instanceof Error ? error.message : String(error) },
+              { status: 409 },
+            );
+          }
+        }
+        if (artifactMatch !== null && request.method === "POST") {
+          let stagingPath: string | undefined;
+          try {
+            const runId = decodeURIComponent(artifactMatch[1] ?? "");
+            const body = (await request.json()) as {
+              attempt?: unknown;
+              content?: unknown;
+              fingerprint?: unknown;
+              leaseGeneration?: unknown;
+              leaseHolder?: unknown;
+              mediaType?: unknown;
+              projectId?: unknown;
+              rootRunId?: unknown;
+            };
+            if (
+              !Number.isInteger(body.attempt) ||
+              (body.attempt as number) <= 0 ||
+              typeof body.content !== "string" ||
+              typeof body.fingerprint !== "string" ||
+              !/^[a-f0-9]{64}$/.test(body.fingerprint) ||
+              !Number.isInteger(body.leaseGeneration) ||
+              (body.leaseGeneration as number) <= 0 ||
+              typeof body.leaseHolder !== "string" ||
+              typeof body.mediaType !== "string" ||
+              typeof body.projectId !== "string" ||
+              typeof body.rootRunId !== "string"
+            ) {
+              return Response.json({ error: "Invalid Execution Artifact" }, { status: 400 });
+            }
+            const content = Buffer.from(body.content, "base64");
+            if (createHash("sha256").update(content).digest("hex") !== body.fingerprint) {
+              return Response.json(
+                { error: "Execution Artifact fingerprint mismatch" },
+                { status: 400 },
+              );
+            }
+            const artifactDirectory = join(home, "artifacts");
+            const stagingDirectory = join(artifactDirectory, "staging");
+            await mkdir(stagingDirectory, { mode: 0o700, recursive: true });
+            stagingPath = join(stagingDirectory, `${randomUUID()}.tmp`);
+            const finalPath = join(artifactDirectory, body.fingerprint);
+            await writeFile(stagingPath, content, { flag: "wx", mode: 0o600 });
+            try {
+              await link(stagingPath, finalPath);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+              const existing = await readFile(finalPath);
+              if (!existing.equals(content)) {
+                throw new Error("Execution Artifact fingerprint collision");
+              }
+            }
+            workflowRunService?.registerArtifact({
+              attempt: body.attempt as number,
+              byteLength: content.byteLength,
+              fingerprint: body.fingerprint,
+              leaseGeneration: body.leaseGeneration as number,
+              leaseHolder: body.leaseHolder,
+              mediaType: body.mediaType,
+              path: join("artifacts", body.fingerprint),
+              projectId: body.projectId,
+              rootRunId: body.rootRunId,
+              runId,
+            });
+            return Response.json({
+              byteLength: content.byteLength,
+              fingerprint: body.fingerprint,
+              mediaType: body.mediaType,
+              status: "finalized",
+            });
+          } catch (error) {
+            return Response.json(
+              { error: error instanceof Error ? error.message : String(error) },
+              { status: 409 },
+            );
+          } finally {
+            if (stagingPath !== undefined) await rm(stagingPath, { force: true });
+          }
+        }
+        if (workflowJournalReadMatch !== null && request.method === "POST") {
+          try {
+            const runId = decodeURIComponent(workflowJournalReadMatch[1] ?? "");
+            const body = (await request.json()) as {
+              attempt?: unknown;
+              idempotencyKey?: unknown;
+              leaseGeneration?: unknown;
+              leaseHolder?: unknown;
+              projectId?: unknown;
+              rootRunId?: unknown;
+            };
+            if (
+              !Number.isInteger(body.attempt) ||
+              (body.attempt as number) <= 0 ||
+              !Number.isInteger(body.leaseGeneration) ||
+              (body.leaseGeneration as number) <= 0 ||
+              typeof body.leaseHolder !== "string" ||
+              typeof body.idempotencyKey !== "string" ||
+              typeof body.projectId !== "string" ||
+              typeof body.rootRunId !== "string"
+            ) {
+              return Response.json({ error: "Invalid Workflow Journal read" }, { status: 400 });
+            }
+            const payload = workflowRunService?.readBoundary(
+              {
+                attempt: body.attempt as number,
+                leaseGeneration: body.leaseGeneration as number,
+                leaseHolder: body.leaseHolder,
+                projectId: body.projectId,
+                rootRunId: body.rootRunId,
+                runId,
+              },
+              body.idempotencyKey,
+            );
+            return Response.json(
+              payload === undefined ? { status: "missing" } : { payload, status: "found" },
+            );
+          } catch (error) {
+            return Response.json(
+              { error: error instanceof Error ? error.message : String(error) },
+              { status: 409 },
+            );
+          }
+        }
+        if (projectMatch !== null && request.method === "POST") {
+          const [, encodedId, operation] = projectMatch;
+          const id = decodeURIComponent(encodedId ?? "");
+          const command = `project.${operation}`;
+          try {
+            const service = projectService;
+            if (service === undefined) {
+              throw new Error("Project service is unavailable");
+            }
+            let project: Project;
+            if (operation === "relink") {
+              const body = (await request.json()) as { path?: unknown };
+              if (typeof body.path !== "string" || body.path.length === 0) {
+                return Response.json(
+                  {
+                    command,
+                    error: { code: "INVALID_REQUEST", message: "Project path is required" },
+                    schemaVersion: 1,
+                    status: "failed",
+                  },
+                  { status: 400 },
+                );
+              }
+              project = await service.relink(id, body.path);
+            } else if (operation === "enable") {
+              project = await service.enable(id);
+            } else if (operation === "disable") {
+              project = await service.disable(id);
+            } else {
+              project = await service.archive(id);
+            }
+            return Response.json({
+              command,
+              project,
+              schemaVersion: 1,
+              status:
+                operation === "enable"
+                  ? "enabled"
+                  : operation === "relink"
+                    ? "relinked"
+                    : `${operation}d`,
+            });
+          } catch (error) {
+            return projectFailure(command, error);
+          }
+        }
+        return new Response("Not found", { status: 404 });
+      },
+      unix: paths.endpoint,
+    });
+    await chmod(paths.endpoint, 0o600);
+    const details = {
+      endpoint: paths.endpoint,
+      phase: "ready",
+      pid: process.pid,
+      token: authority.token,
+    } satisfies LockRecord;
+    await replaceLockRecord(paths.lock, details);
+    await rm(paths.startupError, { force: true });
+    endpointReady = true;
+    leaseReconciler = setInterval(() => {
+      try {
+        store?.workflowRuns.reconcileExpiredLeases();
+      } catch (error) {
+        console.error(
+          JSON.stringify({
+            event: "workflow-lease-reconciliation-failed",
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      }
+    }, 60_000);
+    leaseReconciler.unref();
+    const evaluateSchedules = () => {
+      void workflowScheduleService?.evaluate().catch((error) => {
+        console.error(
+          JSON.stringify({
+            event: "workflow-schedule-evaluation-failed",
+            message: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      });
+    };
+    for (const runId of restartRunIds) {
+      await workflowRunService?.resume(runId).catch((error) => {
+        console.error(
+          JSON.stringify({
+            event: "workflow-resume-skipped",
+            message: error instanceof Error ? error.message : String(error),
+            runId,
+          }),
+        );
+      });
+    }
+    evaluateSchedules();
+    scheduleEvaluator = setInterval(evaluateSchedules, 60_000);
+    scheduleEvaluator.unref();
+    console.log(
+      JSON.stringify({
+        endpoint: details.endpoint,
+        event: "system-ready",
+        phase: details.phase,
+        pid: details.pid,
+      }),
+    );
+
+    const requestStop = () => {
+      void workflowRunService?.gracefulStop().finally(() => resolveStopped?.());
+    };
+    process.once("SIGINT", requestStop);
+    process.once("SIGTERM", requestStop);
+    await stopped;
+    process.off("SIGINT", requestStop);
+    process.off("SIGTERM", requestStop);
+  } catch (error) {
+    const failure = {
+      code: "SYSTEM_STARTUP_FAILED",
+      message: error instanceof Error ? error.message : String(error),
+      schemaVersion: 1,
+    };
+    await writeFile(paths.startupError, JSON.stringify(failure), { mode: 0o600 });
+    console.error(JSON.stringify(failure));
+    throw error;
+  } finally {
+    if (ownsLock) {
+      await cleanup();
+    }
+  }
+};
+
+const workflowFailure = (command: string, error: unknown) => {
+  const startError = error instanceof WorkflowStartError ? error : undefined;
+  const code = startError?.code ?? "WORKFLOW_START_FAILED";
+  const status = code === "PROJECT_NOT_FOUND" || code === "WORKFLOW_NOT_FOUND" ? 404 : 400;
+  return Response.json(
+    {
+      command,
+      error: {
+        code,
+        message: error instanceof Error ? error.message : String(error),
+        ...(startError?.details === undefined ? {} : { details: startError.details }),
+      },
+      schemaVersion: 1,
+      status: "failed",
+    },
+    { status },
+  );
+};
+
+const projectFailure = (command: string, error: unknown) => {
+  const operationError = error instanceof ProjectOperationError ? error : undefined;
+  const code = operationError?.code ?? "PROJECT_COMMAND_FAILED";
+  const status =
+    code === "PROJECT_NOT_FOUND" ? 404 : code === "PROJECT_ALREADY_REGISTERED" ? 409 : 400;
+  return Response.json(
+    {
+      command,
+      error: {
+        code,
+        message: error instanceof Error ? error.message : String(error),
+        ...(operationError?.reasons === undefined ? {} : { reasons: operationError.reasons }),
+      },
+      schemaVersion: 1,
+      status: "failed",
+    },
+    { status },
+  );
+};

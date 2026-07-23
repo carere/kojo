@@ -3,7 +3,14 @@
   "root": false,
   "extends": "//",
   "files": {
-    "includes": ["src/**/*", "vite.config.ts", "tsconfig.json", "!src/routeTree.gen.ts"]
+    "includes": [
+      "src/**/*",
+      "tests/**/*",
+      "playwright.config.ts",
+      "vite.config.ts",
+      "tsconfig.json",
+      "!src/routeTree.gen.ts"
+    ]
   },
   "linter": {
     "rules": {

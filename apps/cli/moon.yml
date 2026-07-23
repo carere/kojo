@@ -3,7 +3,7 @@ $schema: "../../.moon/cache/schemas/project.json"
 tasks:
   serve:
     command: bun run apps/cli/main.ts serve
-    description: Start the Kojo webhook and visualizer server
+    description: Serve the Dense Inspector API for the local System Process
     options:
       runFromWorkspaceRoot: true
     preset: server
