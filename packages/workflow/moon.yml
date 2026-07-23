@@ -36,7 +36,7 @@ tasks:
       - build-types
 
   test-unit:
-    command: bun test tests/authoring.test.ts tests/package.test.ts
+    command: bun test tests/authoring.test.ts tests/package.test.ts tests/providers.test.ts
     description: Run workflow authoring unit and package contract tests
     deps:
       - build

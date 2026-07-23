@@ -1,4 +1,5 @@
 import { Cron, Effect, Schema } from "effect";
+import type { WorkflowEngine } from "effect/unstable/workflow";
 import { CompositionRuntime } from "./composition";
 
 export type {
@@ -10,6 +11,7 @@ export type {
 export { ActivityRetry, Loop } from "./composition";
 export type {
   AgentProviderConfiguration,
+  AgentProviderDirectLayerOptions,
   AgentProviderFailure,
   AgentProviderLayerOptions,
   AgentProviderService,
@@ -24,6 +26,7 @@ export type {
   SandboxExecResult,
   SandboxHandle,
   SandboxProviderFailure,
+  SandboxProviderLayerOptions,
   SandboxProviderService,
   SandboxUseOptions,
 } from "./sandbox";
@@ -73,7 +76,7 @@ export interface WorkflowDefinition<
     ): Effect.Effect<
       Schema.Schema.Type<Success>,
       Schema.Schema.Type<Failure>,
-      Requirements | import("effect/unstable/workflow").WorkflowEngine.WorkflowInstance
+      Requirements | WorkflowEngine.WorkflowInstance
     >;
   };
 }

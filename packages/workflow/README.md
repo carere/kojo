@@ -87,15 +87,48 @@ hard crash can leave an orphan because Sandcastle has no public reopenable ident
 
 Sandbox and Agent Providers are replaceable Effect services. Their public metadata contains a
 stable name, adapter version, explicitly safe scalar fields, and a fingerprint of all remaining
-non-secret configuration (plus the Agent model). The CLI supplies a local Docker Sandbox Provider
-when a workflow does not replace it. Secrets must be resolved while constructing a provider and
-must not be copied into any durable schema or public metadata.
+non-secret configuration (plus the Agent model when one applies). The CLI supplies a local Docker
+Sandbox Provider only as a fallback when a workflow does not replace it. Secrets must be resolved
+while constructing a provider and must not be copied into any durable schema or public metadata.
 
-Use `AgentProvider.layer` when an Agent Provider needs credentials. Its `secrets` Effect resolves
-redacted values when the provider layer is acquired, and `makeAgent` receives plain strings only at
-the process-local Sandcastle construction boundary. The layer may be supplied to a whole workflow
+`SandboxProvider.layer` accepts Sandcastle's `SandboxProvider` interface directly. Docker, Podman,
+Vercel, no-sandbox, and providers returned by `createBindMountSandboxProvider` or
+`createIsolatedSandboxProvider` therefore follow the same path; Kojo does not switch on a provider
+name or copy provider-specific settings. The Project Runtime adds the registered Project path when
+it calls `createSandbox`.
+
+```ts
+import { createIsolatedSandboxProvider } from "@ai-hero/sandcastle";
+import { Effect } from "effect";
+import { Sandbox, SandboxProvider } from "@kojo/workflow";
+
+const provider = SandboxProvider.layer({
+  sandbox: createIsolatedSandboxProvider({
+    name: "company-cloud",
+    create: openCompanySandbox,
+  }),
+  configuration: {
+    adapterVersion: "company-cloud@1",
+    configurationFingerprint: "non-secret-behavior-v1",
+    name: "company-cloud",
+    publicFields: { region: "eu-west" },
+  },
+});
+
+const step = Sandbox.use("ticket", {
+  branch: "ticket/42",
+  effect: Effect.void,
+}).pipe(Effect.provide(provider));
+```
+
+`AgentProvider.layer` likewise accepts any object implementing Sandcastle's `AgentProvider`,
+including every built-in agent and custom implementations. It also accepts `makeAgent` plus a
+`secrets` Effect when an Agent Provider needs credentials. That Effect resolves redacted values
+when the provider layer is acquired, and `makeAgent` receives plain strings only at the
+process-local Sandcastle construction boundary. The layer may be supplied to a whole workflow
 scope or directly to one `Agent.run`, so separate Agent Steps in one Sandbox can use different
-providers without making the CLI choose an agent or model.
+providers without making the CLI choose an agent or model. Custom providers that have no model may
+omit model metadata.
 
 `Agent.run(name, { prompt, success, failure })` asks the Agent to return a structured
 `{ _tag: "Success", value }` or `{ _tag: "Failure", failure }` result in a tagged JSON block and

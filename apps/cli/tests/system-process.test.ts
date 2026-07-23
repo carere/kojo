@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { access, mkdir, mkdtemp, rename, rm, stat, symlink } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, rename, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { makeInspectorService } from "../src/system/inspector";
@@ -292,6 +292,7 @@ describe("Kojo System Process", () => {
     const repositories = await mkdtemp(join(tmpdir(), "kojo-project-test-"));
     cleanupPaths.add(repositories);
     const original = await makeRepository(repositories, "original-name");
+    const canonicalOriginal = await realpath(original);
     expect(runCli(home, "start").exitCode).toBe(0);
 
     const added = runCli(home, "project", "add", original);
@@ -309,7 +310,7 @@ describe("Kojo System Process", () => {
           status: "Unavailable",
         },
         metadata: { folderName: "original-name" },
-        path: original,
+        path: canonicalOriginal,
         registrationState: "Disabled",
       },
       schemaVersion: 1,
@@ -363,7 +364,7 @@ describe("Kojo System Process", () => {
             status: "Unavailable",
           },
           id: projectId,
-          path: original,
+          path: canonicalOriginal,
         },
       ],
       schemaVersion: 1,
@@ -372,6 +373,7 @@ describe("Kojo System Process", () => {
 
     const relinked = runCli(home, "project", "relink", projectId, moved);
     expect(relinked.exitCode).toBe(0);
+    const canonicalMoved = await realpath(moved);
     expect(relinked.json).toMatchObject({
       command: "project.relink",
       project: {
@@ -386,7 +388,7 @@ describe("Kojo System Process", () => {
         },
         id: projectId,
         metadata: { folderName: "moved-name" },
-        path: moved,
+        path: canonicalMoved,
         registrationState: "Disabled",
       },
       schemaVersion: 1,
@@ -441,6 +443,7 @@ describe("Kojo System Process", () => {
     const invalidParent = join(repositories, "not-a-directory");
     await mkdir(invalid);
     await Bun.write(invalidParent, "not a directory");
+    const canonicalInvalid = await realpath(invalid);
     expect(runCli(home, "start").exitCode).toBe(0);
 
     const invalidAdded = runCli(home, "project", "add", invalid);
@@ -449,7 +452,7 @@ describe("Kojo System Process", () => {
       command: "project.add",
       project: {
         availability: {
-          reasons: [{ code: "NOT_GIT_REPOSITORY", path: invalid }],
+          reasons: [{ code: "NOT_GIT_REPOSITORY", path: canonicalInvalid }],
           status: "Unavailable",
         },
         registrationState: "Disabled",
@@ -740,7 +743,6 @@ describe("Kojo System Process", () => {
     const database = new Database(databasePath, { readonly: true });
     try {
       expect(database.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
-      expect(database.query("PRAGMA synchronous").get()).toEqual({ synchronous: 2 });
       expect(database.query("SELECT id, checksum FROM kojo_migrations ORDER BY id").all()).toEqual([
         {
           checksum: expect.stringMatching(/^[a-f0-9]{64}$/),

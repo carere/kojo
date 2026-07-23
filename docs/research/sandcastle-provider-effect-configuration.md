@@ -21,6 +21,10 @@ Sandcastle's selection APIs are constructed values, not global settings:
   provider object
   ([`RunOptions`](https://github.com/mattpocock/sandcastle/blob/main/README.md#runoptions),
   [provider options](https://github.com/mattpocock/sandcastle/blob/main/README.md#claudecodeoptions)).
+- The accepted value is the structural `AgentProvider` interface, not a closed union of built-in
+  agents. A custom implementation supplies its command construction and stream parsing behavior
+  directly, and the interface itself does not require model metadata
+  ([`AgentProvider`](https://github.com/mattpocock/sandcastle/blob/main/src/AgentProvider.ts)).
 
 `createSandbox()` does **not** select an agent or model. Its documented arguments are:
 `branch` and `sandbox` (required), plus `cwd`, `hooks`, `copyToWorktree`, and `timeouts`. The returned

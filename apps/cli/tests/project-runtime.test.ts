@@ -2,9 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { createBindMountSandboxProvider, createIsolatedSandboxProvider } from "@ai-hero/sandcastle";
+import { noSandbox } from "@ai-hero/sandcastle/sandboxes/no-sandbox";
 import {
   decodeProjectRuntimeResult,
   localDockerSandboxOptions,
+  localSandboxOptions,
 } from "../src/system/project-runtime";
 
 const cleanup = new Set<string>();
@@ -26,6 +29,26 @@ describe("Project Runtime Process", () => {
       branch: "sandcastle/workstream-26/issue-36",
       cwd: "/registered/project",
     });
+  });
+
+  test("anchors every Sandcastle Sandbox Provider to the registered Project", () => {
+    const unavailable = async (): Promise<never> => {
+      throw new Error("not created by this options test");
+    };
+    const providers = [
+      noSandbox(),
+      createBindMountSandboxProvider({ name: "custom-bind-mount", create: unavailable }),
+      createIsolatedSandboxProvider({ name: "custom-isolated", create: unavailable }),
+    ];
+
+    for (const sandbox of providers) {
+      const options = localSandboxOptions("/registered/project", sandbox, {
+        branch: "sandcastle/custom-provider",
+      });
+
+      expect(options.cwd).toBe("/registered/project");
+      expect(options.sandbox).toBe(sandbox);
+    }
   });
 
   test("runs Effect Activities through durable System Process boundaries", async () => {

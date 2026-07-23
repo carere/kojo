@@ -1,4 +1,8 @@
 import { createHash } from "node:crypto";
+import type {
+  AgentProvider as SandcastleAgentProvider,
+  SandboxProvider as SandcastleSandboxProvider,
+} from "@ai-hero/sandcastle";
 import { Cause, Context, Effect, Layer, Redacted, Schema } from "effect";
 import { Activity } from "effect/unstable/workflow";
 import { ActivityRetry, type ActivityRetryOptions, CompositionRuntime } from "./composition";
@@ -11,7 +15,7 @@ export interface ProviderConfiguration {
 }
 
 export interface AgentProviderConfiguration extends ProviderConfiguration {
-  readonly model: string;
+  readonly model?: string;
 }
 
 export interface SandboxCreateOptions {
@@ -36,7 +40,7 @@ export interface SandboxHandle {
   readonly close: () => Promise<{ readonly preservedWorktreePath?: string }>;
   readonly exec: (command: string, options?: CommandExecutionOptions) => Promise<SandboxExecResult>;
   readonly run: (options: {
-    readonly agent: unknown;
+    readonly agent: SandcastleAgentProvider;
     readonly logging: { readonly type: "stdout"; readonly verbose: false };
     readonly maxIterations?: number;
     readonly prompt: string;
@@ -50,52 +54,109 @@ export interface SandboxProviderService {
   ) => Effect.Effect<SandboxHandle, SandboxProviderFailure>;
 }
 
+export interface SandboxRuntimeService {
+  readonly create: (
+    sandbox: SandcastleSandboxProvider,
+    options: SandboxCreateOptions,
+  ) => Effect.Effect<SandboxHandle, SandboxProviderFailure>;
+}
+
+export interface SandboxProviderLayerOptions {
+  readonly configuration: ProviderConfiguration;
+  readonly sandbox: SandcastleSandboxProvider;
+}
+
 export const SandboxProviderFailure = Schema.TaggedStruct("Sandbox.ProviderFailure", {
   message: Schema.String,
 });
 export type SandboxProviderFailure = Schema.Schema.Type<typeof SandboxProviderFailure>;
 
 export interface AgentProviderService {
-  readonly agent: unknown;
+  readonly agent: SandcastleAgentProvider;
+  readonly configuration: AgentProviderConfiguration;
+  readonly redact?: (value: string) => string;
+}
+
+export interface AgentProviderDirectLayerOptions {
+  readonly agent: SandcastleAgentProvider;
   readonly configuration: AgentProviderConfiguration;
   readonly redact?: (value: string) => string;
 }
 
 export interface AgentProviderLayerOptions<E, R> {
   readonly configuration: AgentProviderConfiguration;
-  readonly makeAgent: (secrets: ReadonlyArray<string>) => unknown;
+  readonly makeAgent: (secrets: ReadonlyArray<string>) => SandcastleAgentProvider;
   readonly secrets: Effect.Effect<ReadonlyArray<Redacted.Redacted<string>>, E, R>;
 }
 
-export const SandboxProvider = Context.Service<SandboxProviderService>(
+const SandboxProviderService = Context.Service<SandboxProviderService>(
   "@kojo/workflow/SandboxProvider",
 );
 
-const AgentProviderService = Context.Service<AgentProviderService>("@kojo/workflow/AgentProvider");
+const SandboxRuntime = Context.Reference<SandboxRuntimeService>("@kojo/workflow/SandboxRuntime", {
+  defaultValue: () => ({
+    create: () =>
+      Effect.die("Sandcastle Sandbox Providers can only run inside a Kojo Project Runtime"),
+  }),
+});
 
-export const AgentProvider = Object.assign(AgentProviderService, {
-  layer: <E, R>(options: AgentProviderLayerOptions<E, R>) =>
+export const SandboxProvider = Object.assign(SandboxProviderService, {
+  layer: (options: SandboxProviderLayerOptions) =>
     Layer.effect(
-      AgentProviderService,
-      options.secrets.pipe(
-        Effect.map((redactedValues) => {
-          // Sandcastle accepts plain strings. Keep this one unwrap adjacent to
-          // constructing the process-local agent. The redactor closes over those
-          // values without exposing them as provider service data.
-          const secrets = redactedValues.map(Redacted.value);
-          return {
-            agent: options.makeAgent(secrets),
-            configuration: options.configuration,
-            redact: (value: string) =>
-              secrets.reduce(
-                (text, secret) =>
-                  secret.length === 0 ? text : text.split(secret).join("[REDACTED]"),
-                value,
-              ),
-          };
-        }),
+      SandboxProviderService,
+      SandboxRuntime.pipe(
+        Effect.map((runtime) => ({
+          configuration: options.configuration,
+          create: (createOptions: SandboxCreateOptions) =>
+            runtime.create(options.sandbox, createOptions),
+        })),
       ),
     ),
+});
+
+const AgentProviderService = Context.Service<AgentProviderService>("@kojo/workflow/AgentProvider");
+
+function agentProviderLayer(
+  options: AgentProviderDirectLayerOptions,
+): Layer.Layer<AgentProviderService>;
+function agentProviderLayer<E, R>(
+  options: AgentProviderLayerOptions<E, R>,
+): Layer.Layer<AgentProviderService, E, R>;
+function agentProviderLayer<E, R>(
+  options: AgentProviderDirectLayerOptions | AgentProviderLayerOptions<E, R>,
+): Layer.Layer<AgentProviderService, E, R> {
+  if ("agent" in options) {
+    return Layer.succeed(AgentProviderService, {
+      agent: options.agent,
+      configuration: options.configuration,
+      ...(options.redact === undefined ? {} : { redact: options.redact }),
+    });
+  }
+  return Layer.effect(
+    AgentProviderService,
+    options.secrets.pipe(
+      Effect.map((redactedValues) => {
+        // Sandcastle accepts plain strings. Keep this one unwrap adjacent to
+        // constructing the process-local agent. The redactor closes over those
+        // values without exposing them as provider service data.
+        const secrets = redactedValues.map(Redacted.value);
+        return {
+          agent: options.makeAgent(secrets),
+          configuration: options.configuration,
+          redact: (value: string) =>
+            secrets.reduce(
+              (text, secret) =>
+                secret.length === 0 ? text : text.split(secret).join("[REDACTED]"),
+              value,
+            ),
+        };
+      }),
+    ),
+  );
+}
+
+export const AgentProvider = Object.assign(AgentProviderService, {
+  layer: agentProviderLayer,
 });
 
 interface CurrentSandboxService {
@@ -158,7 +219,9 @@ const providerSnapshot = (
   adapterVersion: configuration.adapterVersion,
   configurationFingerprint: configuration.configurationFingerprint,
   kind,
-  ...(kind === "Agent" ? { model: (configuration as AgentProviderConfiguration).model } : {}),
+  ...(kind === "Agent" && (configuration as AgentProviderConfiguration).model !== undefined
+    ? { model: (configuration as AgentProviderConfiguration).model }
+    : {}),
   name: configuration.name,
   publicFields: configuration.publicFields,
 });
@@ -170,8 +233,12 @@ const verifyConfiguration = (
 ) =>
   Effect.gen(function* () {
     assertProviderConfiguration(configuration);
-    if (kind === "Agent" && !stableName((configuration as AgentProviderConfiguration).model)) {
-      return yield* Effect.die("Agent Provider metadata requires a non-empty stable model");
+    const model =
+      kind === "Agent" ? (configuration as AgentProviderConfiguration).model : undefined;
+    if (model !== undefined && !stableName(model)) {
+      return yield* Effect.die(
+        "Agent Provider metadata model must be a non-empty stable name when supplied",
+      );
     }
     yield* CompositionRuntime.RuntimeConfigurationRecorder.pipe(
       Effect.flatMap((recorder) => recorder.verify(subject, providerSnapshot(kind, configuration))),
@@ -378,7 +445,7 @@ export type AgentProviderFailure = Schema.Schema.Type<typeof AgentProviderFailur
 
 const safeProviderIdentity = (configuration: AgentProviderConfiguration) => ({
   adapterVersion: configuration.adapterVersion,
-  model: configuration.model,
+  ...(configuration.model === undefined ? {} : { model: configuration.model }),
   name: configuration.name,
 });
 

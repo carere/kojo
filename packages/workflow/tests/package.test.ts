@@ -17,9 +17,11 @@ describe("published package", () => {
       import: "./dist/index.js",
     });
     expect(manifest.peerDependencies.effect).toBe("4.0.0-beta.98");
+    expect(manifest.peerDependencies["@ai-hero/sandcastle"]).toBe("0.12.0");
     expect(manifest.dependencies?.effect).toBeUndefined();
     expect(manifest.engines.bun).toBe("1.3.14");
     expect(manifest.devDependencies).toEqual({
+      "@ai-hero/sandcastle": "0.12.0",
       "@effect/vitest": "4.0.0-beta.98",
       "@types/bun": "1.3.14",
       effect: "4.0.0-beta.98",

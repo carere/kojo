@@ -7,16 +7,26 @@
   "type": "module",
   "workspaces": [
     "apps/*",
-    "packages/*",
-    ".sandcastle"
+    "packages/*"
   ],
+  "scripts": {
+    "sandbox:build": "docker build --build-arg AGENT_UID=$(id -u) --build-arg AGENT_GID=$(id -g) --tag sandcastle:kojo --file containers/sandbox/Dockerfile .",
+    "test:self-host": "bun test workflows/hello.test.ts"
+  },
   "dependencies": {
-    "@ai-hero/sandcastle": "^0.12.0"
+    "@effect/platform-bun": "4.0.0-beta.98",
+    "@kojo/cli": "workspace:0.1.0",
+    "@kojo/workflow": "workspace:0.1.0",
+    "effect": "4.0.0-beta.98"
   },
   "devDependencies": {
     "@biomejs/biome": "latest",
+    "@types/bun": "1.3.14",
     "lefthook": "latest",
     "sort-package-json": "latest",
-    "typescript": "latest"
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "bun": "1.3.14"
   }
 }

@@ -1,9 +1,0 @@
-{
-  "extends": "../tsconfig.base.json",
-  "compilerOptions": {
-    "noEmit": true,
-    "types": ["bun"],
-    "outDir": "../.moon/cache/types/.sandcastle"
-  },
-  "include": ["./**/*.ts"]
-}

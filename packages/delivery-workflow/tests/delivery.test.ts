@@ -1,5 +1,11 @@
 import { describe, expect, test } from "@effect/vitest";
-import { AgentProvider, type SandboxHandle, SandboxProvider, WorkflowTest } from "@kojo/workflow";
+import {
+  AgentProvider,
+  type AgentProviderDirectLayerOptions,
+  type SandboxHandle,
+  SandboxProvider,
+  WorkflowTest,
+} from "@kojo/workflow";
 import { Effect, Layer } from "effect";
 import type {
   GitHubDeliveryFailure,
@@ -9,6 +15,13 @@ import type {
 import { Delivery, DeliveryTicket, GitHubDelivery } from "../src/index";
 
 const revision = "a".repeat(40);
+const controlledAgent: AgentProviderDirectLayerOptions["agent"] = {
+  name: "controlled-agent",
+  env: {},
+  captureSessions: false,
+  buildPrintCommand: ({ prompt }) => ({ command: prompt }),
+  parseStreamLine: () => [],
+};
 const rootUrl = "https://github.com/carere/kojo/issues/26";
 const delivery = `## Delivery
 
@@ -182,7 +195,7 @@ const executionLayer = Layer.merge(
       } satisfies SandboxHandle),
   }),
   Layer.succeed(AgentProvider, {
-    agent: {},
+    agent: controlledAgent,
     configuration: {
       adapterVersion: "test-1",
       configurationFingerprint: "controlled",

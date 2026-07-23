@@ -416,13 +416,14 @@ const makeMutableCheckout = async (repository: string, commit: string) => {
   try {
     await runGit(repository, "worktree", "add", "--detach", "--no-checkout", path, commit);
     await runGit(path, "checkout", "--detach", commit);
+    const canonicalPath = await realpath(path);
     return {
       dispose: async () => {
-        await runGitResult(repository, "worktree", "remove", "--force", path);
+        await runGitResult(repository, "worktree", "remove", "--force", canonicalPath);
         await rm(parent, { force: true, recursive: true });
       },
       parent,
-      path,
+      path: canonicalPath,
     };
   } catch (error) {
     await rm(parent, { force: true, recursive: true });
@@ -457,6 +458,9 @@ const readJson = async <A>(path: string, code: ProjectSourceDiagnosticCode): Pro
 
 const dependencyVersion = (manifest: PackageManifest, name: string) =>
   manifest.dependencies?.[name] ?? manifest.devDependencies?.[name];
+
+const isExactKojoWorkspaceVersion = (name: string, actual: string | undefined, expected: string) =>
+  name.startsWith("@kojo/") && actual === `workspace:${expected}`;
 
 const manifestDependencies = (manifest: PackageManifest) => ({
   ...manifest.dependencies,
@@ -494,9 +498,11 @@ const validateToolchain = async (checkout: string) => {
     ["typescript", PROJECT_SOURCE_COMPATIBILITY.typescript, "INCOMPATIBLE_TYPESCRIPT"],
   ] as const;
   const diagnostics: Array<ProjectSourceDiagnostic> = [];
+  const localPackages = await collectLocalPackages(checkout);
   for (const [name, expected, code] of requirements) {
     const actual = dependencyVersion(manifest, name);
-    if (actual !== expected) {
+    const workspaceExact = isExactKojoWorkspaceVersion(name, actual, expected);
+    if (actual !== expected && !workspaceExact) {
       diagnostics.push(
         diagnostic(
           code,
@@ -509,7 +515,36 @@ const validateToolchain = async (checkout: string) => {
     }
     const resolution = lockfile.packages?.[name];
     const resolvedIdentity = Array.isArray(resolution) ? resolution[0] : undefined;
-    if (actual === expected && resolvedIdentity !== `${name}@${expected}`) {
+    if (workspaceExact) {
+      const workspacePackage = localPackages.get(name);
+      const expectedWorkspaceIdentity =
+        workspacePackage === undefined
+          ? undefined
+          : `${name}@workspace:${relative(checkout, workspacePackage.path).split(sep).join("/")}`;
+      if (workspacePackage?.manifest.version !== expected) {
+        diagnostics.push(
+          diagnostic(
+            code,
+            `Expected workspace package ${name} ${expected}, found ${workspacePackage?.manifest.version ?? "missing"}.`,
+            {
+              path:
+                workspacePackage === undefined
+                  ? "package.json"
+                  : relative(checkout, join(workspacePackage.path, "package.json")),
+            },
+          ),
+        );
+      }
+      if (resolvedIdentity !== expectedWorkspaceIdentity) {
+        diagnostics.push(
+          diagnostic(
+            "INVALID_LOCKFILE",
+            `Expected bun.lock to resolve ${name} to its exact in-worktree workspace package.`,
+            { path: "bun.lock", specifier: name },
+          ),
+        );
+      }
+    } else if (actual === expected && resolvedIdentity !== `${name}@${expected}`) {
       diagnostics.push(
         diagnostic(
           "INVALID_LOCKFILE",

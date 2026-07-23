@@ -234,6 +234,58 @@ describe("Project Source Revision adapter", () => {
     );
   });
 
+  test("accepts exact in-worktree Kojo workspace packages", async () => {
+    const repository = await makeRepository();
+    const manifest = JSON.parse(await Bun.file(join(repository, "package.json")).text());
+    manifest.dependencies["@kojo/cli"] = "workspace:0.1.0";
+    manifest.dependencies["@kojo/workflow"] = "workspace:0.1.0";
+    await write(join(repository, "package.json"), JSON.stringify(manifest));
+    const lockfile = JSON.parse(await Bun.file(join(repository, "bun.lock")).text());
+    lockfile.packages["@kojo/cli"] = ["@kojo/cli@workspace:apps/cli"];
+    lockfile.packages["@kojo/workflow"] = ["@kojo/workflow@workspace:packages/workflow"];
+    await write(join(repository, "bun.lock"), JSON.stringify(lockfile));
+    for (const [path, name] of [
+      ["apps/cli", "@kojo/cli"],
+      ["packages/workflow", "@kojo/workflow"],
+    ] as const) {
+      await mkdir(join(repository, path), { recursive: true });
+      await write(
+        join(repository, path, "package.json"),
+        JSON.stringify({ name, type: "module", version: "0.1.0" }),
+      );
+    }
+    git(repository, "add", ".");
+    git(repository, "commit", "-m", "use exact Kojo workspaces");
+
+    const revision = await activateProjectSource({
+      loadRegistry: async () => registry(),
+      policy: "LocalWithFreshnessWarning",
+      repository,
+    });
+
+    expect(revision.toolchain).toMatchObject({ cli: "0.1.0", workflow: "0.1.0" });
+  });
+
+  test("rejects an unpinned Kojo workspace dependency", async () => {
+    const repository = await makeRepository();
+    const manifest = JSON.parse(await Bun.file(join(repository, "package.json")).text());
+    manifest.dependencies["@kojo/workflow"] = "workspace:*";
+    await write(join(repository, "package.json"), JSON.stringify(manifest));
+    git(repository, "add", ".");
+    git(repository, "commit", "-m", "use unpinned Kojo workspace");
+
+    const failure = await activateProjectSource({
+      loadRegistry: async () => registry(),
+      policy: "LocalWithFreshnessWarning",
+      repository,
+    }).catch((error) => error);
+
+    expect(failure).toBeInstanceOf(ProjectSourceValidationError);
+    expect(failure.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "INCOMPATIBLE_WORKFLOW" }),
+    );
+  });
+
   test("rejects an invalid Schedule with the complete registry", async () => {
     const repository = await makeRepository();
     const failure = await activateProjectSource({

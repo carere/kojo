@@ -3,6 +3,7 @@ import {
   type CreateSandboxOptions,
   createSandbox,
   type Sandbox as SandcastleSandbox,
+  type SandboxProvider as SandcastleSandboxProvider,
 } from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { Cause, Context, Duration, Effect, Exit, Layer, Option, Schema, Scope } from "effect";
@@ -74,6 +75,15 @@ const SandboxProvider = Context.Service<{
     { readonly _tag: "Sandbox.ProviderFailure"; readonly message: string }
   >;
 }>("@kojo/workflow/SandboxProvider");
+const SandboxRuntime = Context.Service<{
+  readonly create: (
+    sandbox: SandcastleSandboxProvider,
+    options: { readonly baseBranch?: string; readonly branch: string },
+  ) => Effect.Effect<
+    SandcastleSandbox,
+    { readonly _tag: "Sandbox.ProviderFailure"; readonly message: string }
+  >;
+}>("@kojo/workflow/SandboxRuntime");
 const ExecutionArtifactRecorder = Context.Reference<{
   readonly finalizeText: (
     name: string,
@@ -130,15 +140,21 @@ interface RuntimeRequest {
 
 const responsePrefix = "KOJO_RUNTIME_RESULT ";
 
-export const localDockerSandboxOptions = (
+export const localSandboxOptions = (
   projectPath: string,
-  imageName: string,
+  sandbox: SandcastleSandboxProvider,
   options: { readonly baseBranch?: string; readonly branch: string },
 ): CreateSandboxOptions => ({
   ...options,
   cwd: projectPath,
-  sandbox: docker({ imageName }),
+  sandbox,
 });
+
+export const localDockerSandboxOptions = (
+  projectPath: string,
+  imageName: string,
+  options: { readonly baseBranch?: string; readonly branch: string },
+): CreateSandboxOptions => localSandboxOptions(projectPath, docker({ imageName }), options);
 
 const encodeSchemaValue = async (schema: Schema.Top, value: unknown) =>
   Effect.runPromise(
@@ -341,6 +357,19 @@ const executeWorkflow = async (
     return { ...artifact, name };
   };
   const dockerImage = process.env.KOJO_SANDBOX_IMAGE ?? "sandcastle:kojo";
+  const sandboxRuntime = {
+    create: (
+      sandbox: SandcastleSandboxProvider,
+      options: { readonly baseBranch?: string; readonly branch: string },
+    ) =>
+      Effect.tryPromise({
+        try: () => createSandbox(localSandboxOptions(runtimeProjectPath, sandbox, options)),
+        catch: (error) => ({
+          _tag: "Sandbox.ProviderFailure" as const,
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      }),
+  };
   const sandboxProviderLayer = Layer.succeed(SandboxProvider, {
     configuration: {
       adapterVersion: "@ai-hero/sandcastle@0.12.0",
@@ -350,15 +379,7 @@ const executeWorkflow = async (
       name: "local-docker",
       publicFields: { image: dockerImage },
     },
-    create: (options) =>
-      Effect.tryPromise({
-        try: () =>
-          createSandbox(localDockerSandboxOptions(runtimeProjectPath, dockerImage, options)),
-        catch: (error) => ({
-          _tag: "Sandbox.ProviderFailure" as const,
-          message: error instanceof Error ? error.message : String(error),
-        }),
-      }),
+    create: (options) => sandboxRuntime.create(docker({ imageName: dockerImage }), options),
   });
   const workflowRegistry = await loadWorkflowRegistry(request);
   const childWorkflowInvoker = {
@@ -598,6 +619,7 @@ const executeWorkflow = async (
         Effect.provideService(ExecutionAttempt, runtimeAttempt),
         Effect.provideService(ChildWorkflowInvoker, childWorkflowInvoker),
         Effect.provideService(CurrentExecutionScope, { ...executionScope, runId: runtimeRunId }),
+        Effect.provideService(SandboxRuntime, sandboxRuntime),
         Effect.provide(sandboxProviderLayer),
       ),
     )

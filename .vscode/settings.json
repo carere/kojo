@@ -90,6 +90,8 @@
     "uidx",
     "unixepoch",
     "vitest",
+    "worktree",
+    "WORKTREE",
     "zstd"
   ],
   "js/ts.updateImportsOnFileMove.enabled": "always",

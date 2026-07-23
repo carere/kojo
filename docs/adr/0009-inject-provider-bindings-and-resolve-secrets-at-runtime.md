@@ -12,6 +12,12 @@ Workflow code or reusable repository modules that construct Sandcastle providers
 the process environment as the default configuration source, and tests or external secret systems
 may replace that source. Runtime services do not belong in `kojo.config.ts`.
 
+The Sandbox binding accepts Sandcastle's full `SandboxProvider` union without narrowing it to
+Docker or to providers known by Kojo. This includes built-in bind-mount, isolated, and no-sandbox
+providers as well as custom providers produced by Sandcastle's bind-mount and isolated factories.
+The Agent binding accepts Sandcastle's `AgentProvider` interface directly, including custom
+implementations; model metadata is present only when it applies to that provider.
+
 Secrets are resolved only when a provider service is acquired and are unwrapped only to construct
 the plain-string environment Sandcastle requires. They never enter Workflow or Activity schemas,
 the Runtime Configuration Snapshot, Execution Evidence, fingerprints, or rendered output. Effect

@@ -70,9 +70,42 @@ moon run :tsc
 moon run :test
 ```
 
-The `delivery` command is present as the direct invocation surface. Its workflow will be populated
-when the Sandcastle customization is extracted:
+## Run Kojo on this repository
+
+The root `kojo.config.ts` registers a small `Hello` Developer Workflow that opens a local Docker
+Sandbox and prints `Hello from Kojo`. The self-host registry imports the in-repository workflow API
+source so an immutable checkout tests the exact Kojo code being developed. Build the default
+Sandbox image before starting Kojo:
 
 ```sh
-moon run cli:delivery -- .
+bun run test:self-host
+bun run sandbox:build
 ```
+
+Use an isolated Kojo Home for the self-hosting smoke test. Project source activation reads the
+local default branch, so the Kojo configuration and workflow must be committed there before the
+Project can be enabled.
+
+```sh
+export KOJO_HOME=/tmp/kojo-self-host
+bun run apps/cli/main.ts start
+bun run apps/cli/main.ts project add "$PWD"
+bun run apps/cli/main.ts project list
+bun run apps/cli/main.ts project enable <project-id>
+bun run apps/cli/main.ts workflow start <project-id> Hello --input '{}'
+bun run apps/cli/main.ts workflow inspect <run-id>
+```
+
+After the Project is enabled, add `--from-checkout` to `workflow start` to freeze and run current
+dirty and untracked workflow source.
+
+Kojo's reference delivery automation is a repository-local Developer Workflow. Its acceptance tests
+exercise delivery, review, interruption recovery, publication, and finalization through Kojo's
+workflow authoring API:
+
+```sh
+moon run delivery-workflow:test
+```
+
+See [`packages/delivery-workflow/README.md`](packages/delivery-workflow/README.md) for its input,
+runtime adapter contract, and registration instructions.

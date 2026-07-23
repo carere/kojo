@@ -1,6 +1,7 @@
 import { describe, expect, test } from "@effect/vitest";
 import {
   AgentProvider,
+  type AgentProviderDirectLayerOptions,
   type SandboxAgentResult,
   type SandboxExecResult,
   type SandboxHandle,
@@ -16,6 +17,13 @@ import type {
 import { Delivery, DeliveryTicket, GitHubDelivery } from "../src/index";
 
 const sourceRevision = "a".repeat(40);
+const controlledAgent: AgentProviderDirectLayerOptions["agent"] = {
+  name: "controlled-agent",
+  env: {},
+  captureSessions: false,
+  buildPrintCommand: ({ prompt }) => ({ command: prompt }),
+  parseStreamLine: () => [],
+};
 const rootUrl = "https://github.com/carere/kojo/issues/26";
 const delivery = `## Delivery
 
@@ -400,7 +408,7 @@ const providers = (options: ProviderOptions = {}) => {
       }),
   });
   const agent = Layer.succeed(AgentProvider, {
-    agent: {},
+    agent: controlledAgent,
     configuration: {
       adapterVersion: "test-1",
       configurationFingerprint: "agent-test",
