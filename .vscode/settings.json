@@ -11,6 +11,15 @@
   "files.associations": {
     "*.prototools": "toml"
   },
+  "files.readonlyInclude": {
+    "**/routeTree.gen.ts": true
+  },
+  "files.watcherExclude": {
+    "**/routeTree.gen.ts": true
+  },
+  "search.exclude": {
+    "**/routeTree.gen.ts": true
+  },
   "[yaml][yml]": {
     "editor.defaultFormatter": "redhat.vscode-yaml"
   },
@@ -37,6 +46,7 @@
     "cocogitto",
     "esnext",
     "fontsource",
+    "github",
     "kobalte",
     "kojo",
     "montserrat",

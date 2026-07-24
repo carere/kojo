@@ -8,7 +8,8 @@
       "tests/**/*",
       "playwright.config.ts",
       "vite.config.ts",
-      "tsconfig.json"
+      "tsconfig.json",
+      "!src/routeTree.gen.ts"
     ]
   },
   "linter": {

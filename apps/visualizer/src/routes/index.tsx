@@ -1,6 +1,11 @@
-import { Button } from "@/components/ui/button";
+import { createFileRoute } from "@tanstack/solid-router";
+import { Button } from "#components/ui/button";
 
-export function VisualizerHome() {
+export const Route = createFileRoute("/")({
+  component: VisualizerHome,
+});
+
+function VisualizerHome() {
   return (
     <main class="mx-auto flex min-h-screen max-w-3xl items-center px-6">
       <section class="space-y-6">
