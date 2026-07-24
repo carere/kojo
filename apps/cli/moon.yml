@@ -9,7 +9,7 @@ tasks:
     preset: utility
 
   test:
-    command: bun test
+    command: bun --bun vitest run
     description: Run CLI tests
     inputs:
       - "@group(configs)"
