@@ -1,0 +1,24 @@
+{
+  "name": "@kojo/visualizer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@kobalte/core": "^0.13.12",
+    "@tanstack/solid-query": "^5.101.2",
+    "@tanstack/solid-router": "^1.170.16",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "solid-js": "^1.9.13",
+    "tailwind-merge": "^3.6.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.54.1",
+    "@tailwindcss/vite": "^4.3.2",
+    "@types/node": "latest",
+    "tailwindcss": "^4.3.2",
+    "typescript": "latest",
+    "vite": "^8.1.0",
+    "vite-plugin-solid": "^2.11.12"
+  }
+}

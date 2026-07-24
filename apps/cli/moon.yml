@@ -1,0 +1,19 @@
+$schema: "../../.moon/cache/schemas/project.json"
+
+tasks:
+  dev:
+    command: bun run apps/cli/main.ts
+    description: Run the Kojo CLI
+    options:
+      runFromWorkspaceRoot: true
+    preset: utility
+
+  test:
+    command: bun test
+    description: Run CLI tests
+    inputs:
+      - "@group(configs)"
+      - "@group(sources)"
+      - "@group(tests)"
+      - "@group(workspace)"
+    type: test

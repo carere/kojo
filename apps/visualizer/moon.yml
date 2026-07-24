@@ -1,0 +1,39 @@
+$schema: "../../.moon/cache/schemas/project.json"
+
+tasks:
+  dev:
+    command: bun vite dev
+    description: Start the Kojo visualizer
+    preset: server
+
+  build:
+    command: bun vite build
+    description: Build the Kojo visualizer
+    inputs:
+      - "@group(configs)"
+      - "@group(sources)"
+      - "@group(workspace)"
+      - "index.html"
+    outputs:
+      - "dist/"
+    type: build
+
+  test:
+    command: bun --bun playwright test
+    description: Run visualizer browser tests
+    inputs:
+      - "@group(configs)"
+      - "@group(sources)"
+      - "@group(tests)"
+      - "index.html"
+    type: test
+
+  preview:
+    command: bun vite preview
+    description: Preview the visualizer production build
+    preset: server
+
+  zaidan-add:
+    command: bunx shadcn@latest add
+    description: Add a Zaidan component
+    preset: utility

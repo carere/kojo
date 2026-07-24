@@ -1,0 +1,8 @@
+bun = "latest"
+moon = "latest"
+
+[settings]
+detect-strategy = "only-prototools"
+auto-clean = true
+auto-install = true
+unstable-lockfile = true

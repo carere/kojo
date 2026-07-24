@@ -1,0 +1,45 @@
+$schema: ../cache/schemas/tasks.json
+
+fileGroups:
+  configs:
+    - "moon.yml"
+    - "package.json"
+    - "tsconfig.json"
+    - "biome.json"
+    - "*.config.{js,ts,cjs,mjs,mts}"
+  sources:
+    - "src/**/*"
+  tests:
+    - "tests/**/*"
+    - "**/*.{test,spec}.{ts,tsx}"
+  workspace:
+    - "/.moon/tasks/**/*"
+    - "/.moon/toolchains.yml"
+    - "/.moon/workspace.yml"
+    - "/.prototools"
+    - "/biome.json"
+    - "/bun.lock"
+    - "/package.json"
+    - "/tsconfig.base.json"
+    - "/tsconfig.json"
+
+implicitInputs:
+  - "/.moon/tasks/**/*"
+  - "/.moon/toolchains.yml"
+  - "/.moon/workspace.yml"
+  - "/.prototools"
+  - "/biome.json"
+  - "/bun.lock"
+  - "/package.json"
+  - "/tsconfig.base.json"
+  - "/tsconfig.json"
+
+tasks:
+  check:
+    command: "bun --bun biome check --no-errors-on-unmatched ."
+
+  fix:
+    command: "bun --bun biome check --write --no-errors-on-unmatched ."
+
+  tsc:
+    command: "bun --bun tsc --build --verbose"

@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Setup toolchain
+        uses: moonrepo/setup-toolchain@v0.6.4
+        with:
+          auto-install: true
+
+      - name: Lint conventional commits
+        uses: cocogitto/cocogitto-action@v4.2.0
+        with:
+          command: check
+
+      - name: Install Playwright browser
+        working-directory: apps/visualizer
+        run: bun --bun playwright install --with-deps --only-shell chromium
+
+      - name: Build and test
+        run: moon run :build :test
+
+      - name: TypeScript build
+        run: moon run :tsc
+
+      - name: Biome check
+        run: moon run :check
