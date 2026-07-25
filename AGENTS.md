@@ -40,3 +40,17 @@ When you ask questions, use simple English and avoid terms that are not part of 
   `test` task runs the fast unit project.
 - Mirror bounded-context paths beneath `tests/unit/contexts` and `tests/integration/contexts` so the
   behavior and its tests stay easy to find.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in this repository's GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The default five-role triage vocabulary is used. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repository uses a multi-context domain-doc layout; contexts are added only when their boundaries are discovered. See `docs/agents/domain.md`.
