@@ -12,6 +12,9 @@ fileGroups:
   tests:
     - "tests/**/*"
     - "**/*.{test,spec}.{ts,tsx}"
+  translations:
+    - "/messages/**/*"
+    - "/project.inlang/**/*"
   workspace:
     - "/.moon/tasks/**/*"
     - "/.moon/toolchains.yml"

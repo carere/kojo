@@ -1,0 +1,15 @@
+{
+  "$schema": "https://inlang.com/schema/inlang-message-format",
+  "visualizer_eyebrow": "Visualiseur Kojo",
+  "visualizer_title": "Le nouveau Kojo commence ici.",
+  "visualizer_description": "L’application SolidJS, son registre de composants Zaidan et les outils de développement partagés sont prêts pour la prochaine itération.",
+  "visualizer_ready": "Prêt",
+  "visualizer_rpc_ready": "Effect RPC prêt",
+  "theme_toggle_label": "Thème",
+  "theme_toggle_light": "Clair",
+  "theme_toggle_dark": "Sombre",
+  "theme_toggle_system": "Système",
+  "language_toggle_label": "Langue",
+  "language_toggle_en": "Anglais",
+  "language_toggle_fr": "Français"
+}

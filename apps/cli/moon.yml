@@ -9,8 +9,18 @@ tasks:
     preset: utility
 
   test:
-    command: bun --bun vitest run
-    description: Run CLI tests
+    command: bun --bun vitest run --project unit
+    description: Run CLI unit tests
+    inputs:
+      - "@group(configs)"
+      - "@group(sources)"
+      - "@group(tests)"
+      - "@group(workspace)"
+    type: test
+
+  integration-test:
+    command: bun --bun vitest run --project integration --passWithNoTests
+    description: Run CLI integration tests
     inputs:
       - "@group(configs)"
       - "@group(sources)"

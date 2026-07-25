@@ -7,11 +7,11 @@
     "kojo": "./main.ts"
   },
   "dependencies": {
-    "@effect/platform-bun": "4.0.0-beta.98",
-    "effect": "4.0.0-beta.98"
+    "@effect/platform-bun": "4.0.0-beta.101",
+    "effect": "4.0.0-beta.101"
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.0-beta.98",
+    "@effect/vitest": "4.0.0-beta.101",
     "@types/bun": "latest",
     "typescript": "latest",
     "vitest": "^4.1.10"

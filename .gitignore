@@ -18,6 +18,7 @@ node_modules
 
 # build
 dist
+**/src/i18n/
 
 # tests
 playwright-report

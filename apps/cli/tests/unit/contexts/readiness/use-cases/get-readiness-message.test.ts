@@ -1,10 +1,10 @@
 import { expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { program } from "../src/program";
+import { getReadinessMessage } from "../../../../../src/contexts/readiness/use-cases/get-readiness-message";
 
 it.effect("starts from a known state", () =>
   Effect.gen(function* () {
-    const result = yield* program;
+    const result = yield* getReadinessMessage;
 
     expect(result).toBe("Kojo is ready.");
   }),

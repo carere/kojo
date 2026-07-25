@@ -37,7 +37,7 @@ jobs:
         run: bun --bun playwright install --with-deps --only-shell chromium
 
       - name: Build and test
-        run: moon run :build :test
+        run: moon run :build :test :integration-test :browser-test
 
       - name: TypeScript build
         run: moon run :tsc

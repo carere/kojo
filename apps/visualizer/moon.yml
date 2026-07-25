@@ -13,19 +13,40 @@ tasks:
       - "@group(configs)"
       - "@group(sources)"
       - "@group(workspace)"
-      - "index.html"
+      - "@group(translations)"
     outputs:
       - "dist/"
+      - "src/i18n/"
     type: build
 
   test:
-    command: bun --bun playwright test
+    command: bun --bun vitest run --project unit
+    description: Run visualizer unit tests
+    inputs:
+      - "@group(configs)"
+      - "@group(sources)"
+      - "@group(tests)"
+      - "@group(translations)"
+    type: test
+
+  integration-test:
+    command: bun --bun vitest run --project integration
+    description: Run visualizer integration tests
+    inputs:
+      - "@group(configs)"
+      - "@group(sources)"
+      - "@group(tests)"
+      - "@group(translations)"
+    type: test
+
+  browser-test:
+    command: bun --bun vitest run --project browser
     description: Run visualizer browser tests
     inputs:
       - "@group(configs)"
       - "@group(sources)"
       - "@group(tests)"
-      - "index.html"
+      - "@group(translations)"
     type: test
 
   preview:

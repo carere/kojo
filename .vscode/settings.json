@@ -12,13 +12,16 @@
     "*.prototools": "toml"
   },
   "files.readonlyInclude": {
-    "**/routeTree.gen.ts": true
+    "**/routeTree.gen.ts": true,
+    "**/src/i18n/**": true
   },
   "files.watcherExclude": {
-    "**/routeTree.gen.ts": true
+    "**/routeTree.gen.ts": true,
+    "**/src/i18n/**": true
   },
   "search.exclude": {
-    "**/routeTree.gen.ts": true
+    "**/routeTree.gen.ts": true,
+    "**/src/i18n/**": true
   },
   "[yaml][yml]": {
     "editor.defaultFormatter": "redhat.vscode-yaml"
@@ -47,11 +50,16 @@
     "esnext",
     "fontsource",
     "github",
+    "inlang",
     "kobalte",
     "kojo",
     "montserrat",
     "moonrepo",
+    "Ndjson",
+    "outdir",
+    "paraglide",
     "prototools",
+    "Rpcs",
     "shadcn",
     "solidjs",
     "tailwindcss",
