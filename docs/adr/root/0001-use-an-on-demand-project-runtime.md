@@ -1,8 +1,10 @@
 ---
-status: accepted
+status: deprecated
 ---
 
 # Use one on-demand Project Runtime per Kojo Project
+
+This decision is being reconsidered in [Choose the local execution owner and concurrency model](https://github.com/carere/kojo/issues/4) because adopting Effect Workflow's complete durable engine invalidated its orchestration and crash-recovery premises.
 
 Kojo uses one on-demand Project Runtime process as the local execution owner for each Kojo Project. Keeping this owner independent of the CLI and visualizer lets Workflow Runs outlive either client, while project-scoped ownership avoids a permanent global daemon and provides one authority for project-local execution state.
 
