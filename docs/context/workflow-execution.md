@@ -33,8 +33,12 @@ The isolated owner that coordinates Workflow Schedules and Workflow Runs for one
 _Avoid_: Kojo Host, visualizer server, run worker
 
 **Project Runtime Readiness**:
-The condition in which a Project Runtime has opened its durable store, acquired engine ownership, and registered compatible Workflow Definitions. It does not accept or recover work before reaching this condition; once ready, it recovers non-final Workflow Runs without restarting final runs.
+The structured assessment of which work a Project Runtime can perform safely after checking its Project layout, durable store, engine ownership, and Workflow Definitions. `ready` permits all capabilities, `limited` preserves only the capabilities proven safe, and `needs-attention` prevents execution progress while retaining project inspection and repair; findings block the smallest affected Project resources, explicit capabilities remain authoritative, and reassessment restores capabilities only after the affected checks succeed.
 _Avoid_: Host health, process liveness
+
+**Readiness Finding**:
+A stably identified explanation of one condition that affects Project Runtime Readiness. It identifies the affected Project resource, the capabilities it permits or blocks, and whether its repair is automatic, requires an explicit developer action, or is unavailable.
+_Avoid_: Startup error, health check
 
 **Workflow Run State**:
 The current durable lifecycle condition of a Workflow Run: running, suspended, stopping, stopped, failed, or completed. It owns Kojo's accepted lifecycle decisions and public outcome, while the durable Workflow Engine owns replay of workflow code and Workflow Activity results. Running, suspended, and stopping are non-final; stopped, failed, and completed are final and never resume.

@@ -25,7 +25,7 @@ A stable, developer-chosen identifier for a Workflow Definition within one Kojo 
 _Avoid_: Workflow name, export name
 
 **Workflow Definition Revision**:
-A developer-chosen identity for the schemas, handler behavior, and durable operation keys required to recover a Workflow Run safely. A replay-incompatible change requires a different revision; a Project Runtime does not recover a Workflow Run with an incompatible revision.
+A developer-chosen identity for the schemas, handler behavior, and durable operation keys required to recover a Workflow Run safely. A replay-incompatible change requires a different revision; a live Project Runtime may retain an already-loaded revision for existing work, but stored revision metadata cannot recreate unavailable executable source after restart.
 _Avoid_: Workflow version, deployment version
 
 **Workflow Schedule**:
@@ -41,7 +41,7 @@ The Kojo-derived identity of the exact Workflow Schedule definition that Kojo su
 _Avoid_: Schedule version, configuration version
 
 **Kojo Configuration**:
-The single static TypeScript value created with `defineConfig(...)` and default-exported from `kojo.config.ts`. It explicitly registers only a Kojo Project's complete Workflow Definitions; each definition carries its Workflow Schedules and has no unresolved developer-provided services. Loading it does not start workflow work.
+The single static TypeScript value created with `defineConfig(...)` and default-exported from `kojo.config.ts`. It explicitly registers only a Kojo Project's complete Workflow Definitions; each definition carries its Workflow Schedules and has no unresolved developer-provided services. Loading it does not start workflow work; an invalid replacement leaves a live Project Runtime's last accepted snapshot available only to existing work and blocks new work until the current configuration loads successfully.
 _Avoid_: Workflow registry, automatic discovery
 
 **Sandbox Image Definition**:
