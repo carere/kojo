@@ -53,12 +53,28 @@ The immutable evidence captured when a start is accepted. It contains the exact 
 _Avoid_: Workflow backup, resumable snapshot
 
 **Workflow Activity**:
-A named durable side effect within a Workflow Run whose recorded result is reused during replay. An Activity without a durable result may run again with the same Activity Idempotency Key, so its external effect is at-least-once.
+A named durable side effect within a Workflow Run whose recorded result is reused during replay. It may be a custom Effect program or a Kojo Agent or Command operation. An Activity without a durable result may run again with the same Activity Idempotency Key, so its external effect is at-least-once.
 _Avoid_: Task, step
 
 **Activity Idempotency Key**:
 A stable identity for one intended external side effect across retries of a Workflow Activity. An external adapter uses it to avoid repeating work that succeeded before the Activity result became durable.
 _Avoid_: Request ID, Activity name
+
+**Durable Operation Key**:
+A developer-chosen identity for a replay-sensitive operation within one Workflow Run. Reusing it for the same logical operation returns the recorded result, while reuse with different contents conflicts; a Child Workflow Run establishes a new key scope.
+_Avoid_: Array index, attempt number
+
+**Workflow Sandbox**:
+A logical execution environment identified by a stable key within one Workflow Run. Reusing the key with the same definition refers to the same environment; recovery may recreate its provider session while preserving durable worktree state and recorded artifacts. Processes, installed packages, and environment mutations are not durable unless the definition or provider explicitly guarantees them.
+_Avoid_: Container, provider handle
+
+**Workflow Deferred**:
+A named durable wait within one Workflow Run. Awaiting an incomplete Workflow Deferred suspends the run, and a serializable completion token lets Kojo complete it later without exposing the Workflow Engine's private identity.
+_Avoid_: Promise, in-memory deferred
+
+**Agent Session**:
+A provider-native conversation reference optionally returned by an Agent invocation and explicitly passed to a later invocation. It is usable only when the selected Agent Provider and Workflow Sandbox support continuation, and it never represents Workflow Run suspension, resume, or recovery.
+_Avoid_: Workflow session, checkpoint
 
 **Execution Boundary**:
 A nested unit of activity within a Workflow Run. Its start is recorded for live inspection and crash evidence, and its end produces one context-rich completion event. The Workflow Definition determines which kinds of activity become boundaries.

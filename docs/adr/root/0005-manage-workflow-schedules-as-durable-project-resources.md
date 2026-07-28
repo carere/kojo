@@ -11,17 +11,17 @@ Kojo manages each Workflow Schedule as a version-controlled definition reconcile
 ### Definition and identity
 
 - A developer chooses a Schedule Key that is unique within one Kojo Project. Display, export, and file-path changes preserve identity; changing the key creates a new schedule and leaves the old one unavailable. V1 has no rename operation.
-- A schedule targets one Workflow Key and declares a standard five-field cron expression, an explicit IANA time zone, a deterministic input rule, and an overlap policy.
+- A schedule is attached to exactly one Workflow Definition. It targets that definition's Workflow Key and declares a standard five-field cron expression, an explicit IANA time zone, a deterministic input rule, and an overlap policy.
 - The input rule may use only the Schedule Key and scheduled instant interpreted in the declared time zone. Kojo validates and persists the exact resolved input before requesting a Workflow Run.
 - The overlap policy is `allow` or `skip`, defaulting to `allow`. `skip` considers only non-final runs started by the same schedule; manual runs never block it. V1 has no queue or coalescing policy.
-- A stable Workflow Schedule Revision identifies the target Workflow Key, cron, time zone, input rule, and overlap policy. Identical declarations keep the same revision across reloads; changing any of those fields changes it. The authoring contract chooses the concrete fingerprint representation.
+- Kojo derives a stable Workflow Schedule Revision from the target Workflow Key, cron, time zone, input rule's explicit revision, and overlap policy. Identical declarations keep the same revision across reloads; changing any of those fields changes it.
 - A newly discovered schedule starts disabled and requires an explicit enable request.
 
 ### Reconciliation and control
 
 - Workflow Authoring owns the version-controlled definition. Workflow Execution owns project-local durable state: enabled intent, the applied revision, operational condition, next occurrence, high-water mark, and history.
 - Enabled intent is separate from the `available`, `unavailable`, or `needs-attention` condition. Only an enabled, available schedule has a next occurrence.
-- Kojo Configuration snapshots reconcile atomically. If a snapshot cannot load or validate, active Workflow Runs continue, no new scheduled work starts, and the project reports that it needs attention.
+- Kojo Configuration snapshots contain registered Workflow Definitions and their attached Workflow Schedules and reconcile atomically. If a snapshot cannot load or validate, active Workflow Runs continue, no new scheduled work starts, and the project reports that it needs attention.
 - Applying a changed definition under the same Schedule Key preserves enabled intent, invalidates future occurrences from the old revision, and calculates the next occurrence strictly after the update. It never changes an already-created Workflow Run.
 - Removing a schedule from a valid configuration makes it unavailable without deleting enabled intent or history. If the same Schedule Key returns, it resumes automatically when previously enabled and does not catch up the unavailable interval. A different key is a new, disabled schedule.
 - Enable and disable requests are idempotent and serialized with occurrence processing. If disable is accepted before a Workflow Run Start Request, the occurrence cannot create a run. A run whose start was accepted first continues independently. Enabling or re-enabling calculates the first occurrence strictly after the command time and never starts immediately or catches up disabled time.
@@ -60,7 +60,7 @@ Kojo manages each Workflow Schedule as a version-controlled definition reconcile
 ## Consequences
 
 - Kojo needs its own durable schedule registry, occurrence records, revision checks, high-water marks, reconciliation transaction, and delayed-wake adapter above Effect's unstable APIs.
-- The workflow-authoring contract must provide a stable way to fingerprint deterministic input rules and the other revision fields.
+- The workflow-authoring contract requires an explicit input-rule revision and derives the schedule fingerprint from it and the other revision fields.
 - The durable execution record, control protocol, CLI, and visualizer decisions must expose the distinct schedule, occurrence, and Workflow Run identities and lifecycle boundaries defined here.
 - Recovery and integration tests must cover duplicate delivery, host downtime, clock movement, daylight-saving changes, configuration replacement, enable-disable races, overlap, and failure repair.
 
