@@ -77,7 +77,7 @@ A logical execution environment identified by a stable key within one Workflow R
 _Avoid_: Container, provider handle
 
 **Workflow Deferred**:
-A named durable wait within one Workflow Run. Awaiting an incomplete Workflow Deferred suspends the run, and a serializable completion token lets Kojo complete it later without exposing the Workflow Engine's private identity.
+A named durable wait within one Workflow Run. A control client may use its serializable completion token to submit a schema-valid value through Kojo; awaiting an incomplete Workflow Deferred suspends the run, while completing it is distinct from resuming the Workflow Run and never exposes the Workflow Engine's private identity.
 _Avoid_: Promise, in-memory deferred
 
 **Agent Session**:
