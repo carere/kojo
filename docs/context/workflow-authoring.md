@@ -17,7 +17,7 @@ The machine-local catalog that lets the Kojo Host find known Kojo Projects by st
 _Avoid_: Project registry, control plane
 
 **Workflow Definition**:
-A developer-authored Effect Workflow definition with a stable Workflow Key, an explicit Workflow Definition Revision, and schemas for its input, success, and failure values. Its handler is an Effect program executed by the durable Workflow Engine, and its recurring triggers are attached Workflow Schedules. Loading the definition does not start an execution.
+A developer-authored Effect Workflow definition with a stable Workflow Key, an explicit Workflow Definition Revision, and schemas for its input, success, and failure values, including any sensitivity markings. Its handler is an Effect program executed by the durable Workflow Engine, and its recurring triggers are attached Workflow Schedules. Loading the definition does not start an execution.
 _Avoid_: Workflow config, workflow script
 
 **Workflow Key**:
@@ -55,3 +55,7 @@ _Avoid_: Agent service, project agent
 **Sandbox Provider**:
 An immutable built-in or custom authoring value that knows how to create the provider session behind a Workflow Sandbox. A Workflow Definition uses it directly wherever needed; it is not registered in Kojo Configuration, and its live provider handle is never exposed to workflow code.
 _Avoid_: Sandbox, container
+
+**Provider Credential**:
+A sensitive authentication value resolved only when an Agent or Sandbox Provider is invoked, from the environment, operating-system credential storage, or a developer-provided Effect service. Provider definitions may contain non-secret identity and lookup settings, but Kojo never persists the credential in Project state, Diagnostic Events, or Execution Events.
+_Avoid_: Provider configuration, saved token

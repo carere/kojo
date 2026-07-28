@@ -53,7 +53,7 @@ A request to continue a manually suspended Workflow Run under its existing ident
 _Avoid_: Restart, retry run
 
 **Workflow Run Start Snapshot**:
-The immutable evidence captured when a start is accepted. It contains the exact non-secret inputs, trigger kind, and verifiable identities for the workflow source and execution environment; a scheduled start also records its Schedule Key, occurrence identity, scheduled instant, and Workflow Schedule Revision. It is not an executable archive. The first Execution Event contains the snapshot so the Execution Trace is self-contained. Identities learned after execution starts are recorded as later Execution Events.
+The immutable evidence captured when a start is accepted. It contains the exact schema-encoded inputs and their sensitivity markings, trigger kind, and verifiable identities for the workflow source and execution environment; a scheduled start also records its Schedule Key, occurrence identity, scheduled instant, and Workflow Schedule Revision. It is not an executable archive. The first Execution Event contains the snapshot so the Execution Trace is self-contained. Identities learned after execution starts are recorded as later Execution Events.
 _Avoid_: Workflow backup, resumable snapshot
 
 **Workflow Activity**:
@@ -81,12 +81,16 @@ A named durable wait within one Workflow Run. A control client may use its seria
 _Avoid_: Promise, in-memory deferred
 
 **Agent Session**:
-A provider-native conversation reference optionally returned by an Agent invocation and explicitly passed to a later invocation. It is usable only when the selected Agent Provider and Workflow Sandbox support continuation, and it never represents Workflow Run suspension, resume, or recovery.
+A provider-native conversation reference optionally returned by an Agent invocation and explicitly passed to a later invocation. It is usable only when the selected Agent Provider and Workflow Sandbox support continuation, and it never represents Workflow Run suspension, resume, or recovery. Continuation data required by a non-final run is protected execution data; provider stream chunks, captured transcripts, and session files become disposable when the run is final, while normalized Agent result text remains an authoritative Workflow Activity result.
 _Avoid_: Workflow session, checkpoint
 
 **Execution Boundary**:
-A nested unit of activity within a Workflow Run. Its start is recorded for live inspection and crash evidence, and its end produces one context-rich completion event. The Workflow Definition determines which kinds of activity become boundaries.
+A nested unit of activity within a Workflow Run. Its start is recorded for live inspection and crash evidence, and its end produces one context-rich Diagnostic Event. The Workflow Definition determines which kinds of activity become boundaries.
 _Avoid_: Log scope, trace span
+
+**Diagnostic Event**:
+One structured, context-rich completion record for an execution or control boundary. It accumulates safe identities, operation and outcome kinds, lifecycle state, duration, sizes, versions, and safe error codes as the operation proceeds, then emits once at completion. It excludes payloads, transcript text, artifact contents, environment values, command arguments, full local paths, provider credentials, and raw exceptions. Diagnostic Events are best-effort operational data and never replace an authoritative record.
+_Avoid_: Log line, Execution Event
 
 **Execution Event**:
 A durable, append-only structured fact about activity within a Workflow Run. Each event has a globally unique identity and a strict sequence within its Workflow Run. Concurrent Workflow Runs do not share an authoritative order. Execution Events form the user-visible detailed history rather than the current Workflow Run State.
@@ -99,3 +103,19 @@ _Avoid_: Console log, transcript
 **Execution Artifact**:
 A disposable file produced or captured during a Workflow Run and referenced by identity from its Execution Trace. Losing an Execution Artifact is shown explicitly and can reduce historical detail, but never damages the trace or changes the recorded outcome of the run.
 _Avoid_: Durable output
+
+**Sensitive Execution Data**:
+Payload-bearing execution content that may contain developer or provider secrets: Workflow and Activity inputs and results, suspension and resume values, agent transcripts, Execution Artifact contents, and detailed diagnostics. Kojo exposes it only to the local operating-system user who owns the Kojo Project and to remote agents or sandboxes when a Workflow explicitly passes it to them. Identities, lifecycle states, timestamps, revisions, relationships, and outcome categories are ordinary metadata unless a developer marks them sensitive. Exact values remain durable when execution or authoritative history requires them, while ordinary inspection and export mask known secret sources and explicitly marked fields. Kojo does not promise to discover secrets embedded in arbitrary content.
+_Avoid_: Secret-free output, automatically sanitized content
+
+**Sensitivity Map**:
+The immutable field and subtree markings captured beside a schema-encoded payload so historical inspection can mask Sensitive Execution Data even when its Workflow Definition is unavailable. A parent marking covers every descendant, and an unavailable or invalid Sensitivity Map makes the whole payload sensitive.
+_Avoid_: Redacted copy, secret scanner
+
+**Execution Data Retention Policy**:
+The project-local operational policy that bounds Diagnostic Events and disposable content by age and size after they are no longer required by non-final work. It never automatically removes authoritative schedule, occurrence, run, engine, or Execution Event records, and it never removes data still required for recovery, resume, or cleanup. It is local state rather than version-controlled Workflow Authoring.
+_Avoid_: Workflow configuration, backup policy
+
+**Execution Data Deletion**:
+An explicit operation that removes selected authoritative execution records and their owned sensitive or disposable content. It promises logical removal from active Kojo storage and best-effort file or provider cleanup, not secure physical erasure from SQLite pages, filesystem snapshots, backups, exports, or remote systems.
+_Avoid_: Secure erase, forgetting a Project

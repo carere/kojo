@@ -63,6 +63,6 @@ The contract has no manual suspend, recover, retry, replay, unsafe force-stop, r
 
 - `@kojo/control` must remain independent of Unix-socket frames, browser RPC details, Effect execution identities, SQLite rows, and Host implementation modules.
 - Host integration tests must cover retry idempotency, stale revisions, version negotiation, multi-Project subscriptions, reconnect, slow-client resynchronization, and the CLI-only operation boundary.
-- The exact database queries, pagination, Execution Trace reconstruction, redaction, artifact access, retention, CLI syntax, and visualizer interactions remain in their dedicated Wayfinder decisions.
+- The exact database queries, pagination, Execution Trace reconstruction, CLI syntax, and visualizer interactions remain in their dedicated Wayfinder decisions. [Protect and explicitly delete local execution data](./0010-protect-and-explicitly-delete-local-execution-data.md) defines redaction, Artifact access, retention, and deletion across this contract.
 
 This decision resolves [Define the CLI and visualizer control protocol](https://github.com/carere/kojo/issues/9) and follows [Organize Kojo around stable package seams and a dedicated Host app](./0007-organize-kojo-around-stable-package-seams-and-a-dedicated-host-app.md), [Assess and repair Project Runtime readiness by capability](./0008-assess-and-repair-project-runtime-readiness.md), and [Use one project database with separate execution authorities](./0006-use-one-project-database-with-separated-execution-authorities.md).
