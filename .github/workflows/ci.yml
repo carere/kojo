@@ -27,6 +27,9 @@ jobs:
         with:
           auto-install: true
 
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
       - name: Lint conventional commits
         uses: cocogitto/cocogitto-action@v4.2.0
         with:
