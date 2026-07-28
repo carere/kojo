@@ -8,8 +8,12 @@ Workflow Authoring describes how a developer makes workflows, workflow schedules
 A local Git repository initialized for Kojo. It contains version-controlled workflow, workflow schedule, and sandbox image definitions alongside project-local execution data.
 _Avoid_: Workspace, registered repository
 
+**Project Identity**:
+The stable, machine-local identity of one initialized Git working tree. It survives moving that working tree, while another clone or linked worktree is a different Kojo Project with its own identity.
+_Avoid_: Repository ID, remote URL
+
 **Project Index**:
-The machine-local catalog that lets the Kojo Host find known Kojo Projects by stable identity and current repository path. It contains no Workflow Run or Workflow Schedule state and is not shared between developers.
+The machine-local catalog that lets the Kojo Host find known Kojo Projects by stable identity and current repository path. It follows a Project when its working tree moves, but treats the same Project Identity appearing at two paths as a conflict. It contains no Workflow Run or Workflow Schedule state and is not shared between developers.
 _Avoid_: Project registry, control plane
 
 **Workflow Definition**:

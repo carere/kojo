@@ -37,7 +37,7 @@ The condition in which a Project Runtime has opened its durable store, acquired 
 _Avoid_: Host health, process liveness
 
 **Workflow Run State**:
-The current durable lifecycle condition of a Workflow Run: running, suspended, stopping, stopped, failed, or completed. Running, suspended, and stopping are non-final; stopped, failed, and completed are final and never resume.
+The current durable lifecycle condition of a Workflow Run: running, suspended, stopping, stopped, failed, or completed. It owns Kojo's accepted lifecycle decisions and public outcome, while the durable Workflow Engine owns replay of workflow code and Workflow Activity results. Running, suspended, and stopping are non-final; stopped, failed, and completed are final and never resume.
 _Avoid_: Status row, process state
 
 **Workflow Run Stop Request**:
@@ -55,6 +55,10 @@ _Avoid_: Workflow backup, resumable snapshot
 **Workflow Activity**:
 A named durable side effect within a Workflow Run whose recorded result is reused during replay. It may be a custom Effect program or a Kojo Agent or Command operation. An Activity without a durable result may run again with the same Activity Idempotency Key, so its external effect is at-least-once.
 _Avoid_: Task, step
+
+**Workflow Activity Attempt**:
+One actual invocation of a Workflow Activity's external work. A crash before the Workflow Engine records the result may leave one attempt incomplete and cause another attempt with a new identity but the same Activity Idempotency Key.
+_Avoid_: Retry
 
 **Activity Idempotency Key**:
 A stable identity for one intended external side effect across retries of a Workflow Activity. An external adapter uses it to avoid repeating work that succeeded before the Activity result became durable.
@@ -85,7 +89,7 @@ A durable, append-only structured fact about activity within a Workflow Run. Eac
 _Avoid_: Log line, database event
 
 **Execution Trace**:
-The ordered view of one Workflow Run reconstructed from its Execution Events. Its journal may use multiple ordered segments after damage or rotation. It may refer to disposable Execution Artifacts, but diagnostic logs are not part of it.
+The ordered view of one Workflow Run reconstructed from its Execution Events. It may refer to disposable Execution Artifacts, but diagnostic logs are not part of it.
 _Avoid_: Console log, transcript
 
 **Execution Artifact**:

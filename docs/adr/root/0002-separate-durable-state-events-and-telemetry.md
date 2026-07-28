@@ -4,7 +4,7 @@ status: deprecated
 
 # Separate durable workflow state, execution events, and telemetry
 
-This decision is being reconsidered in [Define the durable execution record](https://github.com/carere/kojo/issues/7) because adopting Effect Workflow's complete durable engine introduced authoritative engine state and Activity results.
+This decision is superseded by [Use one project database with separate execution authorities](./0006-use-one-project-database-with-separated-execution-authorities.md), which accounts for Effect Workflow's authoritative engine state and Activity results.
 
 Kojo stores current Workflow Run State in SQLite and durable Execution Events in a per-run JSONL journal. A Drizzle-managed SQLite transaction updates state and queues the complete next event before related external work proceeds, reconciling the need for atomic lifecycle decisions with a user-readable append-only Execution Trace.
 
