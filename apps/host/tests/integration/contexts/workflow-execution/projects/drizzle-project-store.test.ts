@@ -3,9 +3,9 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { afterEach, describe, expect, it } from "@effect/vitest";
 import { ProjectIdentity } from "@kojo/control";
 import { Effect, Schema } from "effect";
-import { afterEach, describe, expect, it } from "vitest";
 import {
   completeProjectStoreMigration,
   DrizzleProjectStoreLive,
@@ -20,60 +20,76 @@ afterEach(async () => {
 });
 
 describe("Drizzle Project store recovery", () => {
-  it("blocks activation while deletion recovery is pending", async () => {
-    const fixture = await initializedProject("kojo-store-pending-deletion-");
-    const database = new Database(fixture.databasePath);
-    database.exec(
-      "INSERT INTO kojo_deletion_intents(deletion_id, request_key, target_kind, target_sha256, target_snapshot_json, phase, created_at_ms, updated_at_ms) VALUES ('deletion', 'request', 'run', zeroblob(32), '{}', 'quiescing', 1, 1)",
-    );
-    database.close();
+  it.effect("blocks activation while deletion recovery is pending", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() =>
+        initializedProject("kojo-store-pending-deletion-"),
+      );
+      yield* Effect.sync(() => {
+        const database = new Database(fixture.databasePath);
+        database.exec(
+          "INSERT INTO kojo_deletion_intents(deletion_id, request_key, target_kind, target_sha256, target_snapshot_json, phase, created_at_ms, updated_at_ms) VALUES ('deletion', 'request', 'run', zeroblob(32), '{}', 'quiescing', 1, 1)",
+        );
+        database.close();
+      });
 
-    expect(await projectStoreReadiness(fixture.project)).toBe("needs-attention");
-  });
+      expect(yield* projectStoreReadiness(fixture.project)).toBe("needs-attention");
+    }),
+  );
 
-  it("blocks activation when a non-final Workflow Run has no accepted Event", async () => {
-    const fixture = await initializedProject("kojo-store-run-event-invariant-");
-    const database = new Database(fixture.databasePath);
-    database.exec(
-      "INSERT INTO kojo_workflow_runs(run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision, engine_reference_version, engine_reference_json, engine_reference_sha256, trigger_kind, state, last_event_sequence, row_version, accepted_at_ms, updated_at_ms) VALUES ('run', 'start', zeroblob(32), 'workflow', 'revision', 1, '{\"execution\":\"one\"}', randomblob(32), 'manual', 'running', 0, 1, 1, 1)",
-    );
-    database.close();
+  it.effect("blocks activation when a non-final Workflow Run has no accepted Event", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() =>
+        initializedProject("kojo-store-run-event-invariant-"),
+      );
+      yield* Effect.sync(() => {
+        const database = new Database(fixture.databasePath);
+        database.exec(
+          "INSERT INTO kojo_workflow_runs(run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision, engine_reference_version, engine_reference_json, engine_reference_sha256, trigger_kind, state, last_event_sequence, row_version, accepted_at_ms, updated_at_ms) VALUES ('run', 'start', zeroblob(32), 'workflow', 'revision', 1, '{\"execution\":\"one\"}', randomblob(32), 'manual', 'running', 0, 1, 1, 1)",
+        );
+        database.close();
+      });
 
-    expect(await projectStoreReadiness(fixture.project)).toBe("needs-attention");
-  });
+      expect(yield* projectStoreReadiness(fixture.project)).toBe("needs-attention");
+    }),
+  );
 
-  it("blocks activation when two Workflow Runs map to one engine execution", async () => {
-    const fixture = await initializedProject("kojo-store-engine-mapping-");
-    const database = new Database(fixture.databasePath);
-    database.exec(
-      "INSERT INTO kojo_workflow_runs(run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision, engine_reference_version, engine_reference_json, engine_reference_sha256, trigger_kind, state, last_event_sequence, row_version, accepted_at_ms, updated_at_ms) VALUES ('first', 'start-first', zeroblob(32), 'workflow', 'revision', 1, '{\"execution\":\"shared\"}', randomblob(32), 'manual', 'running', 1, 1, 1, 1); INSERT INTO kojo_workflow_runs(run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision, engine_reference_version, engine_reference_json, engine_reference_sha256, trigger_kind, state, last_event_sequence, row_version, accepted_at_ms, updated_at_ms) VALUES ('second', 'start-second', zeroblob(32), 'workflow', 'revision', 1, '{\"execution\":\"shared\"}', randomblob(32), 'manual', 'running', 1, 1, 1, 1); INSERT INTO kojo_execution_events(event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms, payload_encoding_version, payload_schema_identity, payload_json, payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256) VALUES ('first-accepted', 'first', 1, 1, 'run.accepted', 1, 1, 1, 'schema', '{}', 1, '{}', zeroblob(32)); INSERT INTO kojo_execution_events(event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms, payload_encoding_version, payload_schema_identity, payload_json, payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256) VALUES ('second-accepted', 'second', 1, 1, 'run.accepted', 1, 1, 1, 'schema', '{}', 1, '{}', zeroblob(32))",
-    );
-    database.close();
+  it.effect("blocks activation when two Workflow Runs map to one engine execution", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() => initializedProject("kojo-store-engine-mapping-"));
+      yield* Effect.sync(() => {
+        const database = new Database(fixture.databasePath);
+        database.exec(
+          "INSERT INTO kojo_workflow_runs(run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision, engine_reference_version, engine_reference_json, engine_reference_sha256, trigger_kind, state, last_event_sequence, row_version, accepted_at_ms, updated_at_ms) VALUES ('first', 'start-first', zeroblob(32), 'workflow', 'revision', 1, '{\"execution\":\"shared\"}', randomblob(32), 'manual', 'running', 1, 1, 1, 1); INSERT INTO kojo_workflow_runs(run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision, engine_reference_version, engine_reference_json, engine_reference_sha256, trigger_kind, state, last_event_sequence, row_version, accepted_at_ms, updated_at_ms) VALUES ('second', 'start-second', zeroblob(32), 'workflow', 'revision', 1, '{\"execution\":\"shared\"}', randomblob(32), 'manual', 'running', 1, 1, 1, 1); INSERT INTO kojo_execution_events(event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms, payload_encoding_version, payload_schema_identity, payload_json, payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256) VALUES ('first-accepted', 'first', 1, 1, 'run.accepted', 1, 1, 1, 'schema', '{}', 1, '{}', zeroblob(32)); INSERT INTO kojo_execution_events(event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms, payload_encoding_version, payload_schema_identity, payload_json, payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256) VALUES ('second-accepted', 'second', 1, 1, 'run.accepted', 1, 1, 1, 'schema', '{}', 1, '{}', zeroblob(32))",
+        );
+        database.close();
+      });
 
-    expect(await projectStoreReadiness(fixture.project)).toBe("needs-attention");
-  });
+      expect(yield* projectStoreReadiness(fixture.project)).toBe("needs-attention");
+    }),
+  );
 
-  it("does not retry a failed activation migration without an explicit retry", async () => {
-    const fixture = await initializedProject("kojo-store-one-attempt-");
-
-    const attempts = await Effect.runPromise(
-      Effect.gen(function* () {
+  it.effect("does not retry a failed activation migration without an explicit retry", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() => initializedProject("kojo-store-one-attempt-"));
+      const attempts = yield* Effect.gen(function* () {
         const store = yield* ProjectStore;
         const first = yield* store.migrate(fixture.project);
         const restored = yield* store.completeMigration(fixture.project, false);
         const automaticRetry = yield* store.migrate(fixture.project);
         return { automaticRetry, first, restored };
-      }).pipe(Effect.provide(DrizzleProjectStoreLive)),
-    );
+      }).pipe(Effect.provide(DrizzleProjectStoreLive));
 
-    expect(attempts).toEqual({ first: true, restored: false, automaticRetry: false });
-  });
+      expect(attempts).toEqual({ first: true, restored: false, automaticRetry: false });
+    }),
+  );
 
-  it("restores the verified backup when semantic postflight fails", async () => {
-    const fixture = await initializedProject("kojo-store-semantic-postflight-");
-
-    const outcome = await Effect.runPromise(
-      Effect.gen(function* () {
+  it.effect("restores the verified backup when semantic postflight fails", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() =>
+        initializedProject("kojo-store-semantic-postflight-"),
+      );
+      const outcome = yield* Effect.gen(function* () {
         const store = yield* ProjectStore;
         const migrated = yield* store.migrate(fixture.project);
         yield* Effect.sync(() => {
@@ -86,13 +102,40 @@ describe("Drizzle Project store recovery", () => {
         const postflight = yield* store.postflight(fixture.project);
         const restored = yield* store.completeMigration(fixture.project, postflight);
         return { migrated, postflight, restored };
-      }).pipe(Effect.provide(DrizzleProjectStoreLive)),
+      }).pipe(Effect.provide(DrizzleProjectStoreLive));
+
+      expect(outcome).toEqual({ migrated: true, postflight: false, restored: false });
+      const restored = new Database(fixture.databasePath, { readonly: true });
+      expect(restored.query("SELECT * FROM kojo_deletion_intents").all()).toEqual([]);
+      restored.close();
+    }),
+  );
+
+  it("keeps the verified backup recoverable when completion durability fails", async () => {
+    const fixture = await initializedProject("kojo-store-completion-durability-");
+    migrateProjectStore(fixture.project);
+    const changed = new Database(fixture.databasePath);
+    changed.exec(
+      "INSERT INTO kojo_retention_policy(singleton_key, row_version, updated_at_ms) VALUES (1, 1, 1)",
+    );
+    changed.close();
+
+    expect(() =>
+      completeProjectStoreMigration(fixture.project, true, {
+        syncDirectory: () => {
+          throw new Error("directory sync failed");
+        },
+      }),
+    ).toThrow("directory sync failed");
+    expect(await Bun.file(`${fixture.databasePath}.migration-backup.completed`).exists()).toBe(
+      true,
     );
 
-    expect(outcome).toEqual({ migrated: true, postflight: false, restored: false });
+    expect(completeProjectStoreMigration(fixture.project, false)).toBe(false);
     const restored = new Database(fixture.databasePath, { readonly: true });
-    expect(restored.query("SELECT * FROM kojo_deletion_intents").all()).toEqual([]);
+    expect(restored.query("SELECT * FROM kojo_retention_policy").all()).toEqual([]);
     restored.close();
+    expect(await Bun.file(`${fixture.databasePath}.migration-backup`).exists()).toBe(true);
   });
 
   it("never follows a live database symlink while a migration backup is pending", async () => {
@@ -256,8 +299,6 @@ const projectStoreReadiness = (project: {
   readonly identity: ProjectIdentity;
   readonly path: string;
 }) =>
-  Effect.runPromise(
-    Effect.flatMap(ProjectStore, (store) => store.readiness(project)).pipe(
-      Effect.provide(DrizzleProjectStoreLive),
-    ),
+  Effect.flatMap(ProjectStore, (store) => store.readiness(project)).pipe(
+    Effect.provide(DrizzleProjectStoreLive),
   );

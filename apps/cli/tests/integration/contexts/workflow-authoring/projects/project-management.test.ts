@@ -7,6 +7,7 @@ import {
   realpath,
   rename,
   rm,
+  stat,
   symlink,
   unlink,
 } from "node:fs/promises";
@@ -29,6 +30,34 @@ afterEach(async () => {
 });
 
 describe("Kojo Project discovery", () => {
+  it("repairs safe owned Kojo path permissions during registration", async () => {
+    const directory = await temporaryDirectory("kojo-project-permission-repair-");
+    const project = join(directory, "project");
+    await git(["init", project]);
+    const host = await startKojoHostProcess();
+    cleanups.push(host.stop);
+    expect((await runCli(["init", project], host.socketPath, directory)).exitCode).toBe(0);
+    const paths = [
+      [join(project, ".kojo"), 0o700],
+      [join(project, ".kojo", "project.json"), 0o600],
+      [join(project, ".kojo", "kojo.sqlite"), 0o600],
+      [join(project, ".kojo", "artifacts"), 0o700],
+      [join(project, ".kojo", "sandboxes"), 0o700],
+    ] as const;
+    for (const [path] of paths) await chmod(path, 0o777);
+
+    const registered = await runCli(
+      ["project", "register", project, "--request-key", "repair-permissions", "--json"],
+      host.socketPath,
+      directory,
+    );
+
+    expect(registered, registered.stderr).toMatchObject({ exitCode: 0 });
+    for (const [path, expected] of paths) {
+      expect((await stat(path)).mode & 0o777).toBe(expected);
+    }
+  });
+
   it("rejects an empty replacement for an initialized Project database", async () => {
     const directory = await temporaryDirectory("kojo-project-replaced-store-");
     const project = join(directory, "project");

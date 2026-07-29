@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
-import { lstat, readFile, realpath, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, readFile, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { ProjectIdentity } from "@kojo/control";
 import { Effect, Layer, Schema } from "effect";
@@ -18,16 +19,37 @@ import {
 } from "../../contexts/workflow-authoring/projects/use-cases/validate-project-layout";
 
 const inspect = async (path: string, kind: "directory" | "file", mode?: number) => {
-  const information = await lstat(path);
-  const matches = kind === "directory" ? information.isDirectory() : information.isFile();
-  const userId = process.getuid?.();
-  if (
-    information.isSymbolicLink() ||
-    !matches ||
-    (userId !== undefined && information.uid !== userId) ||
-    (mode !== undefined && (information.mode & 0o777) !== mode)
-  ) {
-    throw new InvalidProjectLayoutError();
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const information = await handle.stat();
+    const matches = kind === "directory" ? information.isDirectory() : information.isFile();
+    const userId = process.getuid?.();
+    if (!matches || (userId !== undefined && information.uid !== userId)) {
+      throw new InvalidProjectLayoutError();
+    }
+    if (mode !== undefined && (information.mode & 0o777) !== mode) {
+      try {
+        await handle.chmod(mode);
+      } catch {
+        throw new InvalidProjectLayoutError(
+          "Kojo could not tighten permissions on an owned Project path.",
+          "layout.permissions-invalid",
+        );
+      }
+      const repaired = await handle.stat();
+      if (
+        repaired.dev !== information.dev ||
+        repaired.ino !== information.ino ||
+        (repaired.mode & 0o777) !== mode
+      ) {
+        throw new InvalidProjectLayoutError(
+          "Kojo could not tighten permissions on an owned Project path.",
+          "layout.permissions-invalid",
+        );
+      }
+    }
+  } finally {
+    await handle.close();
   }
 };
 

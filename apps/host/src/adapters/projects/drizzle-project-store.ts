@@ -162,6 +162,15 @@ const fsyncDirectory = (path: string) => {
   }
 };
 
+const fsyncFile = (path: string) => {
+  const handle = openSync(path, "r");
+  try {
+    fsyncSync(handle);
+  } finally {
+    closeSync(handle);
+  }
+};
+
 const removeSidecars = (path: string) => {
   const sidecars = [`${path}-wal`, `${path}-shm`];
   for (const sidecar of sidecars) assertSidecar(sidecar);
@@ -407,6 +416,16 @@ export const migrateProjectStore = (project: {
 }) => {
   const path = databasePath(project.path);
   const backupPath = `${path}.migration-backup`;
+  const completedBackupPath = `${backupPath}.completed`;
+  if (existsSync(completedBackupPath)) {
+    assertDatabaseFile(completedBackupPath);
+    try {
+      unlinkSync(completedBackupPath);
+      fsyncDirectory(path);
+    } catch {
+      // A previous durable completion marker is safe to replace after the next migration.
+    }
+  }
   if (existsSync(backupPath)) {
     assertDatabaseFile(path);
     verifyBackup(backupPath, project);
@@ -501,13 +520,26 @@ export const migrateProjectStore = (project: {
 export const completeProjectStoreMigration = (
   project: { readonly identity: string; readonly path: string },
   succeeded: boolean,
+  durability: { readonly syncDirectory: (path: string) => void } = {
+    syncDirectory: fsyncDirectory,
+  },
 ) => {
   const path = databasePath(project.path);
   const backupPath = `${path}.migration-backup`;
-  if (!existsSync(backupPath)) return succeeded;
-  verifyBackup(backupPath, project);
+  const completedBackupPath = `${backupPath}.completed`;
+  const recoveryPath = existsSync(backupPath)
+    ? backupPath
+    : existsSync(completedBackupPath)
+      ? completedBackupPath
+      : undefined;
+  if (recoveryPath === undefined) return succeeded;
+  verifyBackup(recoveryPath, project);
   if (!succeeded) {
-    restoreBackup(backupPath, path);
+    restoreBackup(recoveryPath, path);
+    if (recoveryPath === completedBackupPath) {
+      renameSync(completedBackupPath, backupPath);
+      fsyncDirectory(path);
+    }
     return false;
   }
   assertDatabaseFile(path);
@@ -521,8 +553,16 @@ export const completeProjectStoreMigration = (
   } finally {
     connection.close();
   }
-  unlinkSync(backupPath);
-  fsyncDirectory(path);
+  fsyncFile(path);
+  if (recoveryPath === backupPath) renameSync(backupPath, completedBackupPath);
+  durability.syncDirectory(path);
+  try {
+    assertDatabaseFile(completedBackupPath);
+    unlinkSync(completedBackupPath);
+    fsyncDirectory(path);
+  } catch {
+    // A durable completion marker is safe to remove during a later activation.
+  }
   return true;
 };
 
