@@ -1,26 +1,16 @@
-import { randomUUID } from "node:crypto";
-import { realpath } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
 import {
   type ProjectCondition,
   ProjectIdentity as ProjectIdentitySchema,
-  type ProjectListCursorError,
-  type ProjectMutationResult,
-  type ProjectOperationError,
   type ProjectSelector,
   type ProjectSnapshot,
   type RequestKey,
-  RequestKey as RequestKeySchema,
 } from "@kojo/control";
 import {
   defaultSocketPath,
-  IncompatibleProtocolError,
-  LocalTransportError,
   makeDefaultLocalClient,
   makeNonActivatingLocalClient,
-  UnsupportedControlCapabilityError,
 } from "@kojo/control/local-client";
-import { Effect, Schema } from "effect";
+import { Schema } from "effect";
 import {
   initializeProject,
   ProjectInitializationError,
@@ -28,235 +18,19 @@ import {
 } from "../adapters/projects/project-initializer";
 import { resolveProjectSelectionPath } from "../adapters/projects/project-selection-path";
 import { selectProject } from "../contexts/workflow-authoring/projects/use-cases/select-project";
-
-interface CliFailure {
-  readonly affectedResource?: ProjectOperationError["affectedResource"];
-  readonly code: string;
-  readonly exitCode: number;
-  readonly findingKeys?: ReadonlyArray<string>;
-  readonly message: string;
-  readonly next: string;
-  readonly requestKey?: RequestKey;
-}
-
-interface CliWarning {
-  readonly code: string;
-  readonly message: string;
-  readonly next: string;
-}
-
-type EffectOutcome<A, E> =
-  | { readonly succeeded: true; readonly value: A }
-  | { readonly succeeded: false; readonly error: E };
-
-const runEffect = <A, E>(effect: Effect.Effect<A, E>) =>
-  Effect.runPromise(
-    effect.pipe(
-      Effect.match({
-        onFailure: (error): EffectOutcome<A, E> => ({ succeeded: false, error }),
-        onSuccess: (value): EffectOutcome<A, E> => ({ succeeded: true, value }),
-      }),
-    ),
-  );
-
-const invalid = (next: string): CliFailure => ({
-  code: "invalid-command",
-  exitCode: 2,
-  message: "Invalid command.",
-  next,
-});
-
-const transportFailure = (error: unknown): CliFailure =>
-  error instanceof IncompatibleProtocolError
-    ? {
-        code: "incompatible-protocol",
-        exitCode: 3,
-        message: error.message,
-        next: "Upgrade Kojo Host or this CLI so their protocol major versions match.",
-      }
-    : error instanceof UnsupportedControlCapabilityError
-      ? {
-          code: "unsupported-control-capability",
-          exitCode: 3,
-          message: error.message,
-          next: "Upgrade Kojo Host or use a supported client operation.",
-        }
-      : error instanceof LocalTransportError
-        ? {
-            code: "host-unavailable",
-            exitCode: 3,
-            message: error.message,
-            next: "Start the Kojo Host and try again.",
-          }
-        : {
-            code: "host-request-failed",
-            exitCode: 3,
-            message: "Kojo Host request failed.",
-            next: "Try the command again.",
-          };
-
-const projectFailure = (result: Extract<ProjectMutationResult, { ok: false }>): CliFailure => ({
-  ...result.error,
-  requestKey: result.requestKey,
-  exitCode: result.error.code === "project-layout-invalid" ? 1 : 4,
-});
-
-const projectQueryFailure = (error: ProjectOperationError): CliFailure => ({
-  ...error,
-  exitCode: 4,
-});
-
-const projectCursorFailure = (error: ProjectListCursorError): CliFailure => ({
-  ...error,
-  exitCode: 2,
-});
-
-const writeFailure = (failure: CliFailure, json: boolean, command: string) => {
-  process.stderr.write(`${failure.message}\nNext: ${failure.next}\n`);
-  if (failure.requestKey !== undefined && !json) {
-    process.stdout.write(`Request Key: ${failure.requestKey}\n`);
-  }
-  if (json) {
-    process.stdout.write(
-      `${JSON.stringify({
-        schemaVersion: 1,
-        command,
-        ...(failure.requestKey === undefined ? {} : { requestKey: failure.requestKey }),
-        error: {
-          code: failure.code,
-          message: failure.message,
-          next: failure.next,
-          ...(failure.affectedResource === undefined
-            ? {}
-            : { affectedResource: failure.affectedResource }),
-          ...(failure.findingKeys === undefined ? {} : { findingKeys: failure.findingKeys }),
-        },
-        warnings: [],
-      })}\n`,
-    );
-  }
-  return failure.exitCode;
-};
-
-const writeProject = (
-  command: string,
-  project: ProjectSnapshot,
-  json: boolean,
-  mutation?: Extract<ProjectMutationResult, { ok: true }>,
-  warnings: ReadonlyArray<CliWarning> = [],
-  pendingRequestKey?: RequestKey,
-) => {
-  const requestKey = mutation?.requestKey ?? pendingRequestKey;
-  if (json) {
-    process.stdout.write(
-      `${JSON.stringify({
-        schemaVersion: 1,
-        command,
-        projectIdentity: project.identity,
-        ...(requestKey === undefined ? {} : { requestKey }),
-        result: {
-          project,
-          ...(mutation === undefined ? {} : { alreadyApplied: mutation.alreadyApplied }),
-        },
-        warnings,
-      })}\n`,
-    );
-  } else {
-    process.stdout.write(`Project Identity: ${project.identity}\nPath: ${project.path}\n`);
-    if (requestKey !== undefined) process.stdout.write(`Request Key: ${requestKey}\n`);
-    for (const warning of warnings) {
-      process.stderr.write(`Warning: ${warning.message}\nNext: ${warning.next}\n`);
-    }
-  }
-};
-
-interface ParsedOptions {
-  readonly args: ReadonlyArray<string>;
-  readonly projectId?: string;
-  readonly projectPath?: string;
-  readonly requestKey?: string;
-  readonly conditions: ReadonlyArray<string>;
-  readonly cursor?: string;
-  readonly limit?: string;
-}
-
-const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undefined => {
-  const remaining: Array<string> = [];
-  let projectId: string | undefined;
-  let projectPath: string | undefined;
-  let requestKey: string | undefined;
-  const conditions: Array<string> = [];
-  let cursor: string | undefined;
-  let limit: string | undefined;
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index];
-    if (
-      ![
-        "--project",
-        "--project-id",
-        "--request-key",
-        "--condition",
-        "--cursor",
-        "--limit",
-      ].includes(argument)
-    ) {
-      remaining.push(argument);
-      continue;
-    }
-    const value = args[index + 1];
-    if (value === undefined || value.startsWith("--")) return undefined;
-    index += 1;
-    if (argument === "--condition") {
-      conditions.push(value);
-    } else if (argument === "--cursor") {
-      if (cursor !== undefined) return undefined;
-      cursor = value;
-    } else if (argument === "--limit") {
-      if (limit !== undefined) return undefined;
-      limit = value;
-    } else if (argument === "--project") {
-      if (projectPath !== undefined) return undefined;
-      projectPath = value;
-    } else if (argument === "--project-id") {
-      if (projectId !== undefined) return undefined;
-      projectId = value;
-    } else {
-      if (requestKey !== undefined) return undefined;
-      requestKey = value;
-    }
-  }
-  if (projectId !== undefined && projectPath !== undefined) return undefined;
-  return { args: remaining, projectId, projectPath, requestKey, conditions, cursor, limit };
-};
-
-const decodeRequestKey = (value: string | undefined): RequestKey | undefined => {
-  try {
-    return Schema.decodeUnknownSync(RequestKeySchema)(value ?? randomUUID());
-  } catch {
-    return undefined;
-  }
-};
-
-const canonicalSelectorPath = async (input: string) => {
-  let candidate = resolve(input);
-  const missingSegments: Array<string> = [];
-  for (;;) {
-    try {
-      return join(await realpath(candidate), ...missingSegments);
-    } catch {
-      const parent = dirname(candidate);
-      if (parent === candidate) return resolve(input);
-      missingSegments.unshift(basename(candidate));
-      candidate = parent;
-    }
-  }
-};
-
-const pendingRegistrationWarning = (project: ProjectSnapshot): CliWarning => ({
-  code: "project-registration-pending",
-  message: "The Kojo Project is initialized, but the Host was not available for registration.",
-  next: `Run: kojo project register ${project.path}`,
-});
+import { runEffect } from "./cli-effect";
+import { canonicalSelectorPath, decodeRequestKey, parseOptions } from "./cli-options";
+import {
+  type CliFailure,
+  invalid,
+  pendingRegistrationWarning,
+  projectCursorFailure,
+  projectFailure,
+  projectQueryFailure,
+  transportFailure,
+  writeFailure,
+  writeProject,
+} from "./cli-output";
 
 export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
   const json = rawArgs.includes("--json");

@@ -3,15 +3,17 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   closeSync,
+  constants,
   copyFileSync,
   existsSync,
   fsyncSync,
   lstatSync,
   openSync,
   readFileSync,
+  renameSync,
   unlinkSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { asc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
@@ -93,6 +95,64 @@ const assertDatabaseFile = (path: string) => {
     (information.mode & 0o777) !== 0o600
   ) {
     throw new Error("unsafe Project database");
+  }
+  return information;
+};
+
+const assertSidecar = (path: string) => {
+  if (!existsSync(path)) return;
+  const information = lstatSync(path);
+  const userId = process.getuid?.();
+  if (
+    information.isSymbolicLink() ||
+    !information.isFile() ||
+    (userId !== undefined && information.uid !== userId)
+  ) {
+    throw new Error("unsafe Project database sidecar");
+  }
+};
+
+const fsyncDirectory = (path: string) => {
+  const handle = openSync(dirname(path), "r");
+  try {
+    fsyncSync(handle);
+  } finally {
+    closeSync(handle);
+  }
+};
+
+const removeSidecars = (path: string) => {
+  const sidecars = [`${path}-wal`, `${path}-shm`];
+  for (const sidecar of sidecars) assertSidecar(sidecar);
+  for (const sidecar of sidecars) {
+    if (existsSync(sidecar)) unlinkSync(sidecar);
+  }
+};
+
+const restoreBackup = (backupPath: string, path: string) => {
+  const original = assertDatabaseFile(path);
+  assertDatabaseFile(backupPath);
+  removeSidecars(path);
+  const temporaryPath = `${path}.${randomUUID()}.restore`;
+  try {
+    copyFileSync(backupPath, temporaryPath, constants.COPYFILE_EXCL);
+    chmodSync(temporaryPath, 0o600);
+    const handle = openSync(temporaryPath, "r");
+    try {
+      fsyncSync(handle);
+    } finally {
+      closeSync(handle);
+    }
+    const current = assertDatabaseFile(path);
+    if (current.dev !== original.dev || current.ino !== original.ino) {
+      throw new Error("Project database changed during recovery");
+    }
+    renameSync(temporaryPath, path);
+    removeSidecars(path);
+    fsyncDirectory(path);
+  } catch (error) {
+    if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
+    throw error;
   }
 };
 
@@ -225,9 +285,9 @@ export const migrateProjectStore = (project: {
   const path = databasePath(project.path);
   const backupPath = `${path}.migration-backup`;
   if (existsSync(backupPath)) {
+    assertDatabaseFile(path);
     verifyBackup(backupPath, project);
-    copyFileSync(backupPath, path);
-    chmodSync(path, 0o600);
+    restoreBackup(backupPath, path);
   }
   assertDatabaseFile(path);
   assertProjectIdentity(project);
@@ -241,53 +301,79 @@ export const migrateProjectStore = (project: {
     assertStoreMetadata(connection, project, current);
     if (current === CURRENT_VERSION) {
       assertCurrentSchema(connection, project);
-      succeeded = true;
-      return;
     }
 
-    if (existsSync(backupPath)) unlinkSync(backupPath);
-    connection.query("VACUUM INTO ?").run(backupPath);
-    chmodSync(backupPath, 0o600);
-    const backupHandle = openSync(backupPath, "r");
-    try {
-      fsyncSync(backupHandle);
-    } finally {
-      closeSync(backupHandle);
+    if (!existsSync(backupPath)) {
+      connection.query("VACUUM INTO ?").run(backupPath);
+      chmodSync(backupPath, 0o600);
+      const backupHandle = openSync(backupPath, "r");
+      try {
+        fsyncSync(backupHandle);
+      } finally {
+        closeSync(backupHandle);
+      }
+      fsyncDirectory(backupPath);
+      verifyBackup(backupPath, project);
     }
-    verifyBackup(backupPath, project);
-    migrate(drizzle(connection), {
-      migrationsFolder: migrationFolder,
-      migrationsTable: "kojo_schema_migrations",
-    });
-    const migratedAt = Date.now();
-    connection
-      .query(
-        "UPDATE kojo_store_metadata SET database_instance_id = COALESCE(NULLIF(database_instance_id, ''), ?), store_format_version = ?, engine_adapter_kind = ?, engine_adapter_schema_version = ?, effect_family_version = ?, last_migrated_at_ms = ? WHERE singleton_key = 1 AND project_identity = ?",
-      )
-      .run(
-        randomUUID(),
-        CURRENT_VERSION,
-        ENGINE_ADAPTER_KIND,
-        ENGINE_ADAPTER_SCHEMA_VERSION,
-        EFFECT_FAMILY_VERSION,
-        migratedAt,
-        project.identity,
-      );
-    connection.exec(`PRAGMA user_version = ${CURRENT_VERSION}`);
+    if (current < CURRENT_VERSION) {
+      migrate(drizzle(connection), {
+        migrationsFolder: migrationFolder,
+        migrationsTable: "kojo_schema_migrations",
+      });
+      const migratedAt = Date.now();
+      connection
+        .query(
+          "UPDATE kojo_store_metadata SET database_instance_id = COALESCE(NULLIF(database_instance_id, ''), ?), store_format_version = ?, engine_adapter_kind = ?, engine_adapter_schema_version = ?, effect_family_version = ?, last_migrated_at_ms = ? WHERE singleton_key = 1 AND project_identity = ?",
+        )
+        .run(
+          randomUUID(),
+          CURRENT_VERSION,
+          ENGINE_ADAPTER_KIND,
+          ENGINE_ADAPTER_SCHEMA_VERSION,
+          EFFECT_FAMILY_VERSION,
+          migratedAt,
+          project.identity,
+        );
+      connection.exec(`PRAGMA user_version = ${CURRENT_VERSION}`);
+    }
     assertCurrentSchema(connection, project);
     assertIntegrity(connection);
     connection.query("PRAGMA wal_checkpoint(TRUNCATE)").get();
     succeeded = true;
   } finally {
     connection.close();
-    if (succeeded) {
-      if (existsSync(backupPath)) unlinkSync(backupPath);
-    } else if (existsSync(backupPath)) {
+    if (!succeeded && existsSync(backupPath)) {
       verifyBackup(backupPath, project);
-      copyFileSync(backupPath, path);
-      chmodSync(path, 0o600);
+      restoreBackup(backupPath, path);
     }
   }
+};
+
+export const completeProjectStoreMigration = (
+  project: { readonly identity: string; readonly path: string },
+  succeeded: boolean,
+) => {
+  const path = databasePath(project.path);
+  const backupPath = `${path}.migration-backup`;
+  if (!existsSync(backupPath)) return succeeded;
+  verifyBackup(backupPath, project);
+  if (!succeeded) {
+    restoreBackup(backupPath, path);
+    return false;
+  }
+  assertDatabaseFile(path);
+  assertProjectIdentity(project);
+  const connection = new Database(path, { readonly: true, strict: true });
+  try {
+    configureReadOnly(connection);
+    assertIntegrity(connection);
+    assertCurrentSchema(connection, project);
+  } finally {
+    connection.close();
+  }
+  unlinkSync(backupPath);
+  fsyncDirectory(path);
+  return true;
 };
 
 const inspectReadiness = (project: { readonly identity: string; readonly path: string }) => {
@@ -360,12 +446,19 @@ export const DrizzleProjectStoreLive = Layer.sync(ProjectStore, () => {
   return {
     migrate: (project) =>
       Effect.sync(() => {
-        if (inspectReadiness(project) === "ready") return true;
-        if (attemptedMigrations.has(project.identity)) return false;
-        attemptedMigrations.add(project.identity);
+        if (attemptedMigrations.has(project.path)) return false;
+        attemptedMigrations.add(project.path);
         try {
           migrateProjectStore(project);
           return true;
+        } catch {
+          return false;
+        }
+      }),
+    completeMigration: (project, succeeded) =>
+      Effect.sync(() => {
+        try {
+          return completeProjectStoreMigration(project, succeeded);
         } catch {
           return false;
         }

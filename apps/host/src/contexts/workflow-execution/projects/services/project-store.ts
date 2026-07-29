@@ -9,6 +9,10 @@ export interface ProjectForgetBlockers {
 
 export interface ProjectStoreShape {
   readonly migrate: (project: ProjectSnapshot) => Effect.Effect<boolean>;
+  readonly completeMigration: (
+    project: ProjectSnapshot,
+    succeeded: boolean,
+  ) => Effect.Effect<boolean>;
   readonly readiness: (project: ProjectSnapshot) => Effect.Effect<ProjectCondition>;
   readonly inspectForgetBlockers: (
     project: ProjectSnapshot,

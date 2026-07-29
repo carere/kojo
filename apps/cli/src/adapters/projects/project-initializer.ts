@@ -16,31 +16,16 @@ import {
 import { join } from "node:path";
 import { ProjectIdentity, type ProjectSnapshot } from "@kojo/control";
 import { Schema } from "effect";
+import {
+  initializeProjectWith,
+  ProjectInitializationError,
+  type ProjectInitializationPlatform,
+} from "../../contexts/workflow-authoring/projects/use-cases/initialize-project";
 import { validateProjectDefinition } from "../project-definition/subprocess-project-definition-validator";
-
-const CONFIGURATION =
-  'import { defineConfig } from "@kojo/workflow";\n\nexport default defineConfig({ workflows: [] });\n';
-const IGNORE_RULE = "/.kojo/";
-
-export class ProjectInitializationError extends Error {
-  override readonly name = "ProjectInitializationError";
-
-  constructor(
-    message: string,
-    readonly layoutMutated = false,
-  ) {
-    super(message);
-  }
-}
-
-interface ExistingPath {
-  readonly path: string;
-  readonly kind: "directory" | "file";
-}
 
 const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
 
-const inspectPath = async ({ path, kind }: ExistingPath) => {
+const inspectPath = async (path: string, kind: "directory" | "file") => {
   try {
     const information = await lstat(path);
     if (information.isSymbolicLink()) {
@@ -85,14 +70,13 @@ export const resolveGitWorkingTreeRoot = async (path: string) => {
     throw new ProjectInitializationError(`${path} does not resolve to an existing path.`);
   }
   const information = await stat(canonicalPath);
-  const directory = information.isDirectory() ? canonicalPath : undefined;
-  if (directory === undefined) {
+  if (!information.isDirectory()) {
     throw new ProjectInitializationError(`${path} is not inside a non-bare Git working tree.`);
   }
   const [inside, bare, root] = await Promise.all([
-    runGit(["rev-parse", "--is-inside-work-tree"], directory),
-    runGit(["rev-parse", "--is-bare-repository"], directory),
-    runGit(["rev-parse", "--show-toplevel"], directory),
+    runGit(["rev-parse", "--is-inside-work-tree"], canonicalPath),
+    runGit(["rev-parse", "--is-bare-repository"], canonicalPath),
+    runGit(["rev-parse", "--show-toplevel"], canonicalPath),
   ]);
   if (inside !== "true" || bare !== "false" || root === undefined) {
     throw new ProjectInitializationError(`${path} is not inside a non-bare Git working tree.`);
@@ -100,11 +84,22 @@ export const resolveGitWorkingTreeRoot = async (path: string) => {
   return realpath(root);
 };
 
+const readProjectIdentity = async (metadataPath: string) => {
+  try {
+    const metadata = JSON.parse(await readFile(metadataPath, "utf8"));
+    if (metadata.layoutVersion !== 1) throw new Error("unsupported layout");
+    return Schema.decodeUnknownSync(ProjectIdentity)(metadata.projectIdentity);
+  } catch {
+    throw new ProjectInitializationError(
+      `${metadataPath} does not contain valid Kojo Project metadata; no files were changed.`,
+    );
+  }
+};
+
 export const resolveInitializedProject = async (path: string): Promise<ProjectSnapshot> => {
   const root = await resolveGitWorkingTreeRoot(path);
   const metadataPath = join(root, ".kojo", "project.json");
-  const metadata = await inspectPath({ path: metadataPath, kind: "file" });
-  if (metadata === undefined) {
+  if ((await inspectPath(metadataPath, "file")) === undefined) {
     throw new ProjectInitializationError(`${root} is not an initialized Kojo Project.`);
   }
   return { identity: await readProjectIdentity(metadataPath), path: root };
@@ -135,19 +130,7 @@ const hasProjectLocalIgnoreRule = async (root: string, ignorePath: string) => {
   return source === ".gitignore" || source === ignorePath;
 };
 
-const readProjectIdentity = async (metadataPath: string) => {
-  try {
-    const metadata = JSON.parse(await readFile(metadataPath, "utf8"));
-    if (metadata.layoutVersion !== 1) throw new Error("unsupported layout");
-    return Schema.decodeUnknownSync(ProjectIdentity)(metadata.projectIdentity);
-  } catch {
-    throw new ProjectInitializationError(
-      `${metadataPath} does not contain valid Kojo Project metadata; no files were changed.`,
-    );
-  }
-};
-
-const writeNewFileAtomically = async (path: string, contents: string, mode: number) => {
+const writeNewFile = async (path: string, contents: string, mode: number) => {
   const temporaryPath = `${path}.${randomUUID()}.tmp`;
   const handle = await open(temporaryPath, "wx", mode);
   try {
@@ -164,7 +147,7 @@ const writeNewFileAtomically = async (path: string, contents: string, mode: numb
   }
 };
 
-const appendIgnoreRule = async (path: string) => {
+const appendIgnoreRule = async (path: string, rule: string) => {
   const handle = await open(path, constants.O_RDWR | constants.O_APPEND | constants.O_NOFOLLOW);
   try {
     const information = await handle.stat();
@@ -176,7 +159,7 @@ const appendIgnoreRule = async (path: string) => {
     }
     const existing = await handle.readFile({ encoding: "utf8" });
     const separator = existing.length === 0 || existing.endsWith("\n") ? "" : "\n";
-    await handle.write(`${separator}${IGNORE_RULE}\n`);
+    await handle.write(`${separator}${rule}\n`);
     await handle.sync();
   } finally {
     await handle.close();
@@ -244,146 +227,21 @@ const validateDatabase = (path: string, identity: ProjectSnapshot["identity"]) =
   }
 };
 
-export const initializeProject = async (path: string): Promise<ProjectSnapshot> => {
-  const root = await resolveGitWorkingTreeRoot(path);
-  const configurationPath = join(root, "kojo.config.ts");
-  const ignorePath = join(root, ".gitignore");
-  const dataPath = join(root, ".kojo");
-  const metadataPath = join(dataPath, "project.json");
-  const databasePath = join(dataPath, "kojo.sqlite");
-  const artifactsPath = join(dataPath, "artifacts");
-  const sandboxesPath = join(dataPath, "sandboxes");
-
-  const [configuration, ignore, data, metadata, database, artifacts, sandboxes] = await Promise.all(
-    [
-      inspectPath({ path: configurationPath, kind: "file" }),
-      inspectPath({ path: ignorePath, kind: "file" }),
-      inspectPath({ path: dataPath, kind: "directory" }),
-      inspectPath({ path: metadataPath, kind: "file" }),
-      inspectPath({ path: databasePath, kind: "file" }),
-      inspectPath({ path: artifactsPath, kind: "directory" }),
-      inspectPath({ path: sandboxesPath, kind: "directory" }),
-    ],
-  );
-
-  if (data !== undefined && (metadata === undefined || database === undefined)) {
-    throw new ProjectInitializationError(
-      `${dataPath} is an existing layout with missing durable Project data; use the explicit missing-data repair after reviewing it.`,
-    );
-  }
-  if (data === undefined && [metadata, database, artifacts, sandboxes].some(Boolean)) {
-    throw new ProjectInitializationError(
-      `${dataPath} has a conflicting layout; no files were changed.`,
-    );
-  }
-  if (data !== undefined && configuration === undefined) {
-    throw new ProjectInitializationError(
-      `${configurationPath} is missing from an existing Kojo Project; restore the developer configuration before retrying.`,
-    );
-  }
-  if (data !== undefined && sandboxes === undefined) {
-    throw new ProjectInitializationError(
-      `${sandboxesPath} is missing from an existing Kojo Project; Kojo cannot prove that no non-final Workflow Run needs it.`,
-    );
-  }
-
-  const identity =
-    metadata === undefined
-      ? Schema.decodeUnknownSync(ProjectIdentity)(Bun.randomUUIDv7())
-      : await readProjectIdentity(metadataPath);
-
-  if (database !== undefined) {
-    try {
-      validateDatabase(databasePath, identity);
-    } catch {
-      throw new ProjectInitializationError(
-        `${databasePath} Project database is invalid or needs migration; no files were changed.`,
-      );
-    }
-  }
-
-  const ignoreRuleExists =
-    ignore !== undefined && (await hasProjectLocalIgnoreRule(root, ignorePath));
-  const needsRootWrite =
-    configuration === undefined || ignore === undefined || !ignoreRuleExists || data === undefined;
-  try {
-    if (needsRootWrite) await access(root, constants.W_OK);
-    if (
-      data !== undefined &&
-      [metadata, database, artifacts, sandboxes].some((item) => item === undefined)
-    ) {
-      await access(dataPath, constants.W_OK);
-    }
-  } catch {
-    throw new ProjectInitializationError(
-      `${root} cannot be changed safely; no files were changed.`,
-    );
-  }
-
-  let layoutMutated = false;
-  const enforceMode = async (
-    target: string,
-    information: { readonly mode: number } | undefined,
-    mode: number,
-  ) => {
-    await chmod(target, mode);
-    if (information !== undefined && (information.mode & 0o777) !== mode) {
-      layoutMutated = true;
-    }
-  };
-  try {
-    if (configuration === undefined) {
-      await writeNewFileAtomically(configurationPath, CONFIGURATION, 0o644);
-      layoutMutated = true;
-    }
-    if (ignore === undefined) {
-      await writeNewFileAtomically(ignorePath, `${IGNORE_RULE}\n`, 0o644);
-      layoutMutated = true;
-    } else if (!ignoreRuleExists) {
-      await appendIgnoreRule(ignorePath);
-      layoutMutated = true;
-    }
-    if (data === undefined) {
-      await mkdir(dataPath, { mode: 0o700 });
-      layoutMutated = true;
-    }
-    await enforceMode(dataPath, data, 0o700);
-    if (metadata === undefined) {
-      await writeNewFileAtomically(
-        metadataPath,
-        `${JSON.stringify({ layoutVersion: 1, projectIdentity: identity }, null, 2)}\n`,
-        0o600,
-      );
-      layoutMutated = true;
-      await createDatabase(databasePath, identity);
-      layoutMutated = true;
-    }
-    await enforceMode(metadataPath, metadata, 0o600);
-    await enforceMode(databasePath, database, 0o600);
-    if (artifacts === undefined) {
-      await mkdir(artifactsPath, { mode: 0o700 });
-      layoutMutated = true;
-    }
-    if (data === undefined) {
-      await mkdir(sandboxesPath, { mode: 0o700 });
-      layoutMutated = true;
-    }
-    await enforceMode(artifactsPath, artifacts, 0o700);
-    await enforceMode(sandboxesPath, sandboxes, 0o700);
-  } catch {
-    throw new ProjectInitializationError(
-      `Kojo could not finish initializing ${root}. Review the Project layout before trying again.`,
-      layoutMutated,
-    );
-  }
-
-  const validation = await validateProjectDefinition(configurationPath);
-  if (!validation.ok) {
-    throw new ProjectInitializationError(
-      `${configurationPath} ${validation.message} The safe Project layout remains in place; fix this needs-attention finding and retry kojo init.`,
-      layoutMutated,
-    );
-  }
-
-  return { identity, path: root };
+const platform: ProjectInitializationPlatform = {
+  appendIgnoreRule,
+  canWrite: (path) => access(path, constants.W_OK),
+  createDatabase,
+  createDirectory: (path, mode) => mkdir(path, { mode }).then(() => undefined),
+  enforceMode: chmod,
+  generateIdentity: () => Bun.randomUUIDv7(),
+  hasProjectLocalIgnoreRule,
+  inspectPath,
+  readProjectIdentity,
+  resolveGitWorkingTreeRoot,
+  validateDatabase,
+  validateProjectDefinition,
+  writeNewFile,
 };
+
+export const initializeProject = (path: string) => initializeProjectWith(platform, path);
+export { ProjectInitializationError };

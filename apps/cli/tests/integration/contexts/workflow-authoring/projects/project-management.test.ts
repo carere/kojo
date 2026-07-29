@@ -476,7 +476,7 @@ describe("Kojo Project discovery", () => {
     ).projectIdentity as string;
     const runDatabase = new Database(join(runningProject, ".kojo", "kojo.sqlite"));
     runDatabase.exec(
-      "INSERT INTO kojo_workflow_runs(run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision, engine_reference_version, engine_reference_json, engine_reference_sha256, trigger_kind, state, row_version, accepted_at_ms, updated_at_ms) VALUES ('run-in-progress', 'start-key', X'01', 'workflow', 'revision', 1, '{}', X'02', 'manual', 'running', 1, 1, 1);",
+      "INSERT INTO kojo_workflow_runs(run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision, engine_reference_version, engine_reference_json, engine_reference_sha256, trigger_kind, state, row_version, accepted_at_ms, updated_at_ms) VALUES ('run-in-progress', 'start-key', zeroblob(32), 'workflow', 'revision', 1, '{}', zeroblob(32), 'manual', 'running', 1, 1, 1);",
     );
     runDatabase.close();
 
@@ -647,6 +647,28 @@ describe("Kojo Project discovery", () => {
     ).result.items;
 
     expect(projects).toEqual([{ identity, path: await realpath(project), condition: "ready" }]);
+  });
+
+  it("blocks a second Host from acquiring Workflow ownership for the same Project", async () => {
+    const directory = await temporaryDirectory("kojo-project-engine-owner-");
+    const project = join(directory, "project");
+    await git(["init", project]);
+    const firstHost = await startKojoHostProcess();
+    cleanups.push(firstHost.stop);
+    expect((await runCli(["init", project], firstHost.socketPath, directory)).exitCode).toBe(0);
+    const secondHost = await startKojoHostProcess();
+    cleanups.push(secondHost.stop);
+
+    const refused = await runCli(
+      ["project", "register", project, "--request-key", "second-engine-owner", "--json"],
+      secondHost.socketPath,
+      directory,
+    );
+
+    expect(refused.exitCode).toBe(1);
+    expect(JSON.parse(refused.stdout).error.findingKeys).toEqual(["store.migration-failed"]);
+    const firstView = await runCli(["project", "list", "--json"], firstHost.socketPath, directory);
+    expect(JSON.parse(firstView.stdout).result.items).toMatchObject([{ condition: "ready" }]);
   });
 
   it("correlates Project control diagnostics by Project Identity", async () => {

@@ -1,0 +1,147 @@
+import type {
+  ProjectListCursorError,
+  ProjectMutationResult,
+  ProjectOperationError,
+  ProjectSnapshot,
+  RequestKey,
+} from "@kojo/control";
+import {
+  IncompatibleProtocolError,
+  LocalTransportError,
+  UnsupportedControlCapabilityError,
+} from "@kojo/control/local-client";
+
+export interface CliFailure {
+  readonly affectedResource?: ProjectOperationError["affectedResource"];
+  readonly code: string;
+  readonly exitCode: number;
+  readonly findingKeys?: ReadonlyArray<string>;
+  readonly message: string;
+  readonly next: string;
+  readonly requestKey?: RequestKey;
+}
+
+export interface CliWarning {
+  readonly code: string;
+  readonly message: string;
+  readonly next: string;
+}
+
+export const invalid = (next: string): CliFailure => ({
+  code: "invalid-command",
+  exitCode: 2,
+  message: "Invalid command.",
+  next,
+});
+
+export const transportFailure = (error: unknown): CliFailure =>
+  error instanceof IncompatibleProtocolError
+    ? {
+        code: "incompatible-protocol",
+        exitCode: 3,
+        message: error.message,
+        next: "Upgrade Kojo Host or this CLI so their protocol major versions match.",
+      }
+    : error instanceof UnsupportedControlCapabilityError
+      ? {
+          code: "unsupported-control-capability",
+          exitCode: 3,
+          message: error.message,
+          next: "Upgrade Kojo Host or use a supported client operation.",
+        }
+      : error instanceof LocalTransportError
+        ? {
+            code: "host-unavailable",
+            exitCode: 3,
+            message: error.message,
+            next: "Start the Kojo Host and try again.",
+          }
+        : {
+            code: "host-request-failed",
+            exitCode: 3,
+            message: "Kojo Host request failed.",
+            next: "Try the command again.",
+          };
+
+export const projectFailure = (
+  result: Extract<ProjectMutationResult, { ok: false }>,
+): CliFailure => ({
+  ...result.error,
+  requestKey: result.requestKey,
+  exitCode: result.error.code === "project-layout-invalid" ? 1 : 4,
+});
+
+export const projectQueryFailure = (error: ProjectOperationError): CliFailure => ({
+  ...error,
+  exitCode: 4,
+});
+
+export const projectCursorFailure = (error: ProjectListCursorError): CliFailure => ({
+  ...error,
+  exitCode: 2,
+});
+
+export const writeFailure = (failure: CliFailure, json: boolean, command: string) => {
+  process.stderr.write(`${failure.message}\nNext: ${failure.next}\n`);
+  if (failure.requestKey !== undefined && !json) {
+    process.stdout.write(`Request Key: ${failure.requestKey}\n`);
+  }
+  if (json) {
+    process.stdout.write(
+      `${JSON.stringify({
+        schemaVersion: 1,
+        command,
+        ...(failure.requestKey === undefined ? {} : { requestKey: failure.requestKey }),
+        error: {
+          code: failure.code,
+          message: failure.message,
+          next: failure.next,
+          ...(failure.affectedResource === undefined
+            ? {}
+            : { affectedResource: failure.affectedResource }),
+          ...(failure.findingKeys === undefined ? {} : { findingKeys: failure.findingKeys }),
+        },
+        warnings: [],
+      })}\n`,
+    );
+  }
+  return failure.exitCode;
+};
+
+export const writeProject = (
+  command: string,
+  project: ProjectSnapshot,
+  json: boolean,
+  mutation?: Extract<ProjectMutationResult, { ok: true }>,
+  warnings: ReadonlyArray<CliWarning> = [],
+  pendingRequestKey?: RequestKey,
+) => {
+  const requestKey = mutation?.requestKey ?? pendingRequestKey;
+  if (json) {
+    process.stdout.write(
+      `${JSON.stringify({
+        schemaVersion: 1,
+        command,
+        projectIdentity: project.identity,
+        ...(requestKey === undefined ? {} : { requestKey }),
+        result: {
+          project,
+          ...(mutation === undefined ? {} : { alreadyApplied: mutation.alreadyApplied }),
+        },
+        warnings,
+      })}\n`,
+    );
+  } else {
+    process.stdout.write(`Project Identity: ${project.identity}\nPath: ${project.path}\n`);
+    if (requestKey !== undefined) process.stdout.write(`Request Key: ${requestKey}\n`);
+    for (const warning of warnings) {
+      process.stderr.write(`Warning: ${warning.message}\nNext: ${warning.next}\n`);
+    }
+  }
+};
+
+export const pendingRegistrationWarning = (project: ProjectSnapshot): CliWarning => ({
+  code: "project-registration-pending",
+  message: "The Kojo Project is initialized, but the Host was not available for registration.",
+  next: `Run: kojo project register ${project.path}`,
+});

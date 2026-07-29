@@ -1,4 +1,4 @@
-import { evaluateProjectDefinition } from "./project-definition-validation";
+import { evaluateProjectDefinition } from "@kojo/control/bun-project-definition-validation";
 
 const send = process.send?.bind(process);
 Object.defineProperty(process, "send", { configurable: true, value: undefined });

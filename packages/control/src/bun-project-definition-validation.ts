@@ -4,7 +4,7 @@ import {
   evaluateProjectDefinitionWith,
   type ProjectDefinitionValidation as ProjectDefinitionValidationResult,
   validateProjectDefinitionSubprocessResult,
-} from "@kojo/control/project-definition-validation";
+} from "./project-definition-validation";
 
 const packageManagerCommand = (root: string) => {
   if (existsSync(join(root, "bun.lock")) || existsSync(join(root, "bun.lockb"))) {

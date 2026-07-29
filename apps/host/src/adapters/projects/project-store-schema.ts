@@ -1,7 +1,9 @@
 import { sql } from "drizzle-orm";
 import {
+  type AnySQLiteColumn,
   blob,
   check,
+  foreignKey,
   index,
   integer,
   primaryKey,
@@ -33,8 +35,13 @@ export const controlRequests = sqliteTable(
     operationKind: text("operation_kind").notNull(),
     requestSha256: blob("request_sha256").notNull(),
     targetKind: text("target_kind").notNull(),
-    targetRunId: text("target_run_id"),
-    targetScheduleKey: text("target_schedule_key"),
+    targetRunId: text("target_run_id").references((): AnySQLiteColumn => workflowRuns.runId, {
+      onDelete: "cascade",
+    }),
+    targetScheduleKey: text("target_schedule_key").references(
+      (): AnySQLiteColumn => workflowScheduleStates.scheduleKey,
+      { onDelete: "cascade" },
+    ),
     state: text("state").notNull(),
     resultEncodingVersion: integer("result_encoding_version"),
     resultSchemaIdentity: text("result_schema_identity"),
@@ -52,6 +59,19 @@ export const controlRequests = sqliteTable(
     check(
       "control_request_state_valid",
       sql`${table.state} IN ('pending', 'completed', 'needs-attention')`,
+    ),
+    check("control_request_sha256_length", sql`length(${table.requestSha256}) = 32`),
+    check(
+      "control_result_json_valid",
+      sql`${table.resultJson} IS NULL OR json_valid(${table.resultJson})`,
+    ),
+    check(
+      "control_result_sensitivity_json_valid",
+      sql`${table.resultSensitivityMapJson} IS NULL OR json_valid(${table.resultSensitivityMapJson})`,
+    ),
+    check(
+      "control_result_sha256_length",
+      sql`${table.resultSha256} IS NULL OR length(${table.resultSha256}) = 32`,
     ),
     index("kojo_control_requests_active_idx")
       .on(table.createdAtMs, table.requestKey)
@@ -95,6 +115,14 @@ export const workflowScheduleStates = sqliteTable(
     ),
     check("schedule_row_version_positive", sql`${table.rowVersion} > 0`),
     check(
+      "schedule_current_overlap_valid",
+      sql`${table.currentOverlapPolicy} IS NULL OR ${table.currentOverlapPolicy} IN ('allow', 'skip')`,
+    ),
+    check(
+      "schedule_applied_overlap_valid",
+      sql`${table.appliedOverlapPolicy} IS NULL OR ${table.appliedOverlapPolicy} IN ('allow', 'skip')`,
+    ),
+    check(
       "schedule_current_definition_complete",
       sql`(${table.currentWorkflowKey} IS NULL AND ${table.currentRevision} IS NULL AND ${table.currentCron} IS NULL AND ${table.currentTimeZone} IS NULL AND ${table.currentOverlapPolicy} IS NULL AND ${table.currentInputRuleRevision} IS NULL) OR (${table.currentWorkflowKey} IS NOT NULL AND ${table.currentRevision} IS NOT NULL AND ${table.currentCron} IS NOT NULL AND ${table.currentTimeZone} IS NOT NULL AND ${table.currentOverlapPolicy} IS NOT NULL AND ${table.currentInputRuleRevision} IS NOT NULL)`,
     ),
@@ -125,7 +153,9 @@ export const workflowRuns = sqliteTable(
     engineReferenceJson: text("engine_reference_json").notNull(),
     engineReferenceSha256: blob("engine_reference_sha256").notNull().unique(),
     triggerKind: text("trigger_kind").notNull(),
-    parentRunId: text("parent_run_id"),
+    parentRunId: text("parent_run_id").references((): AnySQLiteColumn => workflowRuns.runId, {
+      onDelete: "cascade",
+    }),
     childInvocationKey: text("child_invocation_key"),
     scheduleKey: text("schedule_key"),
     scheduledAtMs: integer("scheduled_at_ms"),
@@ -157,6 +187,21 @@ export const workflowRuns = sqliteTable(
       "workflow_run_trigger_valid",
       sql`${table.triggerKind} IN ('manual', 'schedule', 'child')`,
     ),
+    check("workflow_run_start_sha256_length", sql`length(${table.startRequestSha256}) = 32`),
+    check("workflow_run_engine_json_valid", sql`json_valid(${table.engineReferenceJson})`),
+    check("workflow_run_engine_sha256_length", sql`length(${table.engineReferenceSha256}) = 32`),
+    check(
+      "workflow_run_suspension_json_valid",
+      sql`${table.suspensionDetailsJson} IS NULL OR json_valid(${table.suspensionDetailsJson})`,
+    ),
+    check(
+      "workflow_run_suspension_sensitivity_json_valid",
+      sql`${table.suspensionSensitivityMapJson} IS NULL OR json_valid(${table.suspensionSensitivityMapJson})`,
+    ),
+    check(
+      "workflow_run_outcome_json_valid",
+      sql`${table.outcomeSummaryJson} IS NULL OR json_valid(${table.outcomeSummaryJson})`,
+    ),
     check("workflow_run_row_version_positive", sql`${table.rowVersion} > 0`),
     check(
       "workflow_run_final_state_valid",
@@ -181,7 +226,9 @@ export const workflowRuns = sqliteTable(
 export const workflowScheduleOccurrences = sqliteTable(
   "kojo_workflow_schedule_occurrences",
   {
-    scheduleKey: text("schedule_key").notNull(),
+    scheduleKey: text("schedule_key")
+      .notNull()
+      .references(() => workflowScheduleStates.scheduleKey, { onDelete: "cascade" }),
     scheduledAtMs: integer("scheduled_at_ms").notNull(),
     appliedRevision: text("applied_revision").notNull(),
     resolvedInputEncodingVersion: integer("resolved_input_encoding_version").notNull(),
@@ -196,7 +243,9 @@ export const workflowScheduleOccurrences = sqliteTable(
     plannedAtMs: integer("planned_at_ms").notNull(),
     firstAttemptedAtMs: integer("first_attempted_at_ms"),
     processedAtMs: integer("processed_at_ms"),
-    linkedRunId: text("linked_run_id"),
+    linkedRunId: text("linked_run_id").references(() => workflowRuns.runId, {
+      onDelete: "set null",
+    }),
     deletedRunId: text("deleted_run_id"),
     deletedRunAtMs: integer("deleted_run_at_ms"),
     rowVersion: integer("row_version").notNull(),
@@ -207,6 +256,13 @@ export const workflowScheduleOccurrences = sqliteTable(
       "schedule_occurrence_outcome_valid",
       sql`${table.outcome} IN ('planned', 'started', 'skipped', 'invalidated', 'failed')`,
     ),
+    check("schedule_occurrence_input_json_valid", sql`json_valid(${table.resolvedInputJson})`),
+    check(
+      "schedule_occurrence_sensitivity_json_valid",
+      sql`json_valid(${table.resolvedInputSensitivityMapJson})`,
+    ),
+    check("schedule_occurrence_sha256_length", sql`length(${table.resolvedInputSha256}) = 32`),
+    check("schedule_occurrence_row_version_positive", sql`${table.rowVersion} > 0`),
     index("kojo_schedule_occurrences_history_idx").on(table.scheduleKey, table.scheduledAtMs),
     index("kojo_schedule_occurrences_outcome_idx").on(table.outcome, table.scheduledAtMs),
     index("kojo_schedule_occurrences_due_idx")
@@ -220,7 +276,9 @@ export const engineOperations = sqliteTable(
   "kojo_engine_operations",
   {
     operationId: text("operation_id").primaryKey(),
-    runId: text("run_id").notNull(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => workflowRuns.runId, { onDelete: "cascade" }),
     kind: text("kind").notNull(),
     operationKey: text("operation_key").notNull(),
     requestEncodingVersion: integer("request_encoding_version").notNull(),
@@ -245,6 +303,12 @@ export const engineOperations = sqliteTable(
       "engine_operation_state_valid",
       sql`${table.state} IN ('pending', 'confirmed', 'needs-attention')`,
     ),
+    check("engine_operation_request_json_valid", sql`json_valid(${table.requestJson})`),
+    check(
+      "engine_operation_sensitivity_json_valid",
+      sql`json_valid(${table.requestSensitivityMapJson})`,
+    ),
+    check("engine_operation_sha256_length", sql`length(${table.requestSha256}) = 32`),
     index("kojo_engine_operations_run_idx").on(table.runId, table.createdAtMs),
     index("kojo_engine_operations_pending_idx")
       .on(table.nextAttemptAtMs, table.operationId)
@@ -256,7 +320,9 @@ export const workflowActivityAttempts = sqliteTable(
   "kojo_workflow_activity_attempts",
   {
     attemptId: text("attempt_id").primaryKey(),
-    runId: text("run_id").notNull(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => workflowRuns.runId, { onDelete: "cascade" }),
     durableOperationKey: text("durable_operation_key").notNull(),
     activityName: text("activity_name").notNull(),
     effectRetryNumber: integer("effect_retry_number").notNull(),
@@ -280,6 +346,10 @@ export const workflowActivityAttempts = sqliteTable(
       "workflow_activity_attempt_state_valid",
       sql`${table.state} IN ('started', 'result-observed', 'engine-confirmed')`,
     ),
+    check(
+      "workflow_activity_outcome_json_valid",
+      sql`${table.outcomeSummaryJson} IS NULL OR json_valid(${table.outcomeSummaryJson})`,
+    ),
     index("kojo_activity_attempts_run_idx").on(
       table.runId,
       table.durableOperationKey,
@@ -293,7 +363,9 @@ export const executionEvents = sqliteTable(
   "kojo_execution_events",
   {
     eventId: text("event_id").primaryKey(),
-    runId: text("run_id").notNull(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => workflowRuns.runId, { onDelete: "cascade" }),
     sequence: integer("sequence").notNull(),
     envelopeVersion: integer("envelope_version").notNull(),
     kind: text("kind").notNull(),
@@ -314,6 +386,13 @@ export const executionEvents = sqliteTable(
   (table) => [
     unique("execution_event_sequence").on(table.runId, table.sequence),
     unique("execution_event_identity").on(table.runId, table.eventId),
+    check("execution_event_sequence_positive", sql`${table.sequence} > 0`),
+    check("execution_event_payload_json_valid", sql`json_valid(${table.payloadJson})`),
+    check(
+      "execution_event_sensitivity_json_valid",
+      sql`json_valid(${table.payloadSensitivityMapJson})`,
+    ),
+    check("execution_event_sha256_length", sql`length(${table.payloadSha256}) = 32`),
     index("kojo_execution_events_kind_idx").on(table.runId, table.kind, table.sequence),
     index("kojo_execution_events_engine_operation_idx").on(table.engineOperationId),
     index("kojo_execution_events_activity_attempt_idx").on(table.activityAttemptId),
@@ -326,7 +405,9 @@ export const executionArtifacts = sqliteTable(
   "kojo_execution_artifacts",
   {
     artifactId: text("artifact_id").primaryKey(),
-    runId: text("run_id").notNull(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => workflowRuns.runId, { onDelete: "cascade" }),
     storageKey: text("storage_key").notNull().unique(),
     displayName: text("display_name").notNull(),
     mediaType: text("media_type").notNull(),
@@ -339,6 +420,8 @@ export const executionArtifacts = sqliteTable(
   },
   (table) => [
     unique("execution_artifact_run_identity").on(table.runId, table.artifactId),
+    check("execution_artifact_byte_size_non_negative", sql`${table.byteSize} >= 0`),
+    check("execution_artifact_sha256_length", sql`length(${table.sha256}) = 32`),
     check(
       "execution_artifact_condition_valid",
       sql`${table.condition} IN ('available', 'missing', 'expired')`,
@@ -356,7 +439,17 @@ export const executionEventArtifacts = sqliteTable(
     artifactId: text("artifact_id").notNull(),
     role: text("role").notNull(),
   },
-  (table) => [primaryKey({ columns: [table.eventId, table.artifactId, table.role] })],
+  (table) => [
+    primaryKey({ columns: [table.eventId, table.artifactId, table.role] }),
+    foreignKey({
+      columns: [table.runId, table.eventId],
+      foreignColumns: [executionEvents.runId, executionEvents.eventId],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.runId, table.artifactId],
+      foreignColumns: [executionArtifacts.runId, executionArtifacts.artifactId],
+    }).onDelete("cascade"),
+  ],
 );
 
 export const retentionPolicy = sqliteTable(
@@ -370,7 +463,25 @@ export const retentionPolicy = sqliteTable(
     rowVersion: integer("row_version").notNull(),
     updatedAtMs: integer("updated_at_ms").notNull(),
   },
-  (table) => [check("retention_policy_singleton", sql`${table.singletonKey} = 1`)],
+  (table) => [
+    check("retention_policy_singleton", sql`${table.singletonKey} = 1`),
+    check(
+      "retention_diagnostic_age_positive",
+      sql`${table.diagnosticMaxAgeMs} IS NULL OR ${table.diagnosticMaxAgeMs} > 0`,
+    ),
+    check(
+      "retention_diagnostic_bytes_positive",
+      sql`${table.diagnosticMaxBytes} IS NULL OR ${table.diagnosticMaxBytes} > 0`,
+    ),
+    check(
+      "retention_disposable_age_positive",
+      sql`${table.disposableMaxAgeMs} IS NULL OR ${table.disposableMaxAgeMs} > 0`,
+    ),
+    check(
+      "retention_disposable_bytes_positive",
+      sql`${table.disposableMaxBytes} IS NULL OR ${table.disposableMaxBytes} > 0`,
+    ),
+  ],
 );
 
 export const deletionIntents = sqliteTable(
@@ -392,6 +503,8 @@ export const deletionIntents = sqliteTable(
       "deletion_intent_phase_valid",
       sql`${table.phase} IN ('quiescing', 'clearing-engine', 'clearing-owned-content', 'deleting-records', 'needs-attention')`,
     ),
+    check("deletion_intent_sha256_length", sql`length(${table.targetSha256}) = 32`),
+    check("deletion_intent_snapshot_json_valid", sql`json_valid(${table.targetSnapshotJson})`),
     index("kojo_deletion_intents_active_idx").on(table.phase, table.updatedAtMs),
   ],
 );
@@ -399,7 +512,9 @@ export const deletionIntents = sqliteTable(
 export const deletionItems = sqliteTable(
   "kojo_deletion_items",
   {
-    deletionId: text("deletion_id").notNull(),
+    deletionId: text("deletion_id")
+      .notNull()
+      .references(() => deletionIntents.deletionId, { onDelete: "cascade" }),
     itemKind: text("item_kind").notNull(),
     itemKey: text("item_key").notNull(),
     stableOrder: integer("stable_order").notNull(),

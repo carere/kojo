@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { ProjectIdentity, type ProjectSnapshot, type ReadinessFindingKey } from "@kojo/control";
+import { ProjectIdentity } from "@kojo/control";
 import { Effect, Layer, Schema } from "effect";
 import {
   ProjectDefinitionLoader,
@@ -10,17 +10,12 @@ import {
 import {
   ProjectLayout,
   type ProjectLayoutShape,
-  type ProjectLayoutValidation,
 } from "../../contexts/workflow-authoring/projects/services/project-layout";
-
-class InvalidProjectLayoutError extends Error {
-  constructor(
-    message = "The path is not a safe initialized Kojo Project.",
-    readonly findingKey: ReadinessFindingKey = "layout.metadata-invalid",
-  ) {
-    super(message);
-  }
-}
+import {
+  InvalidProjectLayoutError,
+  type ProjectLayoutPlatform,
+  validateProjectLayout,
+} from "../../contexts/workflow-authoring/projects/use-cases/validate-project-layout";
 
 const inspect = async (path: string, kind: "directory" | "file", mode?: number) => {
   const information = await lstat(path);
@@ -104,61 +99,30 @@ const validateDatabase = (path: string) => {
   }
 };
 
-const validate = async (
-  path: string,
-  definitions: ProjectDefinitionLoaderShape,
-): Promise<ProjectLayoutValidation> => {
-  try {
-    const canonicalInput = await realpath(path);
-    if (!(await stat(canonicalInput)).isDirectory()) throw new InvalidProjectLayoutError();
-    const [inside, bare, rootValue] = await Promise.all([
-      git(canonicalInput, ["rev-parse", "--is-inside-work-tree"]),
-      git(canonicalInput, ["rev-parse", "--is-bare-repository"]),
-      git(canonicalInput, ["rev-parse", "--show-toplevel"]),
+const platform: ProjectLayoutPlatform = {
+  canonicalDirectory: async (path) => {
+    const canonical = await realpath(path);
+    if (!(await stat(canonical)).isDirectory()) throw new InvalidProjectLayoutError();
+    return canonical;
+  },
+  gitWorkingTree: async (path) => {
+    const [inside, bare, root] = await Promise.all([
+      git(path, ["rev-parse", "--is-inside-work-tree"]),
+      git(path, ["rev-parse", "--is-bare-repository"]),
+      git(path, ["rev-parse", "--show-toplevel"]),
     ]);
-    if (inside !== "true" || bare !== "false") throw new InvalidProjectLayoutError();
-    const root = await realpath(rootValue);
-    await Promise.all([
-      inspect(join(root, "kojo.config.ts"), "file"),
-      inspect(join(root, ".gitignore"), "file"),
-      inspect(join(root, ".kojo"), "directory", 0o700),
-      inspect(join(root, ".kojo", "kojo.sqlite"), "file", 0o600),
-      inspect(join(root, ".kojo", "artifacts"), "directory", 0o700),
-      inspect(join(root, ".kojo", "sandboxes"), "directory", 0o700),
-    ]);
-    const definitionValidation = await definitions.validate(join(root, "kojo.config.ts"));
-    if (!definitionValidation.ok) {
-      throw new InvalidProjectLayoutError(
-        definitionValidation.message,
-        definitionValidation.findingKey,
-      );
-    }
-    validateDatabase(join(root, ".kojo", "kojo.sqlite"));
-    if (!(await hasIgnoreRule(root))) {
-      return {
-        ok: false,
-        message: "The Project-local /.kojo/ ignore rule is missing.",
-        findingKey: "layout.ignore-rule-missing",
-      };
-    }
-    const project: ProjectSnapshot = { identity: await readIdentity(root), path: root };
-    return { ok: true, project };
-  } catch (error) {
-    if (error instanceof InvalidProjectLayoutError) {
-      return { ok: false, message: error.message, findingKey: error.findingKey };
-    }
-    return {
-      ok: false,
-      message: "The path is not a safe initialized Kojo Project.",
-      findingKey: "layout.metadata-invalid",
-    };
-  }
+    return { inside, bare, root };
+  },
+  hasIgnoreRule,
+  inspect,
+  readIdentity,
+  validateDatabase,
 };
 
 export const makeGitProjectLayout = (
   definitions: ProjectDefinitionLoaderShape,
 ): ProjectLayoutShape => ({
-  validate: (path) => Effect.promise(() => validate(path, definitions)),
+  validate: (path) => Effect.promise(() => validateProjectLayout(platform, path, definitions)),
   inspectIndexedPath: (path) =>
     Effect.promise(async () => {
       try {

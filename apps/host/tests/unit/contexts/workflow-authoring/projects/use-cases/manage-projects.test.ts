@@ -61,9 +61,15 @@ const makeLayout = (
 const makeRuntime = (
   blockers: Effect.Effect<ProjectForgetBlockers>,
   condition: "ready" | "limited" | "needs-attention" = "ready",
+  onMigration = () => undefined,
 ) =>
   Layer.succeed(ProjectRuntime, {
-    coordinateRegistration: (_project, operation) => operation(true),
+    coordinateRegistration: (_project, beforeMigration, operation) =>
+      Effect.flatMap(beforeMigration, (refused) =>
+        refused === undefined
+          ? Effect.sync(onMigration).pipe(Effect.andThen(operation(true)))
+          : Effect.succeed(refused),
+      ),
     coordinateLifecycle: (_project, operation) => operation,
     readiness: () => Effect.succeed(condition),
     inspectForgetBlockers: () => blockers,
@@ -80,6 +86,7 @@ it.effect("rejects a duplicate live identity and accepts the path after a move",
   const first: ProjectSnapshot = { identity, path: "/projects/first" };
   const moved: ProjectSnapshot = { identity, path: "/projects/moved" };
   let firstPathExists = true;
+  let migrations = 0;
   const layer = Layer.mergeAll(
     makeStore(),
     makeLayout({ inputA: first, inputB: moved }, (path) =>
@@ -89,7 +96,9 @@ it.effect("rejects a duplicate live identity and accepts the path after a move",
           : { status: "missing" as const },
       ),
     ),
-    makeRuntime(noForgetBlockers),
+    makeRuntime(noForgetBlockers, "ready", () => {
+      migrations += 1;
+    }),
   );
 
   return Effect.gen(function* () {
@@ -105,6 +114,7 @@ it.effect("rejects a duplicate live identity and accepts the path after a move",
         findingKeys: ["project.identity-duplicate"],
       },
     });
+    expect(migrations).toBe(1);
 
     firstPathExists = false;
     const refusedRedelivery = yield* registerProject("inputB", requestKey("2"));
@@ -112,6 +122,7 @@ it.effect("rejects a duplicate live identity and accepts the path after a move",
     const movedResult = yield* registerProject("inputB", requestKey("3"));
     expect(movedResult).toMatchObject({ ok: true, project: moved });
     expect((yield* listProjects).projects).toEqual([moved]);
+    expect(migrations).toBe(2);
   }).pipe(Effect.provide(layer));
 });
 
@@ -290,7 +301,12 @@ it.effect("acquires the Project Runtime before the Project Index for register an
       }
     });
   const runtime = Layer.succeed(ProjectRuntime, {
-    coordinateRegistration: (_project, operation) => withinRuntime(operation(true)),
+    coordinateRegistration: (_project, beforeMigration, operation) =>
+      withinRuntime(
+        Effect.flatMap(beforeMigration, (refused) =>
+          refused === undefined ? operation(true) : Effect.succeed(refused),
+        ),
+      ),
     coordinateLifecycle: (_project, operation) => withinRuntime(operation),
     readiness: () => Effect.succeed("ready" as const),
     inspectForgetBlockers: () => noForgetBlockers,

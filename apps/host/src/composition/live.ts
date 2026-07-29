@@ -7,6 +7,7 @@ import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import { DrizzleProjectStoreLive } from "../adapters/projects/drizzle-project-store";
 import { makeFileProjectIndexStoreLayer } from "../adapters/projects/file-project-index-store";
 import { GitProjectLayoutLive } from "../adapters/projects/git-project-layout";
+import { makeLocalWorkflowBackendLayer } from "../adapters/projects/local-workflow-backend";
 import { SubprocessProjectDefinitionLoaderLive } from "../adapters/projects/subprocess-project-definition-loader";
 import { makeHostDiagnosticLoggerLayer } from "../contexts/workflow-execution/control/services/host-diagnostic-logger";
 import { loadHostIdentity } from "../contexts/workflow-execution/control/services/host-identity-store";
@@ -36,7 +37,9 @@ export const startLiveKojoHost = async () => {
     Layer.provide([
       projectIndex,
       projectLayout,
-      ProjectRuntimeLive.pipe(Layer.provide(DrizzleProjectStoreLive)),
+      ProjectRuntimeLive.pipe(
+        Layer.provide([DrizzleProjectStoreLive, makeLocalWorkflowBackendLayer(hostIdentity)]),
+      ),
     ]),
   );
 

@@ -10,6 +10,7 @@ import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import { DrizzleProjectStoreLive } from "../../../../../src/adapters/projects/drizzle-project-store";
 import { makeFileProjectIndexStoreLayer } from "../../../../../src/adapters/projects/file-project-index-store";
 import { GitProjectLayoutLive } from "../../../../../src/adapters/projects/git-project-layout";
+import { makeLocalWorkflowBackendLayer } from "../../../../../src/adapters/projects/local-workflow-backend";
 import { SubprocessProjectDefinitionLoaderLive } from "../../../../../src/adapters/projects/subprocess-project-definition-loader";
 import { HostIdentity } from "../../../../../src/contexts/workflow-execution/control/models/host-identity";
 import { makeHostDiagnosticLoggerLayer } from "../../../../../src/contexts/workflow-execution/control/services/host-diagnostic-logger";
@@ -216,7 +217,9 @@ const startTestHost = (socketPath: string, diagnosticPath: string) => {
     Layer.provide([
       makeFileProjectIndexStoreLayer(join(dirname(socketPath), "projects.json")),
       GitProjectLayoutLive.pipe(Layer.provide(SubprocessProjectDefinitionLoaderLive)),
-      ProjectRuntimeLive.pipe(Layer.provide(DrizzleProjectStoreLive)),
+      ProjectRuntimeLive.pipe(
+        Layer.provide([DrizzleProjectStoreLive, makeLocalWorkflowBackendLayer(TEST_HOST_IDENTITY)]),
+      ),
     ]),
   );
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });
