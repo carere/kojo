@@ -466,7 +466,6 @@ export const migrateProjectStore = (project: {
         })
         .onConflictDoNothing()
         .run();
-      connection.exec("DROP TABLE kojo_project_store_identity");
       projectStore
         .update(storeMetadata)
         .set({

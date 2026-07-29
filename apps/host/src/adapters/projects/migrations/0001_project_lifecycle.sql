@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS kojo_store_metadata (
   CHECK (created_at_ms >= 0 AND last_migrated_at_ms >= created_at_ms)
 ) STRICT;
 --> statement-breakpoint
+DROP TABLE kojo_project_store_identity;
+--> statement-breakpoint
 
 CREATE TABLE kojo_control_requests (
   request_key TEXT PRIMARY KEY NOT NULL,

@@ -23,12 +23,6 @@ export const projectStoreIdentityBootstrap = sqliteTable(
   (table) => [check("project_store_identity_singleton", sql`${table.singletonKey} = 1`)],
 );
 
-export const schemaMigrations = sqliteTable("kojo_schema_migrations", {
-  id: integer("id").primaryKey(),
-  hash: text("hash").notNull(),
-  createdAt: integer("created_at").notNull(),
-});
-
 export const storeMetadata = sqliteTable(
   "kojo_store_metadata",
   {
@@ -642,7 +636,7 @@ export const deletionItems = sqliteTable(
   ],
 );
 
-export const projectStoreMigrations = sqliteTable("kojo_schema_migrations", {
+export const schemaMigrations = sqliteTable("kojo_schema_migrations", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   hash: text("hash").notNull(),
   createdAt: integer("created_at").notNull(),

@@ -340,7 +340,10 @@ it.effect("restores the store when Workflow ownership postflight fails", () => {
   let assessments = 0;
   const incompatibleBackend = Layer.succeed(WorkflowBackend, {
     acquire: () => Effect.succeed(true),
-    quiesce: () => Effect.void,
+    quiesce: () =>
+      Effect.sync(() => {
+        order.push("backend-quiesced");
+      }),
     initialize: () => Effect.succeed(true),
     readiness: () => Effect.succeed("uninitialized" as const),
     postflight: () =>
@@ -363,6 +366,61 @@ it.effect("restores the store when Workflow ownership postflight fails", () => {
     ).toBe(false);
     expect(assessments).toBe(1);
     expect(completions).toEqual([false]);
-    expect(order).toEqual(["migration-restored", "ownership-released"]);
+    expect(order).toEqual([
+      "backend-quiesced",
+      "backend-quiesced",
+      "migration-restored",
+      "ownership-released",
+    ]);
   }).pipe(Effect.provide(ProjectRuntimeLive.pipe(Layer.provide([store, incompatibleBackend]))));
+});
+
+it.effect("quiesces the Workflow backend when migration completion verification fails", () => {
+  const order: Array<string> = [];
+  const store = Layer.succeed(ProjectStore, {
+    migrate: () => Effect.succeed(true),
+    postflight: () => Effect.succeed(true),
+    completeMigration: (_project, succeeded) =>
+      Effect.sync(() => {
+        order.push(succeeded ? "migration-verification-failed" : "migration-restored");
+        return false;
+      }),
+    readiness: () => Effect.succeed("limited" as const),
+    inspectForgetBlockers: () =>
+      Effect.succeed({
+        assessment: "available" as const,
+        enabledScheduleKeys: [],
+        nonFinalRunIds: [],
+      }),
+  });
+  const backend = Layer.succeed(WorkflowBackend, {
+    acquire: () => Effect.succeed(true),
+    quiesce: () =>
+      Effect.sync(() => {
+        order.push("backend-quiesced");
+      }),
+    initialize: () => Effect.succeed(true),
+    readiness: () => Effect.succeed("uninitialized" as const),
+    postflight: () => Effect.succeed(true),
+    release: () =>
+      Effect.sync(() => {
+        order.push("ownership-released");
+      }),
+  });
+
+  return Effect.gen(function* () {
+    const runtime = yield* ProjectRuntime;
+    expect(
+      yield* runtime.coordinateRegistration(project, Effect.succeed({}), (migrated) =>
+        Effect.succeed(migrated),
+      ),
+    ).toBe(false);
+    expect(order).toEqual([
+      "backend-quiesced",
+      "migration-verification-failed",
+      "backend-quiesced",
+      "migration-restored",
+      "ownership-released",
+    ]);
+  }).pipe(Effect.provide(ProjectRuntimeLive.pipe(Layer.provide([store, backend]))));
 });

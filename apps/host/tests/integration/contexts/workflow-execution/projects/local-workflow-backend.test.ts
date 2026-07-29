@@ -1,9 +1,16 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { Database } from "bun:sqlite";
+import { randomUUID } from "node:crypto";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProjectIdentity, type ProjectSnapshot } from "@kojo/control";
 import { Context, Effect, Fiber, Layer, Schema } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  completeProjectStoreMigration,
+  DrizzleProjectStoreLive,
+  migrateProjectStore,
+} from "../../../../../src/adapters/projects/drizzle-project-store";
 import { makeLocalWorkflowBackendLayer } from "../../../../../src/adapters/projects/local-workflow-backend";
 import {
   ProjectRuntime,
@@ -130,5 +137,88 @@ describe("Local Workflow backend ownership", () => {
       competingAcquired: true,
       completeWhenAcquired: true,
     });
+  });
+
+  it("quiesces an initialized Workflow backend before restoring a failed migration", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "kojo-backend-initialized-restoration-"));
+    cleanups.push(() => rm(directory, { recursive: true }));
+    const projectPath = join(directory, "project");
+    const dataPath = join(projectPath, ".kojo");
+    await mkdir(dataPath, { recursive: true, mode: 0o700 });
+    const project: ProjectSnapshot = {
+      identity: Schema.decodeUnknownSync(ProjectIdentity)(Bun.randomUUIDv7()),
+      path: projectPath,
+    };
+    await writeFile(
+      join(dataPath, "project.json"),
+      `${JSON.stringify({ layoutVersion: 1, projectIdentity: project.identity })}\n`,
+      { mode: 0o600 },
+    );
+    const databasePath = join(dataPath, "kojo.sqlite");
+    const database = new Database(databasePath, { create: true, strict: true });
+    database.exec(`CREATE TABLE kojo_project_store_identity (
+      singleton_key INTEGER PRIMARY KEY NOT NULL CHECK (singleton_key = 1),
+      project_identity TEXT NOT NULL UNIQUE,
+      database_instance_id TEXT NOT NULL UNIQUE
+    ) STRICT`);
+    database
+      .query("INSERT INTO kojo_project_store_identity VALUES (1, ?, ?)")
+      .run(project.identity, randomUUID());
+    database.exec("PRAGMA user_version = 0");
+    database.close();
+    await chmod(databasePath, 0o600);
+    migrateProjectStore(project);
+    expect(completeProjectStoreMigration(project, true)).toBe(true);
+    let quiescedBeforeRestoration = false;
+
+    const activation = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const backendContext = yield* Layer.build(
+            makeLocalWorkflowBackendLayer("initialized-host"),
+          );
+          const storeContext = yield* Layer.build(DrizzleProjectStoreLive);
+          const backend = Context.get(backendContext, WorkflowBackend);
+          const realStore = Context.get(storeContext, ProjectStore);
+          const failingStore = Layer.succeed(ProjectStore, {
+            ...realStore,
+            postflight: (snapshot) =>
+              Effect.gen(function* () {
+                yield* Effect.sync(() => {
+                  const connection = new Database(databasePath);
+                  connection.exec(
+                    "INSERT INTO kojo_deletion_intents(deletion_id, request_key, target_kind, target_sha256, target_snapshot_json, phase, created_at_ms, updated_at_ms) VALUES ('deletion', 'request', 'run', zeroblob(32), '{}', 'quiescing', 1, 1)",
+                  );
+                  connection.close();
+                });
+                return yield* realStore.postflight(snapshot);
+              }),
+            completeMigration: (snapshot, succeeded) =>
+              succeeded
+                ? realStore.completeMigration(snapshot, true)
+                : Effect.gen(function* () {
+                    quiescedBeforeRestoration =
+                      (yield* backend.readiness(snapshot)) === "uninitialized";
+                    return yield* realStore.completeMigration(snapshot, false);
+                  }),
+          });
+          const runtimeContext = yield* Layer.build(
+            ProjectRuntimeLive.pipe(
+              Layer.provide([failingStore, Layer.succeed(WorkflowBackend, backend)]),
+            ),
+          );
+          const runtime = Context.get(runtimeContext, ProjectRuntime);
+          return yield* runtime.coordinateRegistration(project, Effect.succeed({}), (ready) =>
+            Effect.succeed(ready),
+          );
+        }),
+      ),
+    );
+
+    expect(activation).toBe(false);
+    expect(quiescedBeforeRestoration).toBe(true);
+    const restored = new Database(databasePath, { readonly: true });
+    expect(restored.query("SELECT * FROM kojo_deletion_intents").all()).toEqual([]);
+    restored.close();
   });
 });
