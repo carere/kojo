@@ -47,6 +47,7 @@
     "bunx",
     "carere",
     "cocogitto",
+    "direnv",
     "esnext",
     "fontsource",
     "github",
@@ -64,7 +65,10 @@
     "solidjs",
     "tailwindcss",
     "tanstack",
+    "toplevel",
     "vitest",
+    "WORKTREE",
+    "worktrees",
     "zaidan"
   ],
   "js/ts.updateImportsOnFileMove.enabled": "always",

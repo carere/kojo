@@ -4,5 +4,17 @@ name = "kojo"
 
 [setup]
 script = '''
+# The Codex wrapper enables command tracing, so disable it while reading secrets.
+set +x
+set -a
+. "$CODEX_SOURCE_TREE_PATH/.env"
+set +a
+set -x
+
 cd "$CODEX_WORKTREE_PATH"
 bun install'''
+
+[shell_environment_policy]
+inherit = "all"
+experimental_use_profile = true
+ignore_default_excludes = true

@@ -26,7 +26,7 @@ const workflowPackagePath = fileURLToPath(
 );
 
 afterEach(async () => {
-  await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
 describe("kojo init", () => {
