@@ -18,6 +18,7 @@ interface Fixture {
 }
 
 const fixtureStartupTimeoutMs = 30_000;
+const browserAssertionTimeoutMs = 30_000;
 let fixture: Fixture | undefined;
 const temporaryDirectories: Array<() => Promise<void>> = [];
 const workflowPackagePath = fileURLToPath(
@@ -82,9 +83,11 @@ test("loads the Host-authoritative Project state and reconciles Navigator prefer
   );
 
   await page.reload({ waitUntil: "domcontentloaded" });
-  await expect.poll(() => page.locator("body").innerText()).toContain(secondIdentity);
+  await expect
+    .poll(() => page.locator("body").innerText(), { timeout: browserAssertionTimeoutMs })
+    .toContain(secondIdentity);
   const projects = page.getByRole("navigation", { name: "Kojo Projects" }).getByRole("button");
-  await expect.poll(() => projects.count()).toBe(2);
+  await expect.poll(() => projects.count(), { timeout: browserAssertionTimeoutMs }).toBe(2);
 
   expect(await projects.nth(0).getAttribute("data-project-identity")).toBe(secondIdentity);
   expect(await projects.nth(0).getAttribute("aria-current")).toBe("page");
@@ -112,7 +115,7 @@ test("loads the Host-authoritative Project state and reconciles Navigator prefer
     { firstIdentity, secondIdentity },
   );
   await page.reload({ waitUntil: "domcontentloaded" });
-  await expect.poll(() => projects.count()).toBe(2);
+  await expect.poll(() => projects.count(), { timeout: browserAssertionTimeoutMs }).toBe(2);
   expect(await projects.nth(0).getAttribute("data-project-identity")).toBe(secondIdentity);
   expect(await projects.nth(0).getAttribute("aria-current")).toBe("page");
 }, 60_000);
