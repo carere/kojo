@@ -39,8 +39,11 @@ jobs:
         working-directory: apps/visualizer
         run: bunx playwright install --with-deps --only-shell chromium
 
-      - name: Build and test
-        run: moon run :build :unit-test :integration-test :browser-test
+      - name: Build
+        run: moon run :build
+
+      - name: Test
+        run: moon run --concurrency 2 :unit-test :integration-test :browser-test
 
       - name: TypeScript build
         run: bun tsc --build --verbose

@@ -17,6 +17,7 @@ interface Fixture {
   readonly visualizer: Bun.Subprocess;
 }
 
+const fixtureStartupTimeoutMs = 30_000;
 let fixture: Fixture | undefined;
 const temporaryDirectories: Array<() => Promise<void>> = [];
 const workflowPackagePath = fileURLToPath(
@@ -114,7 +115,7 @@ test("loads the Host-authoritative Project state and reconciles Navigator prefer
   await expect.poll(() => projects.count()).toBe(2);
   expect(await projects.nth(0).getAttribute("data-project-identity")).toBe(secondIdentity);
   expect(await projects.nth(0).getAttribute("aria-current")).toBe("page");
-}, 30_000);
+}, 60_000);
 
 const startFixture = async (): Promise<Fixture> => {
   const visualizerDirectory = process.cwd().endsWith("apps/visualizer")
@@ -132,20 +133,29 @@ const startFixture = async (): Promise<Fixture> => {
       stderr: "pipe",
     },
   );
-  await waitFor(async () => {
-    try {
-      return (await fetch(`http://127.0.0.1:${port}`)).ok;
-    } catch {
-      return false;
-    }
-  }, visualizer);
+  const visualizerStderr = readStderr(visualizer);
 
-  return {
-    browser: await chromium.launch({ headless: true }),
-    host,
-    port,
-    visualizer,
-  };
+  try {
+    await waitFor(async () => {
+      try {
+        return (await fetch(`http://127.0.0.1:${port}`)).ok;
+      } catch {
+        return false;
+      }
+    }, visualizer);
+
+    return {
+      browser: await chromium.launch({ headless: true }),
+      host,
+      port,
+      visualizer,
+    };
+  } catch (error) {
+    if (visualizer.exitCode === null) visualizer.kill("SIGTERM");
+    await visualizer.exited;
+    await host.stop();
+    throw withFixtureStderr(error, await visualizerStderr);
+  }
 };
 
 const availablePort = () =>
@@ -164,18 +174,31 @@ const availablePort = () =>
   });
 
 const waitFor = async (condition: () => Promise<boolean>, processHandle: Bun.Subprocess) => {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  const deadline = Date.now() + fixtureStartupTimeoutMs;
+
+  while (Date.now() < deadline) {
     if (await condition()) return;
     if (processHandle.exitCode !== null) {
-      const stderr =
-        processHandle.stderr instanceof ReadableStream
-          ? await new Response(processHandle.stderr).text()
-          : "";
-      throw new Error(`Acceptance fixture process exited early: ${stderr}`);
+      throw new Error("Acceptance fixture process exited before becoming ready.");
     }
     await Bun.sleep(25);
   }
   throw new Error("Timed out while starting the browser acceptance fixture.");
+};
+
+const readStderr = (processHandle: Bun.Subprocess) =>
+  processHandle.stderr instanceof ReadableStream
+    ? new Response(processHandle.stderr).text()
+    : Promise.resolve("");
+
+const withFixtureStderr = (error: unknown, stderr: string) => {
+  const message = error instanceof Error ? error.message : String(error);
+  const diagnostic = stderr.trim();
+
+  return new Error(
+    diagnostic.length === 0 ? message : `${message}\nVisualizer stderr:\n${diagnostic}`,
+    { cause: error },
+  );
 };
 
 const run = async (command: ReadonlyArray<string>) => {

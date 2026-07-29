@@ -13,6 +13,8 @@ export interface KojoHostProcessOptions {
 }
 
 const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
+const hostStartupTimeoutMs = 15_000;
+const socketPollIntervalMs = 25;
 
 export const startKojoHostProcess = async (
   options: KojoHostProcessOptions = {},
@@ -26,14 +28,15 @@ export const startKojoHostProcess = async (
     stdout: "ignore",
     stderr: "pipe",
   });
+  const stderr = readStderr(processHandle);
 
   try {
     await waitForSocket(socketPath, processHandle);
   } catch (error) {
-    processHandle.kill("SIGTERM");
+    if (processHandle.exitCode === null) processHandle.kill("SIGTERM");
     await processHandle.exited;
     if (ownsDirectory) await rm(directory, { recursive: true });
-    throw error;
+    throw withStderr(error, await stderr);
   }
 
   return {
@@ -41,26 +44,40 @@ export const startKojoHostProcess = async (
     stop: async () => {
       processHandle.kill("SIGTERM");
       await processHandle.exited;
+      await stderr;
       if (ownsDirectory) await rm(directory, { recursive: true });
     },
   };
 };
 
 const waitForSocket = async (socketPath: string, processHandle: Bun.Subprocess) => {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  const deadline = Date.now() + hostStartupTimeoutMs;
+
+  while (Date.now() < deadline) {
     try {
       await stat(socketPath);
       return;
     } catch {
       if (processHandle.exitCode !== null) {
-        const stderr =
-          processHandle.stderr instanceof ReadableStream
-            ? await new Response(processHandle.stderr).text()
-            : "";
-        throw new Error(`Kojo Host fixture exited before opening its socket: ${stderr}`);
+        throw new Error("Kojo Host fixture exited before opening its socket.");
       }
-      await Bun.sleep(10);
+      await Bun.sleep(socketPollIntervalMs);
     }
   }
   throw new Error("Timed out while starting the Kojo Host fixture.");
+};
+
+const readStderr = (processHandle: Bun.Subprocess) =>
+  processHandle.stderr instanceof ReadableStream
+    ? new Response(processHandle.stderr).text()
+    : Promise.resolve("");
+
+const withStderr = (error: unknown, stderr: string) => {
+  const message = error instanceof Error ? error.message : String(error);
+  const diagnostic = stderr.trim();
+
+  return new Error(
+    diagnostic.length === 0 ? message : `${message}\nKojo Host stderr:\n${diagnostic}`,
+    { cause: error },
+  );
 };
