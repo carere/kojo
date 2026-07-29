@@ -55,6 +55,13 @@ export const ProjectOperationError = Schema.Struct({
   ]),
   message: Schema.String,
   next: Schema.String,
+  affectedResource: Schema.Union([
+    Schema.Struct({ kind: Schema.Literal("project"), identity: ProjectIdentity }),
+    Schema.Struct({ kind: Schema.Literal("project-path"), path: Schema.String }),
+    Schema.Struct({ kind: Schema.Literal("project-index") }),
+    Schema.Struct({ kind: Schema.Literal("request-key"), requestKey: RequestKey }),
+  ]),
+  findingKeys: Schema.Array(Schema.String),
 });
 export type ProjectOperationError = typeof ProjectOperationError.Type;
 

@@ -1,11 +1,13 @@
-import { type ProjectMutationResult, ProjectSnapshot, RequestKey } from "@kojo/control";
+import { ProjectMutationResult, ProjectSnapshot, RequestKey } from "@kojo/control";
 import { Context, type Effect, Schema } from "effect";
 
 export const ProjectRequestReceipt = Schema.Struct({
   requestKey: RequestKey,
   operation: Schema.Literals(["register", "forget"]),
-  input: Schema.String,
-  project: ProjectSnapshot,
+  fingerprint: Schema.String.check(
+    Schema.isPattern(/^[0-9a-f]{64}$/, { expected: "a SHA-256 request fingerprint" }),
+  ),
+  result: ProjectMutationResult,
 });
 export type ProjectRequestReceipt = typeof ProjectRequestReceipt.Type;
 

@@ -1,6 +1,6 @@
 import { expect, it } from "@effect/vitest";
 import { Effect, Schema } from "effect";
-import { HostInformation } from "../../src";
+import { HostInformation, ProjectIdentity } from "../../src";
 
 it.effect("rejects capabilities outside the versioned control contract", () =>
   Effect.gen(function* () {
@@ -15,3 +15,12 @@ it.effect("rejects capabilities outside the versioned control contract", () =>
     expect(String(error)).toContain("projects:list");
   }),
 );
+
+it("accepts canonical UUIDv7 Project Identities and rejects UUIDv4", () => {
+  expect(Schema.decodeUnknownSync(ProjectIdentity)("019fabda-76fe-7000-a948-c929fc96b3e8")).toBe(
+    "019fabda-76fe-7000-a948-c929fc96b3e8",
+  );
+  expect(() =>
+    Schema.decodeUnknownSync(ProjectIdentity)("00000000-0000-4000-8000-000000000000"),
+  ).toThrow();
+});

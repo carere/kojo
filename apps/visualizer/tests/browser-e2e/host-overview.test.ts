@@ -55,14 +55,14 @@ test("loads the Host-authoritative Project state and reconciles Navigator prefer
   const secondIdentity = JSON.parse(
     await readFile(join(secondPath, ".kojo", "project.json"), "utf8"),
   ).projectIdentity as string;
-  const staleIdentity = "00000000-0000-4000-8000-000000000000";
+  const staleIdentity = "00000000-0000-7000-8000-000000000000";
   await page.evaluate(
     ({ firstIdentity, secondIdentity, staleIdentity }) => {
       window.localStorage.setItem(
         "kojo.navigator.preferences",
         JSON.stringify({
           version: 1,
-          order: [secondIdentity, staleIdentity, firstIdentity],
+          order: [secondIdentity, "malformed-project-identity", staleIdentity, firstIdentity],
           selectedProjectIdentity: secondIdentity,
         }),
       );
@@ -86,6 +86,24 @@ test("loads the Host-authoritative Project state and reconciles Navigator prefer
     order: [secondIdentity, firstIdentity],
     selectedProjectIdentity: secondIdentity,
   });
+
+  await page.evaluate(
+    ({ firstIdentity, secondIdentity }) => {
+      window.localStorage.setItem(
+        "kojo.navigator.preferences",
+        JSON.stringify({
+          version: 1,
+          order: [secondIdentity, firstIdentity],
+          selectedProjectIdentity: "malformed-project-identity",
+        }),
+      );
+    },
+    { firstIdentity, secondIdentity },
+  );
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect.poll(() => projects.count()).toBe(2);
+  expect(await projects.nth(0).getAttribute("data-project-identity")).toBe(secondIdentity);
+  expect(await projects.nth(0).getAttribute("aria-current")).toBe("page");
 }, 30_000);
 
 const startFixture = async (): Promise<Fixture> => {

@@ -12,6 +12,7 @@ import {
   makeKojoControlServerLayer,
   startKojoHost,
 } from "../contexts/workflow-execution/control/services/local-host";
+import { ProjectForgetGuardLive } from "../contexts/workflow-execution/projects/services/project-forget-guard";
 
 export const startLiveKojoHost = async () => {
   const socketPath = process.env.KOJO_HOST_SOCKET ?? defaultSocketPath();
@@ -26,7 +27,7 @@ export const startLiveKojoHost = async () => {
     protocol,
     makeHostDiagnosticLoggerLayer(diagnosticPath),
     hostIdentity,
-  ).pipe(Layer.provide([projectIndex, GitProjectLayoutLive]));
+  ).pipe(Layer.provide([projectIndex, GitProjectLayoutLive, ProjectForgetGuardLive]));
 
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });
 };

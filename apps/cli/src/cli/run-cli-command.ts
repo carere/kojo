@@ -18,13 +18,16 @@ import { Effect, Schema } from "effect";
 import {
   initializeProject,
   ProjectInitializationError,
+  resolveInitializedProject,
 } from "../contexts/workflow-authoring/projects/services/project-initializer";
 import { selectProject } from "../contexts/workflow-execution/projects/use-cases/select-project";
 import { renderHostOverview } from "./render-host-overview";
 
 interface CliFailure {
+  readonly affectedResource?: ProjectOperationError["affectedResource"];
   readonly code: string;
   readonly exitCode: number;
+  readonly findingKeys?: ReadonlyArray<string>;
   readonly message: string;
   readonly next: string;
 }
@@ -90,7 +93,15 @@ const writeFailure = (failure: CliFailure, json: boolean, command: string) => {
       `${JSON.stringify({
         schemaVersion: 1,
         command,
-        error: { code: failure.code, message: failure.message, next: failure.next },
+        error: {
+          code: failure.code,
+          message: failure.message,
+          next: failure.next,
+          ...(failure.affectedResource === undefined
+            ? {}
+            : { affectedResource: failure.affectedResource }),
+          ...(failure.findingKeys === undefined ? {} : { findingKeys: failure.findingKeys }),
+        },
         warnings: [],
       })}\n`,
     );
@@ -104,14 +115,16 @@ const writeProject = (
   json: boolean,
   mutation?: Extract<ProjectMutationResult, { ok: true }>,
   warnings: ReadonlyArray<CliWarning> = [],
+  pendingRequestKey?: RequestKey,
 ) => {
+  const requestKey = mutation?.requestKey ?? pendingRequestKey;
   if (json) {
     process.stdout.write(
       `${JSON.stringify({
         schemaVersion: 1,
         command,
         projectIdentity: project.identity,
-        ...(mutation === undefined ? {} : { requestKey: mutation.requestKey }),
+        ...(requestKey === undefined ? {} : { requestKey }),
         result: {
           project,
           ...(mutation === undefined ? {} : { alreadyApplied: mutation.alreadyApplied }),
@@ -121,7 +134,7 @@ const writeProject = (
     );
   } else {
     process.stdout.write(`Project Identity: ${project.identity}\nPath: ${project.path}\n`);
-    if (mutation !== undefined) process.stdout.write(`Request Key: ${mutation.requestKey}\n`);
+    if (requestKey !== undefined) process.stdout.write(`Request Key: ${requestKey}\n`);
     for (const warning of warnings) {
       process.stderr.write(`Warning: ${warning.message}\nNext: ${warning.next}\n`);
     }
@@ -225,10 +238,10 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
     const registration = await runEffect(client.registerProject(project.path, requestKey));
     if (!registration.succeeded) {
       const warning = pendingRegistrationWarning(project);
-      if (json) writeProject("init", project, true, undefined, [warning]);
+      if (json) writeProject("init", project, true, undefined, [warning], requestKey);
       else {
         process.stdout.write(
-          `Initialized Kojo Project at ${project.path}\nProject Identity: ${project.identity}\n`,
+          `Initialized Kojo Project at ${project.path}\nProject Identity: ${project.identity}\nRequest Key: ${requestKey}\n`,
         );
         process.stderr.write(`Warning: ${warning.message}\nNext: ${warning.next}\n`);
       }
@@ -320,17 +333,24 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
     );
   }
 
-  let chosen: ProjectSnapshot;
+  let chosen: ProjectSnapshot | undefined;
+  let forgetIdentity: ProjectSnapshot["identity"] | undefined;
   if (args[1] === "forget" && options.projectId !== undefined) {
     try {
-      chosen = {
-        identity: Schema.decodeUnknownSync(ProjectIdentitySchema)(options.projectId),
-        path: "",
-      };
+      forgetIdentity = Schema.decodeUnknownSync(ProjectIdentitySchema)(options.projectId);
     } catch {
       return writeFailure(invalid("Use a full Project Identity."), json, "project.forget");
     }
-  } else {
+  } else if (args[1] === "forget") {
+    try {
+      forgetIdentity = (await resolveInitializedProject(options.projectPath ?? process.cwd()))
+        .identity;
+    } catch {
+      // A damaged or unavailable local Project can still be selected from the Host Index below.
+    }
+  }
+
+  if (forgetIdentity === undefined && chosen === undefined) {
     const list = await runEffect(client.listProjects);
     if (!list.succeeded) {
       return writeFailure(transportFailure(list.error), json, `project.${args[1]}`);
@@ -343,6 +363,9 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
   }
 
   if (args[1] === "show") {
+    if (chosen === undefined) {
+      return writeFailure(invalid("Choose a Kojo Project."), json, "project.show");
+    }
     writeProject("project.show", chosen, json);
     return 0;
   }
@@ -351,7 +374,11 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
   if (requestKey === undefined) {
     return writeFailure(invalid("Use a full Request Key."), json, "project.forget");
   }
-  const forgotten = await runEffect(client.forgetProject(chosen.identity, requestKey));
+  const identity = forgetIdentity ?? chosen?.identity;
+  if (identity === undefined) {
+    return writeFailure(invalid("Choose a Kojo Project."), json, "project.forget");
+  }
+  const forgotten = await runEffect(client.forgetProject(identity, requestKey));
   if (!forgotten.succeeded) {
     return writeFailure(transportFailure(forgotten.error), json, "project.forget");
   }

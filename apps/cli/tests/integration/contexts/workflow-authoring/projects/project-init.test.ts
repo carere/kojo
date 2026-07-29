@@ -56,7 +56,7 @@ describe("kojo init", () => {
     expect(metadata).toEqual({
       layoutVersion: 1,
       projectIdentity: expect.stringMatching(
-        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+        /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
       ),
     });
     expect(await readFile(join(project, ".kojo", "project.json"), "utf8")).toMatch(/\n$/);
@@ -129,6 +129,38 @@ describe("kojo init", () => {
     expect(await readFile(join(project, ".gitignore"), "utf8")).toBe(".kojo/\n");
   });
 
+  it("rejects an invalid existing Kojo Configuration before creating Project data", async () => {
+    const directory = await temporaryDirectory("kojo-init-invalid-configuration-");
+    const project = join(directory, "project");
+    await run(["git", "init", project]);
+    const invalidConfiguration = 'export default { workflows: "not-an-array" };\n';
+    await writeFile(join(project, "kojo.config.ts"), invalidConfiguration);
+
+    const result = await runCli(["init", project], join(directory, "missing-host.sock"), directory);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Kojo Configuration is invalid");
+    expect(await readFile(join(project, "kojo.config.ts"), "utf8")).toBe(invalidConfiguration);
+    expect(await pathsExist(project, [".kojo", ".gitignore"])).toEqual([false, false]);
+  });
+
+  it("rejects invalid SQLite content without recreating durable Project data", async () => {
+    const directory = await temporaryDirectory("kojo-init-invalid-database-");
+    const project = join(directory, "project");
+    await run(["git", "init", project]);
+    const host = await startKojoHostProcess();
+    cleanups.push(host.stop);
+    expect((await runCli(["init", project], host.socketPath, directory)).exitCode).toBe(0);
+    const databasePath = join(project, ".kojo", "kojo.sqlite");
+    await writeFile(databasePath, "not a SQLite database");
+
+    const result = await runCli(["init", project], host.socketPath, directory);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Project database is invalid");
+    expect(await readFile(databasePath, "utf8")).toBe("not a SQLite database");
+  });
+
   it("initializes safely when the Host is unavailable and can be registered later", async () => {
     const directory = await temporaryDirectory("kojo-init-offline-");
     const project = join(directory, "project");
@@ -141,7 +173,11 @@ describe("kojo init", () => {
     );
 
     expect(initialized.exitCode).toBe(0);
-    expect(JSON.parse(initialized.stdout).warnings).toEqual([
+    const initializedOutput = JSON.parse(initialized.stdout);
+    expect(initializedOutput.requestKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(initializedOutput.warnings).toEqual([
       expect.objectContaining({ code: "project-registration-pending" }),
     ]);
     const identity = JSON.parse(await readFile(join(project, ".kojo", "project.json"), "utf8"))
@@ -156,6 +192,17 @@ describe("kojo init", () => {
     );
     expect(registered.exitCode).toBe(0);
     expect(JSON.parse(registered.stdout).result.project.identity).toBe(identity);
+
+    const suppliedProject = join(directory, "supplied-request-key");
+    const suppliedRequestKey = "10000000-0000-4000-8000-000000000099";
+    await run(["git", "init", suppliedProject]);
+    const supplied = await runCli(
+      ["init", suppliedProject, "--request-key", suppliedRequestKey],
+      join(directory, "still-missing-host.sock"),
+      directory,
+    );
+    expect(supplied.exitCode).toBe(0);
+    expect(supplied.stdout).toContain(`Request Key: ${suppliedRequestKey}`);
   });
 
   it("does not recreate missing durable data in a damaged existing Project", async () => {

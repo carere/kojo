@@ -18,13 +18,18 @@ const parsePreferences = (value: string | null): NavigatorPreferences | undefine
   try {
     const parsed = JSON.parse(value) as Partial<NavigatorPreferences>;
     if (parsed.version !== 1 || !Array.isArray(parsed.order)) return undefined;
-    const order = parsed.order.map((identity) =>
-      Schema.decodeUnknownSync(ProjectIdentitySchema)(identity),
-    );
-    const selectedProjectIdentity =
-      parsed.selectedProjectIdentity === undefined
-        ? undefined
-        : Schema.decodeUnknownSync(ProjectIdentitySchema)(parsed.selectedProjectIdentity);
+    const decodeIdentity = (value: unknown) => {
+      try {
+        return Schema.decodeUnknownSync(ProjectIdentitySchema)(value);
+      } catch {
+        return undefined;
+      }
+    };
+    const order = parsed.order.flatMap((identity) => {
+      const decoded = decodeIdentity(identity);
+      return decoded === undefined ? [] : [decoded];
+    });
+    const selectedProjectIdentity = decodeIdentity(parsed.selectedProjectIdentity);
     return {
       version: 1,
       order,

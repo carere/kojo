@@ -16,6 +16,7 @@ import {
   startKojoHost,
   UnsafeHostStoreError,
 } from "../../../../../src/contexts/workflow-execution/control/services/local-host";
+import { ProjectForgetGuardLive } from "../../../../../src/contexts/workflow-execution/projects/services/project-forget-guard";
 
 const cleanups: Array<() => Promise<void>> = [];
 const TEST_HOST_IDENTITY = Schema.decodeUnknownSync(HostIdentity)(
@@ -149,6 +150,7 @@ const startTestHost = (socketPath: string, diagnosticPath: string) => {
     Layer.provide([
       makeFileProjectIndexStoreLayer(join(dirname(socketPath), "projects.json")),
       GitProjectLayoutLive,
+      ProjectForgetGuardLive,
     ]),
   );
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });
