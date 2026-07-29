@@ -12,7 +12,7 @@ tasks:
       runFromWorkspaceRoot: true
     preset: utility
 
-  test:
+  unit-test:
     command: bun --bun vitest run --project unit
     description: Run CLI unit tests
     inputs:

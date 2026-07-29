@@ -23,7 +23,7 @@ tasks:
       - "src/i18n/"
     type: build
 
-  test:
+  unit-test:
     command: bun --bun vitest run --project unit
     description: Run visualizer unit tests
     inputs:

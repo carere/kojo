@@ -1,7 +1,7 @@
 $schema: "../../.moon/cache/schemas/project.json"
 
 tasks:
-  test:
+  unit-test:
     command: bun --bun vitest run --project unit
     inputs:
       - "@group(configs)"

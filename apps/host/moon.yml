@@ -7,7 +7,7 @@ tasks:
       runFromWorkspaceRoot: true
     preset: server
 
-  test:
+  unit-test:
     command: bun --bun vitest run --project unit --passWithNoTests
     inputs:
       - "@group(configs)"

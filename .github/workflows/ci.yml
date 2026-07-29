@@ -37,13 +37,13 @@ jobs:
 
       - name: Install Playwright browser
         working-directory: apps/visualizer
-        run: bun --bun playwright install --with-deps --only-shell chromium
+        run: bunx playwright install --with-deps --only-shell chromium
 
       - name: Build and test
-        run: moon run :build :test :integration-test :browser-test
+        run: moon run :build :unit-test :integration-test :browser-test
 
       - name: TypeScript build
-        run: moon run :tsc
+        run: bun tsc --build --verbose
 
       - name: Biome check
-        run: moon run :check
+        run: bun biome check --verbose --no-errors-on-unmatched .
