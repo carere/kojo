@@ -13,7 +13,13 @@ const project: ProjectSnapshot = {
   path: "/project",
 };
 
+const unusedWorkflowExecution = {
+  submit: () => Effect.die("Workflow submission is not used by Project Runtime tests"),
+  observe: () => Effect.die("Workflow observation is not used by Project Runtime tests"),
+};
+
 const backend = Layer.succeed(WorkflowBackend, {
+  ...unusedWorkflowExecution,
   acquire: () => Effect.succeed(true),
   quiesce: () => Effect.void,
   initialize: () => Effect.succeed(true),
@@ -160,6 +166,7 @@ it.effect("commits migration only after the Workflow backend acquires ownership"
       }),
   });
   const initializingBackend = Layer.succeed(WorkflowBackend, {
+    ...unusedWorkflowExecution,
     acquire: () =>
       Effect.sync(() => {
         order.push("ownership-acquired");
@@ -224,6 +231,7 @@ it.effect("does not mutate the store when another Workflow backend owns the Proj
       }),
   });
   const ownedBackend = Layer.succeed(WorkflowBackend, {
+    ...unusedWorkflowExecution,
     acquire: () => Effect.succeed(false),
     quiesce: () => Effect.void,
     readiness: () => Effect.succeed("needs-attention" as const),
@@ -276,6 +284,7 @@ it.effect("releases the previous path before acquiring a moved Project", () => {
   });
   let assessments = 0;
   const movedBackend = Layer.succeed(WorkflowBackend, {
+    ...unusedWorkflowExecution,
     acquire: () => Effect.succeed(true),
     quiesce: () => Effect.void,
     readiness: () =>
@@ -339,6 +348,7 @@ it.effect("restores the store when Workflow ownership postflight fails", () => {
   });
   let assessments = 0;
   const incompatibleBackend = Layer.succeed(WorkflowBackend, {
+    ...unusedWorkflowExecution,
     acquire: () => Effect.succeed(true),
     quiesce: () =>
       Effect.sync(() => {
@@ -394,6 +404,7 @@ it.effect("quiesces the Workflow backend when migration completion verification 
       }),
   });
   const backend = Layer.succeed(WorkflowBackend, {
+    ...unusedWorkflowExecution,
     acquire: () => Effect.succeed(true),
     quiesce: () =>
       Effect.sync(() => {

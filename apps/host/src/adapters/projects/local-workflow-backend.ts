@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { BunCrypto } from "@effect/platform-bun";
 import { SqliteClient } from "@effect/sql-sqlite-bun";
 import type { ProjectSnapshot } from "@kojo/control";
-import { Context, Effect, Exit, Layer, Option, Scope } from "effect";
+import { Context, Duration, Effect, Exit, Layer, Option, Schema, Scope } from "effect";
 import {
   ClusterWorkflowEngine,
   RunnerAddress,
@@ -13,10 +13,17 @@ import {
   SingleRunner,
 } from "effect/unstable/cluster";
 import { SqlClient } from "effect/unstable/sql";
-import { WorkflowEngine } from "effect/unstable/workflow";
+import * as Activity from "effect/unstable/workflow/Activity";
+import * as DurableClock from "effect/unstable/workflow/DurableClock";
+import * as Workflow from "effect/unstable/workflow/Workflow";
+import * as WorkflowEngine from "effect/unstable/workflow/WorkflowEngine";
 import {
+  type AnyLocalWorkflowDefinition,
+  type LocalWorkflowOperations,
   WorkflowBackend,
   type WorkflowBackendAssessment,
+  type WorkflowBackendReference,
+  type WorkflowBackendState,
 } from "../../contexts/workflow-execution/projects/services/workflow-backend";
 
 const databasePath = (project: ProjectSnapshot) => join(project.path, ".kojo", "kojo.sqlite");
@@ -55,8 +62,16 @@ const waitForOwnership = (sharding: Sharding.Sharding["Service"]) =>
     return false;
   });
 
-export const makeLocalWorkflowBackendLayer = (hostIdentity: string) =>
-  Layer.effect(
+export const makeLocalWorkflowBackendLayer = (
+  hostIdentity: string,
+  definitions: ReadonlyArray<AnyLocalWorkflowDefinition> = [],
+) => {
+  const entries = makeEntries(definitions);
+  const registrationLayer = entries.reduce<
+    Layer.Layer<never, never, WorkflowEngine.WorkflowEngine>
+  >((layer, entry) => Layer.merge(layer, entry.registration), Layer.empty);
+
+  return Layer.effect(
     WorkflowBackend,
     Effect.gen(function* () {
       const parentScope = yield* Effect.scope;
@@ -136,7 +151,12 @@ export const makeLocalWorkflowBackendLayer = (hostIdentity: string) =>
             yield* configure(sql);
             const support = SingleRunner.layer({
               runnerStorage: "sql",
-              shardingConfig: { runnerAddress: Option.some(ownerAddress) },
+              shardingConfig: {
+                entityMessagePollInterval: Duration.millis(25),
+                entityReplyPollInterval: Duration.millis(25),
+                refreshAssignmentsInterval: Duration.millis(25),
+                runnerAddress: Option.some(ownerAddress),
+              },
             }).pipe(Layer.provideMerge([Layer.succeedContext(sqlContext), BunCrypto.layer]));
             const context = yield* Layer.buildWithScope(
               ClusterWorkflowEngine.layer.pipe(Layer.provideMerge(support)),
@@ -144,6 +164,12 @@ export const makeLocalWorkflowBackendLayer = (hostIdentity: string) =>
             );
             const sharding = Context.get(context, Sharding.Sharding);
             const engine = Context.get(context, WorkflowEngine.WorkflowEngine);
+            yield* Layer.buildWithScope(
+              registrationLayer.pipe(
+                Layer.provide(Layer.succeed(WorkflowEngine.WorkflowEngine, engine)),
+              ),
+              scope,
+            );
             if (!(yield* waitForOwnership(sharding))) {
               yield* Scope.close(scope, Exit.void);
               return false;
@@ -181,6 +207,147 @@ export const makeLocalWorkflowBackendLayer = (hostIdentity: string) =>
             return (yield* postflight(project)) ? "ready" : "needs-attention";
           }).pipe(Effect.catchCause(() => Effect.succeed("needs-attention" as const))),
         release,
+        submit: (project, { workflowKey, runId, input }) =>
+          Effect.suspend(() => {
+            const backend = getActiveBackend(active, project);
+            const entry = getEntry(entries, workflowKey);
+            return entry
+              .submit(backend.engine, runId, input)
+              .pipe(Effect.as(makeReference(workflowKey, runId)));
+          }),
+        observe: (project, reference) =>
+          Effect.suspend(() => {
+            const backend = getActiveBackend(active, project);
+            const entry = getEntry(entries, reference.workflowKey);
+            return entry.observe(backend.engine, reference.runId);
+          }),
       };
     }),
   );
+};
+
+interface Entry {
+  readonly workflowKey: string;
+  readonly submit: (
+    engine: WorkflowEngine.WorkflowEngine["Service"],
+    runId: string,
+    input: unknown,
+  ) => Effect.Effect<void>;
+  readonly observe: (
+    engine: WorkflowEngine.WorkflowEngine["Service"],
+    runId: string,
+  ) => Effect.Effect<WorkflowBackendState>;
+  readonly registration: Layer.Layer<never, never, WorkflowEngine.WorkflowEngine>;
+}
+
+const makeEntries = (
+  definitions: ReadonlyArray<AnyLocalWorkflowDefinition>,
+): ReadonlyArray<Entry> => {
+  const workflowKeys = new Set<string>();
+  return definitions.map((definition) => {
+    if (workflowKeys.has(definition.workflowKey)) {
+      throw new Error(`Duplicate Workflow Key: ${definition.workflowKey}`);
+    }
+    workflowKeys.add(definition.workflowKey);
+
+    const workflow = Workflow.make(`Kojo/${definition.workflowKey}`, {
+      payload: {
+        runId: Schema.String,
+        input: Schema.Unknown,
+      },
+      success: definition.successSchema,
+      error: definition.failureSchema ?? Schema.Never,
+      idempotencyKey: ({ runId }) => runId,
+    });
+    const operations = makeOperations();
+    const registration = workflow.toLayer(({ input }) =>
+      Schema.decodeUnknownEffect(definition.inputSchema)(input).pipe(
+        Effect.orDie,
+        Effect.flatMap((decoded) => definition.execute(decoded as never, operations)),
+      ),
+    );
+
+    return {
+      workflowKey: definition.workflowKey,
+      submit: (engine, runId, input) =>
+        workflow.executionId({ runId, input }).pipe(
+          Effect.flatMap((executionId) =>
+            engine.execute(workflow, {
+              executionId,
+              payload: { runId, input },
+              discard: true,
+            }),
+          ),
+          Effect.orDie,
+          Effect.asVoid,
+        ) as unknown as Effect.Effect<void>,
+      observe: (engine, runId) =>
+        workflow.executionId({ runId, input: undefined }).pipe(
+          Effect.flatMap((executionId) => engine.poll(workflow, executionId)),
+          Effect.map(toBackendState),
+        ) as unknown as Effect.Effect<WorkflowBackendState>,
+      registration: registration as unknown as Layer.Layer<
+        never,
+        never,
+        WorkflowEngine.WorkflowEngine
+      >,
+    };
+  });
+};
+
+const makeOperations = (): LocalWorkflowOperations => ({
+  activity: <
+    Success extends Schema.Top,
+    Failure extends Schema.Top = typeof Schema.Never,
+  >(options: {
+    readonly operationKey: string;
+    readonly successSchema: Success;
+    readonly failureSchema?: Failure;
+    readonly execute: Effect.Effect<Success["Type"], Failure["Type"]>;
+  }) => {
+    const failureSchema = options.failureSchema ?? (Schema.Never as unknown as Failure);
+    return Activity.make({
+      name: options.operationKey,
+      success: options.successSchema,
+      error: failureSchema,
+      execute: options.execute,
+    }) as unknown as Effect.Effect<Success["Type"], Failure["Type"]>;
+  },
+  sleep: ({ operationKey, duration }) =>
+    DurableClock.sleep({
+      name: operationKey,
+      duration,
+      inMemoryThreshold: Duration.zero,
+    }) as never,
+});
+
+const getActiveBackend = (
+  active: ReadonlyMap<string, ActiveBackend>,
+  project: ProjectSnapshot,
+): ActiveBackend => {
+  const backend = active.get(project.path);
+  if (backend === undefined) {
+    throw new Error(`Project Workflow Backend is not active: ${project.identity}`);
+  }
+  return backend;
+};
+
+const getEntry = (entries: ReadonlyArray<Entry>, workflowKey: string): Entry => {
+  const entry = entries.find((candidate) => candidate.workflowKey === workflowKey);
+  if (entry === undefined) throw new Error(`Unknown Workflow Key: ${workflowKey}`);
+  return entry;
+};
+
+const makeReference = (workflowKey: string, runId: string): WorkflowBackendReference =>
+  ({ workflowKey, runId }) as WorkflowBackendReference;
+
+const toBackendState = (
+  result: Option.Option<Workflow.Result<unknown, unknown>>,
+): WorkflowBackendState => {
+  if (Option.isNone(result)) return { _tag: "Pending" };
+  if (result.value._tag === "Suspended") return { _tag: "Waiting" };
+  if (Exit.isSuccess(result.value.exit)) {
+    return { _tag: "Completed", result: result.value.exit.value };
+  }
+  return { _tag: "Failed" };
+};

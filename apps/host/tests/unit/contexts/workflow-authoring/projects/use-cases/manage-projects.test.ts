@@ -417,6 +417,8 @@ it.effect("forgets the moved Project snapshot after queued registration complete
       Effect.sync(() => {
         releasedPaths.push(project.path);
       }),
+    submit: () => Effect.die("Workflow submission is not used by Project authoring tests"),
+    observe: () => Effect.die("Workflow observation is not used by Project authoring tests"),
   });
   const runtime = ProjectRuntimeLive.pipe(Layer.provide([projectStore, workflowBackend]));
   const layer = Layer.mergeAll(indexStore, makeLayout({ moved }), runtime);
