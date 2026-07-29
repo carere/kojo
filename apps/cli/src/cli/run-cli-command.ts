@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import {
   type ProjectCondition,
   ProjectIdentity as ProjectIdentitySchema,
+  type ProjectListCursorError,
   type ProjectMutationResult,
   type ProjectOperationError,
   type ProjectSelector,
@@ -102,6 +103,11 @@ const projectFailure = (result: Extract<ProjectMutationResult, { ok: false }>): 
 const projectQueryFailure = (error: ProjectOperationError): CliFailure => ({
   ...error,
   exitCode: 4,
+});
+
+const projectCursorFailure = (error: ProjectListCursorError): CliFailure => ({
+  ...error,
+  exitCode: 2,
 });
 
 const writeFailure = (failure: CliFailure, json: boolean, command: string) => {
@@ -377,7 +383,7 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       );
     }
     const listed = await runEffect(
-      client.listProjects({
+      client.listProjectPage({
         conditions: options.conditions as ReadonlyArray<ProjectCondition>,
         limit,
         ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
@@ -385,21 +391,24 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
     );
     if (!listed.succeeded)
       return writeFailure(transportFailure(listed.error), json, "project.list");
+    if (!listed.value.ok)
+      return writeFailure(projectCursorFailure(listed.value.error), json, "project.list");
+    const page = listed.value.page;
     if (json) {
       process.stdout.write(
-        `${JSON.stringify({ schemaVersion: 1, command: "project.list", result: listed.value, warnings: [] })}\n`,
+        `${JSON.stringify({ schemaVersion: 1, command: "project.list", result: page, warnings: [] })}\n`,
       );
     } else {
       const lines =
-        listed.value.items.length === 0
+        page.items.length === 0
           ? "No Kojo Projects."
-          : listed.value.items
+          : page.items
               .map((project) => `${project.identity}\t${project.condition}\t${project.path}`)
               .join("\n");
       process.stdout.write(`${lines}\n`);
-      if (listed.value.nextCursor !== null)
+      if (page.nextCursor !== null)
         process.stdout.write(
-          `More Projects are available. Continue with --cursor ${listed.value.nextCursor}\n`,
+          `More Projects are available. Continue with --cursor ${page.nextCursor}\n`,
         );
     }
     return 0;
@@ -486,13 +495,34 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
   }
 
   if (forgetIdentity === undefined && chosen === undefined) {
-    const list = await runEffect(client.listProjects({ conditions: [], limit: 200 }));
-    if (!list.succeeded) {
+    const projects: Array<ProjectSnapshot> = [];
+    let cursor: string | undefined;
+    let listFailure: CliFailure | undefined;
+    do {
+      const list = await runEffect(
+        client.listProjectPage({
+          conditions: [],
+          limit: 200,
+          ...(cursor === undefined ? {} : { cursor }),
+        }),
+      );
+      if (!list.succeeded) {
+        listFailure = transportFailure(list.error);
+        break;
+      }
+      if (!list.value.ok) {
+        listFailure = projectCursorFailure(list.value.error);
+        break;
+      }
+      projects.push(...list.value.page.items);
+      cursor = list.value.page.nextCursor ?? undefined;
+    } while (cursor !== undefined);
+    if (listFailure !== undefined) {
       if (args[1] === "show") {
-        return writeFailure(transportFailure(list.error), json, "project.show");
+        return writeFailure(listFailure, json, "project.show");
       }
     } else {
-      const selection = await selectProject(list.value.items, options);
+      const selection = await selectProject(projects, options);
       if ("exitCode" in selection) {
         if (args[1] === "show") {
           return writeFailure(selection, json, "project.show");

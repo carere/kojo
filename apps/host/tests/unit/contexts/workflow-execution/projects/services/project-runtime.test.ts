@@ -16,7 +16,8 @@ it.effect("serializes lifecycle inspection for one Project", () => {
   let active = 0;
   let maximumActive = 0;
   const store = Layer.succeed(ProjectStore, {
-    prepare: () => Effect.succeed(true),
+    migrate: () => Effect.succeed(true),
+    readiness: () => Effect.succeed("ready"),
     inspectForgetBlockers: () =>
       Effect.gen(function* () {
         active += 1;

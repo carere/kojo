@@ -43,7 +43,7 @@ const controlClient = (
     },
     ListProjects: () => {
       requests.push("ListProjects");
-      return Effect.succeed({ items: [], nextCursor: null });
+      return Effect.succeed({ projects: [] });
     },
   }) as unknown as KojoControlClient;
 
@@ -56,6 +56,25 @@ it.effect("negotiates before reading the authoritative Project list", () =>
 
     expect(overview).toEqual({ host: handshake, projects: [] });
     expect(requests).toEqual(["Negotiate", "ListProjects"]);
+  }),
+);
+
+it.effect("keeps every authoritative Project in the unpaged Host overview", () =>
+  Effect.gen(function* () {
+    const projects = Array.from({ length: 201 }, (_, index) => ({
+      identity: Schema.decodeUnknownSync(ProjectIdentity)(
+        `00000000-0000-7000-8000-${index.toString(16).padStart(12, "0")}`,
+      ),
+      path: `/projects/${index}`,
+    }));
+    const transport = {
+      Negotiate: () => Effect.succeed(handshake),
+      ListProjects: () => Effect.succeed({ projects }),
+    } as unknown as KojoControlClient;
+
+    const overview = yield* makeLocalClient({ connect: Effect.succeed(transport) }).getHostOverview;
+
+    expect(overview.projects).toEqual(projects);
   }),
 );
 
@@ -82,6 +101,7 @@ it.effect("gates optional Project operations against negotiated Host capabilitie
     );
     const requestKey = Schema.decodeUnknownSync(RequestKey)("10000000-0000-4000-8000-000000000001");
 
+    const pageError = yield* Effect.flip(client.listProjectPage());
     const showError = yield* Effect.flip(client.showProject(identity));
     const registerError = yield* Effect.flip(client.registerProject("/project", requestKey));
     const forgetError = yield* Effect.flip(
@@ -91,6 +111,10 @@ it.effect("gates optional Project operations against negotiated Host capabilitie
       client.replayForgetProject({ kind: "identity", identity }, requestKey),
     );
 
+    expect(pageError).toMatchObject({
+      _tag: "UnsupportedControlCapabilityError",
+      capability: "projects:list-page",
+    });
     expect(showError).toMatchObject({
       _tag: "UnsupportedControlCapabilityError",
       capability: "projects:show",
@@ -99,7 +123,7 @@ it.effect("gates optional Project operations against negotiated Host capabilitie
     expect(registerError).toBeInstanceOf(UnsupportedControlCapabilityError);
     expect(forgetError).toBeInstanceOf(UnsupportedControlCapabilityError);
     expect(replayError).toBeInstanceOf(UnsupportedControlCapabilityError);
-    expect(requests).toEqual(["Negotiate", "Negotiate", "Negotiate", "Negotiate"]);
+    expect(requests).toEqual(["Negotiate", "Negotiate", "Negotiate", "Negotiate", "Negotiate"]);
   }),
 );
 

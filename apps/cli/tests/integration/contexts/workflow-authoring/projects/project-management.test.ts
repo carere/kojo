@@ -1,5 +1,15 @@
 import { Database } from "bun:sqlite";
-import { cp, mkdir, readFile, realpath, rename, rm, symlink, unlink } from "node:fs/promises";
+import {
+  chmod,
+  cp,
+  mkdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  unlink,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -66,9 +76,91 @@ describe("Kojo Project discovery", () => {
       directory,
     );
     expect(JSON.parse(combined.stdout).result.items).toHaveLength(3);
+
+    const malformed = await runCli(
+      ["project", "list", "--cursor", "not-a-cursor", "--json"],
+      host.socketPath,
+      directory,
+    );
+    expect(malformed.exitCode).toBe(2);
+    expect(JSON.parse(malformed.stdout).error.code).toBe("project-cursor-malformed");
+
+    const decodedCursor = JSON.parse(
+      Buffer.from(firstResult.nextCursor, "base64url").toString("utf8"),
+    );
+    decodedCursor.version = 2;
+    const unsupportedCursor = Buffer.from(JSON.stringify(decodedCursor)).toString("base64url");
+    const unsupported = await runCli(
+      ["project", "list", "--cursor", unsupportedCursor, "--json"],
+      host.socketPath,
+      directory,
+    );
+    expect(unsupported.exitCode).toBe(2);
+    expect(JSON.parse(unsupported.stdout).error.code).toBe("project-cursor-version-unsupported");
+
+    const mismatched = await runCli(
+      [
+        "project",
+        "list",
+        "--condition",
+        "needs-attention",
+        "--cursor",
+        firstResult.nextCursor,
+        "--json",
+      ],
+      host.socketPath,
+      directory,
+    );
+    expect(mismatched.exitCode).toBe(2);
+    expect(JSON.parse(mismatched.stdout).error.code).toBe("project-cursor-filter-mismatch");
+
+    expect(
+      (
+        await runCli(
+          ["project", "forget", "--project-id", firstResult.items[0].identity],
+          host.socketPath,
+          directory,
+        )
+      ).exitCode,
+    ).toBe(0);
+    const missingAnchor = await runCli(
+      ["project", "list", "--condition", "ready", "--cursor", firstResult.nextCursor, "--json"],
+      host.socketPath,
+      directory,
+    );
+    expect(missingAnchor.exitCode).toBe(2);
+    expect(JSON.parse(missingAnchor.stdout).error.code).toBe("project-cursor-anchor-missing");
+
     expect(
       (await runCli(["project", "list", "--limit", "201"], host.socketPath, directory)).exitCode,
     ).toBe(2);
+  });
+
+  it("selects Projects beyond the first 200 authoritative Index entries", async () => {
+    const directory = await temporaryDirectory("kojo-project-large-index-");
+    const hostStore = join(directory, "host-store");
+    await mkdir(hostStore, { mode: 0o700 });
+    const projects = Array.from({ length: 201 }, (_, index) => ({
+      identity: `00000000-0000-7000-8000-${index.toString(16).padStart(12, "0")}`,
+      path: join(directory, `missing-project-${index}`),
+    }));
+    const indexPath = join(hostStore, "projects.json");
+    await Bun.write(
+      indexPath,
+      `${JSON.stringify({ layoutVersion: 1, projects, receipts: [] }, null, 2)}\n`,
+    );
+    await chmod(indexPath, 0o600);
+    const host = await startKojoHostProcess({ storePath: hostStore });
+    cleanups.push(host.stop);
+
+    const selected = await runCli(
+      ["project", "show", "--project-id", projects[200].identity, "--json"],
+      host.socketPath,
+      directory,
+    );
+
+    expect(selected.exitCode).toBe(0);
+    expect(JSON.parse(selected.stdout).result.project).toEqual(projects[200]);
   });
 
   it("lists, selects, shows, registers, and forgets Host-authoritative Projects", async () => {
@@ -396,6 +488,40 @@ describe("Kojo Project discovery", () => {
       requestKey: runKey,
       error: { code: "project-forget-blocked" },
     });
+  });
+
+  it("fails closed without recreating a missing Project database during forget", async () => {
+    const directory = await temporaryDirectory("kojo-project-missing-store-forget-");
+    const project = join(directory, "project");
+    await git(["init", project]);
+    const host = await startKojoHostProcess();
+    cleanups.push(host.stop);
+    expect((await runCli(["init", project], host.socketPath, directory)).exitCode).toBe(0);
+    const identity = JSON.parse(await readFile(join(project, ".kojo", "project.json"), "utf8"))
+      .projectIdentity as string;
+    const databasePath = join(project, ".kojo", "kojo.sqlite");
+    await unlink(databasePath);
+
+    const forgotten = await runCli(
+      [
+        "project",
+        "forget",
+        "--project-id",
+        identity,
+        "--request-key",
+        "missing-store-key",
+        "--json",
+      ],
+      host.socketPath,
+      directory,
+    );
+
+    expect(forgotten.exitCode).toBe(4);
+    expect(JSON.parse(forgotten.stdout).error).toMatchObject({
+      code: "project-forget-blocked",
+      findingKeys: ["store.open-failed"],
+    });
+    expect(await Bun.file(databasePath).exists()).toBe(false);
   });
 
   it("finds indexed Projects after the Host restarts", async () => {

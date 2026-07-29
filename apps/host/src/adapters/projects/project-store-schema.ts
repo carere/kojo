@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { blob, check, integer, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
+import { blob, check, index, integer, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
 
 export const workflowScheduleStates = sqliteTable(
   "kojo_workflow_schedule_states",
@@ -33,6 +33,22 @@ export const workflowScheduleStates = sqliteTable(
       sql`${table.condition} IN ('available', 'unavailable', 'needs-attention')`,
     ),
     check("schedule_row_version_positive", sql`${table.rowVersion} > 0`),
+    check(
+      "schedule_current_definition_complete",
+      sql`(${table.currentWorkflowKey} IS NULL AND ${table.currentRevision} IS NULL AND ${table.currentCron} IS NULL AND ${table.currentTimeZone} IS NULL AND ${table.currentOverlapPolicy} IS NULL AND ${table.currentInputRuleRevision} IS NULL) OR (${table.currentWorkflowKey} IS NOT NULL AND ${table.currentRevision} IS NOT NULL AND ${table.currentCron} IS NOT NULL AND ${table.currentTimeZone} IS NOT NULL AND ${table.currentOverlapPolicy} IS NOT NULL AND ${table.currentInputRuleRevision} IS NOT NULL)`,
+    ),
+    check(
+      "schedule_applied_definition_complete",
+      sql`(${table.appliedWorkflowKey} IS NULL AND ${table.appliedRevision} IS NULL AND ${table.appliedCron} IS NULL AND ${table.appliedTimeZone} IS NULL AND ${table.appliedOverlapPolicy} IS NULL AND ${table.appliedInputRuleRevision} IS NULL) OR (${table.appliedWorkflowKey} IS NOT NULL AND ${table.appliedRevision} IS NOT NULL AND ${table.appliedCron} IS NOT NULL AND ${table.appliedTimeZone} IS NOT NULL AND ${table.appliedOverlapPolicy} IS NOT NULL AND ${table.appliedInputRuleRevision} IS NOT NULL)`,
+    ),
+    check(
+      "schedule_next_occurrence_valid",
+      sql`${table.nextOccurrenceMs} IS NULL OR (${table.enabledIntent} = 1 AND ${table.condition} = 'available' AND (${table.highWaterMarkMs} IS NULL OR ${table.nextOccurrenceMs} > ${table.highWaterMarkMs}))`,
+    ),
+    index("kojo_schedule_states_workflow_idx").on(table.currentWorkflowKey),
+    index("kojo_schedule_states_due_idx")
+      .on(table.nextOccurrenceMs, table.scheduleKey)
+      .where(sql`${table.enabledIntent} = 1 AND ${table.condition} = 'available'`),
   ],
 );
 
@@ -81,15 +97,28 @@ export const workflowRuns = sqliteTable(
       sql`${table.triggerKind} IN ('manual', 'schedule', 'child')`,
     ),
     check("workflow_run_row_version_positive", sql`${table.rowVersion} > 0`),
+    check(
+      "workflow_run_final_state_valid",
+      sql`((${table.state} IN ('stopped', 'failed', 'completed')) AND ${table.outcomeEventId} IS NOT NULL AND ${table.finalizedAtMs} IS NOT NULL) OR ((${table.state} IN ('running', 'suspended', 'stopping')) AND ${table.outcomeEventId} IS NULL AND ${table.finalizedAtMs} IS NULL)`,
+    ),
     unique("workflow_run_child_identity").on(
       table.parentRunId,
       table.workflowKey,
       table.childInvocationKey,
     ),
+    index("kojo_workflow_runs_accepted_idx").on(table.acceptedAtMs, table.runId),
+    index("kojo_workflow_runs_workflow_idx").on(table.workflowKey, table.acceptedAtMs, table.runId),
+    index("kojo_workflow_runs_state_updated_idx").on(table.state, table.updatedAtMs),
+    index("kojo_workflow_runs_parent_idx").on(table.parentRunId, table.acceptedAtMs),
+    index("kojo_workflow_runs_schedule_idx").on(table.scheduleKey, table.scheduledAtMs),
+    index("kojo_workflow_runs_non_final_idx")
+      .on(table.updatedAtMs, table.runId)
+      .where(sql`${table.state} IN ('running', 'suspended', 'stopping')`),
   ],
 );
 
 export const projectStoreMigrations = sqliteTable("kojo_schema_migrations", {
   version: integer("version").primaryKey(),
+  checksum: text("checksum").notNull(),
   appliedAt: text("applied_at").notNull(),
 });

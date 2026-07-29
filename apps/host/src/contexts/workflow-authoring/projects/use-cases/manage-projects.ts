@@ -4,6 +4,7 @@ import type {
   ProjectIdentity,
   ProjectList,
   ProjectListInput,
+  ProjectListResult,
   ProjectMutationResult,
   ProjectOperationError,
   ProjectQueryResult,
@@ -76,51 +77,157 @@ const record = (
   ],
 });
 
-const encodeCursor = (identity: ProjectIdentity) =>
-  Buffer.from(JSON.stringify({ version: 1, after: identity })).toString("base64url");
+const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 
-const decodeCursor = (cursor: string | undefined) => {
-  if (cursor === undefined) return undefined;
+const filterFingerprint = (input: ProjectListInput) =>
+  hash(JSON.stringify({ conditions: [...new Set(input.conditions)].sort() }));
+
+interface ProjectCursor {
+  readonly checksum: string;
+  readonly direction: "next";
+  readonly filterFingerprint: string;
+  readonly resourceKind: "project";
+  readonly sort: { readonly identity: string };
+  readonly version: 1;
+}
+
+const cursorContents = (cursor: Omit<ProjectCursor, "checksum">) => JSON.stringify(cursor);
+
+const encodeCursor = (identity: ProjectIdentity, filters: string) => {
+  const contents = {
+    version: 1,
+    resourceKind: "project",
+    direction: "next",
+    sort: { identity },
+    filterFingerprint: filters,
+  } as const;
+  return Buffer.from(
+    JSON.stringify({ ...contents, checksum: hash(cursorContents(contents)) }),
+  ).toString("base64url");
+};
+
+type CursorDecode =
+  | { readonly ok: true; readonly cursor?: ProjectCursor }
+  | { readonly ok: false; readonly result: ProjectListResult };
+
+const cursorFailure = (
+  code: Extract<ProjectListResult, { ok: false }>["error"]["code"],
+  message: string,
+): CursorDecode => ({
+  ok: false,
+  result: {
+    ok: false,
+    error: { code, message, next: "Start a new Project list without --cursor." },
+  },
+});
+
+const decodeCursor = (encoded: string | undefined, filters: string): CursorDecode => {
+  if (encoded === undefined) return { ok: true };
   try {
-    const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
-    return decoded.version === 1 && typeof decoded.after === "string" ? decoded.after : undefined;
+    const decoded = JSON.parse(
+      Buffer.from(encoded, "base64url").toString("utf8"),
+    ) as Partial<ProjectCursor>;
+    if (decoded.version !== 1) {
+      return cursorFailure(
+        "project-cursor-version-unsupported",
+        "This Project cursor version is not supported.",
+      );
+    }
+    if (
+      decoded.resourceKind !== "project" ||
+      decoded.direction !== "next" ||
+      typeof decoded.sort?.identity !== "string" ||
+      typeof decoded.filterFingerprint !== "string" ||
+      typeof decoded.checksum !== "string"
+    ) {
+      return cursorFailure("project-cursor-malformed", "This Project cursor is malformed.");
+    }
+    const contents = {
+      version: 1,
+      resourceKind: "project",
+      direction: "next",
+      sort: { identity: decoded.sort.identity },
+      filterFingerprint: decoded.filterFingerprint,
+    } as const;
+    if (decoded.checksum !== hash(cursorContents(contents))) {
+      return cursorFailure("project-cursor-malformed", "This Project cursor checksum is invalid.");
+    }
+    if (decoded.filterFingerprint !== filters) {
+      return cursorFailure(
+        "project-cursor-filter-mismatch",
+        "This Project cursor belongs to different filters.",
+      );
+    }
+    return { ok: true, cursor: { ...contents, checksum: decoded.checksum } };
   } catch {
-    return undefined;
+    return cursorFailure("project-cursor-malformed", "This Project cursor is malformed.");
   }
 };
 
-export const listProjects = (
+export const listProjects: Effect.Effect<ProjectList, never, ProjectIndexStore> = Effect.gen(
+  function* () {
+    const store = yield* ProjectIndexStore;
+    const state = yield* store.read;
+    return {
+      projects: [...state.projects].sort((left, right) =>
+        right.identity.localeCompare(left.identity),
+      ),
+    };
+  },
+);
+
+export const listProjectPage = (
   input: ProjectListInput = { conditions: [], limit: 50 },
-): Effect.Effect<ProjectList, never, ProjectIndexStore | ProjectLayout> =>
+): Effect.Effect<ProjectListResult, never, ProjectIndexStore | ProjectLayout | ProjectRuntime> =>
   Effect.gen(function* () {
     const store = yield* ProjectIndexStore;
     const layout = yield* ProjectLayout;
+    const runtime = yield* ProjectRuntime;
     const state = yield* store.read;
     const assessed = yield* Effect.all(
       state.projects.map((project) =>
-        Effect.map(layout.validate(project.path), (validation) => ({
-          ...project,
-          condition: validation.ok ? ("ready" as const) : ("needs-attention" as const),
-        })),
+        Effect.gen(function* () {
+          const validation = yield* layout.validate(project.path);
+          return {
+            ...project,
+            condition: validation.ok
+              ? yield* runtime.readiness(project)
+              : ("needs-attention" as const),
+          };
+        }),
       ),
     );
+    const filters = filterFingerprint(input);
+    const decoded = decodeCursor(input.cursor, filters);
+    if (!decoded.ok) return decoded.result;
     const filtered = assessed
       .filter(
         (project) => input.conditions.length === 0 || input.conditions.includes(project.condition),
       )
       .sort((left, right) => right.identity.localeCompare(left.identity));
-    const after = decodeCursor(input.cursor);
+    const after = decoded.cursor?.sort.identity;
     const start =
-      after === undefined
-        ? 0
-        : Math.max(0, filtered.findIndex((item) => item.identity === after) + 1);
+      after === undefined ? 0 : filtered.findIndex((item) => item.identity === after) + 1;
+    if (after !== undefined && start === 0) {
+      return {
+        ok: false,
+        error: {
+          code: "project-cursor-anchor-missing",
+          message: "The Project cursor anchor is no longer available.",
+          next: "Start a new Project list without --cursor.",
+        },
+      };
+    }
     const items = filtered.slice(start, start + input.limit);
     return {
-      items,
-      nextCursor:
-        start + items.length < filtered.length && items.length > 0
-          ? encodeCursor(items[items.length - 1].identity)
-          : null,
+      ok: true,
+      page: {
+        items,
+        nextCursor:
+          start + items.length < filtered.length && items.length > 0
+            ? encodeCursor(items[items.length - 1].identity, filters)
+            : null,
+      },
     };
   });
 
@@ -192,7 +299,7 @@ export const registerProject = (
           return { state: record(state, requestKey, "register", path, result), result };
         }
         const project = validation.project;
-        if (!(yield* runtime.prepareProject(project))) {
+        if (!(yield* runtime.migrateProject(project))) {
           const result = mutationFailure(
             requestKey,
             "project-layout-invalid",
@@ -294,108 +401,105 @@ export const forgetProject = (
       );
     }
 
-    return yield* runtime.coordinateForget(
-      project,
-      (blockers) =>
-        store.update((latest) =>
-          Effect.gen(function* () {
-            const currentReceipt = latest.receipts.find(
-              (candidate) => candidate.requestKey === requestKey,
-            );
-            if (currentReceipt !== undefined) {
-              return {
-                state: latest,
-                result:
-                  currentReceipt.operation === "forget" &&
-                  currentReceipt.fingerprint === requestFingerprint
-                    ? replay(currentReceipt.result)
-                    : requestConflict(requestKey),
-              };
-            }
-            const currentProject = latest.projects.find(
-              (candidate) => candidate.identity === identity,
-            );
-            if (currentProject === undefined || !selectorMatchesProject(selector, currentProject)) {
-              const result = mutationFailure(
-                requestKey,
-                "project-not-found",
-                "Kojo Project was not found in the Project Index.",
-                "Choose a listed Project Identity.",
-                { kind: "project", identity },
-                [],
-              );
-              return {
-                state: record(
-                  latest,
-                  requestKey,
-                  "forget",
-                  input,
-                  result,
-                  selectorLookupKey(selector),
-                ),
-                result,
-              };
-            }
-
-            if (blockers.assessment === "unavailable") {
-              const result = mutationFailure(
-                requestKey,
-                "project-forget-blocked",
-                "Kojo could not verify that Project execution state is safe to forget.",
-                "Restore Project database readiness and retry.",
-                { kind: "project", identity },
-                ["store.open-failed"],
-              );
-              return {
-                state: record(
-                  latest,
-                  requestKey,
-                  "forget",
-                  input,
-                  result,
-                  selectorLookupKey(selector),
-                ),
-                result,
-              };
-            }
-            if (blockers.enabledScheduleKeys.length > 0 || blockers.nonFinalRunIds.length > 0) {
-              const result = mutationFailure(
-                requestKey,
-                "project-forget-blocked",
-                "Kojo Project cannot be forgotten while it has enabled Workflow Schedules or non-final Workflow Runs.",
-                "Disable every Workflow Schedule and finish or stop every non-final Workflow Run, then retry.",
-                { kind: "project", identity },
-                [],
-              );
-              return {
-                state: record(
-                  latest,
-                  requestKey,
-                  "forget",
-                  input,
-                  result,
-                  selectorLookupKey(selector),
-                ),
-                result,
-              };
-            }
-
-            const result = successfulMutation(requestKey, project, false);
-            const nextState = record(
-              {
-                ...latest,
-                projects: latest.projects.filter((candidate) => candidate.identity !== identity),
-              },
+    return yield* runtime.coordinateForget(project, (blockers) =>
+      store.update((latest) =>
+        Effect.gen(function* () {
+          const currentReceipt = latest.receipts.find(
+            (candidate) => candidate.requestKey === requestKey,
+          );
+          if (currentReceipt !== undefined) {
+            return {
+              state: latest,
+              result:
+                currentReceipt.operation === "forget" &&
+                currentReceipt.fingerprint === requestFingerprint
+                  ? replay(currentReceipt.result)
+                  : requestConflict(requestKey),
+            };
+          }
+          const currentProject = latest.projects.find(
+            (candidate) => candidate.identity === identity,
+          );
+          if (currentProject === undefined || !selectorMatchesProject(selector, currentProject)) {
+            const result = mutationFailure(
               requestKey,
-              "forget",
-              input,
-              result,
-              selectorLookupKey(selector),
+              "project-not-found",
+              "Kojo Project was not found in the Project Index.",
+              "Choose a listed Project Identity.",
+              { kind: "project", identity },
+              [],
             );
-            return { state: nextState, result };
-          }),
-        ),
-      (result) => result.ok,
+            return {
+              state: record(
+                latest,
+                requestKey,
+                "forget",
+                input,
+                result,
+                selectorLookupKey(selector),
+              ),
+              result,
+            };
+          }
+
+          if (blockers.assessment === "unavailable") {
+            const result = mutationFailure(
+              requestKey,
+              "project-forget-blocked",
+              "Kojo could not verify that Project execution state is safe to forget.",
+              "Restore Project database readiness and retry.",
+              { kind: "project", identity },
+              ["store.open-failed"],
+            );
+            return {
+              state: record(
+                latest,
+                requestKey,
+                "forget",
+                input,
+                result,
+                selectorLookupKey(selector),
+              ),
+              result,
+            };
+          }
+          if (blockers.enabledScheduleKeys.length > 0 || blockers.nonFinalRunIds.length > 0) {
+            const result = mutationFailure(
+              requestKey,
+              "project-forget-blocked",
+              "Kojo Project cannot be forgotten while it has enabled Workflow Schedules or non-final Workflow Runs.",
+              "Disable every Workflow Schedule and finish or stop every non-final Workflow Run, then retry.",
+              { kind: "project", identity },
+              [],
+            );
+            return {
+              state: record(
+                latest,
+                requestKey,
+                "forget",
+                input,
+                result,
+                selectorLookupKey(selector),
+              ),
+              result,
+            };
+          }
+
+          const result = successfulMutation(requestKey, project, false);
+          const nextState = record(
+            {
+              ...latest,
+              projects: latest.projects.filter((candidate) => candidate.identity !== identity),
+            },
+            requestKey,
+            "forget",
+            input,
+            result,
+            selectorLookupKey(selector),
+          );
+          return { state: nextState, result };
+        }),
+      ),
     );
   });
 

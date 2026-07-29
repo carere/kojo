@@ -16,7 +16,7 @@ import {
 import { join } from "node:path";
 import { ProjectIdentity, type ProjectSnapshot } from "@kojo/control";
 import { Schema } from "effect";
-import { validateProjectDefinition } from "../adapters/subprocess-project-definition-validator";
+import { validateProjectDefinition } from "../../../../adapters/project-definition/subprocess-project-definition-validator";
 
 const CONFIGURATION =
   'import { defineConfig } from "@kojo/workflow";\n\nexport default defineConfig({ workflows: [] });\n';
@@ -294,6 +294,16 @@ export const initializeProject = async (path: string): Promise<ProjectSnapshot> 
   }
 
   let layoutMutated = false;
+  const enforceMode = async (
+    target: string,
+    information: { readonly mode: number } | undefined,
+    mode: number,
+  ) => {
+    await chmod(target, mode);
+    if (information !== undefined && (information.mode & 0o777) !== mode) {
+      layoutMutated = true;
+    }
+  };
   try {
     if (configuration === undefined) {
       await writeNewFileAtomically(configurationPath, CONFIGURATION, 0o644);
@@ -310,7 +320,7 @@ export const initializeProject = async (path: string): Promise<ProjectSnapshot> 
       await mkdir(dataPath, { mode: 0o700 });
       layoutMutated = true;
     }
-    await chmod(dataPath, 0o700);
+    await enforceMode(dataPath, data, 0o700);
     if (metadata === undefined) {
       await writeNewFileAtomically(
         metadataPath,
@@ -321,8 +331,8 @@ export const initializeProject = async (path: string): Promise<ProjectSnapshot> 
       await createDatabase(databasePath);
       layoutMutated = true;
     }
-    await chmod(metadataPath, 0o600);
-    await chmod(databasePath, 0o600);
+    await enforceMode(metadataPath, metadata, 0o600);
+    await enforceMode(databasePath, database, 0o600);
     if (artifacts === undefined) {
       await mkdir(artifactsPath, { mode: 0o700 });
       layoutMutated = true;
@@ -331,8 +341,8 @@ export const initializeProject = async (path: string): Promise<ProjectSnapshot> 
       await mkdir(sandboxesPath, { mode: 0o700 });
       layoutMutated = true;
     }
-    await chmod(artifactsPath, 0o700);
-    await chmod(sandboxesPath, 0o700);
+    await enforceMode(artifactsPath, artifacts, 0o700);
+    await enforceMode(sandboxesPath, sandboxes, 0o700);
   } catch {
     throw new ProjectInitializationError(
       `Kojo could not finish initializing ${root}. Review the Project layout before trying again.`,

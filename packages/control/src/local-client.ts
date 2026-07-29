@@ -16,6 +16,7 @@ import {
   type ProjectIdentity,
   type ProjectList,
   type ProjectListInput,
+  type ProjectListResult,
   type ProjectMutationResult,
   type ProjectQueryResult,
   type ProjectSelector,
@@ -126,19 +127,20 @@ export const makeLocalClient = (options: LocalClientOptions) => {
   const getHostOverview = activateAndRetry(
     request("projects:list", (client, host) =>
       Effect.gen(function* () {
-        const { items } = yield* client.ListProjects({ conditions: [], limit: 200 });
-        return {
-          host,
-          projects: items.map(({ identity, path }) => ({ identity, path })),
-        } satisfies HostOverview;
+        const { projects } = yield* client.ListProjects();
+        return { host, projects } satisfies HostOverview;
       }),
     ),
   );
 
-  const listProjects = (input: ProjectListInput = { conditions: [], limit: 50 }) =>
+  const listProjects = activateAndRetry(
+    request("projects:list", (client) => client.ListProjects()),
+  ) satisfies Effect.Effect<ProjectList, LocalClientError>;
+
+  const listProjectPage = (input: ProjectListInput = { conditions: [], limit: 50 }) =>
     activateAndRetry(
-      request("projects:list", (client) => client.ListProjects(input)),
-    ) satisfies Effect.Effect<ProjectList, LocalClientError>;
+      request("projects:list-page", (client) => client.ListProjectPage(input)),
+    ) satisfies Effect.Effect<ProjectListResult, LocalClientError>;
 
   const showProject = (identity: ProjectIdentity) =>
     activateAndRetry(request("projects:show", (client) => client.ShowProject({ identity })));
@@ -164,6 +166,7 @@ export const makeLocalClient = (options: LocalClientOptions) => {
   return {
     getHostOverview,
     listProjects,
+    listProjectPage,
     showProject,
     registerProject,
     forgetProject,
@@ -173,10 +176,14 @@ export const makeLocalClient = (options: LocalClientOptions) => {
       HostOverview,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;
-    readonly listProjects: (
+    readonly listProjects: Effect.Effect<
+      ProjectList,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly listProjectPage: (
       input?: ProjectListInput,
     ) => Effect.Effect<
-      ProjectList,
+      ProjectListResult,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;
     readonly showProject: (

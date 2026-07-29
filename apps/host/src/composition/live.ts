@@ -4,16 +4,16 @@ import { BunSocketServer } from "@effect/platform-bun";
 import { defaultSocketPath } from "@kojo/control/local-client";
 import { Layer } from "effect";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
-import { makeFileProjectIndexStoreLayer } from "../contexts/workflow-authoring/projects/adapters/file-project-index-store";
-import { GitProjectLayoutLive } from "../contexts/workflow-authoring/projects/adapters/git-project-layout";
-import { SubprocessProjectDefinitionLoaderLive } from "../contexts/workflow-authoring/projects/adapters/subprocess-project-definition-loader";
+import { DrizzleProjectStoreLive } from "../adapters/projects/drizzle-project-store";
+import { makeFileProjectIndexStoreLayer } from "../adapters/projects/file-project-index-store";
+import { GitProjectLayoutLive } from "../adapters/projects/git-project-layout";
+import { SubprocessProjectDefinitionLoaderLive } from "../adapters/projects/subprocess-project-definition-loader";
 import { makeHostDiagnosticLoggerLayer } from "../contexts/workflow-execution/control/services/host-diagnostic-logger";
 import { loadHostIdentity } from "../contexts/workflow-execution/control/services/host-identity-store";
 import {
   makeKojoControlServerLayer,
   startKojoHost,
 } from "../contexts/workflow-execution/control/services/local-host";
-import { DrizzleProjectStoreLive } from "../contexts/workflow-execution/projects/adapters/drizzle-project-store";
 import { ProjectRuntimeLive } from "../contexts/workflow-execution/projects/services/project-runtime";
 
 export const startLiveKojoHost = async () => {

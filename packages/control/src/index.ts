@@ -7,6 +7,7 @@ export { ProjectIdentity } from "@kojo/workflow";
 export const PROTOCOL_VERSION = { major: 1, minor: 0 } as const;
 export const CONTROL_CAPABILITIES = [
   "projects:list",
+  "projects:list-page",
   "projects:show",
   "projects:register",
   "projects:forget",
@@ -54,10 +55,15 @@ export const ProjectSelector = Schema.Union([
 export type ProjectSelector = typeof ProjectSelector.Type;
 
 export const ProjectList = Schema.Struct({
+  projects: Schema.Array(ProjectSnapshot),
+});
+export type ProjectList = typeof ProjectList.Type;
+
+export const ProjectListPage = Schema.Struct({
   items: Schema.Array(ProjectListItem),
   nextCursor: Schema.NullOr(Schema.String),
 });
-export type ProjectList = typeof ProjectList.Type;
+export type ProjectListPage = typeof ProjectListPage.Type;
 
 export const ProjectListInput = Schema.Struct({
   conditions: Schema.Array(ProjectCondition),
@@ -65,6 +71,27 @@ export const ProjectListInput = Schema.Struct({
   cursor: Schema.optionalKey(Schema.String),
 });
 export type ProjectListInput = typeof ProjectListInput.Type;
+
+export const ProjectListCursorErrorCode = Schema.Literals([
+  "project-cursor-malformed",
+  "project-cursor-version-unsupported",
+  "project-cursor-filter-mismatch",
+  "project-cursor-anchor-missing",
+]);
+export type ProjectListCursorErrorCode = typeof ProjectListCursorErrorCode.Type;
+
+export const ProjectListCursorError = Schema.Struct({
+  code: ProjectListCursorErrorCode,
+  message: Schema.String,
+  next: Schema.String,
+});
+export type ProjectListCursorError = typeof ProjectListCursorError.Type;
+
+export const ProjectListResult = Schema.Union([
+  Schema.Struct({ ok: Schema.Literal(true), page: ProjectListPage }),
+  Schema.Struct({ ok: Schema.Literal(false), error: ProjectListCursorError }),
+]);
+export type ProjectListResult = typeof ProjectListResult.Type;
 
 export const ReadinessFindingKey = Schema.Literals([
   "layout.ignore-rule-missing",
@@ -157,8 +184,12 @@ export const Negotiate = Rpc.make("Negotiate", {
 });
 
 export const ListProjects = Rpc.make("ListProjects", {
-  payload: ProjectListInput.fields,
   success: ProjectList,
+});
+
+export const ListProjectPage = Rpc.make("ListProjectPage", {
+  payload: ProjectListInput.fields,
+  success: ProjectListResult,
 });
 
 export const ShowProject = Rpc.make("ShowProject", {
@@ -184,6 +215,7 @@ export const ReplayForgetProject = Rpc.make("ReplayForgetProject", {
 export const KojoControl = RpcGroup.make(
   Negotiate,
   ListProjects,
+  ListProjectPage,
   ShowProject,
   RegisterProject,
   ForgetProject,

@@ -13,6 +13,7 @@ import { Effect, Exit, Layer, Scope } from "effect";
 import { RpcServer } from "effect/unstable/rpc";
 import {
   forgetProject,
+  listProjectPage,
   listProjects,
   registerProject,
   replayForgetProject,
@@ -108,12 +109,19 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           String(options.requestId),
           getHostInformation,
         ),
-      ListProjects: (payload, options) =>
+      ListProjects: (_payload, options) =>
         withHostRequestDiagnostic(
           hostIdentity,
           "ListProjects",
           String(options.requestId),
-          listProjects(payload),
+          listProjects,
+        ),
+      ListProjectPage: (payload, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ListProjects",
+          String(options.requestId),
+          listProjectPage(payload),
         ),
       ShowProject: ({ identity }, options) =>
         withHostRequestDiagnostic(

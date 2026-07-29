@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
-import { validateProjectDefinitionInSubprocess } from "@kojo/control/project-definition-validation";
 import { Layer } from "effect";
-import { ProjectDefinitionLoader } from "../services/project-definition-loader";
+import { ProjectDefinitionLoader } from "../../contexts/workflow-authoring/projects/services/project-definition-loader";
+import { validateProjectDefinitionInSubprocess } from "./project-definition-validation";
 
 const runnerPath = fileURLToPath(
   new URL("./project-definition-loader-process.ts", import.meta.url),

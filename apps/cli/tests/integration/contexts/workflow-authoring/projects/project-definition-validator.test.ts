@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, it } from "vitest";
-import { validateProjectDefinition } from "../../../../../src/contexts/workflow-authoring/projects/adapters/subprocess-project-definition-validator";
+import { validateProjectDefinition } from "../../../../../src/adapters/project-definition/subprocess-project-definition-validator";
 
 const cleanups: Array<() => Promise<void>> = [];
 const workflowPackagePath = fileURLToPath(

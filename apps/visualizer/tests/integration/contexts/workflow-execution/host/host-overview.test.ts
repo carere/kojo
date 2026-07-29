@@ -67,6 +67,7 @@ describe("Host overview", () => {
               hostVersion: "0.1.0",
               capabilities: [
                 "projects:list",
+                "projects:list-page",
                 "projects:show",
                 "projects:register",
                 "projects:forget",

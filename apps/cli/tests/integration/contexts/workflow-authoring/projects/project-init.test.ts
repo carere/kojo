@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import {
   chmod,
   lstat,
@@ -70,6 +71,22 @@ describe("kojo init", () => {
     expect((await stat(join(project, ".kojo", "kojo.sqlite"))).mode & 0o777).toBe(0o600);
     expect((await stat(join(project, ".kojo", "artifacts"))).mode & 0o777).toBe(0o700);
     expect((await stat(join(project, ".kojo", "sandboxes"))).mode & 0o777).toBe(0o700);
+    const databasePath = join(project, ".kojo", "kojo.sqlite");
+    const database = new Database(databasePath, { readonly: true, strict: true });
+    expect(database.query("PRAGMA user_version").get()).toEqual({ user_version: 1 });
+    expect(database.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
+    expect(
+      database.query("SELECT checksum FROM kojo_schema_migrations WHERE version = 1").get(),
+    ).toEqual({ checksum: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    expect(
+      database
+        .query(
+          "SELECT count(*) AS count FROM sqlite_master WHERE type = 'index' AND name LIKE 'kojo_%'",
+        )
+        .get(),
+    ).toEqual({ count: 8 });
+    database.close();
+    expect(await Bun.file(`${databasePath}.migration-backup`).exists()).toBe(false);
 
     const before = await snapshotFiles(project);
     const second = await runCli(["init", project], host.socketPath, directory);
@@ -192,6 +209,37 @@ describe("kojo init", () => {
     expect(
       JSON.parse(await readFile(join(project, ".kojo", "project.json"), "utf8")).projectIdentity,
     ).toBe(firstIdentity);
+  });
+
+  it("prints the Request Key when permission repair precedes a needs-attention result", async () => {
+    const directory = await temporaryDirectory("kojo-init-permission-request-key-");
+    const project = join(directory, "project");
+    await run(["git", "init", project]);
+    const missingHost = join(directory, "missing.sock");
+    expect((await runCli(["init", project], missingHost, directory)).exitCode).toBe(0);
+    await writeFile(join(project, "kojo.config.ts"), "export default {}\n");
+
+    const textKey = "permission-repair-text-key";
+    await chmod(join(project, ".kojo"), 0o755);
+    const textResult = await runCli(
+      ["init", project, "--request-key", textKey],
+      missingHost,
+      directory,
+    );
+    expect(textResult.exitCode).toBe(1);
+    expect(textResult.stdout).toBe(`Request Key: ${textKey}\n`);
+    expect((await stat(join(project, ".kojo"))).mode & 0o777).toBe(0o700);
+
+    const jsonKey = "permission-repair-json-key";
+    await chmod(join(project, ".kojo", "artifacts"), 0o755);
+    const jsonResult = await runCli(
+      ["init", project, "--request-key", jsonKey, "--json"],
+      missingHost,
+      directory,
+    );
+    expect(jsonResult.exitCode).toBe(1);
+    expect(JSON.parse(jsonResult.stdout).requestKey).toBe(jsonKey);
+    expect((await stat(join(project, ".kojo", "artifacts"))).mode & 0o777).toBe(0o700);
   });
 
   it("rejects invalid SQLite content without recreating durable Project data", async () => {

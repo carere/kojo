@@ -6,12 +6,12 @@ import { Effect, Layer, Schema } from "effect";
 import {
   ProjectDefinitionLoader,
   type ProjectDefinitionLoaderShape,
-} from "../services/project-definition-loader";
+} from "../../contexts/workflow-authoring/projects/services/project-definition-loader";
 import {
   ProjectLayout,
   type ProjectLayoutShape,
   type ProjectLayoutValidation,
-} from "../services/project-layout";
+} from "../../contexts/workflow-authoring/projects/services/project-layout";
 
 class InvalidProjectLayoutError extends Error {
   constructor(

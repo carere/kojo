@@ -12,15 +12,13 @@ import {
 } from "../../../../../../src/contexts/workflow-authoring/projects/services/project-layout";
 import {
   forgetProject,
+  listProjectPage,
   listProjects,
   registerProject,
   replayForgetProject,
 } from "../../../../../../src/contexts/workflow-authoring/projects/use-cases/manage-projects";
-import {
-  ProjectForgetGuard,
-  type ProjectForgetGuardShape,
-} from "../../../../../../src/contexts/workflow-execution/projects/services/project-forget-guard";
 import { ProjectRuntime } from "../../../../../../src/contexts/workflow-execution/projects/services/project-runtime";
+import type { ProjectForgetBlockers } from "../../../../../../src/contexts/workflow-execution/projects/services/project-store";
 
 const identity = Schema.decodeUnknownSync(ProjectIdentity)("00000000-0000-7000-8000-000000000001");
 const requestKey = (suffix: string) =>
@@ -60,16 +58,16 @@ const makeLayout = (
     inspectIndexedPath: inspect,
   });
 
-const makeForgetGuard = (blockers: ReturnType<ProjectForgetGuardShape["inspect"]>) =>
-  Layer.mergeAll(
-    Layer.succeed(ProjectForgetGuard, { inspect: () => blockers }),
-    Layer.succeed(ProjectRuntime, {
-      prepareProject: () => Effect.succeed(true),
-      inspectForgetBlockers: () => blockers,
-      coordinateForget: (_project, operation) => Effect.flatMap(blockers, operation),
-      runLifecycleMutation: (_project, mutation) => mutation,
-    }),
-  );
+const makeRuntime = (
+  blockers: Effect.Effect<ProjectForgetBlockers>,
+  condition: "ready" | "limited" | "needs-attention" = "ready",
+) =>
+  Layer.succeed(ProjectRuntime, {
+    migrateProject: () => Effect.succeed(true),
+    readiness: () => Effect.succeed(condition),
+    inspectForgetBlockers: () => blockers,
+    coordinateForget: (_project, operation) => Effect.flatMap(blockers, operation),
+  });
 
 const noForgetBlockers = Effect.succeed({
   assessment: "available" as const,
@@ -90,7 +88,7 @@ it.effect("rejects a duplicate live identity and accepts the path after a move",
           : { status: "missing" as const },
       ),
     ),
-    makeForgetGuard(noForgetBlockers),
+    makeRuntime(noForgetBlockers),
   );
 
   return Effect.gen(function* () {
@@ -112,17 +110,13 @@ it.effect("rejects a duplicate live identity and accepts the path after a move",
     expect(refusedRedelivery).toEqual(duplicate);
     const movedResult = yield* registerProject("inputB", requestKey("3"));
     expect(movedResult).toMatchObject({ ok: true, project: moved });
-    expect((yield* listProjects()).items).toEqual([{ ...moved, condition: "needs-attention" }]);
+    expect((yield* listProjects).projects).toEqual([moved]);
   }).pipe(Effect.provide(layer));
 });
 
 it.effect("persists a refused request result and conflicts on different contents", () => {
   const projects: Record<string, ProjectSnapshot> = {};
-  const layer = Layer.mergeAll(
-    makeStore(),
-    makeLayout(projects),
-    makeForgetGuard(noForgetBlockers),
-  );
+  const layer = Layer.mergeAll(makeStore(), makeLayout(projects), makeRuntime(noForgetBlockers));
 
   return Effect.gen(function* () {
     const refused = yield* registerProject("invalid", requestKey("1"));
@@ -149,7 +143,7 @@ it.effect("blocks forgetting a Project with an enabled Workflow Schedule", () =>
   const layer = Layer.mergeAll(
     makeStore(),
     makeLayout({ input: project }),
-    makeForgetGuard(
+    makeRuntime(
       Effect.succeed({
         assessment: "available",
         enabledScheduleKeys: ["nightly"],
@@ -170,7 +164,7 @@ it.effect("blocks forgetting a Project with an enabled Workflow Schedule", () =>
         findingKeys: [],
       },
     });
-    expect((yield* listProjects()).items).toEqual([{ ...project, condition: "needs-attention" }]);
+    expect((yield* listProjects).projects).toEqual([project]);
   }).pipe(Effect.provide(layer));
 });
 
@@ -179,7 +173,7 @@ it.effect("blocks forgetting a Project with a non-final Workflow Run", () => {
   const layer = Layer.mergeAll(
     makeStore(),
     makeLayout({ input: project }),
-    makeForgetGuard(
+    makeRuntime(
       Effect.succeed({
         assessment: "available",
         enabledScheduleKeys: [],
@@ -200,7 +194,7 @@ it.effect("blocks forgetting a Project with a non-final Workflow Run", () => {
         findingKeys: [],
       },
     });
-    expect((yield* listProjects()).items).toEqual([{ ...project, condition: "needs-attention" }]);
+    expect((yield* listProjects).projects).toEqual([project]);
   }).pipe(Effect.provide(layer));
 });
 
@@ -209,7 +203,7 @@ it.effect("replays forget only for the identical original selector", () => {
   const layer = Layer.mergeAll(
     makeStore(),
     makeLayout({ input: project }),
-    makeForgetGuard(noForgetBlockers),
+    makeRuntime(noForgetBlockers),
   );
 
   return Effect.gen(function* () {
@@ -238,7 +232,7 @@ it.effect(
     const layer = Layer.mergeAll(
       makeStore(),
       makeLayout({ input: project }),
-      makeForgetGuard(noForgetBlockers),
+      makeRuntime(noForgetBlockers),
     );
 
     return Effect.gen(function* () {
@@ -252,3 +246,21 @@ it.effect(
     }).pipe(Effect.provide(layer));
   },
 );
+
+it.effect("uses Runtime readiness for Project condition filtering", () => {
+  const project: ProjectSnapshot = { identity, path: "/projects/limited" };
+  const layer = Layer.mergeAll(
+    makeStore(),
+    makeLayout({ input: project, [project.path]: project }),
+    makeRuntime(noForgetBlockers, "limited"),
+  );
+
+  return Effect.gen(function* () {
+    yield* registerProject("input", requestKey("1"));
+    const listed = yield* listProjectPage({ conditions: ["limited"], limit: 50 });
+    expect(listed).toEqual({
+      ok: true,
+      page: { items: [{ ...project, condition: "limited" }], nextCursor: null },
+    });
+  }).pipe(Effect.provide(layer));
+});

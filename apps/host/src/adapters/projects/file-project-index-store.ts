@@ -7,7 +7,7 @@ import {
   ProjectIndexState,
   ProjectIndexStore,
   type ProjectIndexStoreShape,
-} from "../services/project-index-store";
+} from "../../contexts/workflow-authoring/projects/services/project-index-store";
 
 const writeState = async (path: string, state: ProjectIndexState) => {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });

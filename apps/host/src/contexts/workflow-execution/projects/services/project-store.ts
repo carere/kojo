@@ -1,4 +1,4 @@
-import type { ProjectSnapshot } from "@kojo/control";
+import type { ProjectCondition, ProjectSnapshot } from "@kojo/control";
 import { Context, type Effect } from "effect";
 
 export interface ProjectForgetBlockers {
@@ -8,7 +8,8 @@ export interface ProjectForgetBlockers {
 }
 
 export interface ProjectStoreShape {
-  readonly prepare: (project: ProjectSnapshot) => Effect.Effect<boolean>;
+  readonly migrate: (project: ProjectSnapshot) => Effect.Effect<boolean>;
+  readonly readiness: (project: ProjectSnapshot) => Effect.Effect<ProjectCondition>;
   readonly inspectForgetBlockers: (
     project: ProjectSnapshot,
   ) => Effect.Effect<ProjectForgetBlockers>;

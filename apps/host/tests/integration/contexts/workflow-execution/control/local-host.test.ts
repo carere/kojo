@@ -6,9 +6,10 @@ import { afterEach, describe, expect, it } from "@effect/vitest";
 import { connectUnixControlClient, makeLocalClient } from "@kojo/control/local-client";
 import { Effect, Exit, Layer, Schema } from "effect";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
-import { makeFileProjectIndexStoreLayer } from "../../../../../src/contexts/workflow-authoring/projects/adapters/file-project-index-store";
-import { GitProjectLayoutLive } from "../../../../../src/contexts/workflow-authoring/projects/adapters/git-project-layout";
-import { SubprocessProjectDefinitionLoaderLive } from "../../../../../src/contexts/workflow-authoring/projects/adapters/subprocess-project-definition-loader";
+import { DrizzleProjectStoreLive } from "../../../../../src/adapters/projects/drizzle-project-store";
+import { makeFileProjectIndexStoreLayer } from "../../../../../src/adapters/projects/file-project-index-store";
+import { GitProjectLayoutLive } from "../../../../../src/adapters/projects/git-project-layout";
+import { SubprocessProjectDefinitionLoaderLive } from "../../../../../src/adapters/projects/subprocess-project-definition-loader";
 import { HostIdentity } from "../../../../../src/contexts/workflow-execution/control/models/host-identity";
 import { makeHostDiagnosticLoggerLayer } from "../../../../../src/contexts/workflow-execution/control/services/host-diagnostic-logger";
 import {
@@ -17,8 +18,6 @@ import {
   startKojoHost,
   UnsafeHostStoreError,
 } from "../../../../../src/contexts/workflow-execution/control/services/local-host";
-import { DrizzleProjectStoreLive } from "../../../../../src/contexts/workflow-execution/projects/adapters/drizzle-project-store";
-import { ProjectForgetGuardLive } from "../../../../../src/contexts/workflow-execution/projects/services/project-forget-guard";
 import { ProjectRuntimeLive } from "../../../../../src/contexts/workflow-execution/projects/services/project-runtime";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -52,6 +51,7 @@ describe("local Kojo Host control", () => {
             hostVersion: "0.1.0",
             capabilities: [
               "projects:list",
+              "projects:list-page",
               "projects:show",
               "projects:register",
               "projects:forget",
@@ -153,9 +153,6 @@ const startTestHost = (socketPath: string, diagnosticPath: string) => {
     Layer.provide([
       makeFileProjectIndexStoreLayer(join(dirname(socketPath), "projects.json")),
       GitProjectLayoutLive.pipe(Layer.provide(SubprocessProjectDefinitionLoaderLive)),
-      ProjectForgetGuardLive.pipe(
-        Layer.provide(ProjectRuntimeLive.pipe(Layer.provide(DrizzleProjectStoreLive))),
-      ),
       ProjectRuntimeLive.pipe(Layer.provide(DrizzleProjectStoreLive)),
     ]),
   );
