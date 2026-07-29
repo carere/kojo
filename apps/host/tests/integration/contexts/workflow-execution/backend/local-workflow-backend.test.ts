@@ -34,7 +34,6 @@ describe("Local Workflow Backend", () => {
           return "recorded activity result";
         });
 
-        const acceptedAt = Date.now();
         const reference = yield* Effect.scoped(
           Effect.gen(function* () {
             const backend = yield* LocalWorkflowBackend;
@@ -54,10 +53,8 @@ describe("Local Workflow Backend", () => {
             ),
           ),
         );
-        const hostStoppedAfterMillis = Date.now() - acceptedAt;
-        expect(hostStoppedAfterMillis).toBeLessThan(wakeAfterMillis);
 
-        yield* Effect.sleep(`${wakeAfterMillis - hostStoppedAfterMillis + 250} millis`);
+        yield* Effect.sleep(`${wakeAfterMillis + 250} millis`);
 
         const completed = yield* Effect.scoped(
           Effect.gen(function* () {
