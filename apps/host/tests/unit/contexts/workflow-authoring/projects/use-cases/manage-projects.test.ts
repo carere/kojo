@@ -1,8 +1,9 @@
 import { expect, it } from "@effect/vitest";
 import { ProjectIdentity, type ProjectSnapshot, RequestKey } from "@kojo/control";
-import { Effect, Layer, Schema } from "effect";
+import { Effect, Fiber, Layer, Schema } from "effect";
 import {
   emptyProjectIndexState,
+  type ProjectIndexState,
   ProjectIndexStore,
   type ProjectIndexStoreShape,
 } from "../../../../../../src/contexts/workflow-authoring/projects/services/project-index-store";
@@ -17,8 +18,15 @@ import {
   registerProject,
   replayForgetProject,
 } from "../../../../../../src/contexts/workflow-authoring/projects/use-cases/manage-projects";
-import { ProjectRuntime } from "../../../../../../src/contexts/workflow-execution/projects/services/project-runtime";
-import type { ProjectForgetBlockers } from "../../../../../../src/contexts/workflow-execution/projects/services/project-store";
+import {
+  ProjectRuntime,
+  ProjectRuntimeLive,
+} from "../../../../../../src/contexts/workflow-execution/projects/services/project-runtime";
+import {
+  type ProjectForgetBlockers,
+  ProjectStore,
+} from "../../../../../../src/contexts/workflow-execution/projects/services/project-store";
+import { WorkflowBackend } from "../../../../../../src/contexts/workflow-execution/projects/services/workflow-backend";
 
 const identity = Schema.decodeUnknownSync(ProjectIdentity)("00000000-0000-7000-8000-000000000001");
 const requestKey = (suffix: string) =>
@@ -73,8 +81,17 @@ const makeRuntime = (
     coordinateLifecycle: (_project, operation) => operation,
     readiness: () => Effect.succeed(condition),
     inspectForgetBlockers: () => blockers,
-    coordinateForget: (_project, operation) =>
-      Effect.map(Effect.flatMap(blockers, operation), ({ result }) => result),
+    coordinateForget: (_identity, resolve, operation) =>
+      Effect.flatMap(resolve, (resolved) =>
+        resolved._tag === "result"
+          ? Effect.succeed(resolved.result)
+          : Effect.map(
+              Effect.flatMap(blockers, (currentBlockers) =>
+                operation(resolved.project, currentBlockers),
+              ),
+              ({ result }) => result,
+            ),
+      ),
   });
 
 const noForgetBlockers = Effect.succeed({
@@ -311,9 +328,18 @@ it.effect("acquires the Project Runtime before the Project Index for register an
     coordinateLifecycle: (_project, operation) => withinRuntime(operation),
     readiness: () => Effect.succeed("ready" as const),
     inspectForgetBlockers: () => noForgetBlockers,
-    coordinateForget: (_project, operation) =>
+    coordinateForget: (_identity, resolve, operation) =>
       withinRuntime(
-        Effect.map(Effect.flatMap(noForgetBlockers, operation), ({ result }) => result),
+        Effect.flatMap(resolve, (resolved) =>
+          resolved._tag === "result"
+            ? Effect.succeed(resolved.result)
+            : Effect.map(
+                Effect.flatMap(noForgetBlockers, (blockers) =>
+                  operation(resolved.project, blockers),
+                ),
+                ({ result }) => result,
+              ),
+        ),
       ),
   });
   const layer = Layer.mergeAll(store, makeLayout({ input: project }), runtime);
@@ -323,5 +349,93 @@ it.effect("acquires the Project Runtime before the Project Index for register an
     expect(
       yield* forgetProject(identity, { kind: "identity", identity }, requestKey("2")),
     ).toMatchObject({ ok: true });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("forgets the moved Project snapshot after queued registration completes", () => {
+  const previous: ProjectSnapshot = { identity, path: "/projects/previous" };
+  const moved: ProjectSnapshot = { identity, path: "/projects/moved" };
+  let state: ProjectIndexState = { ...emptyProjectIndexState(), projects: [previous] };
+  let markMigrationStarted: () => void = () => undefined;
+  const migrationStarted = new Promise<void>((resolve) => {
+    markMigrationStarted = resolve;
+  });
+  let resumeMigration: () => void = () => undefined;
+  const migrationGate = new Promise<void>((resolve) => {
+    resumeMigration = resolve;
+  });
+  let markForgetRead: () => void = () => undefined;
+  const forgetRead = new Promise<void>((resolve) => {
+    markForgetRead = resolve;
+  });
+  let registrationIsMigrating = false;
+  const inspectedPaths: Array<string> = [];
+  const releasedPaths: Array<string> = [];
+
+  const indexStore = Layer.succeed(ProjectIndexStore, {
+    read: Effect.sync(() => {
+      if (registrationIsMigrating) markForgetRead();
+      return state;
+    }),
+    update: (change) =>
+      Effect.flatMap(change(state), (update) =>
+        Effect.sync(() => {
+          state = update.state;
+          return update.result;
+        }),
+      ),
+  });
+  const projectStore = Layer.succeed(ProjectStore, {
+    migrate: () =>
+      Effect.promise(async () => {
+        registrationIsMigrating = true;
+        markMigrationStarted();
+        await migrationGate;
+        registrationIsMigrating = false;
+        return true;
+      }),
+    postflight: () => Effect.succeed(true),
+    completeMigration: () => Effect.succeed(true),
+    readiness: () => Effect.succeed("ready" as const),
+    inspectForgetBlockers: (project) =>
+      Effect.sync(() => {
+        inspectedPaths.push(project.path);
+        return {
+          assessment: "available" as const,
+          enabledScheduleKeys: [],
+          nonFinalRunIds: [],
+        };
+      }),
+  });
+  const workflowBackend = Layer.succeed(WorkflowBackend, {
+    acquire: () => Effect.succeed(true),
+    quiesce: () => Effect.void,
+    initialize: () => Effect.succeed(true),
+    postflight: () => Effect.succeed(true),
+    readiness: () => Effect.succeed("uninitialized" as const),
+    release: (project) =>
+      Effect.sync(() => {
+        releasedPaths.push(project.path);
+      }),
+  });
+  const runtime = ProjectRuntimeLive.pipe(Layer.provide([projectStore, workflowBackend]));
+  const layer = Layer.mergeAll(indexStore, makeLayout({ moved }), runtime);
+
+  return Effect.gen(function* () {
+    const registration = yield* Effect.forkChild(registerProject("moved", requestKey("20")), {
+      startImmediately: true,
+    });
+    yield* Effect.promise(() => migrationStarted);
+    const forgetting = yield* Effect.forkChild(
+      forgetProject(identity, { kind: "identity", identity }, requestKey("21")),
+      { startImmediately: true },
+    );
+    yield* Effect.promise(() => forgetRead);
+    resumeMigration();
+
+    expect(yield* Fiber.join(registration)).toMatchObject({ ok: true, project: moved });
+    expect(yield* Fiber.join(forgetting)).toMatchObject({ ok: true, project: moved });
+    expect(inspectedPaths).toEqual([moved.path]);
+    expect(releasedPaths.at(-1)).toBe(moved.path);
   }).pipe(Effect.provide(layer));
 });

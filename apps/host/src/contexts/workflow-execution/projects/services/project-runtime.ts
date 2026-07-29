@@ -1,4 +1,4 @@
-import type { ProjectCondition, ProjectSnapshot } from "@kojo/control";
+import type { ProjectCondition, ProjectIdentity, ProjectSnapshot } from "@kojo/control";
 import { Context, Effect, Layer } from "effect";
 import { type ProjectForgetBlockers, ProjectStore } from "./project-store";
 import { WorkflowBackend } from "./workflow-backend";
@@ -24,8 +24,13 @@ export interface ProjectRuntimeShape {
     project: ProjectSnapshot,
   ) => Effect.Effect<ProjectForgetBlockers>;
   readonly coordinateForget: <A>(
-    project: ProjectSnapshot,
+    identity: ProjectIdentity,
+    resolve: Effect.Effect<
+      | { readonly _tag: "project"; readonly project: ProjectSnapshot }
+      | { readonly _tag: "result"; readonly result: A }
+    >,
     operation: (
+      project: ProjectSnapshot,
       blockers: ProjectForgetBlockers,
     ) => Effect.Effect<{ readonly deactivate: boolean; readonly result: A }>,
   ) => Effect.Effect<A>;
@@ -42,12 +47,12 @@ export const ProjectRuntimeLive = Layer.effect(
     const backend = yield* WorkflowBackend;
     const pending = new Map<string, Promise<void>>();
     let pendingRegistration: Promise<void> = Promise.resolve();
-    const serialize = <A>(project: ProjectSnapshot, effect: Effect.Effect<A>) =>
+    const serializeIdentity = <A>(identity: string, effect: Effect.Effect<A>) =>
       Effect.promise(() => {
-        const previous = pending.get(project.identity) ?? Promise.resolve();
+        const previous = pending.get(identity) ?? Promise.resolve();
         const result = previous.then(() => Effect.runPromise(effect));
         pending.set(
-          project.identity,
+          identity,
           result.then(
             () => undefined,
             () => undefined,
@@ -55,6 +60,8 @@ export const ProjectRuntimeLive = Layer.effect(
         );
         return result;
       });
+    const serialize = <A>(project: ProjectSnapshot, effect: Effect.Effect<A>) =>
+      serializeIdentity(project.identity, effect);
     const serializeRegistration = <A>(effect: Effect.Effect<A>) =>
       Effect.promise(() => {
         const result = pendingRegistration.then(() => Effect.runPromise(effect));
@@ -66,11 +73,16 @@ export const ProjectRuntimeLive = Layer.effect(
       });
     const activate = (project: ProjectSnapshot) =>
       Effect.gen(function* () {
-        yield* backend.release(project);
-        if (!(yield* store.migrate(project))) return false;
+        if (!(yield* backend.acquire(project))) return false;
+        yield* backend.quiesce(project);
+        if (!(yield* store.migrate(project))) {
+          yield* backend.release(project);
+          return false;
+        }
         const initialized = yield* backend.initialize(project);
-        const backendReady = initialized && (yield* backend.postflight(project));
-        if (!backendReady) {
+        const postflightReady =
+          initialized && (yield* backend.postflight(project)) && (yield* store.postflight(project));
+        if (!postflightReady) {
           yield* backend.release(project);
           yield* store.completeMigration(project, false);
           return false;
@@ -141,16 +153,26 @@ export const ProjectRuntimeLive = Layer.effect(
       inspectForgetBlockers: (project: ProjectSnapshot) =>
         serialize(project, store.inspectForgetBlockers(project)),
       coordinateForget: <A>(
-        project: ProjectSnapshot,
+        identity: ProjectIdentity,
+        resolve: Effect.Effect<
+          | { readonly _tag: "project"; readonly project: ProjectSnapshot }
+          | { readonly _tag: "result"; readonly result: A }
+        >,
         operation: (
+          project: ProjectSnapshot,
           blockers: ProjectForgetBlockers,
         ) => Effect.Effect<{ readonly deactivate: boolean; readonly result: A }>,
       ) =>
-        serialize(
-          project,
+        serializeIdentity(
+          identity,
           Effect.gen(function* () {
-            const outcome = yield* operation(yield* store.inspectForgetBlockers(project));
-            if (outcome.deactivate) yield* backend.release(project);
+            const resolved = yield* resolve;
+            if (resolved._tag === "result") return resolved.result;
+            const outcome = yield* operation(
+              resolved.project,
+              yield* store.inspectForgetBlockers(resolved.project),
+            );
+            if (outcome.deactivate) yield* backend.release(resolved.project);
             return outcome.result;
           }),
         ),

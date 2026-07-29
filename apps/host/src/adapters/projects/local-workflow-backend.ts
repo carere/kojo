@@ -1,15 +1,15 @@
 import { Database } from "bun:sqlite";
+import { chmodSync, existsSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { BunCrypto } from "@effect/platform-bun";
 import { SqliteClient } from "@effect/sql-sqlite-bun";
 import type { ProjectSnapshot } from "@kojo/control";
-import { Context, Duration, Effect, Exit, Layer, Option, Scope } from "effect";
+import { Context, Effect, Exit, Layer, Option, Scope } from "effect";
 import {
   ClusterWorkflowEngine,
   RunnerAddress,
   ShardId,
   Sharding,
-  ShardingConfig,
   SingleRunner,
 } from "effect/unstable/cluster";
 import { SqlClient } from "effect/unstable/sql";
@@ -20,9 +20,8 @@ import {
 } from "../../contexts/workflow-execution/projects/services/workflow-backend";
 
 const databasePath = (project: ProjectSnapshot) => join(project.path, ".kojo", "kojo.sqlite");
-const shardLockExpirationSeconds = Math.ceil(
-  Duration.toSeconds(ShardingConfig.defaults.shardLockExpiration),
-);
+const ownershipPath = (project: ProjectSnapshot) =>
+  join(project.path, ".kojo", "project-runtime-lock.sqlite");
 
 const configure = (sql: SqlClient.SqlClient) =>
   Effect.gen(function* () {
@@ -62,9 +61,10 @@ export const makeLocalWorkflowBackendLayer = (hostIdentity: string) =>
     Effect.gen(function* () {
       const parentScope = yield* Effect.scope;
       const active = new Map<string, ActiveBackend>();
+      const ownership = new Map<string, Database>();
       const ownerAddress = RunnerAddress.make(hostIdentity, 34_431);
 
-      const close = (path: string) =>
+      const quiesce = (path: string) =>
         Effect.gen(function* () {
           const backend = active.get(path);
           if (backend === undefined) return;
@@ -72,7 +72,47 @@ export const makeLocalWorkflowBackendLayer = (hostIdentity: string) =>
           yield* Scope.close(backend.scope, Exit.void);
         });
 
-      const acquire = (project: ProjectSnapshot) =>
+      const acquireOwnership = (project: ProjectSnapshot) =>
+        Effect.sync(() => {
+          if (ownership.has(project.path)) return true;
+          const path = ownershipPath(project);
+          if (existsSync(path)) {
+            const information = lstatSync(path);
+            const userId = process.getuid?.();
+            if (
+              information.isSymbolicLink() ||
+              !information.isFile() ||
+              (userId !== undefined && information.uid !== userId) ||
+              (information.mode & 0o777) !== 0o600
+            ) {
+              return false;
+            }
+          }
+          const connection = new Database(path, { create: true, strict: true });
+          try {
+            chmodSync(path, 0o600);
+            connection.exec("PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE");
+            ownership.set(project.path, connection);
+            return true;
+          } catch {
+            connection.close();
+            return false;
+          }
+        }).pipe(Effect.catchCause(() => Effect.succeed(false)));
+
+      const releaseOwnership = (path: string) =>
+        Effect.sync(() => {
+          const connection = ownership.get(path);
+          if (connection === undefined) return;
+          ownership.delete(path);
+          try {
+            connection.exec("ROLLBACK");
+          } finally {
+            connection.close();
+          }
+        }).pipe(Effect.catchCause(() => Effect.void));
+
+      const initialize = (project: ProjectSnapshot) =>
         Effect.gen(function* () {
           const current = active.get(project.path);
           if (current !== undefined) return yield* waitForOwnership(current.sharding);
@@ -102,7 +142,7 @@ export const makeLocalWorkflowBackendLayer = (hostIdentity: string) =>
             active.set(project.path, { engine, scope, sharding });
             return true;
           }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)));
-        }).pipe(Effect.catchCause(() => close(project.path).pipe(Effect.as(false))));
+        }).pipe(Effect.catchCause(() => quiesce(project.path).pipe(Effect.as(false))));
 
       const postflight = (project: ProjectSnapshot) =>
         Effect.gen(function* () {
@@ -113,46 +153,25 @@ export const makeLocalWorkflowBackendLayer = (hostIdentity: string) =>
           return backend.engine !== undefined;
         }).pipe(Effect.catchCause(() => Effect.succeed(false)));
 
-      const hasForeignOwnership = (project: ProjectSnapshot) =>
-        Effect.sync(() => {
-          const connection = new Database(databasePath(project), {
-            create: false,
-            readonly: true,
-            strict: true,
-          });
-          try {
-            const lockTable = connection
-              .query(
-                "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'cluster_locks'",
-              )
-              .get() as { readonly present: number } | undefined;
-            if (lockTable?.present !== 1) return false;
-            const lock = connection
-              .query(
-                "SELECT 1 AS present FROM cluster_locks WHERE address <> ? AND acquired_at >= datetime('now', ?) LIMIT 1",
-              )
-              .get(
-                `${ownerAddress.host}:${ownerAddress.port}`,
-                `-${shardLockExpirationSeconds} seconds`,
-              ) as { readonly present: number } | undefined;
-            return lock?.present === 1;
-          } finally {
-            connection.close();
-          }
-        }).pipe(Effect.catchCause(() => Effect.succeed(true)));
+      const release = (project: ProjectSnapshot) =>
+        quiesce(project.path).pipe(Effect.andThen(releaseOwnership(project.path)));
+
+      yield* Effect.addFinalizer(() =>
+        Effect.forEach(Array.from(ownership.keys()), releaseOwnership, { discard: true }),
+      );
 
       return {
-        initialize: acquire,
+        acquire: acquireOwnership,
+        quiesce: (project: ProjectSnapshot) => quiesce(project.path),
+        initialize,
         postflight,
         readiness: (project: ProjectSnapshot): Effect.Effect<WorkflowBackendAssessment> =>
           Effect.gen(function* () {
             const backend = active.get(project.path);
-            if (backend === undefined) {
-              return (yield* hasForeignOwnership(project)) ? "needs-attention" : "uninitialized";
-            }
+            if (backend === undefined) return "uninitialized";
             return (yield* postflight(project)) ? "ready" : "needs-attention";
           }).pipe(Effect.catchCause(() => Effect.succeed("needs-attention" as const))),
-        release: (project: ProjectSnapshot) => close(project.path),
+        release,
       };
     }),
   );

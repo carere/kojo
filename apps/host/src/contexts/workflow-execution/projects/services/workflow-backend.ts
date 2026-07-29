@@ -4,6 +4,8 @@ import { Context, type Effect } from "effect";
 export type WorkflowBackendAssessment = "ready" | "uninitialized" | "needs-attention";
 
 export interface WorkflowBackendShape {
+  readonly acquire: (project: ProjectSnapshot) => Effect.Effect<boolean>;
+  readonly quiesce: (project: ProjectSnapshot) => Effect.Effect<void>;
   readonly initialize: (project: ProjectSnapshot) => Effect.Effect<boolean>;
   readonly postflight: (project: ProjectSnapshot) => Effect.Effect<boolean>;
   readonly readiness: (project: ProjectSnapshot) => Effect.Effect<WorkflowBackendAssessment>;

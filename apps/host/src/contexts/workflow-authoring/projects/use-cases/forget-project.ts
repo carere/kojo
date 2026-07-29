@@ -25,6 +25,9 @@ const selectorMatchesProject = (selector: ProjectSelector, project: ProjectSnaps
   selector.kind === "identity"
     ? selector.identity === project.identity
     : selector.path === project.path || selector.path.startsWith(`${project.path}${sep}`);
+type ForgetResolution =
+  | { readonly _tag: "project"; readonly project: ProjectSnapshot }
+  | { readonly _tag: "result"; readonly result: ProjectMutationResult };
 export const forgetProject = (
   identity: ProjectIdentity,
   selector: ProjectSelector,
@@ -42,17 +45,8 @@ export const forgetProject = (
         ? replay(receipt.result)
         : requestConflict(requestKey);
     }
-    const project = state.projects.find((candidate) => candidate.identity === identity);
-    if (project === undefined || !selectorMatchesProject(selector, project)) {
-      const result = mutationFailure(
-        requestKey,
-        "project-not-found",
-        "Kojo Project was not found in the Project Index.",
-        "Choose a listed Project Identity.",
-        { kind: "project", identity },
-        [],
-      );
-      return yield* store.update((latest) =>
+    const resolveCurrentProject: Effect.Effect<ForgetResolution> = Effect.suspend(() =>
+      store.update<ForgetResolution>((latest) =>
         Effect.sync(() => {
           const currentReceipt = latest.receipts.find(
             (candidate) => candidate.requestKey === requestKey,
@@ -60,22 +54,42 @@ export const forgetProject = (
           if (currentReceipt !== undefined) {
             return {
               state: latest,
-              result:
-                currentReceipt.operation === "forget" &&
-                currentReceipt.fingerprint === requestFingerprint
-                  ? replay(currentReceipt.result)
-                  : requestConflict(requestKey),
+              result: {
+                _tag: "result" as const,
+                result:
+                  currentReceipt.operation === "forget" &&
+                  currentReceipt.fingerprint === requestFingerprint
+                    ? replay(currentReceipt.result)
+                    : requestConflict(requestKey),
+              },
             };
           }
+          const currentProject = latest.projects.find(
+            (candidate) => candidate.identity === identity,
+          );
+          if (currentProject !== undefined && selectorMatchesProject(selector, currentProject)) {
+            return {
+              state: latest,
+              result: { _tag: "project" as const, project: currentProject },
+            };
+          }
+          const result = mutationFailure(
+            requestKey,
+            "project-not-found",
+            "Kojo Project was not found in the Project Index.",
+            "Choose a listed Project Identity.",
+            { kind: "project", identity },
+            [],
+          );
           return {
             state: record(latest, requestKey, "forget", input, result, selectorLookupKey(selector)),
-            result,
+            result: { _tag: "result" as const, result },
           };
         }),
-      );
-    }
+      ),
+    );
 
-    return yield* runtime.coordinateForget(project, (blockers) =>
+    return yield* runtime.coordinateForget(identity, resolveCurrentProject, (project, blockers) =>
       store
         .update((latest) =>
           Effect.gen(function* () {

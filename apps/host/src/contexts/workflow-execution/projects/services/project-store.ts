@@ -9,6 +9,7 @@ export interface ProjectForgetBlockers {
 
 export interface ProjectStoreShape {
   readonly migrate: (project: ProjectSnapshot) => Effect.Effect<boolean>;
+  readonly postflight: (project: ProjectSnapshot) => Effect.Effect<boolean>;
   readonly completeMigration: (
     project: ProjectSnapshot,
     succeeded: boolean,

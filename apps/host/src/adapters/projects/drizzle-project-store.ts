@@ -277,6 +277,33 @@ const assertCurrentSchema = (connection: Database, project: { readonly identity:
   }
 };
 
+const assertActivationSemantics = (connection: Database) => {
+  const pendingDeletion = connection
+    .query("SELECT 1 AS present FROM kojo_deletion_intents LIMIT 1")
+    .get() as { readonly present: number } | undefined;
+  if (pendingDeletion?.present === 1) {
+    throw new Error("Project deletion recovery is pending");
+  }
+
+  const invalidNonFinalRun = connection
+    .query(
+      "SELECT 1 AS present FROM kojo_workflow_runs AS run WHERE run.state IN ('running', 'suspended', 'stopping') AND (run.last_event_sequence < 1 OR NOT EXISTS (SELECT 1 FROM kojo_execution_events AS accepted WHERE accepted.run_id = run.run_id AND accepted.sequence = 1 AND accepted.kind = 'run.accepted') OR run.last_event_sequence != (SELECT COALESCE(MAX(event.sequence), 0) FROM kojo_execution_events AS event WHERE event.run_id = run.run_id)) LIMIT 1",
+    )
+    .get() as { readonly present: number } | undefined;
+  if (invalidNonFinalRun?.present === 1) {
+    throw new Error("Project non-final Workflow Run Event invariants are invalid");
+  }
+
+  const duplicateEngineMapping = connection
+    .query(
+      "SELECT 1 AS present FROM kojo_workflow_runs GROUP BY engine_reference_version, engine_reference_json HAVING COUNT(*) > 1 LIMIT 1",
+    )
+    .get() as { readonly present: number } | undefined;
+  if (duplicateEngineMapping?.present === 1) {
+    throw new Error("Project Workflow Run engine mappings are not unique");
+  }
+};
+
 const assertProjectIdentity = (project: { readonly identity: string; readonly path: string }) => {
   const metadata = JSON.parse(
     readFileSync(join(project.path, ".kojo", "project.json"), "utf8"),
@@ -327,6 +354,7 @@ export const migrateProjectStore = (project: {
     if (current !== 0) assertStoreMetadata(connection, project, current);
     if (current === CURRENT_VERSION) {
       assertCurrentSchema(connection, project);
+      assertActivationSemantics(connection);
     }
 
     if (!existsSync(backupPath)) {
@@ -380,6 +408,7 @@ export const migrateProjectStore = (project: {
       connection.exec(`PRAGMA user_version = ${CURRENT_VERSION}`);
     }
     assertCurrentSchema(connection, project);
+    assertActivationSemantics(connection);
     assertIntegrity(connection);
     connection.query("PRAGMA wal_checkpoint(TRUNCATE)").get();
     succeeded = true;
@@ -411,6 +440,7 @@ export const completeProjectStoreMigration = (
     configureReadOnly(connection);
     assertIntegrity(connection);
     assertCurrentSchema(connection, project);
+    assertActivationSemantics(connection);
   } finally {
     connection.close();
   }
@@ -435,6 +465,7 @@ const inspectReadiness = (project: { readonly identity: string; readonly path: s
       }
       assertStoreMetadata(connection, project, current);
       assertCurrentSchema(connection, project);
+      assertActivationSemantics(connection);
       return "ready" as const;
     } finally {
       connection.close();
@@ -489,9 +520,13 @@ const inspectBlockers = (project: { readonly identity: string; readonly path: st
 
 export const DrizzleProjectStoreLive = Layer.sync(ProjectStore, () => {
   const attemptedMigrations = new Set<string>();
+  const failedMigrations = new Set<string>();
+  const failureKey = (project: { readonly identity: string; readonly path: string }) =>
+    `${project.identity}:${project.path}`;
   return {
     migrate: (project) =>
       Effect.sync(() => {
+        if (failedMigrations.has(failureKey(project))) return false;
         const path = databasePath(project.path);
         const backupPath = `${path}.migration-backup`;
         const attemptKey = existsSync(backupPath)
@@ -502,6 +537,27 @@ export const DrizzleProjectStoreLive = Layer.sync(ProjectStore, () => {
         try {
           migrateProjectStore(project);
           return true;
+        } catch {
+          failedMigrations.add(failureKey(project));
+          return false;
+        }
+      }),
+    postflight: (project) =>
+      Effect.sync(() => {
+        try {
+          const path = databasePath(project.path);
+          assertDatabaseFile(path);
+          assertProjectIdentity(project);
+          const connection = new Database(path, { readonly: true, strict: true });
+          try {
+            configureReadOnly(connection);
+            assertIntegrity(connection);
+            assertCurrentSchema(connection, project);
+            assertActivationSemantics(connection);
+            return true;
+          } finally {
+            connection.close();
+          }
         } catch {
           return false;
         }
@@ -515,9 +571,12 @@ export const DrizzleProjectStoreLive = Layer.sync(ProjectStore, () => {
             for (const attempt of attemptedMigrations) {
               if (attempt.startsWith(prefix)) attemptedMigrations.delete(attempt);
             }
+          } else {
+            failedMigrations.add(failureKey(project));
           }
           return completed;
         } catch {
+          failedMigrations.add(failureKey(project));
           return false;
         }
       }),
