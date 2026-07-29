@@ -1,6 +1,7 @@
 import {
   chmod,
   lstat,
+  mkdir,
   readFile,
   realpath,
   rm,
@@ -10,6 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   makeTemporaryDirectory,
@@ -18,6 +20,9 @@ import {
 import { startKojoHostProcess } from "../../../../../../../tests/support/host-process";
 
 const cleanups: Array<() => Promise<void>> = [];
+const workflowPackagePath = fileURLToPath(
+  new URL("../../../../../../../packages/workflow", import.meta.url),
+);
 
 afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
@@ -129,7 +134,7 @@ describe("kojo init", () => {
     expect(await readFile(join(project, ".gitignore"), "utf8")).toBe(".kojo/\n");
   });
 
-  it("rejects an invalid existing Kojo Configuration before creating Project data", async () => {
+  it("leaves a safe retryable layout when an existing Kojo Configuration is invalid", async () => {
     const directory = await temporaryDirectory("kojo-init-invalid-configuration-");
     const project = join(directory, "project");
     await run(["git", "init", project]);
@@ -141,7 +146,39 @@ describe("kojo init", () => {
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("Kojo Configuration is invalid");
     expect(await readFile(join(project, "kojo.config.ts"), "utf8")).toBe(invalidConfiguration);
-    expect(await pathsExist(project, [".kojo", ".gitignore"])).toEqual([false, false]);
+    expect(await pathsExist(project, [".kojo", ".gitignore"])).toEqual([true, true]);
+    expect(result.stderr).toContain("safe Project layout remains in place");
+  });
+
+  it("reports a missing workflow dependency after safe layout creation and converges on retry", async () => {
+    const directory = await temporaryDirectory("kojo-init-missing-dependency-");
+    const project = join(directory, "project");
+    await run(["git", "init", project]);
+    await writeFile(join(project, "bun.lock"), "");
+    const dependencyPath = join(directory, "node_modules", "@kojo", "workflow");
+    await unlink(dependencyPath);
+
+    const first = await runCli(["init", project], join(directory, "missing.sock"), directory);
+
+    expect(first.exitCode).toBe(1);
+    expect(first.stderr).toContain("dependency");
+    expect(first.stderr).toContain("bun add @kojo/workflow");
+    expect(await pathsExist(project, ["kojo.config.ts", ".gitignore", ".kojo"])).toEqual([
+      true,
+      true,
+      true,
+    ]);
+    const firstIdentity = JSON.parse(
+      await readFile(join(project, ".kojo", "project.json"), "utf8"),
+    ).projectIdentity;
+
+    await symlink(workflowPackagePath, dependencyPath, "dir");
+    const retried = await runCli(["init", project], join(directory, "missing.sock"), directory);
+
+    expect(retried.exitCode).toBe(0);
+    expect(
+      JSON.parse(await readFile(join(project, ".kojo", "project.json"), "utf8")).projectIdentity,
+    ).toBe(firstIdentity);
   });
 
   it("rejects invalid SQLite content without recreating durable Project data", async () => {
@@ -194,7 +231,7 @@ describe("kojo init", () => {
     expect(JSON.parse(registered.stdout).result.project.identity).toBe(identity);
 
     const suppliedProject = join(directory, "supplied-request-key");
-    const suppliedRequestKey = "10000000-0000-4000-8000-000000000099";
+    const suppliedRequestKey = "settled-offline-key";
     await run(["git", "init", suppliedProject]);
     const supplied = await runCli(
       ["init", suppliedProject, "--request-key", suppliedRequestKey],
@@ -327,6 +364,12 @@ describe("kojo init", () => {
 const temporaryDirectory = async (prefix: string) => {
   const directory = await makeTemporaryDirectory(prefix);
   cleanups.push(directory.cleanup);
+  await mkdir(join(directory.path, "node_modules", "@kojo"), { recursive: true });
+  await symlink(
+    workflowPackagePath,
+    join(directory.path, "node_modules", "@kojo", "workflow"),
+    "dir",
+  );
   return directory.path;
 };
 

@@ -14,6 +14,7 @@ import {
   forgetProject,
   listProjects,
   registerProject,
+  replayForgetProject,
 } from "../../../../../../src/contexts/workflow-authoring/projects/use-cases/manage-projects";
 import {
   ProjectForgetGuard,
@@ -150,7 +151,7 @@ it.effect("blocks forgetting a Project with an enabled Workflow Schedule", () =>
 
   return Effect.gen(function* () {
     yield* registerProject("input", requestKey("1"));
-    const result = yield* forgetProject(identity, requestKey("2"));
+    const result = yield* forgetProject(identity, { kind: "identity", identity }, requestKey("2"));
 
     expect(result).toMatchObject({
       ok: false,
@@ -180,7 +181,7 @@ it.effect("blocks forgetting a Project with a non-final Workflow Run", () => {
 
   return Effect.gen(function* () {
     yield* registerProject("input", requestKey("1"));
-    const result = yield* forgetProject(identity, requestKey("2"));
+    const result = yield* forgetProject(identity, { kind: "identity", identity }, requestKey("2"));
 
     expect(result).toMatchObject({
       ok: false,
@@ -191,5 +192,29 @@ it.effect("blocks forgetting a Project with a non-final Workflow Run", () => {
       },
     });
     expect((yield* listProjects).projects).toEqual([project]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("replays forget only for the identical original selector", () => {
+  const project: ProjectSnapshot = { identity, path: "/projects/first" };
+  const layer = Layer.mergeAll(
+    makeStore(),
+    makeLayout({ input: project }),
+    makeForgetGuard(noForgetBlockers),
+  );
+
+  return Effect.gen(function* () {
+    yield* registerProject("input", requestKey("1"));
+    const selector = { kind: "path" as const, path: project.path };
+    const forgotten = yield* forgetProject(identity, selector, requestKey("2"));
+    expect(forgotten).toMatchObject({ ok: true, alreadyApplied: false });
+
+    expect(yield* replayForgetProject(selector, requestKey("2"))).toMatchObject({
+      ok: true,
+      alreadyApplied: true,
+    });
+    expect(
+      yield* replayForgetProject({ kind: "path", path: "/projects/other" }, requestKey("2")),
+    ).toMatchObject({ ok: false, error: { code: "request-key-conflict" } });
   }).pipe(Effect.provide(layer));
 });

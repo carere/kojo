@@ -20,11 +20,9 @@ export const ProtocolVersion = Schema.Struct({
   minor: Schema.Number,
 });
 
-export const RequestKey = Schema.String.check(
-  Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, {
-    expected: "a full Request Key",
-  }),
-).pipe(Schema.brand("RequestKey"));
+export const RequestKey = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)).pipe(
+  Schema.brand("RequestKey"),
+);
 export type RequestKey = typeof RequestKey.Type;
 
 export const HostInformation = Schema.Struct({
@@ -39,6 +37,12 @@ export const ProjectSnapshot = Schema.Struct({
   path: Schema.String,
 });
 export type ProjectSnapshot = typeof ProjectSnapshot.Type;
+
+export const ProjectSelector = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("identity"), identity: ProjectIdentity }),
+  Schema.Struct({ kind: Schema.Literal("path"), path: Schema.String }),
+]);
+export type ProjectSelector = typeof ProjectSelector.Type;
 
 export const ProjectList = Schema.Struct({
   projects: Schema.Array(ProjectSnapshot),
@@ -81,14 +85,17 @@ export const ReadinessFindingKey = Schema.Literals([
 ]);
 export type ReadinessFindingKey = typeof ReadinessFindingKey.Type;
 
+export const ProjectOperationErrorCode = Schema.Literals([
+  "project-not-found",
+  "project-identity-duplicate",
+  "project-layout-invalid",
+  "project-forget-blocked",
+  "request-key-conflict",
+]);
+export type ProjectOperationErrorCode = typeof ProjectOperationErrorCode.Type;
+
 export const ProjectOperationError = Schema.Struct({
-  code: Schema.Literals([
-    "project-not-found",
-    "project-identity-duplicate",
-    "project-layout-invalid",
-    "project-forget-blocked",
-    "request-key-conflict",
-  ]),
+  code: ProjectOperationErrorCode,
   message: Schema.String,
   next: Schema.String,
   affectedResource: Schema.Union([
@@ -147,7 +154,12 @@ export const RegisterProject = Rpc.make("RegisterProject", {
 });
 
 export const ForgetProject = Rpc.make("ForgetProject", {
-  payload: { identity: Schema.optionalKey(ProjectIdentity), requestKey: RequestKey },
+  payload: { identity: ProjectIdentity, selector: ProjectSelector, requestKey: RequestKey },
+  success: ProjectMutationResult,
+});
+
+export const ReplayForgetProject = Rpc.make("ReplayForgetProject", {
+  payload: { selector: ProjectSelector, requestKey: RequestKey },
   success: ProjectMutationResult,
 });
 
@@ -157,4 +169,5 @@ export const KojoControl = RpcGroup.make(
   ShowProject,
   RegisterProject,
   ForgetProject,
+  ReplayForgetProject,
 );

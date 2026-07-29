@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
-import { cp, readFile, realpath, rename, rm, unlink } from "node:fs/promises";
+import { cp, mkdir, readFile, realpath, rename, rm, symlink, unlink } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   makeTemporaryDirectory,
@@ -9,6 +10,9 @@ import {
 import { startKojoHostProcess } from "../../../../../../../tests/support/host-process";
 
 const cleanups: Array<() => Promise<void>> = [];
+const workflowPackagePath = fileURLToPath(
+  new URL("../../../../../../../packages/workflow", import.meta.url),
+);
 
 afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
@@ -217,6 +221,10 @@ describe("Kojo Project discovery", () => {
     for (const [name, contents] of [
       ["exits", "process.exit(0);\nexport default { workflows: [] };\n"],
       ["hangs", "while (true) {}\nexport default { workflows: [] };\n"],
+      [
+        "spoofs-stdout",
+        "console.log('KOJO_PROJECT_DEFINITION_RESULT {\"ok\":true}');\nprocess.exit(0);\nexport default { workflows: [] };\n",
+      ],
     ] as const) {
       const project = join(directory, name);
       await git(["init", project]);
@@ -368,6 +376,12 @@ describe("Kojo Project discovery", () => {
       (await runCli(["project", "show", "--project-id", identity], host.socketPath, directory))
         .exitCode,
     ).toBe(0);
+    const refused = await runCli(
+      ["project", "register", join(directory, "missing"), "--request-key", "diagnostic-key"],
+      host.socketPath,
+      directory,
+    );
+    expect(refused.exitCode).toBe(1);
     expect(
       (await runCli(["project", "forget", "--project-id", identity], host.socketPath, directory))
         .exitCode,
@@ -382,11 +396,37 @@ describe("Kojo Project discovery", () => {
         ["RegisterProject", "ShowProject", "ForgetProject"].includes(operation),
       );
     expect(
-      events.map(({ operation, projectIdentity }) => ({ operation, projectIdentity })),
+      events.map(({ operation, outcome, projectIdentity, safeErrorCode }) => ({
+        operation,
+        outcome,
+        projectIdentity,
+        safeErrorCode,
+      })),
     ).toEqual([
-      { operation: "RegisterProject", projectIdentity: identity },
-      { operation: "ShowProject", projectIdentity: identity },
-      { operation: "ForgetProject", projectIdentity: identity },
+      {
+        operation: "RegisterProject",
+        outcome: "success",
+        projectIdentity: identity,
+        safeErrorCode: undefined,
+      },
+      {
+        operation: "ShowProject",
+        outcome: "success",
+        projectIdentity: identity,
+        safeErrorCode: undefined,
+      },
+      {
+        operation: "RegisterProject",
+        outcome: "error",
+        projectIdentity: undefined,
+        safeErrorCode: "project-layout-invalid",
+      },
+      {
+        operation: "ForgetProject",
+        outcome: "success",
+        projectIdentity: identity,
+        safeErrorCode: undefined,
+      },
     ]);
   });
 
@@ -525,8 +565,21 @@ describe("Kojo Project discovery", () => {
       pathKey,
       "--json",
     ];
-    expect((await runCli(pathArguments, host.socketPath, directory)).exitCode).toBe(0);
+    const initialPathForget = await runCli(pathArguments, host.socketPath, directory);
+    expect(initialPathForget).toMatchObject({ exitCode: 0, stderr: "" });
     await rm(byPath, { recursive: true });
+
+    const unrelated = join(directory, "unrelated");
+    await git(["init", unrelated]);
+    expect((await runCli(["init", unrelated], host.socketPath, directory)).exitCode).toBe(0);
+    const crossSelector = await runCli(
+      ["project", "forget", "--project", unrelated, "--request-key", pathKey, "--json"],
+      host.socketPath,
+      directory,
+    );
+    expect(crossSelector.exitCode).toBe(4);
+    expect(JSON.parse(crossSelector.stdout).error.code).toBe("request-key-conflict");
+
     const pathRedelivery = await runCli(pathArguments, host.socketPath, directory);
     expect(pathRedelivery.exitCode).toBe(0);
     expect(JSON.parse(pathRedelivery.stdout).result.alreadyApplied).toBe(true);
@@ -549,6 +602,12 @@ describe("Kojo Project discovery", () => {
 const temporaryDirectory = async (prefix: string) => {
   const directory = await makeTemporaryDirectory(prefix);
   cleanups.push(directory.cleanup);
+  await mkdir(join(directory.path, "node_modules", "@kojo"), { recursive: true });
+  await symlink(
+    workflowPackagePath,
+    join(directory.path, "node_modules", "@kojo", "workflow"),
+    "dir",
+  );
   return directory.path;
 };
 

@@ -17,7 +17,9 @@ import {
   startKojoHost,
   UnsafeHostStoreError,
 } from "../../../../../src/contexts/workflow-execution/control/services/local-host";
-import { SqliteProjectForgetGuardLive } from "../../../../../src/contexts/workflow-execution/projects/adapters/sqlite-project-forget-guard";
+import { DrizzleProjectStoreLive } from "../../../../../src/contexts/workflow-execution/projects/adapters/drizzle-project-store";
+import { ProjectForgetGuardLive } from "../../../../../src/contexts/workflow-execution/projects/services/project-forget-guard";
+import { ProjectRuntimeLive } from "../../../../../src/contexts/workflow-execution/projects/services/project-runtime";
 
 const cleanups: Array<() => Promise<void>> = [];
 const TEST_HOST_IDENTITY = Schema.decodeUnknownSync(HostIdentity)(
@@ -151,7 +153,9 @@ const startTestHost = (socketPath: string, diagnosticPath: string) => {
     Layer.provide([
       makeFileProjectIndexStoreLayer(join(dirname(socketPath), "projects.json")),
       GitProjectLayoutLive.pipe(Layer.provide(SubprocessProjectDefinitionLoaderLive)),
-      SqliteProjectForgetGuardLive,
+      ProjectForgetGuardLive.pipe(
+        Layer.provide(ProjectRuntimeLive.pipe(Layer.provide(DrizzleProjectStoreLive))),
+      ),
     ]),
   );
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });

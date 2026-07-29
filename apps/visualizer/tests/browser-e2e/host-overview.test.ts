@@ -1,6 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, symlink } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { type Browser, chromium } from "playwright";
 import { afterEach, expect, test } from "vitest";
 import { makeTemporaryDirectory, runKojoCli } from "../../../../tests/support/cli-process";
@@ -18,6 +19,9 @@ interface Fixture {
 
 let fixture: Fixture | undefined;
 const temporaryDirectories: Array<() => Promise<void>> = [];
+const workflowPackagePath = fileURLToPath(
+  new URL("../../../../packages/workflow", import.meta.url),
+);
 
 afterEach(async () => {
   if (fixture !== undefined) {
@@ -42,6 +46,12 @@ test("loads the Host-authoritative Project state and reconciles Navigator prefer
   expect(await page.getByText("No Kojo Projects yet.").isVisible()).toBe(true);
   const directory = await makeTemporaryDirectory("kojo-navigator-");
   temporaryDirectories.push(directory.cleanup);
+  await mkdir(join(directory.path, "node_modules", "@kojo"), { recursive: true });
+  await symlink(
+    workflowPackagePath,
+    join(directory.path, "node_modules", "@kojo", "workflow"),
+    "dir",
+  );
   const firstPath = join(directory.path, "first-project");
   const secondPath = join(directory.path, "second-project");
   await run(["git", "init", firstPath]);

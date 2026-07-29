@@ -2,13 +2,20 @@ import { randomUUID } from "node:crypto";
 import { chmod, open, readFile, unlink } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname } from "node:path";
-import { KojoControl, type ProjectIdentity, type ProjectMutationResult } from "@kojo/control";
+import {
+  KojoControl,
+  type ProjectIdentity,
+  type ProjectMutationResult,
+  type ProjectOperationErrorCode,
+  type ProjectQueryResult,
+} from "@kojo/control";
 import { Effect, Exit, Layer, Scope } from "effect";
 import { RpcServer } from "effect/unstable/rpc";
 import {
   forgetProject,
   listProjects,
   registerProject,
+  replayForgetProject,
   showProject,
 } from "../../../workflow-authoring/projects/use-cases/manage-projects";
 import type { HostIdentity } from "../models/host-identity";
@@ -42,18 +49,16 @@ const withHostRequestDiagnostic = <A, E, R>(
   operation: HostRequestDiagnosticEvent["operation"],
   requestId: string,
   effect: Effect.Effect<A, E, R>,
-  projectIdentity?: ProjectIdentity | ((value: A) => ProjectIdentity | undefined),
+  classify?: (value: A) => {
+    readonly projectIdentity?: ProjectIdentity;
+    readonly safeErrorCode?: ProjectOperationErrorCode;
+  },
 ) =>
   Effect.gen(function* () {
     const startedAt = Date.now();
     const exit = yield* Effect.exit(effect);
     const logger = yield* HostDiagnosticLogger;
-    const correlatedProjectIdentity =
-      typeof projectIdentity === "function"
-        ? Exit.isSuccess(exit)
-          ? projectIdentity(exit.value)
-          : undefined
-        : projectIdentity;
+    const classification = Exit.isSuccess(exit) ? classify?.(exit.value) : undefined;
     yield* logger
       .emit({
         eventVersion: 1,
@@ -61,25 +66,37 @@ const withHostRequestDiagnostic = <A, E, R>(
         hostIdentity,
         requestId,
         operation,
-        outcome: Exit.isSuccess(exit) ? "success" : "error",
+        outcome:
+          Exit.isFailure(exit) || classification?.safeErrorCode !== undefined ? "error" : "success",
         durationMs: Math.max(0, Date.now() - startedAt),
         hostVersion: HOST_INFORMATION.hostVersion,
         protocolMajor: HOST_INFORMATION.protocol.major,
         protocolMinor: HOST_INFORMATION.protocol.minor,
-        ...(correlatedProjectIdentity === undefined
+        ...(classification?.projectIdentity === undefined
           ? {}
-          : { projectIdentity: correlatedProjectIdentity }),
+          : { projectIdentity: classification.projectIdentity }),
+        ...(classification?.safeErrorCode === undefined
+          ? {}
+          : { safeErrorCode: classification.safeErrorCode }),
         timestamp: new Date().toISOString(),
       })
       .pipe(Effect.ignore);
     return yield* exit;
   });
 
-const mutationProjectIdentity = (result: ProjectMutationResult) => {
-  if (result.ok) return result.project.identity;
+const mutationDiagnostic = (result: ProjectMutationResult) => {
+  if (result.ok) return { projectIdentity: result.project.identity };
   const affected = result.error.affectedResource;
-  return affected.kind === "project" ? affected.identity : undefined;
+  return {
+    ...(affected.kind === "project" ? { projectIdentity: affected.identity } : {}),
+    safeErrorCode: result.error.code,
+  };
 };
+
+const queryDiagnostic = (identity: ProjectIdentity) => (result: ProjectQueryResult) => ({
+  projectIdentity: identity,
+  ...(result.ok ? {} : { safeErrorCode: result.error.code }),
+});
 
 const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
   KojoControl.toLayer(
@@ -104,7 +121,7 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           "ShowProject",
           String(options.requestId),
           showProject(identity),
-          identity,
+          queryDiagnostic(identity),
         ),
       RegisterProject: ({ path, requestKey }, options) =>
         withHostRequestDiagnostic(
@@ -112,15 +129,23 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           "RegisterProject",
           String(options.requestId),
           registerProject(path, requestKey),
-          mutationProjectIdentity,
+          mutationDiagnostic,
         ),
-      ForgetProject: ({ identity, requestKey }, options) =>
+      ForgetProject: ({ identity, selector, requestKey }, options) =>
         withHostRequestDiagnostic(
           hostIdentity,
           "ForgetProject",
           String(options.requestId),
-          forgetProject(identity, requestKey),
-          identity ?? mutationProjectIdentity,
+          forgetProject(identity, selector, requestKey),
+          mutationDiagnostic,
+        ),
+      ReplayForgetProject: ({ selector, requestKey }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ReplayForgetProject",
+          String(options.requestId),
+          replayForgetProject(selector, requestKey),
+          mutationDiagnostic,
         ),
     }),
   );

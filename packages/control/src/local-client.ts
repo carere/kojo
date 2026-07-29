@@ -17,6 +17,7 @@ import {
   type ProjectList,
   type ProjectMutationResult,
   type ProjectQueryResult,
+  type ProjectSelector,
   type RequestKey,
 } from "./index";
 
@@ -140,14 +141,19 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     activateAndRetry(
       request("projects:register", (client) => client.RegisterProject({ path, requestKey })),
     );
-  const forgetProject = (identity: ProjectIdentity | undefined, requestKey: RequestKey) =>
+  const forgetProject = (
+    identity: ProjectIdentity,
+    selector: ProjectSelector,
+    requestKey: RequestKey,
+  ) =>
     activateAndRetry(
       request("projects:forget", (client) =>
-        client.ForgetProject({
-          requestKey,
-          ...(identity === undefined ? {} : { identity }),
-        }),
+        client.ForgetProject({ identity, selector, requestKey }),
       ),
+    );
+  const replayForgetProject = (selector: ProjectSelector, requestKey: RequestKey) =>
+    activateAndRetry(
+      request("projects:forget", (client) => client.ReplayForgetProject({ selector, requestKey })),
     );
 
   return {
@@ -156,6 +162,7 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     showProject,
     registerProject,
     forgetProject,
+    replayForgetProject,
   } satisfies {
     readonly getHostOverview: Effect.Effect<
       HostOverview,
@@ -179,7 +186,15 @@ export const makeLocalClient = (options: LocalClientOptions) => {
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;
     readonly forgetProject: (
-      identity: ProjectIdentity | undefined,
+      identity: ProjectIdentity,
+      selector: ProjectSelector,
+      requestKey: RequestKey,
+    ) => Effect.Effect<
+      ProjectMutationResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly replayForgetProject: (
+      selector: ProjectSelector,
       requestKey: RequestKey,
     ) => Effect.Effect<
       ProjectMutationResult,

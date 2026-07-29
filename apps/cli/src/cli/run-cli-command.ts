@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { realpath } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import {
   ProjectIdentity as ProjectIdentitySchema,
   type ProjectMutationResult,
   type ProjectOperationError,
+  type ProjectSelector,
   type ProjectSnapshot,
   type RequestKey,
   RequestKey as RequestKeySchema,
@@ -204,6 +207,21 @@ const decodeRequestKey = (value: string | undefined): RequestKey | undefined => 
   }
 };
 
+const canonicalSelectorPath = async (input: string) => {
+  let candidate = resolve(input);
+  const missingSegments: Array<string> = [];
+  for (;;) {
+    try {
+      return join(await realpath(candidate), ...missingSegments);
+    } catch {
+      const parent = dirname(candidate);
+      if (parent === candidate) return resolve(input);
+      missingSegments.unshift(basename(candidate));
+      candidate = parent;
+    }
+  }
+};
+
 const pendingRegistrationWarning = (project: ProjectSnapshot): CliWarning => ({
   code: "project-registration-pending",
   message: "The Kojo Project is initialized, but the Host was not available for registration.",
@@ -327,7 +345,11 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
     }
     const requestKey = decodeRequestKey(options.requestKey);
     if (requestKey === undefined) {
-      return writeFailure(invalid("Use a full Request Key."), json, "project.register");
+      return writeFailure(
+        invalid("Use a non-empty Request Key of at most 256 characters."),
+        json,
+        "project.register",
+      );
     }
     const result = await runEffect(client.registerProject(options.args[0], requestKey));
     if (!result.succeeded) {
@@ -354,17 +376,27 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
 
   let chosen: ProjectSnapshot | undefined;
   let forgetIdentity: ProjectSnapshot["identity"] | undefined;
+  let forgetSelector: ProjectSelector | undefined;
   const forgetRequestKey = args[1] === "forget" ? decodeRequestKey(options.requestKey) : undefined;
   if (args[1] === "forget" && forgetRequestKey === undefined) {
-    return writeFailure(invalid("Use a full Request Key."), json, "project.forget");
+    return writeFailure(
+      invalid("Use a non-empty Request Key of at most 256 characters."),
+      json,
+      "project.forget",
+    );
   }
   if (args[1] === "forget" && options.projectId !== undefined) {
     try {
       forgetIdentity = Schema.decodeUnknownSync(ProjectIdentitySchema)(options.projectId);
+      forgetSelector = { kind: "identity", identity: forgetIdentity };
     } catch {
       return writeFailure(invalid("Use a full Project Identity."), json, "project.forget");
     }
   } else if (args[1] === "forget") {
+    forgetSelector = {
+      kind: "path",
+      path: await canonicalSelectorPath(options.projectPath ?? process.cwd()),
+    };
     try {
       forgetIdentity = (await resolveInitializedProject(options.projectPath ?? process.cwd()))
         .identity;
@@ -408,7 +440,12 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
 
   const requestKey = forgetRequestKey as RequestKey;
   const identity = forgetIdentity ?? chosen?.identity;
-  const forgotten = await runEffect(client.forgetProject(identity, requestKey));
+  const selector = forgetSelector as ProjectSelector;
+  const forgotten = await runEffect(
+    identity === undefined
+      ? client.replayForgetProject(selector, requestKey)
+      : client.forgetProject(identity, selector, requestKey),
+  );
   if (!forgotten.succeeded) {
     return writeFailure(transportFailure(forgotten.error), json, "project.forget");
   }

@@ -13,7 +13,9 @@ import {
   makeKojoControlServerLayer,
   startKojoHost,
 } from "../contexts/workflow-execution/control/services/local-host";
-import { SqliteProjectForgetGuardLive } from "../contexts/workflow-execution/projects/adapters/sqlite-project-forget-guard";
+import { DrizzleProjectStoreLive } from "../contexts/workflow-execution/projects/adapters/drizzle-project-store";
+import { ProjectForgetGuardLive } from "../contexts/workflow-execution/projects/services/project-forget-guard";
+import { ProjectRuntimeLive } from "../contexts/workflow-execution/projects/services/project-runtime";
 
 export const startLiveKojoHost = async () => {
   const socketPath = process.env.KOJO_HOST_SOCKET ?? defaultSocketPath();
@@ -31,7 +33,15 @@ export const startLiveKojoHost = async () => {
     protocol,
     makeHostDiagnosticLoggerLayer(diagnosticPath),
     hostIdentity,
-  ).pipe(Layer.provide([projectIndex, projectLayout, SqliteProjectForgetGuardLive]));
+  ).pipe(
+    Layer.provide([
+      projectIndex,
+      projectLayout,
+      ProjectForgetGuardLive.pipe(
+        Layer.provide(ProjectRuntimeLive.pipe(Layer.provide(DrizzleProjectStoreLive))),
+      ),
+    ]),
+  );
 
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });
 };

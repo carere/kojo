@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
+import { sep } from "node:path";
 import type {
   ProjectIdentity,
   ProjectList,
   ProjectMutationResult,
   ProjectOperationError,
   ProjectQueryResult,
+  ProjectSelector,
+  ProjectSnapshot,
   ReadinessFindingKey,
   RequestKey,
 } from "@kojo/control";
@@ -94,6 +97,13 @@ export const showProject = (
         )
       : { ok: true, project };
   });
+
+const selectorInput = (selector: ProjectSelector) => JSON.stringify(selector);
+
+const selectorMatchesProject = (selector: ProjectSelector, project: ProjectSnapshot) =>
+  selector.kind === "identity"
+    ? selector.identity === project.identity
+    : selector.path === project.path || selector.path.startsWith(`${project.path}${sep}`);
 
 export const registerProject = (
   path: string,
@@ -186,7 +196,8 @@ export const registerProject = (
   });
 
 export const forgetProject = (
-  identity: ProjectIdentity | undefined,
+  identity: ProjectIdentity,
+  selector: ProjectSelector,
   requestKey: RequestKey,
 ): Effect.Effect<ProjectMutationResult, never, ProjectForgetGuard | ProjectIndexStore> =>
   Effect.gen(function* () {
@@ -195,30 +206,19 @@ export const forgetProject = (
     return yield* store.update((state) =>
       Effect.gen(function* () {
         const receipt = state.receipts.find((candidate) => candidate.requestKey === requestKey);
-        const requestFingerprint = fingerprint("forget", identity ?? "");
+        const input = selectorInput(selector);
+        const requestFingerprint = fingerprint("forget", input);
         if (receipt !== undefined) {
           return {
             state,
             result:
-              receipt.operation === "forget" &&
-              (identity === undefined || receipt.fingerprint === requestFingerprint)
+              receipt.operation === "forget" && receipt.fingerprint === requestFingerprint
                 ? replay(receipt.result)
                 : requestConflict(requestKey),
           };
         }
-        if (identity === undefined) {
-          const result = mutationFailure(
-            requestKey,
-            "project-not-found",
-            "Kojo Project could not be resolved for this forget request.",
-            "Restore the selector path or retry with a Request Key from an earlier request.",
-            { kind: "request-key", requestKey },
-            [],
-          );
-          return { state: record(state, requestKey, "forget", "", result), result };
-        }
         const project = state.projects.find((candidate) => candidate.identity === identity);
-        if (project === undefined) {
+        if (project === undefined || !selectorMatchesProject(selector, project)) {
           const result = mutationFailure(
             requestKey,
             "project-not-found",
@@ -227,7 +227,7 @@ export const forgetProject = (
             { kind: "project", identity },
             [],
           );
-          return { state: record(state, requestKey, "forget", identity, result), result };
+          return { state: record(state, requestKey, "forget", input, result), result };
         }
 
         const blockers = yield* guard.inspect(project);
@@ -240,7 +240,7 @@ export const forgetProject = (
             { kind: "project", identity },
             ["store.open-failed"],
           );
-          return { state: record(state, requestKey, "forget", identity, result), result };
+          return { state: record(state, requestKey, "forget", input, result), result };
         }
         if (blockers.enabledScheduleKeys.length > 0 || blockers.nonFinalRunIds.length > 0) {
           const result = mutationFailure(
@@ -251,7 +251,7 @@ export const forgetProject = (
             { kind: "project", identity },
             [],
           );
-          return { state: record(state, requestKey, "forget", identity, result), result };
+          return { state: record(state, requestKey, "forget", input, result), result };
         }
 
         const result = successfulMutation(requestKey, project, false);
@@ -262,10 +262,28 @@ export const forgetProject = (
           },
           requestKey,
           "forget",
-          identity,
+          input,
           result,
         );
         return { state: nextState, result };
       }),
     );
+  });
+
+export const replayForgetProject = (
+  selector: ProjectSelector,
+  requestKey: RequestKey,
+): Effect.Effect<ProjectMutationResult, never, ProjectIndexStore> =>
+  Effect.gen(function* () {
+    const store = yield* ProjectIndexStore;
+    const state = yield* store.read;
+    const receipt = state.receipts.find((candidate) => candidate.requestKey === requestKey);
+    if (
+      receipt === undefined ||
+      receipt.operation !== "forget" ||
+      receipt.fingerprint !== fingerprint("forget", selectorInput(selector))
+    ) {
+      return requestConflict(requestKey);
+    }
+    return replay(receipt.result);
   });

@@ -1,19 +1,41 @@
 import { fileURLToPath } from "node:url";
-import { Layer, Schema } from "effect";
-import {
-  ProjectDefinitionLoader,
-  ProjectDefinitionValidation,
-  type ProjectDefinitionValidation as ProjectDefinitionValidationResult,
-} from "../services/project-definition-loader";
+import type { ReadinessFindingKey } from "@kojo/control";
+import { Schema } from "effect";
+
+const Validation = Schema.Union([
+  Schema.Struct({ ok: Schema.Literal(true) }),
+  Schema.Struct({
+    ok: Schema.Literal(false),
+    findingKey: Schema.Literals([
+      "dependency.workflow-package-missing",
+      "configuration.invalid",
+      "configuration.load-failed",
+    ]),
+    message: Schema.String,
+  }),
+]);
+
+export type ProjectDefinitionValidation =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly findingKey: Extract<
+        ReadinessFindingKey,
+        | "dependency.workflow-package-missing"
+        | "configuration.invalid"
+        | "configuration.load-failed"
+      >;
+      readonly message: string;
+    };
 
 const runnerPath = fileURLToPath(
-  new URL("./project-definition-loader-process.ts", import.meta.url),
+  new URL("./project-definition-validator-process.ts", import.meta.url),
 );
 
 export const validateProjectDefinition = async (
   path: string,
   timeoutMs = 1_000,
-): Promise<ProjectDefinitionValidationResult> => {
+): Promise<ProjectDefinitionValidation> => {
   let envelope: unknown;
   const child = Bun.spawn([process.execPath, runnerPath, path], {
     stdout: "ignore",
@@ -38,7 +60,7 @@ export const validateProjectDefinition = async (
   }
   try {
     if (exitCode !== 0 || envelope === undefined) throw new Error("missing result");
-    return Schema.decodeUnknownSync(ProjectDefinitionValidation)(envelope);
+    return Schema.decodeUnknownSync(Validation)(envelope);
   } catch {
     return {
       ok: false,
@@ -47,7 +69,3 @@ export const validateProjectDefinition = async (
     };
   }
 };
-
-export const SubprocessProjectDefinitionLoaderLive = Layer.succeed(ProjectDefinitionLoader, {
-  validate: validateProjectDefinition,
-});

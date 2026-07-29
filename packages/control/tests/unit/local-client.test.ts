@@ -84,7 +84,12 @@ it.effect("gates optional Project operations against negotiated Host capabilitie
 
     const showError = yield* Effect.flip(client.showProject(identity));
     const registerError = yield* Effect.flip(client.registerProject("/project", requestKey));
-    const forgetError = yield* Effect.flip(client.forgetProject(identity, requestKey));
+    const forgetError = yield* Effect.flip(
+      client.forgetProject(identity, { kind: "identity", identity }, requestKey),
+    );
+    const replayError = yield* Effect.flip(
+      client.replayForgetProject({ kind: "identity", identity }, requestKey),
+    );
 
     expect(showError).toMatchObject({
       _tag: "UnsupportedControlCapabilityError",
@@ -93,7 +98,8 @@ it.effect("gates optional Project operations against negotiated Host capabilitie
     });
     expect(registerError).toBeInstanceOf(UnsupportedControlCapabilityError);
     expect(forgetError).toBeInstanceOf(UnsupportedControlCapabilityError);
-    expect(requests).toEqual(["Negotiate", "Negotiate", "Negotiate"]);
+    expect(replayError).toBeInstanceOf(UnsupportedControlCapabilityError);
+    expect(requests).toEqual(["Negotiate", "Negotiate", "Negotiate", "Negotiate"]);
   }),
 );
 

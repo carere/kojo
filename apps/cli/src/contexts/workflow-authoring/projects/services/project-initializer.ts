@@ -15,8 +15,8 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { ProjectIdentity, type ProjectSnapshot } from "@kojo/control";
-import { validateProjectDefinition } from "@kojo/control/project-definition-validator";
 import { Schema } from "effect";
+import { validateProjectDefinition } from "../adapters/subprocess-project-definition-validator";
 
 const CONFIGURATION =
   'import { defineConfig } from "@kojo/workflow";\n\nexport default defineConfig({ workflows: [] });\n';
@@ -251,14 +251,6 @@ export const initializeProject = async (path: string): Promise<ProjectSnapshot> 
     );
   }
 
-  if (configuration !== undefined) {
-    const validation = await validateProjectDefinition(configurationPath);
-    if (!validation.ok) {
-      throw new ProjectInitializationError(
-        `${configurationPath} ${validation.message} No files were changed.`,
-      );
-    }
-  }
   if (database !== undefined) {
     try {
       validateDatabase(databasePath);
@@ -322,6 +314,13 @@ export const initializeProject = async (path: string): Promise<ProjectSnapshot> 
   } catch {
     throw new ProjectInitializationError(
       `Kojo could not finish initializing ${root}. Review the Project layout before trying again.`,
+    );
+  }
+
+  const validation = await validateProjectDefinition(configurationPath);
+  if (!validation.ok) {
+    throw new ProjectInitializationError(
+      `${configurationPath} ${validation.message} The safe Project layout remains in place; fix this needs-attention finding and retry kojo init.`,
     );
   }
 

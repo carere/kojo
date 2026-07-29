@@ -2,7 +2,7 @@ $schema: "../../.moon/cache/schemas/project.json"
 
 tasks:
   test:
-    command: bun --bun vitest run
+    command: bun --bun vitest run --project unit
     inputs:
       - "@group(configs)"
       - "@group(sources)"
@@ -11,7 +11,7 @@ tasks:
     type: test
 
   integration-test:
-    command: bun --bun vitest run --passWithNoTests tests/integration
+    command: bun --bun vitest run --project integration --passWithNoTests
     inputs:
       - "@group(configs)"
       - "@group(sources)"

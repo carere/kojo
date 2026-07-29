@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
-import { ProjectIdentity } from "@kojo/control";
+import { ProjectIdentity, ProjectOperationErrorCode } from "@kojo/control";
 import { Context, Effect, Layer, Schema } from "effect";
 import { HostIdentity } from "../models/host-identity";
 
@@ -44,8 +44,10 @@ export const HostRequestDiagnosticEvent = Schema.Struct({
     "ShowProject",
     "RegisterProject",
     "ForgetProject",
+    "ReplayForgetProject",
   ]),
   outcome: Schema.Literals(["success", "error"]),
+  safeErrorCode: Schema.optionalKey(ProjectOperationErrorCode),
   durationMs: Schema.Number,
   hostVersion: Schema.String,
   protocolMajor: Schema.Number,

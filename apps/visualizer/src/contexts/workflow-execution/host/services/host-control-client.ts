@@ -4,13 +4,14 @@ import {
   type IncompatibleProtocolError,
   type LocalTransportError,
   makeDefaultLocalClient,
+  type UnsupportedControlCapabilityError,
 } from "@kojo/control/local-client";
 import { Context, Effect, Layer } from "effect";
 
 export interface HostControlClientShape {
   readonly getHostOverview: Effect.Effect<
     HostOverview,
-    LocalTransportError | IncompatibleProtocolError
+    LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
   >;
 }
 
