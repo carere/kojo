@@ -5,13 +5,13 @@ import { afterEach, describe, expect, it } from "@effect/vitest";
 import { ProjectIdentity } from "@kojo/control";
 import { Effect, Schema } from "effect";
 import { TestClock } from "effect/testing";
-import { HostIdentity } from "../../../../../src/contexts/shared/models/host-identity";
+import { HostIdentity } from "../../../../../src/contexts/workflow-execution/control/models/host-identity";
 import {
   HostDiagnosticLogger,
   type HostRequestDiagnosticEvent,
   makeHostDiagnosticLogger,
   makeHostDiagnosticLoggerLayer,
-} from "../../../../../src/contexts/shared/services/host-diagnostic-logger";
+} from "../../../../../src/contexts/workflow-execution/control/services/host-diagnostic-logger";
 
 const cleanups: Array<() => Promise<void>> = [];
 const TEST_HOST_IDENTITY = Schema.decodeUnknownSync(HostIdentity)(

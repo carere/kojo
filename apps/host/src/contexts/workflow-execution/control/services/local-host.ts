@@ -5,14 +5,11 @@ import { dirname } from "node:path";
 import { KojoControl } from "@kojo/control";
 import { Effect, Exit, Layer, Scope } from "effect";
 import { RpcServer } from "effect/unstable/rpc";
-import type { HostIdentity } from "../../../shared/models/host-identity";
-import {
-  HostDiagnosticLogger,
-  type HostRequestDiagnosticEvent,
-} from "../../../shared/services/host-diagnostic-logger";
+import type { HostIdentity } from "../models/host-identity";
 import { HOST_INFORMATION } from "../models/host-information";
 import { getHostInformation } from "../use-cases/get-host-information";
 import { listProjects } from "../use-cases/list-projects";
+import { HostDiagnosticLogger, type HostRequestDiagnosticEvent } from "./host-diagnostic-logger";
 import { prepareHostStoreDirectory } from "./host-store";
 
 export { UnsafeHostStoreError } from "./host-store";

@@ -6,8 +6,8 @@ import { afterEach, describe, expect, it } from "@effect/vitest";
 import { connectUnixControlClient, makeLocalClient } from "@kojo/control/local-client";
 import { Effect, Exit, Layer, Schema } from "effect";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
-import { HostIdentity } from "../../../../../src/contexts/shared/models/host-identity";
-import { makeHostDiagnosticLoggerLayer } from "../../../../../src/contexts/shared/services/host-diagnostic-logger";
+import { HostIdentity } from "../../../../../src/contexts/workflow-execution/control/models/host-identity";
+import { makeHostDiagnosticLoggerLayer } from "../../../../../src/contexts/workflow-execution/control/services/host-diagnostic-logger";
 import {
   type KojoHostServer,
   makeKojoControlServerLayer,

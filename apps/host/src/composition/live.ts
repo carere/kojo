@@ -4,7 +4,7 @@ import { BunSocketServer } from "@effect/platform-bun";
 import { defaultSocketPath } from "@kojo/control/local-client";
 import { Layer } from "effect";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
-import { makeHostDiagnosticLoggerLayer } from "../contexts/shared/services/host-diagnostic-logger";
+import { makeHostDiagnosticLoggerLayer } from "../contexts/workflow-execution/control/services/host-diagnostic-logger";
 import { loadHostIdentity } from "../contexts/workflow-execution/control/services/host-identity-store";
 import {
   makeKojoControlServerLayer,
