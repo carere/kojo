@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import { KojoControl } from "@kojo/control";
 import { Effect, Exit, Layer, Scope } from "effect";
 import { RpcServer } from "effect/unstable/rpc";
+import type { HostIdentity } from "../../../shared/models/host-identity";
 import {
   HostDiagnosticLogger,
   type HostRequestDiagnosticEvent,
@@ -35,7 +36,7 @@ export class KojoHostAlreadyRunningError extends Error {
 }
 
 const withHostRequestDiagnostic = <A, E, R>(
-  hostIdentity: string,
+  hostIdentity: HostIdentity,
   operation: HostRequestDiagnosticEvent["operation"],
   requestId: string,
   effect: Effect.Effect<A, E, R>,
@@ -62,7 +63,7 @@ const withHostRequestDiagnostic = <A, E, R>(
     return yield* exit;
   });
 
-const makeKojoControlHandlers = (hostIdentity: string) =>
+const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
   KojoControl.toLayer(
     KojoControl.of({
       Negotiate: (_payload, options) =>
@@ -148,7 +149,7 @@ const acquireHostLock = async (lockPath: string) => {
 export const makeKojoControlServerLayer = <ProtocolError, ProtocolRequirements>(
   protocol: Layer.Layer<RpcServer.Protocol, ProtocolError, ProtocolRequirements>,
   diagnosticLogger: Layer.Layer<HostDiagnosticLogger>,
-  hostIdentity: string,
+  hostIdentity: HostIdentity,
 ) =>
   RpcServer.layer(KojoControl).pipe(
     Layer.provide([

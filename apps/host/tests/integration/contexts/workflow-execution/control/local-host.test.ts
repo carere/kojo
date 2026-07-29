@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { BunSocketServer } from "@effect/platform-bun";
 import { afterEach, describe, expect, it } from "@effect/vitest";
 import { connectUnixControlClient, makeLocalClient } from "@kojo/control/local-client";
-import { Effect, Exit, Layer } from "effect";
+import { Effect, Exit, Layer, Schema } from "effect";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
+import { HostIdentity } from "../../../../../src/contexts/shared/models/host-identity";
 import { makeHostDiagnosticLoggerLayer } from "../../../../../src/contexts/shared/services/host-diagnostic-logger";
 import {
   type KojoHostServer,
@@ -15,6 +16,9 @@ import {
 } from "../../../../../src/contexts/workflow-execution/control/services/local-host";
 
 const cleanups: Array<() => Promise<void>> = [];
+const TEST_HOST_IDENTITY = Schema.decodeUnknownSync(HostIdentity)(
+  "host:00000000-0000-4000-8000-000000000000",
+);
 
 afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
@@ -66,7 +70,7 @@ describe("local Kojo Host control", () => {
         expect(events[0]).toMatchObject({
           eventVersion: 1,
           eventKind: "host-request.completed",
-          hostIdentity: "host:test",
+          hostIdentity: "host:00000000-0000-4000-8000-000000000000",
           hostVersion: "0.1.0",
           protocolMajor: 1,
           protocolMinor: 0,
@@ -133,7 +137,7 @@ const startTestHost = (socketPath: string, diagnosticPath: string) => {
   const serverLayer = makeKojoControlServerLayer(
     protocol,
     makeHostDiagnosticLoggerLayer(diagnosticPath),
-    "host:test",
+    TEST_HOST_IDENTITY,
   );
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });
 };

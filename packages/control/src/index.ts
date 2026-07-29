@@ -2,6 +2,8 @@ import { ProjectIdentity } from "@kojo/workflow";
 import { Schema } from "effect";
 import { Rpc, RpcGroup } from "effect/unstable/rpc";
 
+export { ProjectIdentity } from "@kojo/workflow";
+
 export const PROTOCOL_VERSION = { major: 1, minor: 0 } as const;
 export const CONTROL_CAPABILITIES = ["projects:list"] as const;
 

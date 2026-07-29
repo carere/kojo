@@ -11,7 +11,9 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
-import { Context, Effect, Layer } from "effect";
+import { ProjectIdentity } from "@kojo/control";
+import { Context, Effect, Layer, Schema } from "effect";
+import { HostIdentity } from "../models/host-identity";
 
 export const DEFAULT_DIAGNOSTIC_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1_000;
 export const DEFAULT_DIAGNOSTIC_MAX_PROJECT_BYTES = 100 * 1024 * 1024;
@@ -31,20 +33,21 @@ export interface HostDiagnosticLoggerOptions {
   readonly retention?: Partial<HostDiagnosticRetentionPolicy>;
 }
 
-export interface HostRequestDiagnosticEvent {
-  readonly eventVersion: 1;
-  readonly eventKind: "host-request.completed";
-  readonly hostIdentity: string;
-  readonly requestId: string;
-  readonly operation: "Negotiate" | "ListProjects";
-  readonly outcome: "success" | "error";
-  readonly durationMs: number;
-  readonly hostVersion: string;
-  readonly protocolMajor: number;
-  readonly protocolMinor: number;
-  readonly projectIdentity?: string;
-  readonly timestamp: string;
-}
+export const HostRequestDiagnosticEvent = Schema.Struct({
+  eventVersion: Schema.Literal(1),
+  eventKind: Schema.Literal("host-request.completed"),
+  hostIdentity: HostIdentity,
+  requestId: Schema.String,
+  operation: Schema.Literals(["Negotiate", "ListProjects"]),
+  outcome: Schema.Literals(["success", "error"]),
+  durationMs: Schema.Number,
+  hostVersion: Schema.String,
+  protocolMajor: Schema.Number,
+  protocolMinor: Schema.Number,
+  projectIdentity: Schema.optionalKey(ProjectIdentity),
+  timestamp: Schema.String,
+});
+export type HostRequestDiagnosticEvent = typeof HostRequestDiagnosticEvent.Type;
 
 export interface HostDiagnosticLoggerShape {
   readonly cleanup: Effect.Effect<void>;
@@ -103,7 +106,7 @@ const readStoredLines = async (paths: ReadonlyArray<string>) => {
     const contents = await readFile(path, "utf8");
     for (const value of contents.split("\n").filter(Boolean)) {
       try {
-        const event = JSON.parse(value) as HostRequestDiagnosticEvent;
+        const event = Schema.decodeUnknownSync(HostRequestDiagnosticEvent)(JSON.parse(value));
         const timestamp = Date.parse(event.timestamp);
         if (!Number.isFinite(timestamp)) {
           malformed = true;
@@ -204,7 +207,7 @@ export const makeHostDiagnosticLogger = (
     const minimumTimestamp = now() - retention.maxAgeMs;
     const ageEligible = lines.filter((line) => line.timestamp >= minimumTimestamp);
     const retained: Array<StoredDiagnosticLine> = [];
-    const projectBytes = new Map<string, number>();
+    const projectBytes = new Map<ProjectIdentity, number>();
     let hostBytes = 0;
     for (const line of ageEligible.toReversed()) {
       if (hostBytes + line.bytes > retention.maxHostBytes) continue;

@@ -2,15 +2,22 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { ProjectIdentity } from "@kojo/control";
+import { Effect, Schema } from "effect";
 import { TestClock } from "effect/testing";
+import { HostIdentity } from "../../../../../src/contexts/shared/models/host-identity";
 import {
   HostDiagnosticLogger,
+  type HostRequestDiagnosticEvent,
   makeHostDiagnosticLogger,
   makeHostDiagnosticLoggerLayer,
 } from "../../../../../src/contexts/shared/services/host-diagnostic-logger";
 
 const cleanups: Array<() => Promise<void>> = [];
+const TEST_HOST_IDENTITY = Schema.decodeUnknownSync(HostIdentity)(
+  "host:00000000-0000-4000-8000-000000000000",
+);
+const projectIdentity = (value: string) => Schema.decodeUnknownSync(ProjectIdentity)(value);
 
 afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
@@ -65,6 +72,29 @@ describe("Host Diagnostic Store", () => {
     }),
   );
 
+  it.effect("discards stored Diagnostic Events with an invalid Host Identity", () =>
+    Effect.gen(function* () {
+      const directory = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), "kojo-diagnostics-invalid-identity-")),
+      );
+      cleanups.push(() => rm(directory, { recursive: true }));
+      const path = join(directory, "diagnostics.jsonl");
+      const event = {
+        ...diagnosticEvent("invalid", "2026-07-15T00:00:00.000Z"),
+        hostIdentity: "host:arbitrary",
+      };
+      yield* Effect.promise(() => writeFile(path, `${JSON.stringify(event)}\n`));
+      const logger = makeHostDiagnosticLogger({
+        now: () => Date.parse("2026-07-15T00:00:00.000Z"),
+        path,
+      });
+
+      yield* logger.cleanup;
+
+      expect(yield* Effect.promise(() => readDiagnosticEvents(directory))).toEqual([]);
+    }),
+  );
+
   it.effect("keeps the newest events within each Project byte limit", () =>
     Effect.gen(function* () {
       const directory = yield* Effect.promise(() =>
@@ -74,7 +104,7 @@ describe("Host Diagnostic Store", () => {
       const path = join(directory, "diagnostics.jsonl");
       const timestamp = "2026-07-15T00:00:00.000Z";
       const projectEventBytes = Buffer.byteLength(
-        `${JSON.stringify(diagnosticEvent("a-1", timestamp, "project-a"))}\n`,
+        `${JSON.stringify(diagnosticEvent("a-1", timestamp, projectIdentity("project-a")))}\n`,
       );
       const logger = makeHostDiagnosticLogger({
         now: () => Date.parse(timestamp),
@@ -85,10 +115,10 @@ describe("Host Diagnostic Store", () => {
         },
       });
 
-      yield* logger.emit(diagnosticEvent("a-1", timestamp, "project-a"));
-      yield* logger.emit(diagnosticEvent("a-2", timestamp, "project-a"));
-      yield* logger.emit(diagnosticEvent("a-3", timestamp, "project-a"));
-      yield* logger.emit(diagnosticEvent("b-1", timestamp, "project-b"));
+      yield* logger.emit(diagnosticEvent("a-1", timestamp, projectIdentity("project-a")));
+      yield* logger.emit(diagnosticEvent("a-2", timestamp, projectIdentity("project-a")));
+      yield* logger.emit(diagnosticEvent("a-3", timestamp, projectIdentity("project-a")));
+      yield* logger.emit(diagnosticEvent("b-1", timestamp, projectIdentity("project-b")));
       yield* logger.cleanup;
 
       const events = yield* Effect.promise(() => readDiagnosticEvents(directory));
@@ -182,10 +212,14 @@ describe("Host Diagnostic Store", () => {
   );
 });
 
-const diagnosticEvent = (requestId: string, timestamp: string, projectIdentity?: string) => ({
+const diagnosticEvent = (
+  requestId: string,
+  timestamp: string,
+  projectIdentityValue?: ProjectIdentity,
+) => ({
   eventVersion: 1 as const,
   eventKind: "host-request.completed" as const,
-  hostIdentity: "host:test",
+  hostIdentity: TEST_HOST_IDENTITY,
   requestId,
   operation: "Negotiate" as const,
   outcome: "success" as const,
@@ -193,7 +227,7 @@ const diagnosticEvent = (requestId: string, timestamp: string, projectIdentity?:
   hostVersion: "0.1.0",
   protocolMajor: 1,
   protocolMinor: 0,
-  ...(projectIdentity === undefined ? {} : { projectIdentity }),
+  ...(projectIdentityValue === undefined ? {} : { projectIdentity: projectIdentityValue }),
   timestamp,
 });
 
@@ -210,3 +244,32 @@ const readDiagnosticEvents = async (directory: string) => {
   );
   return events.flat();
 };
+
+const diagnosticContractFields = {
+  eventVersion: 1 as const,
+  eventKind: "host-request.completed" as const,
+  requestId: "request-1",
+  operation: "Negotiate" as const,
+  outcome: "success" as const,
+  durationMs: 1,
+  hostVersion: "0.1.0",
+  protocolMajor: 1,
+  protocolMinor: 0,
+  timestamp: "2026-07-15T00:00:00.000Z",
+};
+
+const eventWithPlainHostIdentity = {
+  ...diagnosticContractFields,
+  // @ts-expect-error Host Identity must be decoded through its domain schema.
+  hostIdentity: "host:00000000-0000-4000-8000-000000000000",
+} satisfies HostRequestDiagnosticEvent;
+
+const eventWithPlainProjectIdentity = {
+  ...diagnosticContractFields,
+  hostIdentity: TEST_HOST_IDENTITY,
+  // @ts-expect-error Project Identity must be decoded through its domain schema.
+  projectIdentity: "project-a",
+} satisfies HostRequestDiagnosticEvent;
+
+void eventWithPlainHostIdentity;
+void eventWithPlainProjectIdentity;
