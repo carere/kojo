@@ -42,8 +42,14 @@ jobs:
       - name: Build
         run: moon run :build
 
-      - name: Test
-        run: moon run --concurrency 2 :unit-test :integration-test :browser-test
+      - name: Unit tests
+        run: moon run :unit-test
+
+      - name: Integration tests
+        run: moon run --concurrency 1 :integration-test
+
+      - name: Browser tests
+        run: moon run --concurrency 1 :browser-test
 
       - name: TypeScript build
         run: bun tsc --build --verbose

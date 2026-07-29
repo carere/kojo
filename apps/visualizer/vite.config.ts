@@ -67,7 +67,7 @@ export default defineConfig({
         test: {
           name: "browser",
           include: ["tests/browser/**/*.test.tsx"],
-          sequence: { groupOrder: 0 },
+          sequence: { groupOrder: 1 },
           browser: {
             enabled: true,
             headless: true,
@@ -82,7 +82,7 @@ export default defineConfig({
           name: "browser-e2e",
           environment: "node",
           include: ["tests/browser-e2e/**/*.test.ts"],
-          sequence: { groupOrder: 1 },
+          sequence: { groupOrder: 0 },
         },
       },
     ],
