@@ -1,7 +1,8 @@
 import type { ProjectSnapshot } from "@kojo/control";
-import { Context, Effect, Layer } from "effect";
+import { Context, type Effect } from "effect";
 
 export interface ProjectForgetBlockers {
+  readonly assessment: "available" | "unavailable";
   readonly enabledScheduleKeys: ReadonlyArray<string>;
   readonly nonFinalRunIds: ReadonlyArray<string>;
 }
@@ -14,7 +15,3 @@ export class ProjectForgetGuard extends Context.Service<
   ProjectForgetGuard,
   ProjectForgetGuardShape
 >()("kojo/host/ProjectForgetGuard") {}
-
-export const ProjectForgetGuardLive = Layer.succeed(ProjectForgetGuard, {
-  inspect: () => Effect.succeed({ enabledScheduleKeys: [], nonFinalRunIds: [] }),
-});

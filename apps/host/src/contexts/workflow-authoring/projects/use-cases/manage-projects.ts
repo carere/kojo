@@ -5,6 +5,7 @@ import type {
   ProjectMutationResult,
   ProjectOperationError,
   ProjectQueryResult,
+  ReadinessFindingKey,
   RequestKey,
 } from "@kojo/control";
 import { Effect } from "effect";
@@ -16,25 +17,33 @@ import {
 } from "../services/project-index-store";
 import { ProjectLayout } from "../services/project-layout";
 
-const failure = (
+const operationError = (
   code: ProjectOperationError["code"],
   message: string,
   next: string,
   affectedResource: ProjectOperationError["affectedResource"],
-  findingKeys: ReadonlyArray<string>,
-): ProjectMutationResult | ProjectQueryResult => ({
+  findingKeys: ReadonlyArray<ReadinessFindingKey>,
+): ProjectOperationError => ({ code, message, next, affectedResource, findingKeys });
+
+const queryFailure = (...args: Parameters<typeof operationError>): ProjectQueryResult => ({
   ok: false,
-  error: { code, message, next, affectedResource, findingKeys },
+  error: operationError(...args),
 });
 
+const mutationFailure = (
+  requestKey: RequestKey,
+  ...args: Parameters<typeof operationError>
+): ProjectMutationResult => ({ ok: false, requestKey, error: operationError(...args) });
+
 const requestConflict = (requestKey: RequestKey) =>
-  failure(
+  mutationFailure(
+    requestKey,
     "request-key-conflict",
     "This Request Key was already used for a different Project mutation.",
     "Retry with the original request contents or use a new Request Key.",
     { kind: "request-key", requestKey },
-    ["control.request-key.reused"],
-  ) as ProjectMutationResult;
+    [],
+  );
 
 const replay = (result: ProjectMutationResult): ProjectMutationResult =>
   result.ok ? { ...result, alreadyApplied: true } : result;
@@ -76,12 +85,12 @@ export const showProject = (
     const state = yield* store.read;
     const project = state.projects.find((candidate) => candidate.identity === identity);
     return project === undefined
-      ? failure(
+      ? queryFailure(
           "project-not-found",
           "Kojo Project was not found in the Project Index.",
           "Register the Project or choose a listed Project Identity.",
           { kind: "project", identity },
-          ["project.index.missing"],
+          [],
         )
       : { ok: true, project };
   });
@@ -109,25 +118,27 @@ export const registerProject = (
 
         const validation = yield* layout.validate(path);
         if (!validation.ok) {
-          const result = failure(
+          const result = mutationFailure(
+            requestKey,
             "project-layout-invalid",
             validation.message,
             "Run kojo init for this working tree.",
             { kind: "project-path", path },
             [validation.findingKey],
-          ) as ProjectMutationResult;
+          );
           return { state: record(state, requestKey, "register", path, result), result };
         }
         const project = validation.project;
         const samePath = state.projects.find((candidate) => candidate.path === project.path);
         if (samePath !== undefined && samePath.identity !== project.identity) {
-          const result = failure(
+          const result = mutationFailure(
+            requestKey,
             "project-layout-invalid",
             "This Project path is already indexed with another Project Identity.",
             "Inspect the Project metadata and Project Index before retrying.",
             { kind: "project-path", path: project.path },
-            ["project.index.path-conflict"],
-          ) as ProjectMutationResult;
+            ["layout.path-conflict"],
+          );
           return { state: record(state, requestKey, "register", path, result), result };
         }
 
@@ -137,23 +148,25 @@ export const registerProject = (
         if (existing !== undefined && existing.path !== project.path) {
           const previous = yield* layout.inspectIndexedPath(existing.path);
           if (previous.status === "valid" && previous.identity === project.identity) {
-            const result = failure(
+            const result = mutationFailure(
+              requestKey,
               "project-identity-duplicate",
               "The same Project Identity is present at two working-tree paths.",
               "Run kojo init --new-identity on the copied working tree.",
               { kind: "project", identity: project.identity },
-              ["project.identity.duplicate"],
-            ) as ProjectMutationResult;
+              ["project.identity-duplicate"],
+            );
             return { state: record(state, requestKey, "register", path, result), result };
           }
           if (previous.status === "invalid") {
-            const result = failure(
+            const result = mutationFailure(
+              requestKey,
               "project-identity-duplicate",
               "Kojo cannot safely distinguish a moved Project from a duplicate identity.",
               "Resolve the previous path or assign a new Project Identity explicitly.",
               { kind: "project", identity: project.identity },
-              ["project.identity.previous-path-invalid"],
-            ) as ProjectMutationResult;
+              ["layout.path-conflict"],
+            );
             return { state: record(state, requestKey, "register", path, result), result };
           }
         }
@@ -173,7 +186,7 @@ export const registerProject = (
   });
 
 export const forgetProject = (
-  identity: ProjectIdentity,
+  identity: ProjectIdentity | undefined,
   requestKey: RequestKey,
 ): Effect.Effect<ProjectMutationResult, never, ProjectForgetGuard | ProjectIndexStore> =>
   Effect.gen(function* () {
@@ -182,41 +195,62 @@ export const forgetProject = (
     return yield* store.update((state) =>
       Effect.gen(function* () {
         const receipt = state.receipts.find((candidate) => candidate.requestKey === requestKey);
-        const requestFingerprint = fingerprint("forget", identity);
+        const requestFingerprint = fingerprint("forget", identity ?? "");
         if (receipt !== undefined) {
           return {
             state,
             result:
-              receipt.operation === "forget" && receipt.fingerprint === requestFingerprint
+              receipt.operation === "forget" &&
+              (identity === undefined || receipt.fingerprint === requestFingerprint)
                 ? replay(receipt.result)
                 : requestConflict(requestKey),
           };
         }
+        if (identity === undefined) {
+          const result = mutationFailure(
+            requestKey,
+            "project-not-found",
+            "Kojo Project could not be resolved for this forget request.",
+            "Restore the selector path or retry with a Request Key from an earlier request.",
+            { kind: "request-key", requestKey },
+            [],
+          );
+          return { state: record(state, requestKey, "forget", "", result), result };
+        }
         const project = state.projects.find((candidate) => candidate.identity === identity);
         if (project === undefined) {
-          const result = failure(
+          const result = mutationFailure(
+            requestKey,
             "project-not-found",
             "Kojo Project was not found in the Project Index.",
             "Choose a listed Project Identity.",
             { kind: "project", identity },
-            ["project.index.missing"],
-          ) as ProjectMutationResult;
+            [],
+          );
           return { state: record(state, requestKey, "forget", identity, result), result };
         }
 
         const blockers = yield* guard.inspect(project);
-        const findingKeys = [
-          ...blockers.enabledScheduleKeys.map((key) => `workflow-schedule.enabled:${key}`),
-          ...blockers.nonFinalRunIds.map((runId) => `workflow-run.non-final:${runId}`),
-        ];
-        if (findingKeys.length > 0) {
-          const result = failure(
+        if (blockers.assessment === "unavailable") {
+          const result = mutationFailure(
+            requestKey,
+            "project-forget-blocked",
+            "Kojo could not verify that Project execution state is safe to forget.",
+            "Restore Project database readiness and retry.",
+            { kind: "project", identity },
+            ["store.open-failed"],
+          );
+          return { state: record(state, requestKey, "forget", identity, result), result };
+        }
+        if (blockers.enabledScheduleKeys.length > 0 || blockers.nonFinalRunIds.length > 0) {
+          const result = mutationFailure(
+            requestKey,
             "project-forget-blocked",
             "Kojo Project cannot be forgotten while it has enabled Workflow Schedules or non-final Workflow Runs.",
             "Disable every Workflow Schedule and finish or stop every non-final Workflow Run, then retry.",
             { kind: "project", identity },
-            findingKeys,
-          ) as ProjectMutationResult;
+            [],
+          );
           return { state: record(state, requestKey, "forget", identity, result), result };
         }
 

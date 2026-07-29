@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./local-client": "./src/local-client.ts"
+    "./local-client": "./src/local-client.ts",
+    "./project-definition-validator": "./src/project-definition-validator.ts"
   },
   "dependencies": {
     "@effect/platform-bun": "4.0.0-beta.102",

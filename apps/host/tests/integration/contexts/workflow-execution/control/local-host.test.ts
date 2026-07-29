@@ -8,6 +8,7 @@ import { Effect, Exit, Layer, Schema } from "effect";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import { makeFileProjectIndexStoreLayer } from "../../../../../src/contexts/workflow-authoring/projects/adapters/file-project-index-store";
 import { GitProjectLayoutLive } from "../../../../../src/contexts/workflow-authoring/projects/adapters/git-project-layout";
+import { SubprocessProjectDefinitionLoaderLive } from "../../../../../src/contexts/workflow-authoring/projects/adapters/subprocess-project-definition-loader";
 import { HostIdentity } from "../../../../../src/contexts/workflow-execution/control/models/host-identity";
 import { makeHostDiagnosticLoggerLayer } from "../../../../../src/contexts/workflow-execution/control/services/host-diagnostic-logger";
 import {
@@ -16,7 +17,7 @@ import {
   startKojoHost,
   UnsafeHostStoreError,
 } from "../../../../../src/contexts/workflow-execution/control/services/local-host";
-import { ProjectForgetGuardLive } from "../../../../../src/contexts/workflow-execution/projects/services/project-forget-guard";
+import { SqliteProjectForgetGuardLive } from "../../../../../src/contexts/workflow-execution/projects/adapters/sqlite-project-forget-guard";
 
 const cleanups: Array<() => Promise<void>> = [];
 const TEST_HOST_IDENTITY = Schema.decodeUnknownSync(HostIdentity)(
@@ -149,8 +150,8 @@ const startTestHost = (socketPath: string, diagnosticPath: string) => {
   ).pipe(
     Layer.provide([
       makeFileProjectIndexStoreLayer(join(dirname(socketPath), "projects.json")),
-      GitProjectLayoutLive,
-      ProjectForgetGuardLive,
+      GitProjectLayoutLive.pipe(Layer.provide(SubprocessProjectDefinitionLoaderLive)),
+      SqliteProjectForgetGuardLive,
     ]),
   );
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });

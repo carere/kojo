@@ -51,7 +51,7 @@ const makeLayout = (
           ? {
               ok: false as const,
               message: "invalid test layout",
-              findingKey: "project.layout.invalid",
+              findingKey: "configuration.invalid",
             }
           : { ok: true as const, project: projects[path] },
       ),
@@ -62,6 +62,7 @@ const makeForgetGuard = (blockers: ReturnType<ProjectForgetGuardShape["inspect"]
   Layer.succeed(ProjectForgetGuard, { inspect: () => blockers });
 
 const noForgetBlockers = Effect.succeed({
+  assessment: "available" as const,
   enabledScheduleKeys: [] as ReadonlyArray<string>,
   nonFinalRunIds: [] as ReadonlyArray<string>,
 });
@@ -92,7 +93,7 @@ it.effect("rejects a duplicate live identity and accepts the path after a move",
       error: {
         code: "project-identity-duplicate",
         affectedResource: { kind: "project", identity },
-        findingKeys: ["project.identity.duplicate"],
+        findingKeys: ["project.identity-duplicate"],
       },
     });
 
@@ -120,7 +121,7 @@ it.effect("persists a refused request result and conflicts on different contents
       error: {
         code: "project-layout-invalid",
         affectedResource: { kind: "project-path", path: "invalid" },
-        findingKeys: ["project.layout.invalid"],
+        findingKeys: ["configuration.invalid"],
       },
     });
     projects.invalid = { identity, path: "/projects/valid-now" };
@@ -138,32 +139,12 @@ it.effect("blocks forgetting a Project with an enabled Workflow Schedule", () =>
   const layer = Layer.mergeAll(
     makeStore(),
     makeLayout({ input: project }),
-    makeForgetGuard(Effect.succeed({ enabledScheduleKeys: ["nightly"], nonFinalRunIds: [] })),
-  );
-
-  return Effect.gen(function* () {
-    yield* registerProject("input", requestKey("1"));
-    const result = yield* forgetProject(identity, requestKey("2"));
-
-    expect(result).toMatchObject({
-      ok: false,
-      error: {
-        code: "project-forget-blocked",
-        affectedResource: { kind: "project", identity },
-        findingKeys: ["workflow-schedule.enabled:nightly"],
-      },
-    });
-    expect((yield* listProjects).projects).toEqual([project]);
-  }).pipe(Effect.provide(layer));
-});
-
-it.effect("blocks forgetting a Project with a non-final Workflow Run", () => {
-  const project: ProjectSnapshot = { identity, path: "/projects/first" };
-  const layer = Layer.mergeAll(
-    makeStore(),
-    makeLayout({ input: project }),
     makeForgetGuard(
-      Effect.succeed({ enabledScheduleKeys: [], nonFinalRunIds: ["run-in-progress"] }),
+      Effect.succeed({
+        assessment: "available",
+        enabledScheduleKeys: ["nightly"],
+        nonFinalRunIds: [],
+      }),
     ),
   );
 
@@ -176,7 +157,37 @@ it.effect("blocks forgetting a Project with a non-final Workflow Run", () => {
       error: {
         code: "project-forget-blocked",
         affectedResource: { kind: "project", identity },
-        findingKeys: ["workflow-run.non-final:run-in-progress"],
+        findingKeys: [],
+      },
+    });
+    expect((yield* listProjects).projects).toEqual([project]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("blocks forgetting a Project with a non-final Workflow Run", () => {
+  const project: ProjectSnapshot = { identity, path: "/projects/first" };
+  const layer = Layer.mergeAll(
+    makeStore(),
+    makeLayout({ input: project }),
+    makeForgetGuard(
+      Effect.succeed({
+        assessment: "available",
+        enabledScheduleKeys: [],
+        nonFinalRunIds: ["run-in-progress"],
+      }),
+    ),
+  );
+
+  return Effect.gen(function* () {
+    yield* registerProject("input", requestKey("1"));
+    const result = yield* forgetProject(identity, requestKey("2"));
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {
+        code: "project-forget-blocked",
+        affectedResource: { kind: "project", identity },
+        findingKeys: [],
       },
     });
     expect((yield* listProjects).projects).toEqual([project]);

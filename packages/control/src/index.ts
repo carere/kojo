@@ -45,6 +45,42 @@ export const ProjectList = Schema.Struct({
 });
 export type ProjectList = typeof ProjectList.Type;
 
+export const ReadinessFindingKey = Schema.Literals([
+  "layout.ignore-rule-missing",
+  "workflow.revision-unavailable",
+  "workflow.revision-conflict",
+  "schedule.definition-unavailable",
+  "run.engine-state-missing",
+  "sandbox.state-missing",
+  "dependency.workflow-package-missing",
+  "dependency.workflow-package-incompatible",
+  "configuration.missing",
+  "configuration.load-failed",
+  "configuration.invalid",
+  "workflow.key-duplicate",
+  "workflow.schema-invalid",
+  "workflow.child-definition-missing",
+  "schedule.key-duplicate",
+  "schedule.definition-invalid",
+  "layout.path-conflict",
+  "layout.symbolic-link",
+  "layout.owner-invalid",
+  "layout.permissions-invalid",
+  "layout.version-unsupported",
+  "layout.metadata-invalid",
+  "project.identity-missing",
+  "project.identity-duplicate",
+  "store.missing",
+  "store.open-failed",
+  "store.integrity-failed",
+  "store.version-unsupported",
+  "store.migration-failed",
+  "engine.ownership-unavailable",
+  "engine.global-state-invalid",
+  "engine.execution-unowned",
+]);
+export type ReadinessFindingKey = typeof ReadinessFindingKey.Type;
+
 export const ProjectOperationError = Schema.Struct({
   code: Schema.Literals([
     "project-not-found",
@@ -61,7 +97,7 @@ export const ProjectOperationError = Schema.Struct({
     Schema.Struct({ kind: Schema.Literal("project-index") }),
     Schema.Struct({ kind: Schema.Literal("request-key"), requestKey: RequestKey }),
   ]),
-  findingKeys: Schema.Array(Schema.String),
+  findingKeys: Schema.Array(ReadinessFindingKey),
 });
 export type ProjectOperationError = typeof ProjectOperationError.Type;
 
@@ -78,7 +114,11 @@ export const ProjectMutationResult = Schema.Union([
     alreadyApplied: Schema.Boolean,
     requestKey: RequestKey,
   }),
-  Schema.Struct({ ok: Schema.Literal(false), error: ProjectOperationError }),
+  Schema.Struct({
+    ok: Schema.Literal(false),
+    requestKey: RequestKey,
+    error: ProjectOperationError,
+  }),
 ]);
 export type ProjectMutationResult = typeof ProjectMutationResult.Type;
 
@@ -107,7 +147,7 @@ export const RegisterProject = Rpc.make("RegisterProject", {
 });
 
 export const ForgetProject = Rpc.make("ForgetProject", {
-  payload: { identity: ProjectIdentity, requestKey: RequestKey },
+  payload: { identity: Schema.optionalKey(ProjectIdentity), requestKey: RequestKey },
   success: ProjectMutationResult,
 });
 

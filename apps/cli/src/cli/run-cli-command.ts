@@ -13,6 +13,7 @@ import {
   LocalTransportError,
   makeDefaultLocalClient,
   makeNonActivatingLocalClient,
+  UnsupportedControlCapabilityError,
 } from "@kojo/control/local-client";
 import { Effect, Schema } from "effect";
 import {
@@ -20,7 +21,7 @@ import {
   ProjectInitializationError,
   resolveInitializedProject,
 } from "../contexts/workflow-authoring/projects/services/project-initializer";
-import { selectProject } from "../contexts/workflow-execution/projects/use-cases/select-project";
+import { selectProject } from "../contexts/workflow-authoring/projects/use-cases/select-project";
 import { renderHostOverview } from "./render-host-overview";
 
 interface CliFailure {
@@ -30,6 +31,7 @@ interface CliFailure {
   readonly findingKeys?: ReadonlyArray<string>;
   readonly message: string;
   readonly next: string;
+  readonly requestKey?: RequestKey;
 }
 
 interface CliWarning {
@@ -67,32 +69,49 @@ const transportFailure = (error: unknown): CliFailure =>
         message: error.message,
         next: "Upgrade Kojo Host or this CLI so their protocol major versions match.",
       }
-    : error instanceof LocalTransportError
+    : error instanceof UnsupportedControlCapabilityError
       ? {
-          code: "host-unavailable",
+          code: "unsupported-control-capability",
           exitCode: 3,
           message: error.message,
-          next: "Start the Kojo Host and try again.",
+          next: "Upgrade Kojo Host or use a supported client operation.",
         }
-      : {
-          code: "host-request-failed",
-          exitCode: 3,
-          message: "Kojo Host request failed.",
-          next: "Try the command again.",
-        };
+      : error instanceof LocalTransportError
+        ? {
+            code: "host-unavailable",
+            exitCode: 3,
+            message: error.message,
+            next: "Start the Kojo Host and try again.",
+          }
+        : {
+            code: "host-request-failed",
+            exitCode: 3,
+            message: "Kojo Host request failed.",
+            next: "Try the command again.",
+          };
 
-const projectFailure = (error: ProjectOperationError): CliFailure => ({
+const projectFailure = (result: Extract<ProjectMutationResult, { ok: false }>): CliFailure => ({
+  ...result.error,
+  requestKey: result.requestKey,
+  exitCode: result.error.code === "project-layout-invalid" ? 1 : 4,
+});
+
+const projectQueryFailure = (error: ProjectOperationError): CliFailure => ({
   ...error,
-  exitCode: error.code === "project-layout-invalid" ? 1 : 4,
+  exitCode: 4,
 });
 
 const writeFailure = (failure: CliFailure, json: boolean, command: string) => {
   process.stderr.write(`${failure.message}\nNext: ${failure.next}\n`);
+  if (failure.requestKey !== undefined && !json) {
+    process.stdout.write(`Request Key: ${failure.requestKey}\n`);
+  }
   if (json) {
     process.stdout.write(
       `${JSON.stringify({
         schemaVersion: 1,
         command,
+        ...(failure.requestKey === undefined ? {} : { requestKey: failure.requestKey }),
         error: {
           code: failure.code,
           message: failure.message,
@@ -248,7 +267,7 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       return 0;
     }
     if (!registration.value.ok) {
-      return writeFailure(projectFailure(registration.value.error), json, "init");
+      return writeFailure(projectFailure(registration.value), json, "init");
     }
     if (json) writeProject("init", registration.value.project, true, registration.value);
     else {
@@ -315,7 +334,7 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       return writeFailure(transportFailure(result.error), json, "project.register");
     }
     if (!result.value.ok) {
-      return writeFailure(projectFailure(result.value.error), json, "project.register");
+      return writeFailure(projectFailure(result.value), json, "project.register");
     }
     writeProject("project.register", result.value.project, json, result.value);
     return 0;
@@ -335,6 +354,10 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
 
   let chosen: ProjectSnapshot | undefined;
   let forgetIdentity: ProjectSnapshot["identity"] | undefined;
+  const forgetRequestKey = args[1] === "forget" ? decodeRequestKey(options.requestKey) : undefined;
+  if (args[1] === "forget" && forgetRequestKey === undefined) {
+    return writeFailure(invalid("Use a full Request Key."), json, "project.forget");
+  }
   if (args[1] === "forget" && options.projectId !== undefined) {
     try {
       forgetIdentity = Schema.decodeUnknownSync(ProjectIdentitySchema)(options.projectId);
@@ -353,37 +376,44 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
   if (forgetIdentity === undefined && chosen === undefined) {
     const list = await runEffect(client.listProjects);
     if (!list.succeeded) {
-      return writeFailure(transportFailure(list.error), json, `project.${args[1]}`);
+      if (args[1] === "show") {
+        return writeFailure(transportFailure(list.error), json, "project.show");
+      }
+    } else {
+      const selection = await selectProject(list.value.projects, options);
+      if ("exitCode" in selection) {
+        if (args[1] === "show") {
+          return writeFailure(selection, json, "project.show");
+        }
+      } else {
+        chosen = selection;
+      }
     }
-    const selection = await selectProject(list.value.projects, options);
-    if ("exitCode" in selection) {
-      return writeFailure(selection, json, `project.${args[1]}`);
-    }
-    chosen = selection;
   }
 
   if (args[1] === "show") {
     if (chosen === undefined) {
       return writeFailure(invalid("Choose a Kojo Project."), json, "project.show");
     }
-    writeProject("project.show", chosen, json);
+    const shown = await runEffect(client.showProject(chosen.identity));
+    if (!shown.succeeded) {
+      return writeFailure(transportFailure(shown.error), json, "project.show");
+    }
+    if (!shown.value.ok) {
+      return writeFailure(projectQueryFailure(shown.value.error), json, "project.show");
+    }
+    writeProject("project.show", shown.value.project, json);
     return 0;
   }
 
-  const requestKey = decodeRequestKey(options.requestKey);
-  if (requestKey === undefined) {
-    return writeFailure(invalid("Use a full Request Key."), json, "project.forget");
-  }
+  const requestKey = forgetRequestKey as RequestKey;
   const identity = forgetIdentity ?? chosen?.identity;
-  if (identity === undefined) {
-    return writeFailure(invalid("Choose a Kojo Project."), json, "project.forget");
-  }
   const forgotten = await runEffect(client.forgetProject(identity, requestKey));
   if (!forgotten.succeeded) {
     return writeFailure(transportFailure(forgotten.error), json, "project.forget");
   }
   if (!forgotten.value.ok) {
-    return writeFailure(projectFailure(forgotten.value.error), json, "project.forget");
+    return writeFailure(projectFailure(forgotten.value), json, "project.forget");
   }
   if (json) writeProject("project.forget", forgotten.value.project, true, forgotten.value);
   else {

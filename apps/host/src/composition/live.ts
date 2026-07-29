@@ -6,19 +6,23 @@ import { Layer } from "effect";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import { makeFileProjectIndexStoreLayer } from "../contexts/workflow-authoring/projects/adapters/file-project-index-store";
 import { GitProjectLayoutLive } from "../contexts/workflow-authoring/projects/adapters/git-project-layout";
+import { SubprocessProjectDefinitionLoaderLive } from "../contexts/workflow-authoring/projects/adapters/subprocess-project-definition-loader";
 import { makeHostDiagnosticLoggerLayer } from "../contexts/workflow-execution/control/services/host-diagnostic-logger";
 import { loadHostIdentity } from "../contexts/workflow-execution/control/services/host-identity-store";
 import {
   makeKojoControlServerLayer,
   startKojoHost,
 } from "../contexts/workflow-execution/control/services/local-host";
-import { ProjectForgetGuardLive } from "../contexts/workflow-execution/projects/services/project-forget-guard";
+import { SqliteProjectForgetGuardLive } from "../contexts/workflow-execution/projects/adapters/sqlite-project-forget-guard";
 
 export const startLiveKojoHost = async () => {
   const socketPath = process.env.KOJO_HOST_SOCKET ?? defaultSocketPath();
   const hostStorePath = process.env.KOJO_HOST_STORE ?? join(homedir(), ".kojo", "host");
   const diagnosticPath = join(hostStorePath, "diagnostics.jsonl");
   const projectIndex = makeFileProjectIndexStoreLayer(join(hostStorePath, "projects.json"));
+  const projectLayout = GitProjectLayoutLive.pipe(
+    Layer.provide(SubprocessProjectDefinitionLoaderLive),
+  );
   const hostIdentity = await loadHostIdentity(join(hostStorePath, "identity"));
   const protocol = RpcServer.layerProtocolSocketServer.pipe(
     Layer.provide([BunSocketServer.layer({ path: socketPath }), RpcSerialization.layerNdjson]),
@@ -27,7 +31,7 @@ export const startLiveKojoHost = async () => {
     protocol,
     makeHostDiagnosticLoggerLayer(diagnosticPath),
     hostIdentity,
-  ).pipe(Layer.provide([projectIndex, GitProjectLayoutLive, ProjectForgetGuardLive]));
+  ).pipe(Layer.provide([projectIndex, projectLayout, SqliteProjectForgetGuardLive]));
 
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });
 };

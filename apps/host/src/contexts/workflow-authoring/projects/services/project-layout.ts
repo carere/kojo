@@ -1,9 +1,9 @@
-import type { ProjectIdentity, ProjectSnapshot } from "@kojo/control";
+import type { ProjectIdentity, ProjectSnapshot, ReadinessFindingKey } from "@kojo/control";
 import { Context, type Effect } from "effect";
 
 export type ProjectLayoutValidation =
   | { readonly ok: true; readonly project: ProjectSnapshot }
-  | { readonly ok: false; readonly message: string; readonly findingKey: string };
+  | { readonly ok: false; readonly message: string; readonly findingKey: ReadinessFindingKey };
 
 export type IndexedProjectPath =
   | { readonly status: "missing" }

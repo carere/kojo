@@ -1,4 +1,5 @@
-import { cp, readFile, realpath, rename } from "node:fs/promises";
+import { Database } from "bun:sqlite";
+import { cp, readFile, realpath, rename, rm, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -124,7 +125,12 @@ describe("Kojo Project discovery", () => {
     );
 
     expect(result.exitCode).toBe(4);
-    expect(JSON.parse(result.stdout).error.code).toBe("project-identity-duplicate");
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      requestKey: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      ),
+      error: { code: "project-identity-duplicate" },
+    });
     expect(result.stderr).toContain("same Project Identity is present at two working-tree paths");
   });
 
@@ -164,7 +170,7 @@ describe("Kojo Project discovery", () => {
     expect(JSON.parse(configurationResult.stdout).error).toMatchObject({
       code: "project-layout-invalid",
       affectedResource: { kind: "project-path", path: invalidConfiguration },
-      findingKeys: ["project.configuration.invalid"],
+      findingKeys: ["configuration.invalid"],
     });
 
     const invalidDatabase = join(directory, "invalid-database");
@@ -193,8 +199,54 @@ describe("Kojo Project discovery", () => {
     expect(JSON.parse(databaseResult.stdout).error).toMatchObject({
       code: "project-layout-invalid",
       affectedResource: { kind: "project-path", path: invalidDatabase },
-      findingKeys: ["project.database.invalid"],
+      findingKeys: ["store.integrity-failed"],
     });
+  });
+
+  it("bounds configuration exit and timeout without making another Project unavailable", async () => {
+    const directory = await temporaryDirectory("kojo-project-bounded-configuration-");
+    const host = await startKojoHostProcess();
+    cleanups.push(host.stop);
+    const availableProject = join(directory, "available-project");
+    await git(["init", availableProject]);
+    expect((await runCli(["init", availableProject], host.socketPath, directory)).exitCode).toBe(0);
+    const availableIdentity = JSON.parse(
+      await readFile(join(availableProject, ".kojo", "project.json"), "utf8"),
+    ).projectIdentity as string;
+
+    for (const [name, contents] of [
+      ["exits", "process.exit(0);\nexport default { workflows: [] };\n"],
+      ["hangs", "while (true) {}\nexport default { workflows: [] };\n"],
+    ] as const) {
+      const project = join(directory, name);
+      await git(["init", project]);
+      expect((await runCli(["init", project], host.socketPath, directory)).exitCode).toBe(0);
+      const identity = JSON.parse(await readFile(join(project, ".kojo", "project.json"), "utf8"))
+        .projectIdentity as string;
+      expect(
+        (await runCli(["project", "forget", "--project-id", identity], host.socketPath, directory))
+          .exitCode,
+      ).toBe(0);
+      await Bun.write(join(project, "kojo.config.ts"), contents);
+
+      const result = await runCli(
+        ["project", "register", project, "--json"],
+        host.socketPath,
+        directory,
+      );
+      expect(result.exitCode).toBe(1);
+      expect(JSON.parse(result.stdout).error).toMatchObject({
+        code: "project-layout-invalid",
+        findingKeys: ["configuration.load-failed"],
+      });
+      const listed = JSON.parse(
+        (await runCli(["project", "list", "--json"], host.socketPath, directory)).stdout,
+      );
+      expect(listed.result.projects).toContainEqual({
+        identity: availableIdentity,
+        path: await realpath(availableProject),
+      });
+    }
   });
 
   it("requires an unambiguous Project selection", async () => {
@@ -221,6 +273,68 @@ describe("Kojo Project discovery", () => {
     expect(conflicting.exitCode).toBe(2);
   });
 
+  it("blocks forget through the control boundary for enabled Schedules and non-final Runs", async () => {
+    const directory = await temporaryDirectory("kojo-project-forget-blockers-");
+    const host = await startKojoHostProcess();
+    cleanups.push(host.stop);
+
+    const scheduledProject = join(directory, "scheduled-project");
+    await git(["init", scheduledProject]);
+    expect((await runCli(["init", scheduledProject], host.socketPath, directory)).exitCode).toBe(0);
+    const scheduledIdentity = JSON.parse(
+      await readFile(join(scheduledProject, ".kojo", "project.json"), "utf8"),
+    ).projectIdentity as string;
+    const scheduleDatabase = new Database(join(scheduledProject, ".kojo", "kojo.sqlite"));
+    scheduleDatabase.exec(
+      "CREATE TABLE kojo_workflow_schedule_states (schedule_key TEXT PRIMARY KEY, enabled_intent INTEGER NOT NULL); INSERT INTO kojo_workflow_schedule_states VALUES ('nightly', 1);",
+    );
+    scheduleDatabase.close();
+
+    const scheduleKey = "10000000-0000-4000-8000-000000000020";
+    const scheduleResult = await runCli(
+      [
+        "project",
+        "forget",
+        "--project-id",
+        scheduledIdentity,
+        "--request-key",
+        scheduleKey,
+        "--json",
+      ],
+      host.socketPath,
+      directory,
+    );
+    expect(scheduleResult.exitCode).toBe(4);
+    expect(JSON.parse(scheduleResult.stdout)).toMatchObject({
+      requestKey: scheduleKey,
+      error: { code: "project-forget-blocked" },
+    });
+
+    const runningProject = join(directory, "running-project");
+    await git(["init", runningProject]);
+    expect((await runCli(["init", runningProject], host.socketPath, directory)).exitCode).toBe(0);
+    const runningIdentity = JSON.parse(
+      await readFile(join(runningProject, ".kojo", "project.json"), "utf8"),
+    ).projectIdentity as string;
+    const runDatabase = new Database(join(runningProject, ".kojo", "kojo.sqlite"));
+    runDatabase.exec(
+      "CREATE TABLE kojo_workflow_runs (run_id TEXT PRIMARY KEY, state TEXT NOT NULL); INSERT INTO kojo_workflow_runs VALUES ('run-in-progress', 'running');",
+    );
+    runDatabase.close();
+
+    const runKey = "10000000-0000-4000-8000-000000000021";
+    const runResult = await runCli(
+      ["project", "forget", "--project-id", runningIdentity, "--request-key", runKey, "--json"],
+      host.socketPath,
+      directory,
+    );
+    expect(runResult.exitCode).toBe(4);
+    expect(JSON.parse(runResult.stdout)).toMatchObject({
+      requestKey: runKey,
+      error: { code: "project-forget-blocked" },
+    });
+  });
+
   it("finds indexed Projects after the Host restarts", async () => {
     const directory = await temporaryDirectory("kojo-project-restart-");
     const hostStore = join(directory, "host-store");
@@ -239,6 +353,41 @@ describe("Kojo Project discovery", () => {
     ).result.projects;
 
     expect(projects).toEqual([{ identity, path: await realpath(project) }]);
+  });
+
+  it("correlates Project control diagnostics by Project Identity", async () => {
+    const directory = await temporaryDirectory("kojo-project-diagnostics-");
+    const hostStore = join(directory, "host-store");
+    const project = join(directory, "project");
+    await git(["init", project]);
+    const host = await startKojoHostProcess({ storePath: hostStore });
+    expect((await runCli(["init", project], host.socketPath, directory)).exitCode).toBe(0);
+    const identity = JSON.parse(await readFile(join(project, ".kojo", "project.json"), "utf8"))
+      .projectIdentity as string;
+    expect(
+      (await runCli(["project", "show", "--project-id", identity], host.socketPath, directory))
+        .exitCode,
+    ).toBe(0);
+    expect(
+      (await runCli(["project", "forget", "--project-id", identity], host.socketPath, directory))
+        .exitCode,
+    ).toBe(0);
+    await host.stop();
+
+    const events = (await readFile(join(hostStore, "diagnostics.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .filter(({ operation }) =>
+        ["RegisterProject", "ShowProject", "ForgetProject"].includes(operation),
+      );
+    expect(
+      events.map(({ operation, projectIdentity }) => ({ operation, projectIdentity })),
+    ).toEqual([
+      { operation: "RegisterProject", projectIdentity: identity },
+      { operation: "ShowProject", projectIdentity: identity },
+      { operation: "ForgetProject", projectIdentity: identity },
+    ]);
   });
 
   it("persists Request Key receipts, redelivers mutations, and rejects conflicting reuse", async () => {
@@ -271,7 +420,17 @@ describe("Kojo Project discovery", () => {
       directory,
     );
     expect(refused.exitCode).toBe(1);
-    expect(JSON.parse(refused.stdout).error.code).toBe("project-layout-invalid");
+    expect(JSON.parse(refused.stdout)).toMatchObject({
+      requestKey: refusedKey,
+      error: { code: "project-layout-invalid" },
+    });
+    const refusedText = await runCli(
+      ["project", "register", initiallyInvalid, "--request-key", refusedKey],
+      firstHost.socketPath,
+      directory,
+    );
+    expect(refusedText.exitCode).toBe(1);
+    expect(refusedText.stdout).toContain(`Request Key: ${refusedKey}`);
     await git(["init", initiallyInvalid]);
     expect(
       (await runCli(["init", initiallyInvalid], firstHost.socketPath, directory)).exitCode,
@@ -304,7 +463,10 @@ describe("Kojo Project discovery", () => {
       directory,
     );
     expect(conflict.exitCode).toBe(4);
-    expect(JSON.parse(conflict.stdout).error.code).toBe("request-key-conflict");
+    expect(JSON.parse(conflict.stdout)).toMatchObject({
+      requestKey: registerKey,
+      error: { code: "request-key-conflict" },
+    });
 
     const firstForget = await runCli(
       ["project", "forget", "--project-id", identity, "--request-key", forgetKey, "--json"],
@@ -364,6 +526,7 @@ describe("Kojo Project discovery", () => {
       "--json",
     ];
     expect((await runCli(pathArguments, host.socketPath, directory)).exitCode).toBe(0);
+    await rm(byPath, { recursive: true });
     const pathRedelivery = await runCli(pathArguments, host.socketPath, directory);
     expect(pathRedelivery.exitCode).toBe(0);
     expect(JSON.parse(pathRedelivery.stdout).result.alreadyApplied).toBe(true);
@@ -376,6 +539,7 @@ describe("Kojo Project discovery", () => {
     const cwdKey = "10000000-0000-4000-8000-000000000011";
     const cwdArguments = ["project", "forget", "--request-key", cwdKey, "--json"];
     expect((await runCli(cwdArguments, host.socketPath, byCurrentDirectory)).exitCode).toBe(0);
+    await unlink(join(byCurrentDirectory, ".kojo", "project.json"));
     const cwdRedelivery = await runCli(cwdArguments, host.socketPath, byCurrentDirectory);
     expect(cwdRedelivery.exitCode).toBe(0);
     expect(JSON.parse(cwdRedelivery.stdout).result.alreadyApplied).toBe(true);

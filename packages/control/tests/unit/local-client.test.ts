@@ -1,7 +1,8 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
+import { ProjectIdentity, RequestKey } from "../../src";
 import {
   defaultSocketPath,
   IncompatibleProtocolError,
@@ -9,6 +10,7 @@ import {
   LocalTransportError,
   makeLocalClient,
   makeOperatingSystemHostActivation,
+  UnsupportedControlCapabilityError,
 } from "../../src/local-client";
 
 it("keeps fallback Host discovery inside the current user's home", () => {
@@ -68,6 +70,30 @@ it.effect("stops before Project lifecycle work when the protocol major is incomp
 
     expect(error).toBeInstanceOf(IncompatibleProtocolError);
     expect(requests).toEqual(["Negotiate"]);
+  }),
+);
+
+it.effect("gates optional Project operations against negotiated Host capabilities", () =>
+  Effect.gen(function* () {
+    const requests: Array<string> = [];
+    const client = makeLocalClient({ connect: Effect.succeed(controlClient(requests)) });
+    const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+      "019fabda-76fe-7000-a948-c929fc96b3e8",
+    );
+    const requestKey = Schema.decodeUnknownSync(RequestKey)("10000000-0000-4000-8000-000000000001");
+
+    const showError = yield* Effect.flip(client.showProject(identity));
+    const registerError = yield* Effect.flip(client.registerProject("/project", requestKey));
+    const forgetError = yield* Effect.flip(client.forgetProject(identity, requestKey));
+
+    expect(showError).toMatchObject({
+      _tag: "UnsupportedControlCapabilityError",
+      capability: "projects:show",
+      hostVersion: "0.1.0",
+    });
+    expect(registerError).toBeInstanceOf(UnsupportedControlCapabilityError);
+    expect(forgetError).toBeInstanceOf(UnsupportedControlCapabilityError);
+    expect(requests).toEqual(["Negotiate", "Negotiate", "Negotiate"]);
   }),
 );
 

@@ -9,6 +9,7 @@ import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import type { RpcClientError } from "effect/unstable/rpc/RpcClientError";
 import { Socket } from "effect/unstable/socket";
 import {
+  type ControlCapability,
   type HostOverview,
   KojoControl,
   PROTOCOL_VERSION,
@@ -28,6 +29,19 @@ export class IncompatibleProtocolError extends Data.TaggedError("IncompatiblePro
   readonly hostMajor: number;
   readonly message: string;
 }> {}
+
+export class UnsupportedControlCapabilityError extends Data.TaggedError(
+  "UnsupportedControlCapabilityError",
+)<{
+  readonly capability: ControlCapability;
+  readonly hostVersion: string;
+  readonly message: string;
+}> {}
+
+type LocalClientError =
+  | IncompatibleProtocolError
+  | LocalTransportError
+  | UnsupportedControlCapabilityError;
 
 export type KojoControlClient = RpcClient.RpcClient<
   RpcGroup.Rpcs<typeof KojoControl>,
@@ -54,6 +68,7 @@ export const makeLocalClient = (options: LocalClientOptions) => {
   const retryDelay = options.retryDelay ?? "50 millis";
 
   const request = <A>(
+    capability: ControlCapability,
     operation: (
       client: KojoControlClient,
       host: HostOverview["host"],
@@ -73,15 +88,24 @@ export const makeLocalClient = (options: LocalClientOptions) => {
             }),
           );
         }
+        if (!host.capabilities.includes(capability)) {
+          return yield* Effect.fail(
+            new UnsupportedControlCapabilityError({
+              capability,
+              hostVersion: host.hostVersion,
+              message: `Kojo Host ${host.hostVersion} does not support ${capability}. Upgrade the Host or use a supported client operation.`,
+            }),
+          );
+        }
 
         return yield* operation(client, host).pipe(Effect.mapError(safeUnavailable));
       }),
     );
 
   const retryTransport = <A>(
-    effect: Effect.Effect<A, LocalTransportError | IncompatibleProtocolError>,
+    effect: Effect.Effect<A, LocalClientError>,
     attempt: number,
-  ): Effect.Effect<A, LocalTransportError | IncompatibleProtocolError> =>
+  ): Effect.Effect<A, LocalClientError> =>
     effect.pipe(
       Effect.catchTag("LocalTransportError", () => {
         if (attempt >= maxAttempts) return Effect.fail(safeUnavailable());
@@ -90,9 +114,7 @@ export const makeLocalClient = (options: LocalClientOptions) => {
       }),
     );
 
-  const activateAndRetry = <A>(
-    effect: Effect.Effect<A, LocalTransportError | IncompatibleProtocolError>,
-  ) =>
+  const activateAndRetry = <A>(effect: Effect.Effect<A, LocalClientError>) =>
     effect.pipe(
       Effect.catchTag("LocalTransportError", () =>
         Effect.andThen(options.activate ?? Effect.void, retryTransport(effect, 2)),
@@ -100,7 +122,7 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     );
 
   const getHostOverview = activateAndRetry(
-    request((client, host) =>
+    request("projects:list", (client, host) =>
       Effect.gen(function* () {
         const { projects } = yield* client.ListProjects();
         return { host, projects } satisfies HostOverview;
@@ -109,15 +131,24 @@ export const makeLocalClient = (options: LocalClientOptions) => {
   );
 
   const listProjects = activateAndRetry(
-    request((client) => client.ListProjects()),
-  ) satisfies Effect.Effect<ProjectList, LocalTransportError | IncompatibleProtocolError>;
+    request("projects:list", (client) => client.ListProjects()),
+  ) satisfies Effect.Effect<ProjectList, LocalClientError>;
 
   const showProject = (identity: ProjectIdentity) =>
-    activateAndRetry(request((client) => client.ShowProject({ identity })));
+    activateAndRetry(request("projects:show", (client) => client.ShowProject({ identity })));
   const registerProject = (path: string, requestKey: RequestKey) =>
-    activateAndRetry(request((client) => client.RegisterProject({ path, requestKey })));
-  const forgetProject = (identity: ProjectIdentity, requestKey: RequestKey) =>
-    activateAndRetry(request((client) => client.ForgetProject({ identity, requestKey })));
+    activateAndRetry(
+      request("projects:register", (client) => client.RegisterProject({ path, requestKey })),
+    );
+  const forgetProject = (identity: ProjectIdentity | undefined, requestKey: RequestKey) =>
+    activateAndRetry(
+      request("projects:forget", (client) =>
+        client.ForgetProject({
+          requestKey,
+          ...(identity === undefined ? {} : { identity }),
+        }),
+      ),
+    );
 
   return {
     getHostOverview,
@@ -128,23 +159,32 @@ export const makeLocalClient = (options: LocalClientOptions) => {
   } satisfies {
     readonly getHostOverview: Effect.Effect<
       HostOverview,
-      LocalTransportError | IncompatibleProtocolError
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;
     readonly listProjects: Effect.Effect<
       ProjectList,
-      LocalTransportError | IncompatibleProtocolError
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;
     readonly showProject: (
       identity: ProjectIdentity,
-    ) => Effect.Effect<ProjectQueryResult, LocalTransportError | IncompatibleProtocolError>;
+    ) => Effect.Effect<
+      ProjectQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
     readonly registerProject: (
       path: string,
       requestKey: RequestKey,
-    ) => Effect.Effect<ProjectMutationResult, LocalTransportError | IncompatibleProtocolError>;
+    ) => Effect.Effect<
+      ProjectMutationResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
     readonly forgetProject: (
-      identity: ProjectIdentity,
+      identity: ProjectIdentity | undefined,
       requestKey: RequestKey,
-    ) => Effect.Effect<ProjectMutationResult, LocalTransportError | IncompatibleProtocolError>;
+    ) => Effect.Effect<
+      ProjectMutationResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
   };
 };
 

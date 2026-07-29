@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmod, open, readFile, unlink } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname } from "node:path";
-import { KojoControl } from "@kojo/control";
+import { KojoControl, type ProjectIdentity, type ProjectMutationResult } from "@kojo/control";
 import { Effect, Exit, Layer, Scope } from "effect";
 import { RpcServer } from "effect/unstable/rpc";
 import {
@@ -42,11 +42,18 @@ const withHostRequestDiagnostic = <A, E, R>(
   operation: HostRequestDiagnosticEvent["operation"],
   requestId: string,
   effect: Effect.Effect<A, E, R>,
+  projectIdentity?: ProjectIdentity | ((value: A) => ProjectIdentity | undefined),
 ) =>
   Effect.gen(function* () {
     const startedAt = Date.now();
     const exit = yield* Effect.exit(effect);
     const logger = yield* HostDiagnosticLogger;
+    const correlatedProjectIdentity =
+      typeof projectIdentity === "function"
+        ? Exit.isSuccess(exit)
+          ? projectIdentity(exit.value)
+          : undefined
+        : projectIdentity;
     yield* logger
       .emit({
         eventVersion: 1,
@@ -59,11 +66,20 @@ const withHostRequestDiagnostic = <A, E, R>(
         hostVersion: HOST_INFORMATION.hostVersion,
         protocolMajor: HOST_INFORMATION.protocol.major,
         protocolMinor: HOST_INFORMATION.protocol.minor,
+        ...(correlatedProjectIdentity === undefined
+          ? {}
+          : { projectIdentity: correlatedProjectIdentity }),
         timestamp: new Date().toISOString(),
       })
       .pipe(Effect.ignore);
     return yield* exit;
   });
+
+const mutationProjectIdentity = (result: ProjectMutationResult) => {
+  if (result.ok) return result.project.identity;
+  const affected = result.error.affectedResource;
+  return affected.kind === "project" ? affected.identity : undefined;
+};
 
 const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
   KojoControl.toLayer(
@@ -88,6 +104,7 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           "ShowProject",
           String(options.requestId),
           showProject(identity),
+          identity,
         ),
       RegisterProject: ({ path, requestKey }, options) =>
         withHostRequestDiagnostic(
@@ -95,6 +112,7 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           "RegisterProject",
           String(options.requestId),
           registerProject(path, requestKey),
+          mutationProjectIdentity,
         ),
       ForgetProject: ({ identity, requestKey }, options) =>
         withHostRequestDiagnostic(
@@ -102,6 +120,7 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           "ForgetProject",
           String(options.requestId),
           forgetProject(identity, requestKey),
+          identity ?? mutationProjectIdentity,
         ),
     }),
   );
