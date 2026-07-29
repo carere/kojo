@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { BunSocketServer } from "@effect/platform-bun";
 import { defaultSocketPath } from "@kojo/control/local-client";
@@ -18,6 +20,9 @@ export const startLiveKojoHost = () => {
   const serverLayer = makeKojoControlServerLayer(
     protocol,
     makeHostDiagnosticLoggerLayer(diagnosticPath),
+    `host:${createHash("sha256")
+      .update(`${hostname()}:${process.getuid?.() ?? 0}`)
+      .digest("hex")}`,
   );
 
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });

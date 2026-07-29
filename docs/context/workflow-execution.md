@@ -28,9 +28,17 @@ _Avoid_: Nested execution, execution boundary
 The long-lived local service for one developer that keeps Kojo work progressing without a connected CLI or visualizer. It contains an isolated Project Runtime for each active Kojo Project.
 _Avoid_: Global daemon, control plane
 
+**Host Identity**:
+The stable, opaque identity of one developer's Kojo Host on one machine. It remains the same across Host process restarts and appears in Host-wide Diagnostic Events without exposing the machine hostname, user name, process identity, or a local path.
+_Avoid_: Process ID, socket path, machine hostname
+
 **Project Runtime**:
 The isolated owner that coordinates Workflow Schedules and Workflow Runs for one Kojo Project inside the Kojo Host. The CLI and visualizer control it as clients.
 _Avoid_: Kojo Host, visualizer server, run worker
+
+**Control Capability**:
+A versioned literal reported by the Kojo Host during negotiation to state that one optional control operation or result shape is supported. Clients branch only on capabilities defined by the shared control contract; a Control Capability is distinct from a Project Runtime Readiness capability.
+_Avoid_: Arbitrary feature string, feature flag, Readiness capability
 
 **Project Runtime Readiness**:
 The structured assessment of which work a Project Runtime can perform safely after checking its Project layout, durable store, engine ownership, and Workflow Definitions. `ready` permits all capabilities, `limited` preserves only the capabilities proven safe, and `needs-attention` prevents execution progress while retaining project inspection and repair; findings block the smallest affected Project resources, explicit capabilities remain authoritative, and reassessment restores capabilities only after the affected checks succeed.

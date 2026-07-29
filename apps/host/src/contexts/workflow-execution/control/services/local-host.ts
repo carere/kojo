@@ -1,4 +1,6 @@
-import { chmod, mkdir, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { chmod, mkdir, open, readFile, unlink } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { dirname } from "node:path";
 import { KojoControl } from "@kojo/control";
 import { Effect, Exit, Layer, Scope } from "effect";
@@ -13,17 +15,24 @@ import { listProjects } from "../use-cases/list-projects";
 
 export interface KojoHostServer {
   readonly diagnosticPath: string;
+  readonly lockPath: string;
   readonly socketPath: string;
   readonly stop: () => Promise<void>;
 }
 
 export interface KojoHostOptions {
   readonly diagnosticPath: string;
+  readonly lockPath?: string;
   readonly serverLayer: Layer.Layer<never, unknown>;
   readonly socketPath: string;
 }
 
+export class KojoHostAlreadyRunningError extends Error {
+  override readonly name = "KojoHostAlreadyRunningError";
+}
+
 const withHostRequestDiagnostic = <A, E, R>(
+  hostIdentity: string,
   operation: HostRequestDiagnosticEvent["operation"],
   requestId: string,
   effect: Effect.Effect<A, E, R>,
@@ -36,6 +45,7 @@ const withHostRequestDiagnostic = <A, E, R>(
       .emit({
         eventVersion: 1,
         eventKind: "host-request.completed",
+        hostIdentity,
         requestId,
         operation,
         outcome: Exit.isSuccess(exit) ? "success" : "error",
@@ -49,14 +59,25 @@ const withHostRequestDiagnostic = <A, E, R>(
     return yield* exit;
   });
 
-const KojoControlHandlers = KojoControl.toLayer(
-  KojoControl.of({
-    Negotiate: (_payload, options) =>
-      withHostRequestDiagnostic("Negotiate", String(options.requestId), getHostInformation),
-    ListProjects: (_payload, options) =>
-      withHostRequestDiagnostic("ListProjects", String(options.requestId), listProjects),
-  }),
-);
+const makeKojoControlHandlers = (hostIdentity: string) =>
+  KojoControl.toLayer(
+    KojoControl.of({
+      Negotiate: (_payload, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "Negotiate",
+          String(options.requestId),
+          getHostInformation,
+        ),
+      ListProjects: (_payload, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ListProjects",
+          String(options.requestId),
+          listProjects,
+        ),
+    }),
+  );
 
 const removeStaleSocket = async (socketPath: string) => {
   try {
@@ -66,34 +87,119 @@ const removeStaleSocket = async (socketPath: string) => {
   }
 };
 
+const isProcessRunning = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+
+const socketAcceptsConnections = (socketPath: string) =>
+  new Promise<boolean>((resolve) => {
+    const socket = createConnection(socketPath);
+    const finish = (active: boolean) => {
+      socket.destroy();
+      resolve(active);
+    };
+    socket.setTimeout(100, () => finish(false));
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
+
+const acquireHostLock = async (lockPath: string) => {
+  const token = randomUUID();
+  for (;;) {
+    try {
+      const handle = await open(lockPath, "wx", 0o600);
+      await handle.writeFile(JSON.stringify({ pid: process.pid, token }));
+      await handle.close();
+      await chmod(lockPath, 0o600);
+      return async () => {
+        try {
+          const owner = JSON.parse(await readFile(lockPath, "utf8"));
+          if (owner.token === token) await unlink(lockPath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try {
+        const owner = JSON.parse(await readFile(lockPath, "utf8"));
+        if (typeof owner.pid === "number" && isProcessRunning(owner.pid)) {
+          throw new KojoHostAlreadyRunningError("Kojo Host is already running or starting.");
+        }
+        await unlink(lockPath);
+      } catch (lockError) {
+        if (lockError instanceof KojoHostAlreadyRunningError) throw lockError;
+        if ((lockError as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw new KojoHostAlreadyRunningError("Kojo Host ownership cannot be established.");
+        }
+      }
+    }
+  }
+};
+
 export const makeKojoControlServerLayer = <ProtocolError, ProtocolRequirements>(
   protocol: Layer.Layer<RpcServer.Protocol, ProtocolError, ProtocolRequirements>,
   diagnosticLogger: Layer.Layer<HostDiagnosticLogger>,
+  hostIdentity: string,
 ) =>
   RpcServer.layer(KojoControl).pipe(
-    Layer.provide([KojoControlHandlers.pipe(Layer.provide(diagnosticLogger)), protocol]),
+    Layer.provide([
+      makeKojoControlHandlers(hostIdentity).pipe(Layer.provide(diagnosticLogger)),
+      protocol,
+    ]),
   );
 
 export const startKojoHost = async (options: KojoHostOptions): Promise<KojoHostServer> => {
   const socketDirectory = dirname(options.socketPath);
+  const lockPath = options.lockPath ?? `${options.socketPath}.lock`;
   await mkdir(socketDirectory, { recursive: true, mode: 0o700 });
   await chmod(socketDirectory, 0o700);
-  await removeStaleSocket(options.socketPath);
-  const scope = Effect.runSync(Scope.make());
-  const previousUmask = process.umask(0o077);
+  const releaseLock = await acquireHostLock(lockPath);
+  let scope: Scope.Closeable | undefined;
+  let mayOwnSocket = false;
   try {
-    await Effect.runPromise(Layer.buildWithScope(options.serverLayer, scope));
-  } finally {
-    process.umask(previousUmask);
-  }
-  await chmod(options.socketPath, 0o600);
+    if (await socketAcceptsConnections(options.socketPath)) {
+      throw new KojoHostAlreadyRunningError("Kojo Host is already running.");
+    }
+    await removeStaleSocket(options.socketPath);
+    mayOwnSocket = true;
+    scope = Effect.runSync(Scope.make());
+    const previousUmask = process.umask(0o077);
+    try {
+      await Effect.runPromise(Layer.buildWithScope(options.serverLayer, scope));
+    } finally {
+      process.umask(previousUmask);
+    }
+    await chmod(options.socketPath, 0o600);
+    const serverScope = scope;
 
-  return {
-    diagnosticPath: options.diagnosticPath,
-    socketPath: options.socketPath,
-    stop: async () => {
-      await Effect.runPromise(Scope.close(scope, Exit.void));
-      await removeStaleSocket(options.socketPath);
-    },
-  };
+    return {
+      diagnosticPath: options.diagnosticPath,
+      lockPath,
+      socketPath: options.socketPath,
+      stop: async () => {
+        try {
+          await Effect.runPromise(Scope.close(serverScope, Exit.void));
+        } finally {
+          try {
+            await removeStaleSocket(options.socketPath);
+          } finally {
+            await releaseLock();
+          }
+        }
+      },
+    };
+  } catch (error) {
+    if (scope !== undefined) {
+      await Effect.runPromise(Scope.close(scope, Exit.void)).catch(() => undefined);
+    }
+    if (mayOwnSocket) await removeStaleSocket(options.socketPath);
+    await releaseLock();
+    throw error;
+  }
 };
