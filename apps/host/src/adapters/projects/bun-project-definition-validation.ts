@@ -1,10 +1,11 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   evaluateProjectDefinitionWith,
   type ProjectDefinitionValidation as ProjectDefinitionValidationResult,
   validateProjectDefinitionSubprocessResult,
-} from "./project-definition-validation";
+} from "@kojo/control/project-definition-validation";
 
 const packageManagerCommand = (root: string) => {
   if (existsSync(join(root, "bun.lock")) || existsSync(join(root, "bun.lockb"))) {
@@ -30,12 +31,9 @@ export const evaluateProjectDefinition = async (
       },
       installCommand: packageManagerCommand,
       loadDefaultExport: async (path) => {
-        const built = await Bun.build({ entrypoints: [path], format: "esm", target: "bun" });
-        if (!built.success || built.outputs.length !== 1) throw new Error("build failed");
-        const url = URL.createObjectURL(
-          new Blob([await built.outputs[0].text()], { type: "text/javascript" }),
-        );
-        const module = await import(url).finally(() => URL.revokeObjectURL(url));
+        const url = pathToFileURL(path);
+        url.searchParams.set("kojo-validation", crypto.randomUUID());
+        const module = await import(url.href);
         return module.default;
       },
     },

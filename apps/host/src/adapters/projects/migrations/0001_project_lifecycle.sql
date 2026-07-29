@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS kojo_store_metadata (
   engine_adapter_schema_version INTEGER NOT NULL,
   effect_family_version TEXT NOT NULL,
   created_at_ms INTEGER NOT NULL,
-  last_migrated_at_ms INTEGER NOT NULL
+  last_migrated_at_ms INTEGER NOT NULL,
+  CHECK (created_at_ms >= 0 AND last_migrated_at_ms >= created_at_ms)
 ) STRICT;
 --> statement-breakpoint
 
@@ -25,7 +26,11 @@ CREATE TABLE kojo_control_requests (
   result_sensitivity_map_version INTEGER, result_sensitivity_map_json TEXT CHECK (result_sensitivity_map_json IS NULL OR json_valid(result_sensitivity_map_json)),
   result_sha256 BLOB CHECK (result_sha256 IS NULL OR length(result_sha256) = 32),
   result_code TEXT, safe_error_code TEXT,
-  created_at_ms INTEGER NOT NULL, completed_at_ms INTEGER, expires_at_ms INTEGER
+  created_at_ms INTEGER NOT NULL, completed_at_ms INTEGER, expires_at_ms INTEGER,
+  CHECK ((target_kind = 'none' AND target_run_id IS NULL AND target_schedule_key IS NULL) OR (target_kind = 'run' AND target_run_id IS NOT NULL AND target_schedule_key IS NULL) OR (target_kind = 'schedule' AND target_run_id IS NULL AND target_schedule_key IS NOT NULL)),
+  CHECK ((result_encoding_version IS NULL AND result_schema_identity IS NULL AND result_json IS NULL AND result_sensitivity_map_version IS NULL AND result_sensitivity_map_json IS NULL AND result_sha256 IS NULL) OR (result_encoding_version IS NOT NULL AND result_schema_identity IS NOT NULL AND result_json IS NOT NULL AND result_sensitivity_map_version IS NOT NULL AND result_sensitivity_map_json IS NOT NULL AND result_sha256 IS NOT NULL)),
+  CHECK ((state = 'completed' AND completed_at_ms IS NOT NULL AND result_json IS NOT NULL) OR (state != 'completed' AND completed_at_ms IS NULL)),
+  CHECK (created_at_ms >= 0 AND (completed_at_ms IS NULL OR completed_at_ms >= created_at_ms) AND (expires_at_ms IS NULL OR expires_at_ms >= created_at_ms))
 ) STRICT;
 --> statement-breakpoint
 CREATE INDEX kojo_control_requests_active_idx ON kojo_control_requests(created_at_ms, request_key) WHERE state != 'completed';
@@ -61,7 +66,8 @@ CREATE TABLE kojo_workflow_schedule_states (
     OR
     (applied_workflow_key IS NOT NULL AND applied_revision IS NOT NULL AND applied_cron IS NOT NULL AND applied_time_zone IS NOT NULL AND applied_overlap_policy IS NOT NULL AND applied_input_rule_revision IS NOT NULL)
   ),
-  CHECK (next_occurrence_ms IS NULL OR (enabled_intent = 1 AND condition = 'available' AND (high_water_mark_ms IS NULL OR next_occurrence_ms > high_water_mark_ms)))
+  CHECK (next_occurrence_ms IS NULL OR (enabled_intent = 1 AND condition = 'available' AND (high_water_mark_ms IS NULL OR next_occurrence_ms > high_water_mark_ms))),
+  CHECK (created_at_ms >= 0 AND updated_at_ms >= created_at_ms AND (high_water_mark_ms IS NULL OR high_water_mark_ms >= 0) AND (next_occurrence_ms IS NULL OR next_occurrence_ms >= 0))
 ) STRICT;
 --> statement-breakpoint
 
@@ -93,6 +99,8 @@ CREATE TABLE kojo_workflow_runs (
   accepted_at_ms INTEGER NOT NULL, engine_confirmed_at_ms INTEGER,
   updated_at_ms INTEGER NOT NULL, finalized_at_ms INTEGER,
   UNIQUE(parent_run_id, workflow_key, child_invocation_key),
+  CHECK ((trigger_kind = 'manual' AND parent_run_id IS NULL AND child_invocation_key IS NULL AND schedule_key IS NULL AND scheduled_at_ms IS NULL AND schedule_revision IS NULL) OR (trigger_kind = 'schedule' AND parent_run_id IS NULL AND child_invocation_key IS NULL AND schedule_key IS NOT NULL AND scheduled_at_ms IS NOT NULL AND schedule_revision IS NOT NULL) OR (trigger_kind = 'child' AND parent_run_id IS NOT NULL AND child_invocation_key IS NOT NULL AND schedule_key IS NULL AND scheduled_at_ms IS NULL AND schedule_revision IS NULL)),
+  CHECK (accepted_at_ms >= 0 AND updated_at_ms >= accepted_at_ms AND (engine_confirmed_at_ms IS NULL OR engine_confirmed_at_ms >= accepted_at_ms) AND (scheduled_at_ms IS NULL OR scheduled_at_ms >= 0) AND (stop_requested_at_ms IS NULL OR stop_requested_at_ms >= accepted_at_ms) AND (finalized_at_ms IS NULL OR finalized_at_ms >= accepted_at_ms)),
   CHECK (
     (state IN ('stopped', 'failed', 'completed') AND outcome_event_id IS NOT NULL AND finalized_at_ms IS NOT NULL)
     OR
@@ -137,7 +145,9 @@ CREATE TABLE kojo_workflow_schedule_occurrences (
   linked_run_id TEXT REFERENCES kojo_workflow_runs(run_id) ON DELETE SET NULL,
   deleted_run_id TEXT, deleted_run_at_ms INTEGER,
   row_version INTEGER NOT NULL CHECK (row_version > 0),
-  PRIMARY KEY (schedule_key, scheduled_at_ms)
+  PRIMARY KEY (schedule_key, scheduled_at_ms),
+  CHECK ((outcome = 'planned' AND processed_at_ms IS NULL AND linked_run_id IS NULL AND deleted_run_id IS NULL AND deleted_run_at_ms IS NULL) OR (outcome = 'started' AND processed_at_ms IS NOT NULL AND ((linked_run_id IS NOT NULL AND deleted_run_id IS NULL AND deleted_run_at_ms IS NULL) OR (linked_run_id IS NULL AND deleted_run_id IS NOT NULL AND deleted_run_at_ms IS NOT NULL))) OR (outcome IN ('skipped', 'invalidated', 'failed') AND processed_at_ms IS NOT NULL AND linked_run_id IS NULL AND deleted_run_id IS NULL AND deleted_run_at_ms IS NULL)),
+  CHECK (scheduled_at_ms >= 0 AND delivery_attempt_count >= 0 AND planned_at_ms >= 0 AND (first_attempted_at_ms IS NULL OR first_attempted_at_ms >= planned_at_ms) AND (processed_at_ms IS NULL OR processed_at_ms >= planned_at_ms) AND (deleted_run_at_ms IS NULL OR deleted_run_at_ms >= 0))
 ) STRICT;
 --> statement-breakpoint
 CREATE INDEX kojo_schedule_occurrences_history_idx ON kojo_workflow_schedule_occurrences(schedule_key, scheduled_at_ms DESC);
@@ -162,7 +172,9 @@ CREATE TABLE kojo_engine_operations (
   attempt_count INTEGER NOT NULL, next_attempt_at_ms INTEGER, last_attempted_at_ms INTEGER,
   confirmed_at_ms INTEGER, confirmation_event_id TEXT UNIQUE, safe_error_code TEXT,
   created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
-  UNIQUE (run_id, kind, operation_key)
+  UNIQUE (run_id, kind, operation_key),
+  CHECK ((state = 'confirmed' AND confirmed_at_ms IS NOT NULL AND confirmation_event_id IS NOT NULL AND next_attempt_at_ms IS NULL) OR (state != 'confirmed' AND confirmed_at_ms IS NULL AND confirmation_event_id IS NULL)),
+  CHECK (attempt_count >= 0 AND created_at_ms >= 0 AND updated_at_ms >= created_at_ms AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms >= 0) AND (last_attempted_at_ms IS NULL OR last_attempted_at_ms >= created_at_ms) AND (confirmed_at_ms IS NULL OR confirmed_at_ms >= created_at_ms))
 ) STRICT;
 --> statement-breakpoint
 CREATE INDEX kojo_engine_operations_run_idx ON kojo_engine_operations(run_id, created_at_ms);
@@ -179,7 +191,9 @@ CREATE TABLE kojo_workflow_activity_attempts (
   state TEXT NOT NULL CHECK (state IN ('started', 'result-observed', 'engine-confirmed')),
   outcome_code TEXT, outcome_summary_json TEXT CHECK (outcome_summary_json IS NULL OR json_valid(outcome_summary_json)),
   started_at_ms INTEGER NOT NULL, result_observed_at_ms INTEGER, engine_confirmed_at_ms INTEGER,
-  UNIQUE (run_id, durable_operation_key, effect_retry_number, invocation_number)
+  UNIQUE (run_id, durable_operation_key, effect_retry_number, invocation_number),
+  CHECK ((state = 'started' AND result_observed_at_ms IS NULL AND engine_confirmed_at_ms IS NULL) OR (state = 'result-observed' AND result_observed_at_ms IS NOT NULL AND engine_confirmed_at_ms IS NULL) OR (state = 'engine-confirmed' AND result_observed_at_ms IS NOT NULL AND engine_confirmed_at_ms IS NOT NULL)),
+  CHECK (effect_retry_number >= 0 AND invocation_number >= 0 AND started_at_ms >= 0 AND (result_observed_at_ms IS NULL OR result_observed_at_ms >= started_at_ms) AND (engine_confirmed_at_ms IS NULL OR engine_confirmed_at_ms >= started_at_ms))
 ) STRICT;
 --> statement-breakpoint
 CREATE INDEX kojo_activity_attempts_run_idx ON kojo_workflow_activity_attempts(run_id, durable_operation_key, started_at_ms);
@@ -199,7 +213,8 @@ CREATE TABLE kojo_execution_events (
   payload_sensitivity_map_version INTEGER NOT NULL,
   payload_sensitivity_map_json TEXT NOT NULL CHECK (json_valid(payload_sensitivity_map_json)),
   payload_sha256 BLOB NOT NULL CHECK (length(payload_sha256) = 32),
-  UNIQUE (run_id, sequence), UNIQUE (run_id, event_id)
+  UNIQUE (run_id, sequence), UNIQUE (run_id, event_id),
+  CHECK (envelope_version > 0 AND kind_version > 0 AND recorded_at_ms >= 0 AND (observed_at_ms IS NULL OR observed_at_ms >= 0))
 ) STRICT;
 --> statement-breakpoint
 CREATE INDEX kojo_execution_events_kind_idx ON kojo_execution_events(run_id, kind, sequence);
@@ -222,7 +237,9 @@ CREATE TABLE kojo_execution_artifacts (
   byte_size INTEGER NOT NULL CHECK (byte_size >= 0), sha256 BLOB NOT NULL CHECK (length(sha256) = 32),
   condition TEXT NOT NULL CHECK (condition IN ('available', 'missing', 'expired')),
   created_at_ms INTEGER NOT NULL, unavailable_at_ms INTEGER, unavailable_reason_code TEXT,
-  UNIQUE (run_id, artifact_id)
+  UNIQUE (run_id, artifact_id),
+  CHECK ((condition = 'available' AND unavailable_at_ms IS NULL AND unavailable_reason_code IS NULL) OR (condition IN ('missing', 'expired') AND unavailable_at_ms IS NOT NULL AND unavailable_reason_code IS NOT NULL)),
+  CHECK (created_at_ms >= 0 AND (unavailable_at_ms IS NULL OR unavailable_at_ms >= created_at_ms))
 ) STRICT;
 --> statement-breakpoint
 CREATE INDEX kojo_execution_artifacts_run_idx ON kojo_execution_artifacts(run_id, created_at_ms);
@@ -242,7 +259,7 @@ CREATE TABLE kojo_retention_policy (
   singleton_key INTEGER PRIMARY KEY NOT NULL CHECK (singleton_key = 1),
   diagnostic_max_age_ms INTEGER, diagnostic_max_bytes INTEGER,
   disposable_max_age_ms INTEGER, disposable_max_bytes INTEGER,
-  row_version INTEGER NOT NULL CHECK (row_version > 0), updated_at_ms INTEGER NOT NULL,
+  row_version INTEGER NOT NULL CHECK (row_version > 0), updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= 0),
   CHECK (diagnostic_max_age_ms IS NULL OR diagnostic_max_age_ms > 0),
   CHECK (diagnostic_max_bytes IS NULL OR diagnostic_max_bytes > 0),
   CHECK (disposable_max_age_ms IS NULL OR disposable_max_age_ms > 0),
@@ -256,7 +273,8 @@ CREATE TABLE kojo_deletion_intents (
   target_snapshot_json TEXT NOT NULL CHECK (json_valid(target_snapshot_json)),
   expected_revision INTEGER,
   phase TEXT NOT NULL CHECK (phase IN ('quiescing', 'clearing-engine', 'clearing-owned-content', 'deleting-records', 'needs-attention')),
-  safe_error_code TEXT, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL
+  safe_error_code TEXT, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
+  CHECK (created_at_ms >= 0 AND updated_at_ms >= created_at_ms)
 ) STRICT;
 --> statement-breakpoint
 CREATE INDEX kojo_deletion_intents_active_idx ON kojo_deletion_intents(phase, updated_at_ms) WHERE phase != 'needs-attention';
@@ -267,7 +285,9 @@ CREATE TABLE kojo_deletion_items (
   item_kind TEXT NOT NULL, item_key TEXT NOT NULL, stable_order INTEGER NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('pending', 'completed', 'warning', 'needs-attention')),
   attempt_count INTEGER NOT NULL, completed_at_ms INTEGER, safe_error_code TEXT,
-  PRIMARY KEY (deletion_id, item_kind, item_key)
+  PRIMARY KEY (deletion_id, item_kind, item_key),
+  CHECK ((state = 'completed' AND completed_at_ms IS NOT NULL) OR (state != 'completed' AND completed_at_ms IS NULL)),
+  CHECK (stable_order >= 0 AND attempt_count >= 0 AND (completed_at_ms IS NULL OR completed_at_ms >= 0))
 ) STRICT;
 --> statement-breakpoint
 CREATE INDEX kojo_deletion_items_next_idx ON kojo_deletion_items(deletion_id, state, stable_order);

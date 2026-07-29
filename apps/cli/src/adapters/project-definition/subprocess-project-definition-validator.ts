@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { validateProjectDefinitionInSubprocess } from "@kojo/control/bun-project-definition-validation";
+import { validateProjectDefinitionInSubprocess } from "./bun-project-definition-validation";
 
 const runnerPath = fileURLToPath(
   new URL("./project-definition-validator-process.ts", import.meta.url),

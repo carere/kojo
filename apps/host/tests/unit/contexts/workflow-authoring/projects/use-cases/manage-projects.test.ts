@@ -65,15 +65,16 @@ const makeRuntime = (
 ) =>
   Layer.succeed(ProjectRuntime, {
     coordinateRegistration: (_project, beforeMigration, operation) =>
-      Effect.flatMap(beforeMigration, (refused) =>
-        refused === undefined
+      Effect.flatMap(beforeMigration, (preflight) =>
+        preflight.result === undefined
           ? Effect.sync(onMigration).pipe(Effect.andThen(operation(true)))
-          : Effect.succeed(refused),
+          : Effect.succeed(preflight.result),
       ),
     coordinateLifecycle: (_project, operation) => operation,
     readiness: () => Effect.succeed(condition),
     inspectForgetBlockers: () => blockers,
     coordinateForget: (_project, operation) => Effect.flatMap(blockers, operation),
+    deactivate: () => Effect.void,
   });
 
 const noForgetBlockers = Effect.succeed({
@@ -304,7 +305,7 @@ it.effect("acquires the Project Runtime before the Project Index for register an
     coordinateRegistration: (_project, beforeMigration, operation) =>
       withinRuntime(
         Effect.flatMap(beforeMigration, (refused) =>
-          refused === undefined ? operation(true) : Effect.succeed(refused),
+          refused.result === undefined ? operation(true) : Effect.succeed(refused.result),
         ),
       ),
     coordinateLifecycle: (_project, operation) => withinRuntime(operation),
@@ -312,6 +313,7 @@ it.effect("acquires the Project Runtime before the Project Index for register an
     inspectForgetBlockers: () => noForgetBlockers,
     coordinateForget: (_project, operation) =>
       withinRuntime(Effect.flatMap(noForgetBlockers, operation)),
+    deactivate: () => Effect.void,
   });
   const layer = Layer.mergeAll(store, makeLayout({ input: project }), runtime);
 

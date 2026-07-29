@@ -75,7 +75,7 @@ export const forgetProject = (
       );
     }
 
-    return yield* runtime.coordinateForget(project, (blockers) =>
+    const result = yield* runtime.coordinateForget(project, (blockers) =>
       store.update((latest) =>
         Effect.gen(function* () {
           const currentReceipt = latest.receipts.find(
@@ -175,6 +175,8 @@ export const forgetProject = (
         }),
       ),
     );
+    if (result.ok) yield* runtime.deactivate(project);
+    return result;
   });
 
 export const replayForgetProject = (

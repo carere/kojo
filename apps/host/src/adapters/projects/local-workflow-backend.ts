@@ -11,18 +11,11 @@ import {
   SingleRunner,
 } from "effect/unstable/cluster";
 import { SqlClient } from "effect/unstable/sql";
+import { WorkflowEngine } from "effect/unstable/workflow";
 import {
   WorkflowBackend,
   type WorkflowBackendAssessment,
 } from "../../contexts/workflow-execution/projects/services/workflow-backend";
-
-const REQUIRED_EFFECT_OBJECTS = [
-  "cluster_locks",
-  "cluster_messages",
-  "cluster_migrations",
-  "cluster_replies",
-  "cluster_runners",
-] as const;
 
 const databasePath = (project: ProjectSnapshot) => join(project.path, ".kojo", "kojo.sqlite");
 
@@ -42,29 +35,8 @@ const configure = (sql: SqlClient.SqlClient) =>
     }
   });
 
-const inspectObjects = (project: ProjectSnapshot) =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      const rows = yield* sql.unsafe<{ readonly name: string }>(
-        `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${REQUIRED_EFFECT_OBJECTS.map(() => "?").join(", ")})`,
-        REQUIRED_EFFECT_OBJECTS,
-      );
-      return rows.length === REQUIRED_EFFECT_OBJECTS.length;
-    }).pipe(
-      Effect.provide(
-        SqliteClient.layer({
-          filename: databasePath(project),
-          readonly: true,
-          readwrite: false,
-          create: false,
-          disableWAL: true,
-        }),
-      ),
-    ),
-  );
-
 interface ActiveBackend {
+  readonly engine: WorkflowEngine.WorkflowEngine["Service"];
   readonly scope: Scope.Closeable;
   readonly sharding: Sharding.Sharding["Service"];
 }
@@ -117,11 +89,12 @@ export const makeLocalWorkflowBackendLayer = (hostIdentity: string) =>
               scope,
             );
             const sharding = Context.get(context, Sharding.Sharding);
+            const engine = Context.get(context, WorkflowEngine.WorkflowEngine);
             if (!(yield* waitForOwnership(sharding))) {
               yield* Scope.close(scope, Exit.void);
               return false;
             }
-            active.set(project.path, { scope, sharding });
+            active.set(project.path, { engine, scope, sharding });
             return true;
           }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)));
         }).pipe(Effect.catchCause(() => close(project.path).pipe(Effect.as(false))));
@@ -130,15 +103,12 @@ export const makeLocalWorkflowBackendLayer = (hostIdentity: string) =>
         initialize: acquire,
         readiness: (project: ProjectSnapshot): Effect.Effect<WorkflowBackendAssessment> =>
           Effect.gen(function* () {
-            if (active.has(project.path)) {
-              return (yield* acquire(project)) ? "ready" : "needs-attention";
-            }
-            const initialized = yield* inspectObjects(project).pipe(
-              Effect.catchCause(() => Effect.succeed(false)),
-            );
-            if (!initialized) return "uninitialized";
-            return (yield* acquire(project)) ? "ready" : "needs-attention";
-          }),
+            const backend = active.get(project.path);
+            if (backend === undefined) return "uninitialized";
+            if (yield* backend.sharding.isShutdown) return "needs-attention";
+            if (!(yield* waitForOwnership(backend.sharding))) return "needs-attention";
+            return backend.engine === undefined ? "needs-attention" : "ready";
+          }).pipe(Effect.catchCause(() => Effect.succeed("needs-attention" as const))),
         release: (project: ProjectSnapshot) => close(project.path),
       };
     }),

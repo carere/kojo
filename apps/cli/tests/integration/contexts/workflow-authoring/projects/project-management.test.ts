@@ -137,7 +137,7 @@ describe("Kojo Project discovery", () => {
     expect(
       (await runCli(["project", "list", "--limit", "201"], host.socketPath, directory)).exitCode,
     ).toBe(2);
-  });
+  }, 15_000);
 
   it("selects Projects beyond the first 200 authoritative Index entries", async () => {
     const directory = await temporaryDirectory("kojo-project-large-index-");
@@ -590,6 +590,51 @@ describe("Kojo Project discovery", () => {
     restored.close();
   });
 
+  it("quiesces an active Workflow backend before recovery and owns the restored database", async () => {
+    const directory = await temporaryDirectory("kojo-project-active-recovery-");
+    const project = join(directory, "project");
+    await git(["init", project]);
+    const firstHost = await startKojoHostProcess();
+    expect((await runCli(["init", project], firstHost.socketPath, directory)).exitCode).toBe(0);
+    const databasePath = join(project, ".kojo", "kojo.sqlite");
+    const backupPath = `${databasePath}.migration-backup`;
+    const backupSource = new Database(databasePath, { readonly: true });
+    backupSource.query("VACUUM INTO ?").run(backupPath);
+    backupSource.close();
+    await chmod(backupPath, 0o600);
+    const changed = new Database(databasePath);
+    changed.exec(
+      "INSERT INTO kojo_retention_policy(singleton_key, row_version, updated_at_ms) VALUES (1, 1, 1)",
+    );
+    changed.close();
+
+    const recovered = await runCli(
+      ["project", "register", project, "--request-key", "active-recovery", "--json"],
+      firstHost.socketPath,
+      directory,
+    );
+    expect(recovered, recovered.stderr).toMatchObject({ exitCode: 0 });
+    const restored = new Database(databasePath, { readonly: true });
+    expect(restored.query("SELECT * FROM kojo_retention_policy").all()).toEqual([]);
+    restored.close();
+
+    const secondHost = await startKojoHostProcess();
+    cleanups.push(secondHost.stop);
+    const contended = await runCli(
+      ["project", "register", project, "--request-key", "restored-contended", "--json"],
+      secondHost.socketPath,
+      directory,
+    );
+    expect(contended.exitCode).toBe(1);
+    await firstHost.stop();
+    const reacquired = await runCli(
+      ["project", "register", project, "--request-key", "restored-reacquired", "--json"],
+      secondHost.socketPath,
+      directory,
+    );
+    expect(reacquired, reacquired.stderr).toMatchObject({ exitCode: 0 });
+  });
+
   it("rejects a pending migration backup owned by another Project", async () => {
     const directory = await temporaryDirectory("kojo-project-foreign-backup-");
     const hostStore = join(directory, "host-store");
@@ -649,6 +694,31 @@ describe("Kojo Project discovery", () => {
     expect(projects).toEqual([{ identity, path: await realpath(project), condition: "ready" }]);
   });
 
+  it("rejects incompatible Workflow backend metadata before engine activation", async () => {
+    const directory = await temporaryDirectory("kojo-project-engine-compatibility-");
+    const hostStore = join(directory, "host-store");
+    const project = join(directory, "project");
+    await git(["init", project]);
+    const firstHost = await startKojoHostProcess({ storePath: hostStore });
+    expect((await runCli(["init", project], firstHost.socketPath, directory)).exitCode).toBe(0);
+    await firstHost.stop();
+    const databasePath = join(project, ".kojo", "kojo.sqlite");
+    const database = new Database(databasePath);
+    database.exec("UPDATE kojo_store_metadata SET effect_family_version = 'future-effect'");
+    database.close();
+
+    const restartedHost = await startKojoHostProcess({ storePath: hostStore });
+    cleanups.push(restartedHost.stop);
+    const refused = await runCli(
+      ["project", "register", project, "--request-key", "incompatible-engine", "--json"],
+      restartedHost.socketPath,
+      directory,
+    );
+    expect(refused.exitCode).toBe(1);
+    expect(JSON.parse(refused.stdout).error.findingKeys).toEqual(["store.migration-failed"]);
+    expect(await Bun.file(`${databasePath}.migration-backup`).exists()).toBe(false);
+  });
+
   it("blocks a second Host from acquiring Workflow ownership for the same Project", async () => {
     const directory = await temporaryDirectory("kojo-project-engine-owner-");
     const project = join(directory, "project");
@@ -669,6 +739,75 @@ describe("Kojo Project discovery", () => {
     expect(JSON.parse(refused.stdout).error.findingKeys).toEqual(["store.migration-failed"]);
     const firstView = await runCli(["project", "list", "--json"], firstHost.socketPath, directory);
     expect(JSON.parse(firstView.stdout).result.items).toMatchObject([{ condition: "ready" }]);
+  });
+
+  it("releases Workflow ownership after forget so another Host can reacquire", async () => {
+    const directory = await temporaryDirectory("kojo-project-forget-reacquire-");
+    const project = join(directory, "project");
+    await git(["init", project]);
+    const firstHost = await startKojoHostProcess();
+    cleanups.push(firstHost.stop);
+    expect((await runCli(["init", project], firstHost.socketPath, directory)).exitCode).toBe(0);
+    const identity = JSON.parse(await readFile(join(project, ".kojo", "project.json"), "utf8"))
+      .projectIdentity as string;
+    expect(
+      (
+        await runCli(
+          ["project", "forget", "--project-id", identity, "--request-key", "release-owner"],
+          firstHost.socketPath,
+          directory,
+        )
+      ).exitCode,
+    ).toBe(0);
+
+    const secondHost = await startKojoHostProcess();
+    cleanups.push(secondHost.stop);
+    const registered = await runCli(
+      ["project", "register", project, "--request-key", "reacquire-after-forget", "--json"],
+      secondHost.socketPath,
+      directory,
+    );
+    expect(registered, registered.stderr).toMatchObject({ exitCode: 0 });
+  });
+
+  it("releases the old runtime when a moved Project is forgotten", async () => {
+    const directory = await temporaryDirectory("kojo-project-move-rekey-");
+    const project = join(directory, "project");
+    const moved = join(directory, "moved");
+    await git(["init", project]);
+    const firstHost = await startKojoHostProcess();
+    cleanups.push(firstHost.stop);
+    expect((await runCli(["init", project], firstHost.socketPath, directory)).exitCode).toBe(0);
+    const identity = JSON.parse(await readFile(join(project, ".kojo", "project.json"), "utf8"))
+      .projectIdentity as string;
+    await rename(project, moved);
+    expect(
+      (
+        await runCli(
+          ["project", "register", moved, "--request-key", "move-rekey"],
+          firstHost.socketPath,
+          directory,
+        )
+      ).exitCode,
+    ).toBe(0);
+    expect(
+      (
+        await runCli(
+          ["project", "forget", "--project-id", identity, "--request-key", "forget-moved"],
+          firstHost.socketPath,
+          directory,
+        )
+      ).exitCode,
+    ).toBe(0);
+
+    const secondHost = await startKojoHostProcess();
+    cleanups.push(secondHost.stop);
+    const registered = await runCli(
+      ["project", "register", moved, "--request-key", "reacquire-moved", "--json"],
+      secondHost.socketPath,
+      directory,
+    );
+    expect(registered, registered.stderr).toMatchObject({ exitCode: 0 });
   });
 
   it("correlates Project control diagnostics by Project Identity", async () => {

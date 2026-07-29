@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { desc, sql } from "drizzle-orm";
 import {
   type AnySQLiteColumn,
   blob,
@@ -10,6 +10,7 @@ import {
   sqliteTable,
   text,
   unique,
+  uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
 export const storeMetadata = sqliteTable(
@@ -25,7 +26,13 @@ export const storeMetadata = sqliteTable(
     createdAtMs: integer("created_at_ms").notNull(),
     lastMigratedAtMs: integer("last_migrated_at_ms").notNull(),
   },
-  (table) => [check("store_metadata_singleton", sql`${table.singletonKey} = 1`)],
+  (table) => [
+    check("store_metadata_singleton", sql`${table.singletonKey} = 1`),
+    check(
+      "store_metadata_times_non_negative",
+      sql`${table.createdAtMs} >= 0 AND ${table.lastMigratedAtMs} >= ${table.createdAtMs}`,
+    ),
+  ],
 );
 
 export const controlRequests = sqliteTable(
@@ -61,6 +68,22 @@ export const controlRequests = sqliteTable(
       sql`${table.state} IN ('pending', 'completed', 'needs-attention')`,
     ),
     check("control_request_sha256_length", sql`length(${table.requestSha256}) = 32`),
+    check(
+      "control_request_target_consistent",
+      sql`(${table.targetKind} = 'none' AND ${table.targetRunId} IS NULL AND ${table.targetScheduleKey} IS NULL) OR (${table.targetKind} = 'run' AND ${table.targetRunId} IS NOT NULL AND ${table.targetScheduleKey} IS NULL) OR (${table.targetKind} = 'schedule' AND ${table.targetRunId} IS NULL AND ${table.targetScheduleKey} IS NOT NULL)`,
+    ),
+    check(
+      "control_result_bundle_consistent",
+      sql`(${table.resultEncodingVersion} IS NULL AND ${table.resultSchemaIdentity} IS NULL AND ${table.resultJson} IS NULL AND ${table.resultSensitivityMapVersion} IS NULL AND ${table.resultSensitivityMapJson} IS NULL AND ${table.resultSha256} IS NULL) OR (${table.resultEncodingVersion} IS NOT NULL AND ${table.resultSchemaIdentity} IS NOT NULL AND ${table.resultJson} IS NOT NULL AND ${table.resultSensitivityMapVersion} IS NOT NULL AND ${table.resultSensitivityMapJson} IS NOT NULL AND ${table.resultSha256} IS NOT NULL)`,
+    ),
+    check(
+      "control_completion_consistent",
+      sql`(${table.state} = 'completed' AND ${table.completedAtMs} IS NOT NULL AND ${table.resultJson} IS NOT NULL) OR (${table.state} != 'completed' AND ${table.completedAtMs} IS NULL)`,
+    ),
+    check(
+      "control_times_non_negative",
+      sql`${table.createdAtMs} >= 0 AND (${table.completedAtMs} IS NULL OR ${table.completedAtMs} >= ${table.createdAtMs}) AND (${table.expiresAtMs} IS NULL OR ${table.expiresAtMs} >= ${table.createdAtMs})`,
+    ),
     check(
       "control_result_json_valid",
       sql`${table.resultJson} IS NULL OR json_valid(${table.resultJson})`,
@@ -114,6 +137,10 @@ export const workflowScheduleStates = sqliteTable(
       sql`${table.condition} IN ('available', 'unavailable', 'needs-attention')`,
     ),
     check("schedule_row_version_positive", sql`${table.rowVersion} > 0`),
+    check(
+      "schedule_times_non_negative",
+      sql`${table.createdAtMs} >= 0 AND ${table.updatedAtMs} >= ${table.createdAtMs} AND (${table.highWaterMarkMs} IS NULL OR ${table.highWaterMarkMs} >= 0) AND (${table.nextOccurrenceMs} IS NULL OR ${table.nextOccurrenceMs} >= 0)`,
+    ),
     check(
       "schedule_current_overlap_valid",
       sql`${table.currentOverlapPolicy} IS NULL OR ${table.currentOverlapPolicy} IN ('allow', 'skip')`,
@@ -204,6 +231,14 @@ export const workflowRuns = sqliteTable(
     ),
     check("workflow_run_row_version_positive", sql`${table.rowVersion} > 0`),
     check(
+      "workflow_run_trigger_fields_consistent",
+      sql`(${table.triggerKind} = 'manual' AND ${table.parentRunId} IS NULL AND ${table.childInvocationKey} IS NULL AND ${table.scheduleKey} IS NULL AND ${table.scheduledAtMs} IS NULL AND ${table.scheduleRevision} IS NULL) OR (${table.triggerKind} = 'schedule' AND ${table.parentRunId} IS NULL AND ${table.childInvocationKey} IS NULL AND ${table.scheduleKey} IS NOT NULL AND ${table.scheduledAtMs} IS NOT NULL AND ${table.scheduleRevision} IS NOT NULL) OR (${table.triggerKind} = 'child' AND ${table.parentRunId} IS NOT NULL AND ${table.childInvocationKey} IS NOT NULL AND ${table.scheduleKey} IS NULL AND ${table.scheduledAtMs} IS NULL AND ${table.scheduleRevision} IS NULL)`,
+    ),
+    check(
+      "workflow_run_times_non_negative",
+      sql`${table.acceptedAtMs} >= 0 AND ${table.updatedAtMs} >= ${table.acceptedAtMs} AND (${table.engineConfirmedAtMs} IS NULL OR ${table.engineConfirmedAtMs} >= ${table.acceptedAtMs}) AND (${table.scheduledAtMs} IS NULL OR ${table.scheduledAtMs} >= 0) AND (${table.stopRequestedAtMs} IS NULL OR ${table.stopRequestedAtMs} >= ${table.acceptedAtMs}) AND (${table.finalizedAtMs} IS NULL OR ${table.finalizedAtMs} >= ${table.acceptedAtMs})`,
+    ),
+    check(
       "workflow_run_final_state_valid",
       sql`((${table.state} IN ('stopped', 'failed', 'completed')) AND ${table.outcomeEventId} IS NOT NULL AND ${table.finalizedAtMs} IS NOT NULL) OR ((${table.state} IN ('running', 'suspended', 'stopping')) AND ${table.outcomeEventId} IS NULL AND ${table.finalizedAtMs} IS NULL)`,
     ),
@@ -212,11 +247,15 @@ export const workflowRuns = sqliteTable(
       table.workflowKey,
       table.childInvocationKey,
     ),
-    index("kojo_workflow_runs_accepted_idx").on(table.acceptedAtMs, table.runId),
-    index("kojo_workflow_runs_workflow_idx").on(table.workflowKey, table.acceptedAtMs, table.runId),
-    index("kojo_workflow_runs_state_updated_idx").on(table.state, table.updatedAtMs),
-    index("kojo_workflow_runs_parent_idx").on(table.parentRunId, table.acceptedAtMs),
-    index("kojo_workflow_runs_schedule_idx").on(table.scheduleKey, table.scheduledAtMs),
+    index("kojo_workflow_runs_accepted_idx").on(desc(table.acceptedAtMs), desc(table.runId)),
+    index("kojo_workflow_runs_workflow_idx").on(
+      table.workflowKey,
+      desc(table.acceptedAtMs),
+      desc(table.runId),
+    ),
+    index("kojo_workflow_runs_state_updated_idx").on(table.state, desc(table.updatedAtMs)),
+    index("kojo_workflow_runs_parent_idx").on(table.parentRunId, desc(table.acceptedAtMs)),
+    index("kojo_workflow_runs_schedule_idx").on(table.scheduleKey, desc(table.scheduledAtMs)),
     index("kojo_workflow_runs_non_final_idx")
       .on(table.updatedAtMs, table.runId)
       .where(sql`${table.state} IN ('running', 'suspended', 'stopping')`),
@@ -263,12 +302,22 @@ export const workflowScheduleOccurrences = sqliteTable(
     ),
     check("schedule_occurrence_sha256_length", sql`length(${table.resolvedInputSha256}) = 32`),
     check("schedule_occurrence_row_version_positive", sql`${table.rowVersion} > 0`),
-    index("kojo_schedule_occurrences_history_idx").on(table.scheduleKey, table.scheduledAtMs),
-    index("kojo_schedule_occurrences_outcome_idx").on(table.outcome, table.scheduledAtMs),
+    check(
+      "schedule_occurrence_lifecycle_consistent",
+      sql`(${table.outcome} = 'planned' AND ${table.processedAtMs} IS NULL AND ${table.linkedRunId} IS NULL AND ${table.deletedRunId} IS NULL AND ${table.deletedRunAtMs} IS NULL) OR (${table.outcome} = 'started' AND ${table.processedAtMs} IS NOT NULL AND ((${table.linkedRunId} IS NOT NULL AND ${table.deletedRunId} IS NULL AND ${table.deletedRunAtMs} IS NULL) OR (${table.linkedRunId} IS NULL AND ${table.deletedRunId} IS NOT NULL AND ${table.deletedRunAtMs} IS NOT NULL))) OR (${table.outcome} IN ('skipped', 'invalidated', 'failed') AND ${table.processedAtMs} IS NOT NULL AND ${table.linkedRunId} IS NULL AND ${table.deletedRunId} IS NULL AND ${table.deletedRunAtMs} IS NULL)`,
+    ),
+    check(
+      "schedule_occurrence_times_non_negative",
+      sql`${table.scheduledAtMs} >= 0 AND ${table.deliveryAttemptCount} >= 0 AND ${table.plannedAtMs} >= 0 AND (${table.firstAttemptedAtMs} IS NULL OR ${table.firstAttemptedAtMs} >= ${table.plannedAtMs}) AND (${table.processedAtMs} IS NULL OR ${table.processedAtMs} >= ${table.plannedAtMs}) AND (${table.deletedRunAtMs} IS NULL OR ${table.deletedRunAtMs} >= 0)`,
+    ),
+    index("kojo_schedule_occurrences_history_idx").on(table.scheduleKey, desc(table.scheduledAtMs)),
+    index("kojo_schedule_occurrences_outcome_idx").on(table.outcome, desc(table.scheduledAtMs)),
     index("kojo_schedule_occurrences_due_idx")
       .on(table.scheduledAtMs, table.scheduleKey)
       .where(sql`${table.outcome} = 'planned'`),
-    unique("kojo_schedule_occurrences_linked_run_unique").on(table.linkedRunId),
+    uniqueIndex("kojo_schedule_occurrences_linked_run_unique")
+      .on(table.linkedRunId)
+      .where(sql`${table.linkedRunId} IS NOT NULL`),
   ],
 );
 
@@ -309,6 +358,14 @@ export const engineOperations = sqliteTable(
       sql`json_valid(${table.requestSensitivityMapJson})`,
     ),
     check("engine_operation_sha256_length", sql`length(${table.requestSha256}) = 32`),
+    check(
+      "engine_operation_confirmation_consistent",
+      sql`(${table.state} = 'confirmed' AND ${table.confirmedAtMs} IS NOT NULL AND ${table.confirmationEventId} IS NOT NULL AND ${table.nextAttemptAtMs} IS NULL) OR (${table.state} != 'confirmed' AND ${table.confirmedAtMs} IS NULL AND ${table.confirmationEventId} IS NULL)`,
+    ),
+    check(
+      "engine_operation_times_non_negative",
+      sql`${table.attemptCount} >= 0 AND ${table.createdAtMs} >= 0 AND ${table.updatedAtMs} >= ${table.createdAtMs} AND (${table.nextAttemptAtMs} IS NULL OR ${table.nextAttemptAtMs} >= 0) AND (${table.lastAttemptedAtMs} IS NULL OR ${table.lastAttemptedAtMs} >= ${table.createdAtMs}) AND (${table.confirmedAtMs} IS NULL OR ${table.confirmedAtMs} >= ${table.createdAtMs})`,
+    ),
     index("kojo_engine_operations_run_idx").on(table.runId, table.createdAtMs),
     index("kojo_engine_operations_pending_idx")
       .on(table.nextAttemptAtMs, table.operationId)
@@ -349,6 +406,14 @@ export const workflowActivityAttempts = sqliteTable(
     check(
       "workflow_activity_outcome_json_valid",
       sql`${table.outcomeSummaryJson} IS NULL OR json_valid(${table.outcomeSummaryJson})`,
+    ),
+    check(
+      "workflow_activity_state_consistent",
+      sql`(${table.state} = 'started' AND ${table.resultObservedAtMs} IS NULL AND ${table.engineConfirmedAtMs} IS NULL) OR (${table.state} = 'result-observed' AND ${table.resultObservedAtMs} IS NOT NULL AND ${table.engineConfirmedAtMs} IS NULL) OR (${table.state} = 'engine-confirmed' AND ${table.resultObservedAtMs} IS NOT NULL AND ${table.engineConfirmedAtMs} IS NOT NULL)`,
+    ),
+    check(
+      "workflow_activity_times_non_negative",
+      sql`${table.effectRetryNumber} >= 0 AND ${table.invocationNumber} >= 0 AND ${table.startedAtMs} >= 0 AND (${table.resultObservedAtMs} IS NULL OR ${table.resultObservedAtMs} >= ${table.startedAtMs}) AND (${table.engineConfirmedAtMs} IS NULL OR ${table.engineConfirmedAtMs} >= ${table.startedAtMs})`,
     ),
     index("kojo_activity_attempts_run_idx").on(
       table.runId,
@@ -393,6 +458,10 @@ export const executionEvents = sqliteTable(
       sql`json_valid(${table.payloadSensitivityMapJson})`,
     ),
     check("execution_event_sha256_length", sql`length(${table.payloadSha256}) = 32`),
+    check(
+      "execution_event_times_non_negative",
+      sql`${table.envelopeVersion} > 0 AND ${table.kindVersion} > 0 AND ${table.recordedAtMs} >= 0 AND (${table.observedAtMs} IS NULL OR ${table.observedAtMs} >= 0)`,
+    ),
     index("kojo_execution_events_kind_idx").on(table.runId, table.kind, table.sequence),
     index("kojo_execution_events_engine_operation_idx").on(table.engineOperationId),
     index("kojo_execution_events_activity_attempt_idx").on(table.activityAttemptId),
@@ -425,6 +494,14 @@ export const executionArtifacts = sqliteTable(
     check(
       "execution_artifact_condition_valid",
       sql`${table.condition} IN ('available', 'missing', 'expired')`,
+    ),
+    check(
+      "execution_artifact_condition_consistent",
+      sql`(${table.condition} = 'available' AND ${table.unavailableAtMs} IS NULL AND ${table.unavailableReasonCode} IS NULL) OR (${table.condition} IN ('missing', 'expired') AND ${table.unavailableAtMs} IS NOT NULL AND ${table.unavailableReasonCode} IS NOT NULL)`,
+    ),
+    check(
+      "execution_artifact_times_non_negative",
+      sql`${table.createdAtMs} >= 0 AND (${table.unavailableAtMs} IS NULL OR ${table.unavailableAtMs} >= ${table.createdAtMs})`,
     ),
     index("kojo_execution_artifacts_run_idx").on(table.runId, table.createdAtMs),
     index("kojo_execution_artifacts_condition_idx").on(table.condition),
@@ -505,7 +582,13 @@ export const deletionIntents = sqliteTable(
     ),
     check("deletion_intent_sha256_length", sql`length(${table.targetSha256}) = 32`),
     check("deletion_intent_snapshot_json_valid", sql`json_valid(${table.targetSnapshotJson})`),
-    index("kojo_deletion_intents_active_idx").on(table.phase, table.updatedAtMs),
+    check(
+      "deletion_intent_times_non_negative",
+      sql`${table.createdAtMs} >= 0 AND ${table.updatedAtMs} >= ${table.createdAtMs}`,
+    ),
+    index("kojo_deletion_intents_active_idx")
+      .on(table.phase, table.updatedAtMs)
+      .where(sql`${table.phase} != 'needs-attention'`),
   ],
 );
 
@@ -528,6 +611,14 @@ export const deletionItems = sqliteTable(
     check(
       "deletion_item_state_valid",
       sql`${table.state} IN ('pending', 'completed', 'warning', 'needs-attention')`,
+    ),
+    check(
+      "deletion_item_completion_consistent",
+      sql`(${table.state} = 'completed' AND ${table.completedAtMs} IS NOT NULL) OR (${table.state} != 'completed' AND ${table.completedAtMs} IS NULL)`,
+    ),
+    check(
+      "deletion_item_counts_non_negative",
+      sql`${table.stableOrder} >= 0 AND ${table.attemptCount} >= 0 AND (${table.completedAtMs} IS NULL OR ${table.completedAtMs} >= 0)`,
     ),
     index("kojo_deletion_items_next_idx").on(table.deletionId, table.state, table.stableOrder),
   ],

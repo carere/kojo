@@ -166,27 +166,10 @@ const appendIgnoreRule = async (path: string, rule: string) => {
   }
 };
 
-const createDatabase = async (path: string, identity: ProjectSnapshot["identity"]) => {
+const createDatabase = async (path: string, _identity: ProjectSnapshot["identity"]) => {
   const temporaryPath = `${path}.${randomUUID()}.tmp`;
   try {
     const database = new Database(temporaryPath, { create: true, strict: true });
-    database.exec(`CREATE TABLE kojo_store_metadata (
-      singleton_key INTEGER PRIMARY KEY NOT NULL CHECK (singleton_key = 1),
-      project_identity TEXT NOT NULL UNIQUE,
-      database_instance_id TEXT NOT NULL UNIQUE,
-      store_format_version INTEGER NOT NULL,
-      engine_adapter_kind TEXT NOT NULL,
-      engine_adapter_schema_version INTEGER NOT NULL,
-      effect_family_version TEXT NOT NULL,
-      created_at_ms INTEGER NOT NULL,
-      last_migrated_at_ms INTEGER NOT NULL
-    ) STRICT`);
-    const createdAt = Date.now();
-    database
-      .query(
-        "INSERT INTO kojo_store_metadata VALUES (1, ?, ?, 0, 'effect-workflow', 1, '4.0.0-beta.102', ?, ?)",
-      )
-      .run(identity, randomUUID(), createdAt, createdAt);
     database.exec("PRAGMA user_version = 0");
     database.close();
     await chmod(temporaryPath, 0o600);
@@ -207,18 +190,26 @@ const validateDatabase = (path: string, identity: ProjectSnapshot["identity"]) =
     const version = database.query("PRAGMA user_version").get() as
       | { readonly user_version: number }
       | undefined;
-    const metadata = database
-      .query(
-        "SELECT project_identity, store_format_version FROM kojo_store_metadata WHERE singleton_key = 1",
-      )
-      .get() as
-      | { readonly project_identity: string; readonly store_format_version: number }
-      | undefined;
+    const userObjects = database
+      .query("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
+      .all() as ReadonlyArray<{ readonly name: string }>;
+    const metadata =
+      version?.user_version === 0 && userObjects.length === 0
+        ? undefined
+        : (database
+            .query(
+              "SELECT project_identity, store_format_version FROM kojo_store_metadata WHERE singleton_key = 1",
+            )
+            .get() as
+            | { readonly project_identity: string; readonly store_format_version: number }
+            | undefined);
     if (
       check?.quick_check !== "ok" ||
       ![0, 1].includes(version?.user_version ?? -1) ||
-      metadata?.project_identity !== identity ||
-      metadata.store_format_version !== version?.user_version
+      (version?.user_version === 0
+        ? userObjects.length !== 0
+        : metadata?.project_identity !== identity ||
+          metadata.store_format_version !== version?.user_version)
     ) {
       throw new Error("unsupported database state");
     }

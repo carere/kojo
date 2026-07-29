@@ -225,6 +225,17 @@ const assertStoreMetadata = (
   }
 };
 
+const assertVersionZero = (connection: Database, project: { readonly identity: string }) => {
+  const objects = connection
+    .query("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
+    .all() as ReadonlyArray<{ readonly name: string }>;
+  if (objects.length === 0) return;
+  if (objects.length !== 1 || objects[0]?.name !== "kojo_store_metadata") {
+    throw new Error("unsupported version-zero Project store");
+  }
+  assertStoreMetadata(connection, project, 0);
+};
+
 const assertCurrentSchema = (connection: Database, project: { readonly identity: string }) => {
   if (version(connection) !== CURRENT_VERSION) throw new Error("unsupported Project store version");
   const migrationRow = connection
@@ -271,7 +282,8 @@ const verifyBackup = (path: string, project: { readonly identity: string }) => {
     assertIntegrity(backup);
     const backupVersion = version(backup);
     if (backupVersion > CURRENT_VERSION) throw new Error("unsupported Project store version");
-    assertStoreMetadata(backup, project, backupVersion);
+    if (backupVersion === 0) assertVersionZero(backup, project);
+    else assertStoreMetadata(backup, project, backupVersion);
     if (backupVersion === CURRENT_VERSION) assertCurrentSchema(backup, project);
   } finally {
     backup.close();
@@ -298,7 +310,8 @@ export const migrateProjectStore = (project: {
     assertIntegrity(connection);
     const current = version(connection);
     if (current > CURRENT_VERSION) throw new Error("unsupported Project store version");
-    assertStoreMetadata(connection, project, current);
+    if (current === 0) assertVersionZero(connection, project);
+    else assertStoreMetadata(connection, project, current);
     if (current === CURRENT_VERSION) {
       assertCurrentSchema(connection, project);
     }
@@ -321,6 +334,19 @@ export const migrateProjectStore = (project: {
         migrationsTable: "kojo_schema_migrations",
       });
       const migratedAt = Date.now();
+      connection
+        .query(
+          "INSERT INTO kojo_store_metadata(singleton_key, project_identity, database_instance_id, store_format_version, engine_adapter_kind, engine_adapter_schema_version, effect_family_version, created_at_ms, last_migrated_at_ms) VALUES (1, ?, ?, 0, ?, ?, ?, ?, ?) ON CONFLICT(singleton_key) DO NOTHING",
+        )
+        .run(
+          project.identity,
+          randomUUID(),
+          ENGINE_ADAPTER_KIND,
+          ENGINE_ADAPTER_SCHEMA_VERSION,
+          EFFECT_FAMILY_VERSION,
+          migratedAt,
+          migratedAt,
+        );
       connection
         .query(
           "UPDATE kojo_store_metadata SET database_instance_id = COALESCE(NULLIF(database_instance_id, ''), ?), store_format_version = ?, engine_adapter_kind = ?, engine_adapter_schema_version = ?, effect_family_version = ?, last_migrated_at_ms = ? WHERE singleton_key = 1 AND project_identity = ?",
@@ -386,8 +412,11 @@ const inspectReadiness = (project: { readonly identity: string; readonly path: s
       configureReadOnly(connection);
       assertIntegrity(connection);
       const current = version(connection);
+      if (current === 0) {
+        assertVersionZero(connection, project);
+        return "limited" as const;
+      }
       assertStoreMetadata(connection, project, current);
-      if (current === 0) return "limited" as const;
       assertCurrentSchema(connection, project);
       return "ready" as const;
     } finally {
@@ -446,8 +475,13 @@ export const DrizzleProjectStoreLive = Layer.sync(ProjectStore, () => {
   return {
     migrate: (project) =>
       Effect.sync(() => {
-        if (attemptedMigrations.has(project.path)) return false;
-        attemptedMigrations.add(project.path);
+        const path = databasePath(project.path);
+        const backupPath = `${path}.migration-backup`;
+        const attemptKey = existsSync(backupPath)
+          ? `${project.path}:backup:${lstatSync(backupPath).dev}:${lstatSync(backupPath).ino}`
+          : `${project.path}:store`;
+        if (attemptedMigrations.has(attemptKey)) return false;
+        attemptedMigrations.add(attemptKey);
         try {
           migrateProjectStore(project);
           return true;

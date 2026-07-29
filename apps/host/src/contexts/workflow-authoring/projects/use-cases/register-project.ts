@@ -1,4 +1,4 @@
-import type { ProjectMutationResult, RequestKey } from "@kojo/control";
+import type { ProjectMutationResult, ProjectSnapshot, RequestKey } from "@kojo/control";
 import { Effect } from "effect";
 import { ProjectRuntime } from "../../../workflow-execution/projects/services/project-runtime";
 import { ProjectIndexStore, successfulMutation } from "../services/project-index-store";
@@ -8,6 +8,11 @@ import {
   projectMutationFingerprint as fingerprint,
   recordProjectMutation as record,
 } from "./project-receipts";
+
+interface RegistrationPreflight {
+  readonly previousProject?: ProjectSnapshot;
+  readonly result?: ProjectMutationResult;
+}
 
 export const registerProject = (
   path: string,
@@ -61,16 +66,18 @@ export const registerProject = (
       });
     }
     const project = validation.project;
-    const checkConflictsBeforeMigration = store.update((state) =>
+    const checkConflictsBeforeMigration = store.update<RegistrationPreflight>((state) =>
       Effect.gen(function* () {
         const receipt = state.receipts.find((candidate) => candidate.requestKey === requestKey);
         if (receipt !== undefined) {
           return {
             state,
-            result:
-              receipt.operation === "register" && receipt.fingerprint === requestFingerprint
-                ? replay(receipt.result)
-                : requestConflict(requestKey),
+            result: {
+              result:
+                receipt.operation === "register" && receipt.fingerprint === requestFingerprint
+                  ? replay(receipt.result)
+                  : requestConflict(requestKey),
+            },
           };
         }
         const samePath = state.projects.find((candidate) => candidate.path === project.path);
@@ -83,7 +90,10 @@ export const registerProject = (
             { kind: "project-path", path: project.path },
             ["layout.path-conflict"],
           );
-          return { state: record(state, requestKey, "register", path, result), result };
+          return {
+            state: record(state, requestKey, "register", path, result),
+            result: { result },
+          };
         }
         const existing = state.projects.find(
           (candidate) => candidate.identity === project.identity,
@@ -99,7 +109,10 @@ export const registerProject = (
               { kind: "project", identity: project.identity },
               ["project.identity-duplicate"],
             );
-            return { state: record(state, requestKey, "register", path, result), result };
+            return {
+              state: record(state, requestKey, "register", path, result),
+              result: { result },
+            };
           }
           if (previous.status === "invalid") {
             const result = mutationFailure(
@@ -110,10 +123,18 @@ export const registerProject = (
               { kind: "project", identity: project.identity },
               ["layout.path-conflict"],
             );
-            return { state: record(state, requestKey, "register", path, result), result };
+            return {
+              state: record(state, requestKey, "register", path, result),
+              result: { result },
+            };
           }
         }
-        return { state, result: undefined };
+        return {
+          state,
+          result: {
+            ...(existing === undefined ? {} : { previousProject: existing }),
+          },
+        };
       }),
     );
     return yield* runtime.coordinateRegistration(
