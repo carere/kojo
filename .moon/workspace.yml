@@ -9,3 +9,12 @@ projects:
 vcs:
   defaultBranch: "main"
   provider: "github"
+
+remote:
+  api: "http"
+  host: "https://remoshu.carere.workers.dev"
+  auth:
+    token: "MOON_REMOTE_CACHE_TOKEN"
+  cache:
+    instanceName: "carere/kojo"
+    verifyIntegrity: true

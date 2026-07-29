@@ -17,6 +17,8 @@ export default defineConfig({
           name: "integration",
           environment: "node",
           include: ["tests/integration/**/*.test.ts"],
+          maxWorkers: 1,
+          testTimeout: 15_000,
         },
       },
     ],
