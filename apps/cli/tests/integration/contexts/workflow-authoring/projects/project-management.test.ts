@@ -19,6 +19,58 @@ afterEach(async () => {
 });
 
 describe("Kojo Project discovery", () => {
+  it("filters and paginates Project lists with the settled JSON envelope", async () => {
+    const directory = await temporaryDirectory("kojo-project-list-page-");
+    const host = await startKojoHostProcess();
+    cleanups.push(host.stop);
+    const projects = ["first", "second", "damaged"].map((name) => join(directory, name));
+    for (const project of projects) {
+      await git(["init", project]);
+      expect((await runCli(["init", project], host.socketPath, directory)).exitCode).toBe(0);
+    }
+    await Bun.write(join(projects[2], "kojo.config.ts"), "export default {}\n");
+
+    const firstPage = await runCli(
+      ["project", "list", "--condition", "ready", "--limit", "1", "--json"],
+      host.socketPath,
+      directory,
+    );
+    const firstResult = JSON.parse(firstPage.stdout).result;
+    expect(firstResult.items).toHaveLength(1);
+    expect(firstResult.items[0].condition).toBe("ready");
+    expect(firstResult.nextCursor).toEqual(expect.any(String));
+
+    const secondPage = await runCli(
+      [
+        "project",
+        "list",
+        "--condition",
+        "ready",
+        "--limit",
+        "1",
+        "--cursor",
+        firstResult.nextCursor,
+        "--json",
+      ],
+      host.socketPath,
+      directory,
+    );
+    expect(JSON.parse(secondPage.stdout).result).toMatchObject({
+      items: [expect.objectContaining({ condition: "ready" })],
+      nextCursor: null,
+    });
+
+    const combined = await runCli(
+      ["project", "list", "--condition", "ready", "--condition", "needs-attention", "--json"],
+      host.socketPath,
+      directory,
+    );
+    expect(JSON.parse(combined.stdout).result.items).toHaveLength(3);
+    expect(
+      (await runCli(["project", "list", "--limit", "201"], host.socketPath, directory)).exitCode,
+    ).toBe(2);
+  });
+
   it("lists, selects, shows, registers, and forgets Host-authoritative Projects", async () => {
     const directory = await temporaryDirectory("kojo-project-management-");
     const project = join(directory, "project");
@@ -32,7 +84,9 @@ describe("Kojo Project discovery", () => {
 
     const list = await runCli(["project", "list", "--json"], host.socketPath, directory);
     expect(list.exitCode).toBe(0);
-    expect(JSON.parse(list.stdout).result.projects).toEqual([{ identity, path: canonicalProject }]);
+    expect(JSON.parse(list.stdout).result.items).toEqual([
+      { identity, path: canonicalProject, condition: "ready" },
+    ]);
 
     const nested = join(project, ".kojo", "artifacts");
     const inferred = await runCli(["project", "show"], host.socketPath, nested);
@@ -68,7 +122,7 @@ describe("Kojo Project discovery", () => {
     expect(JSON.parse(await readFile(metadataPath, "utf8")).projectIdentity).toBe(identity);
     expect(
       JSON.parse((await runCli(["project", "list", "--json"], host.socketPath, directory)).stdout)
-        .result.projects,
+        .result.items,
     ).toEqual([]);
 
     const registered = await runCli(
@@ -108,8 +162,8 @@ describe("Kojo Project discovery", () => {
     });
     const projects = JSON.parse(
       (await runCli(["project", "list", "--json"], host.socketPath, directory)).stdout,
-    ).result.projects;
-    expect(projects).toEqual([{ identity, path: await realpath(moved) }]);
+    ).result.items;
+    expect(projects).toEqual([{ identity, path: await realpath(moved), condition: "ready" }]);
   });
 
   it("rejects one Project Identity at two live working-tree paths", async () => {
@@ -250,9 +304,10 @@ describe("Kojo Project discovery", () => {
       const listed = JSON.parse(
         (await runCli(["project", "list", "--json"], host.socketPath, directory)).stdout,
       );
-      expect(listed.result.projects).toContainEqual({
+      expect(listed.result.items).toContainEqual({
         identity: availableIdentity,
         path: await realpath(availableProject),
+        condition: "ready",
       });
     }
   });
@@ -294,7 +349,7 @@ describe("Kojo Project discovery", () => {
     ).projectIdentity as string;
     const scheduleDatabase = new Database(join(scheduledProject, ".kojo", "kojo.sqlite"));
     scheduleDatabase.exec(
-      "CREATE TABLE kojo_workflow_schedule_states (schedule_key TEXT PRIMARY KEY, enabled_intent INTEGER NOT NULL); INSERT INTO kojo_workflow_schedule_states VALUES ('nightly', 1);",
+      "INSERT INTO kojo_workflow_schedule_states(schedule_key, enabled_intent, condition, row_version, created_at_ms, updated_at_ms) VALUES ('nightly', 1, 'available', 1, 1, 1);",
     );
     scheduleDatabase.close();
 
@@ -326,7 +381,7 @@ describe("Kojo Project discovery", () => {
     ).projectIdentity as string;
     const runDatabase = new Database(join(runningProject, ".kojo", "kojo.sqlite"));
     runDatabase.exec(
-      "CREATE TABLE kojo_workflow_runs (run_id TEXT PRIMARY KEY, state TEXT NOT NULL); INSERT INTO kojo_workflow_runs VALUES ('run-in-progress', 'running');",
+      "INSERT INTO kojo_workflow_runs(run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision, engine_reference_version, engine_reference_json, engine_reference_sha256, trigger_kind, state, row_version, accepted_at_ms, updated_at_ms) VALUES ('run-in-progress', 'start-key', X'01', 'workflow', 'revision', 1, '{}', X'02', 'manual', 'running', 1, 1, 1);",
     );
     runDatabase.close();
 
@@ -358,9 +413,9 @@ describe("Kojo Project discovery", () => {
     cleanups.push(restartedHost.stop);
     const projects = JSON.parse(
       (await runCli(["project", "list", "--json"], restartedHost.socketPath, directory)).stdout,
-    ).result.projects;
+    ).result.items;
 
-    expect(projects).toEqual([{ identity, path: await realpath(project) }]);
+    expect(projects).toEqual([{ identity, path: await realpath(project), condition: "ready" }]);
   });
 
   it("correlates Project control diagnostics by Project Identity", async () => {

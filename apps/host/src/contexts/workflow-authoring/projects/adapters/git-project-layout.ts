@@ -90,7 +90,9 @@ const validateDatabase = (path: string) => {
       const version = database.query("PRAGMA user_version").get() as
         | { readonly user_version: number }
         | undefined;
-      if (check?.quick_check !== "ok" || version?.user_version !== 0) throw new Error();
+      if (check?.quick_check !== "ok" || ![0, 1].includes(version?.user_version ?? -1)) {
+        throw new Error();
+      }
     } finally {
       database.close();
     }

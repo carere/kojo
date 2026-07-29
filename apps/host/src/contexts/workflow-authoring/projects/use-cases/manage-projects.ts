@@ -3,6 +3,7 @@ import { sep } from "node:path";
 import type {
   ProjectIdentity,
   ProjectList,
+  ProjectListInput,
   ProjectMutationResult,
   ProjectOperationError,
   ProjectQueryResult,
@@ -12,7 +13,7 @@ import type {
   RequestKey,
 } from "@kojo/control";
 import { Effect } from "effect";
-import { ProjectForgetGuard } from "../../../workflow-execution/projects/services/project-forget-guard";
+import { ProjectRuntime } from "../../../workflow-execution/projects/services/project-runtime";
 import {
   type ProjectIndexState,
   ProjectIndexStore,
@@ -60,25 +61,68 @@ const record = (
   operation: "register" | "forget",
   input: string,
   result: ProjectMutationResult,
+  selectorLookupKey?: string,
 ): ProjectIndexState => ({
   ...state,
   receipts: [
     ...state.receipts,
-    { requestKey, operation, fingerprint: fingerprint(operation, input), result },
+    {
+      requestKey,
+      operation,
+      fingerprint: fingerprint(operation, input),
+      result,
+      ...(selectorLookupKey === undefined ? {} : { selectorLookupKey }),
+    },
   ],
 });
 
-export const listProjects: Effect.Effect<ProjectList, never, ProjectIndexStore> = Effect.gen(
-  function* () {
+const encodeCursor = (identity: ProjectIdentity) =>
+  Buffer.from(JSON.stringify({ version: 1, after: identity })).toString("base64url");
+
+const decodeCursor = (cursor: string | undefined) => {
+  if (cursor === undefined) return undefined;
+  try {
+    const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    return decoded.version === 1 && typeof decoded.after === "string" ? decoded.after : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+export const listProjects = (
+  input: ProjectListInput = { conditions: [], limit: 50 },
+): Effect.Effect<ProjectList, never, ProjectIndexStore | ProjectLayout> =>
+  Effect.gen(function* () {
     const store = yield* ProjectIndexStore;
+    const layout = yield* ProjectLayout;
     const state = yield* store.read;
-    return {
-      projects: [...state.projects].sort((left, right) =>
-        left.identity.localeCompare(right.identity),
+    const assessed = yield* Effect.all(
+      state.projects.map((project) =>
+        Effect.map(layout.validate(project.path), (validation) => ({
+          ...project,
+          condition: validation.ok ? ("ready" as const) : ("needs-attention" as const),
+        })),
       ),
+    );
+    const filtered = assessed
+      .filter(
+        (project) => input.conditions.length === 0 || input.conditions.includes(project.condition),
+      )
+      .sort((left, right) => right.identity.localeCompare(left.identity));
+    const after = decodeCursor(input.cursor);
+    const start =
+      after === undefined
+        ? 0
+        : Math.max(0, filtered.findIndex((item) => item.identity === after) + 1);
+    const items = filtered.slice(start, start + input.limit);
+    return {
+      items,
+      nextCursor:
+        start + items.length < filtered.length && items.length > 0
+          ? encodeCursor(items[items.length - 1].identity)
+          : null,
     };
-  },
-);
+  });
 
 export const showProject = (
   identity: ProjectIdentity,
@@ -99,6 +143,10 @@ export const showProject = (
   });
 
 const selectorInput = (selector: ProjectSelector) => JSON.stringify(selector);
+const forgetInput = (identity: ProjectIdentity, selector: ProjectSelector) =>
+  JSON.stringify({ identity, selector });
+const selectorLookupKey = (selector: ProjectSelector) =>
+  fingerprint("forget", selectorInput(selector));
 
 const selectorMatchesProject = (selector: ProjectSelector, project: ProjectSnapshot) =>
   selector.kind === "identity"
@@ -108,10 +156,15 @@ const selectorMatchesProject = (selector: ProjectSelector, project: ProjectSnaps
 export const registerProject = (
   path: string,
   requestKey: RequestKey,
-): Effect.Effect<ProjectMutationResult, never, ProjectIndexStore | ProjectLayout> =>
+): Effect.Effect<
+  ProjectMutationResult,
+  never,
+  ProjectIndexStore | ProjectLayout | ProjectRuntime
+> =>
   Effect.gen(function* () {
     const store = yield* ProjectIndexStore;
     const layout = yield* ProjectLayout;
+    const runtime = yield* ProjectRuntime;
     return yield* store.update((state) =>
       Effect.gen(function* () {
         const receipt = state.receipts.find((candidate) => candidate.requestKey === requestKey);
@@ -139,6 +192,17 @@ export const registerProject = (
           return { state: record(state, requestKey, "register", path, result), result };
         }
         const project = validation.project;
+        if (!(yield* runtime.prepareProject(project))) {
+          const result = mutationFailure(
+            requestKey,
+            "project-layout-invalid",
+            "Kojo Project database migration could not be completed safely.",
+            "Restore the Project database and retry registration.",
+            { kind: "project", identity: project.identity },
+            ["store.migration-failed"],
+          );
+          return { state: record(state, requestKey, "register", path, result), result };
+        }
         const samePath = state.projects.find((candidate) => candidate.path === project.path);
         if (samePath !== undefined && samePath.identity !== project.identity) {
           const result = mutationFailure(
@@ -199,74 +263,139 @@ export const forgetProject = (
   identity: ProjectIdentity,
   selector: ProjectSelector,
   requestKey: RequestKey,
-): Effect.Effect<ProjectMutationResult, never, ProjectForgetGuard | ProjectIndexStore> =>
+): Effect.Effect<ProjectMutationResult, never, ProjectIndexStore | ProjectRuntime> =>
   Effect.gen(function* () {
     const store = yield* ProjectIndexStore;
-    const guard = yield* ProjectForgetGuard;
-    return yield* store.update((state) =>
-      Effect.gen(function* () {
-        const receipt = state.receipts.find((candidate) => candidate.requestKey === requestKey);
-        const input = selectorInput(selector);
-        const requestFingerprint = fingerprint("forget", input);
-        if (receipt !== undefined) {
-          return {
-            state,
-            result:
-              receipt.operation === "forget" && receipt.fingerprint === requestFingerprint
-                ? replay(receipt.result)
-                : requestConflict(requestKey),
-          };
-        }
-        const project = state.projects.find((candidate) => candidate.identity === identity);
-        if (project === undefined || !selectorMatchesProject(selector, project)) {
-          const result = mutationFailure(
-            requestKey,
-            "project-not-found",
-            "Kojo Project was not found in the Project Index.",
-            "Choose a listed Project Identity.",
-            { kind: "project", identity },
-            [],
-          );
-          return { state: record(state, requestKey, "forget", input, result), result };
-        }
-
-        const blockers = yield* guard.inspect(project);
-        if (blockers.assessment === "unavailable") {
-          const result = mutationFailure(
-            requestKey,
-            "project-forget-blocked",
-            "Kojo could not verify that Project execution state is safe to forget.",
-            "Restore Project database readiness and retry.",
-            { kind: "project", identity },
-            ["store.open-failed"],
-          );
-          return { state: record(state, requestKey, "forget", input, result), result };
-        }
-        if (blockers.enabledScheduleKeys.length > 0 || blockers.nonFinalRunIds.length > 0) {
-          const result = mutationFailure(
-            requestKey,
-            "project-forget-blocked",
-            "Kojo Project cannot be forgotten while it has enabled Workflow Schedules or non-final Workflow Runs.",
-            "Disable every Workflow Schedule and finish or stop every non-final Workflow Run, then retry.",
-            { kind: "project", identity },
-            [],
-          );
-          return { state: record(state, requestKey, "forget", input, result), result };
-        }
-
-        const result = successfulMutation(requestKey, project, false);
-        const nextState = record(
-          {
-            ...state,
-            projects: state.projects.filter((candidate) => candidate.identity !== identity),
-          },
-          requestKey,
-          "forget",
-          input,
+    const runtime = yield* ProjectRuntime;
+    const state = yield* store.read;
+    const receipt = state.receipts.find((candidate) => candidate.requestKey === requestKey);
+    const input = forgetInput(identity, selector);
+    const requestFingerprint = fingerprint("forget", input);
+    if (receipt !== undefined) {
+      return receipt.operation === "forget" && receipt.fingerprint === requestFingerprint
+        ? replay(receipt.result)
+        : requestConflict(requestKey);
+    }
+    const project = state.projects.find((candidate) => candidate.identity === identity);
+    if (project === undefined || !selectorMatchesProject(selector, project)) {
+      const result = mutationFailure(
+        requestKey,
+        "project-not-found",
+        "Kojo Project was not found in the Project Index.",
+        "Choose a listed Project Identity.",
+        { kind: "project", identity },
+        [],
+      );
+      return yield* store.update((latest) =>
+        Effect.succeed({
+          state: record(latest, requestKey, "forget", input, result, selectorLookupKey(selector)),
           result,
-        );
-        return { state: nextState, result };
-      }),
+        }),
+      );
+    }
+
+    return yield* runtime.coordinateForget(
+      project,
+      (blockers) =>
+        store.update((latest) =>
+          Effect.gen(function* () {
+            const currentReceipt = latest.receipts.find(
+              (candidate) => candidate.requestKey === requestKey,
+            );
+            if (currentReceipt !== undefined) {
+              return {
+                state: latest,
+                result:
+                  currentReceipt.operation === "forget" &&
+                  currentReceipt.fingerprint === requestFingerprint
+                    ? replay(currentReceipt.result)
+                    : requestConflict(requestKey),
+              };
+            }
+            const currentProject = latest.projects.find(
+              (candidate) => candidate.identity === identity,
+            );
+            if (currentProject === undefined || !selectorMatchesProject(selector, currentProject)) {
+              const result = mutationFailure(
+                requestKey,
+                "project-not-found",
+                "Kojo Project was not found in the Project Index.",
+                "Choose a listed Project Identity.",
+                { kind: "project", identity },
+                [],
+              );
+              return {
+                state: record(
+                  latest,
+                  requestKey,
+                  "forget",
+                  input,
+                  result,
+                  selectorLookupKey(selector),
+                ),
+                result,
+              };
+            }
+
+            if (blockers.assessment === "unavailable") {
+              const result = mutationFailure(
+                requestKey,
+                "project-forget-blocked",
+                "Kojo could not verify that Project execution state is safe to forget.",
+                "Restore Project database readiness and retry.",
+                { kind: "project", identity },
+                ["store.open-failed"],
+              );
+              return {
+                state: record(
+                  latest,
+                  requestKey,
+                  "forget",
+                  input,
+                  result,
+                  selectorLookupKey(selector),
+                ),
+                result,
+              };
+            }
+            if (blockers.enabledScheduleKeys.length > 0 || blockers.nonFinalRunIds.length > 0) {
+              const result = mutationFailure(
+                requestKey,
+                "project-forget-blocked",
+                "Kojo Project cannot be forgotten while it has enabled Workflow Schedules or non-final Workflow Runs.",
+                "Disable every Workflow Schedule and finish or stop every non-final Workflow Run, then retry.",
+                { kind: "project", identity },
+                [],
+              );
+              return {
+                state: record(
+                  latest,
+                  requestKey,
+                  "forget",
+                  input,
+                  result,
+                  selectorLookupKey(selector),
+                ),
+                result,
+              };
+            }
+
+            const result = successfulMutation(requestKey, project, false);
+            const nextState = record(
+              {
+                ...latest,
+                projects: latest.projects.filter((candidate) => candidate.identity !== identity),
+              },
+              requestKey,
+              "forget",
+              input,
+              result,
+              selectorLookupKey(selector),
+            );
+            return { state: nextState, result };
+          }),
+        ),
+      (result) => result.ok,
     );
   });
 
@@ -281,7 +410,7 @@ export const replayForgetProject = (
     if (
       receipt === undefined ||
       receipt.operation !== "forget" ||
-      receipt.fingerprint !== fingerprint("forget", selectorInput(selector))
+      receipt.selectorLookupKey !== selectorLookupKey(selector)
     ) {
       return requestConflict(requestKey);
     }

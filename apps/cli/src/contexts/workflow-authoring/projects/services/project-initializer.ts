@@ -24,6 +24,13 @@ const IGNORE_RULE = "/.kojo/";
 
 export class ProjectInitializationError extends Error {
   override readonly name = "ProjectInitializationError";
+
+  constructor(
+    message: string,
+    readonly layoutMutated = false,
+  ) {
+    super(message);
+  }
 }
 
 interface ExistingPath {
@@ -200,7 +207,7 @@ const validateDatabase = (path: string) => {
     const version = database.query("PRAGMA user_version").get() as
       | { readonly user_version: number }
       | undefined;
-    if (check?.quick_check !== "ok" || version?.user_version !== 0) {
+    if (check?.quick_check !== "ok" || ![0, 1].includes(version?.user_version ?? -1)) {
       throw new Error("unsupported database state");
     }
   } finally {
@@ -286,16 +293,23 @@ export const initializeProject = async (path: string): Promise<ProjectSnapshot> 
     identity = await readProjectIdentity(metadataPath);
   }
 
+  let layoutMutated = false;
   try {
     if (configuration === undefined) {
       await writeNewFileAtomically(configurationPath, CONFIGURATION, 0o644);
+      layoutMutated = true;
     }
     if (ignore === undefined) {
       await writeNewFileAtomically(ignorePath, `${IGNORE_RULE}\n`, 0o644);
+      layoutMutated = true;
     } else if (!ignoreRuleExists) {
       await appendIgnoreRule(ignorePath);
+      layoutMutated = true;
     }
-    if (data === undefined) await mkdir(dataPath, { mode: 0o700 });
+    if (data === undefined) {
+      await mkdir(dataPath, { mode: 0o700 });
+      layoutMutated = true;
+    }
     await chmod(dataPath, 0o700);
     if (metadata === undefined) {
       await writeNewFileAtomically(
@@ -303,17 +317,26 @@ export const initializeProject = async (path: string): Promise<ProjectSnapshot> 
         `${JSON.stringify({ layoutVersion: 1, projectIdentity: identity }, null, 2)}\n`,
         0o600,
       );
+      layoutMutated = true;
       await createDatabase(databasePath);
+      layoutMutated = true;
     }
     await chmod(metadataPath, 0o600);
     await chmod(databasePath, 0o600);
-    if (artifacts === undefined) await mkdir(artifactsPath, { mode: 0o700 });
-    if (data === undefined) await mkdir(sandboxesPath, { mode: 0o700 });
+    if (artifacts === undefined) {
+      await mkdir(artifactsPath, { mode: 0o700 });
+      layoutMutated = true;
+    }
+    if (data === undefined) {
+      await mkdir(sandboxesPath, { mode: 0o700 });
+      layoutMutated = true;
+    }
     await chmod(artifactsPath, 0o700);
     await chmod(sandboxesPath, 0o700);
   } catch {
     throw new ProjectInitializationError(
       `Kojo could not finish initializing ${root}. Review the Project layout before trying again.`,
+      layoutMutated,
     );
   }
 
@@ -321,6 +344,7 @@ export const initializeProject = async (path: string): Promise<ProjectSnapshot> 
   if (!validation.ok) {
     throw new ProjectInitializationError(
       `${configurationPath} ${validation.message} The safe Project layout remains in place; fix this needs-attention finding and retry kojo init.`,
+      layoutMutated,
     );
   }
 

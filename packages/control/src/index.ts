@@ -38,6 +38,15 @@ export const ProjectSnapshot = Schema.Struct({
 });
 export type ProjectSnapshot = typeof ProjectSnapshot.Type;
 
+export const ProjectCondition = Schema.Literals(["ready", "limited", "needs-attention"]);
+export type ProjectCondition = typeof ProjectCondition.Type;
+
+export const ProjectListItem = Schema.Struct({
+  ...ProjectSnapshot.fields,
+  condition: ProjectCondition,
+});
+export type ProjectListItem = typeof ProjectListItem.Type;
+
 export const ProjectSelector = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("identity"), identity: ProjectIdentity }),
   Schema.Struct({ kind: Schema.Literal("path"), path: Schema.String }),
@@ -45,9 +54,17 @@ export const ProjectSelector = Schema.Union([
 export type ProjectSelector = typeof ProjectSelector.Type;
 
 export const ProjectList = Schema.Struct({
-  projects: Schema.Array(ProjectSnapshot),
+  items: Schema.Array(ProjectListItem),
+  nextCursor: Schema.NullOr(Schema.String),
 });
 export type ProjectList = typeof ProjectList.Type;
+
+export const ProjectListInput = Schema.Struct({
+  conditions: Schema.Array(ProjectCondition),
+  limit: Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 200 })),
+  cursor: Schema.optionalKey(Schema.String),
+});
+export type ProjectListInput = typeof ProjectListInput.Type;
 
 export const ReadinessFindingKey = Schema.Literals([
   "layout.ignore-rule-missing",
@@ -140,6 +157,7 @@ export const Negotiate = Rpc.make("Negotiate", {
 });
 
 export const ListProjects = Rpc.make("ListProjects", {
+  payload: ProjectListInput.fields,
   success: ProjectList,
 });
 

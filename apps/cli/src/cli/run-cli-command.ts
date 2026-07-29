@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import {
+  type ProjectCondition,
   ProjectIdentity as ProjectIdentitySchema,
   type ProjectMutationResult,
   type ProjectOperationError,
@@ -25,7 +26,6 @@ import {
   resolveInitializedProject,
 } from "../contexts/workflow-authoring/projects/services/project-initializer";
 import { selectProject } from "../contexts/workflow-authoring/projects/use-cases/select-project";
-import { renderHostOverview } from "./render-host-overview";
 
 interface CliFailure {
   readonly affectedResource?: ProjectOperationError["affectedResource"];
@@ -168,6 +168,9 @@ interface ParsedOptions {
   readonly projectId?: string;
   readonly projectPath?: string;
   readonly requestKey?: string;
+  readonly conditions: ReadonlyArray<string>;
+  readonly cursor?: string;
+  readonly limit?: string;
 }
 
 const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undefined => {
@@ -175,16 +178,36 @@ const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undefined =>
   let projectId: string | undefined;
   let projectPath: string | undefined;
   let requestKey: string | undefined;
+  const conditions: Array<string> = [];
+  let cursor: string | undefined;
+  let limit: string | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
-    if (argument !== "--project" && argument !== "--project-id" && argument !== "--request-key") {
+    if (
+      ![
+        "--project",
+        "--project-id",
+        "--request-key",
+        "--condition",
+        "--cursor",
+        "--limit",
+      ].includes(argument)
+    ) {
       remaining.push(argument);
       continue;
     }
     const value = args[index + 1];
     if (value === undefined || value.startsWith("--")) return undefined;
     index += 1;
-    if (argument === "--project") {
+    if (argument === "--condition") {
+      conditions.push(value);
+    } else if (argument === "--cursor") {
+      if (cursor !== undefined) return undefined;
+      cursor = value;
+    } else if (argument === "--limit") {
+      if (limit !== undefined) return undefined;
+      limit = value;
+    } else if (argument === "--project") {
       if (projectPath !== undefined) return undefined;
       projectPath = value;
     } else if (argument === "--project-id") {
@@ -196,7 +219,7 @@ const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undefined =>
     }
   }
   if (projectId !== undefined && projectPath !== undefined) return undefined;
-  return { args: remaining, projectId, projectPath, requestKey };
+  return { args: remaining, projectId, projectPath, requestKey, conditions, cursor, limit };
 };
 
 const decodeRequestKey = (value: string | undefined): RequestKey | undefined => {
@@ -238,7 +261,10 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       options === undefined ||
       options.args.length > 1 ||
       options.projectId !== undefined ||
-      options.projectPath !== undefined
+      options.projectPath !== undefined ||
+      options.conditions.length > 0 ||
+      options.cursor !== undefined ||
+      options.limit !== undefined
     ) {
       return writeFailure(
         invalid("Run: kojo init [path] [--request-key <Request Key>] [--json]"),
@@ -263,6 +289,9 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
               ? error.message
               : "Kojo Project initialization failed safely.",
           next: "Correct the Project layout and try again.",
+          ...(error instanceof ProjectInitializationError && error.layoutMutated
+            ? { requestKey }
+            : {}),
         },
         json,
         "init",
@@ -321,13 +350,58 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       options.projectPath !== undefined ||
       options.requestKey !== undefined
     ) {
-      return writeFailure(invalid("Run: kojo project list [--json]"), json, "project.list");
+      return writeFailure(
+        invalid(
+          "Run: kojo project list [--condition <condition>] [--limit <1-200>] [--cursor <cursor>] [--json]",
+        ),
+        json,
+        "project.list",
+      );
     }
-    const overview = await runEffect(client.getHostOverview);
-    if (!overview.succeeded) {
-      return writeFailure(transportFailure(overview.error), json, "project.list");
+    const allowedConditions = new Set<ProjectCondition>(["ready", "limited", "needs-attention"]);
+    if (
+      options.conditions.some((condition) => !allowedConditions.has(condition as ProjectCondition))
+    ) {
+      return writeFailure(
+        invalid("Use --condition ready, limited, or needs-attention."),
+        json,
+        "project.list",
+      );
     }
-    process.stdout.write(renderHostOverview(overview.value, json));
+    const limit = options.limit === undefined ? 50 : Number(options.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      return writeFailure(
+        invalid("Use --limit with a whole number from 1 to 200."),
+        json,
+        "project.list",
+      );
+    }
+    const listed = await runEffect(
+      client.listProjects({
+        conditions: options.conditions as ReadonlyArray<ProjectCondition>,
+        limit,
+        ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
+      }),
+    );
+    if (!listed.succeeded)
+      return writeFailure(transportFailure(listed.error), json, "project.list");
+    if (json) {
+      process.stdout.write(
+        `${JSON.stringify({ schemaVersion: 1, command: "project.list", result: listed.value, warnings: [] })}\n`,
+      );
+    } else {
+      const lines =
+        listed.value.items.length === 0
+          ? "No Kojo Projects."
+          : listed.value.items
+              .map((project) => `${project.identity}\t${project.condition}\t${project.path}`)
+              .join("\n");
+      process.stdout.write(`${lines}\n`);
+      if (listed.value.nextCursor !== null)
+        process.stdout.write(
+          `More Projects are available. Continue with --cursor ${listed.value.nextCursor}\n`,
+        );
+    }
     return 0;
   }
 
@@ -335,7 +409,10 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
     if (
       options.args.length !== 1 ||
       options.projectId !== undefined ||
-      options.projectPath !== undefined
+      options.projectPath !== undefined ||
+      options.conditions.length > 0 ||
+      options.cursor !== undefined ||
+      options.limit !== undefined
     ) {
       return writeFailure(
         invalid("Run: kojo project register <path> [--request-key <Request Key>] [--json]"),
@@ -365,6 +442,9 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
   if (
     (args[1] !== "show" && args[1] !== "forget") ||
     options.args.length !== 0 ||
+    options.conditions.length > 0 ||
+    options.cursor !== undefined ||
+    options.limit !== undefined ||
     (args[1] === "show" && options.requestKey !== undefined)
   ) {
     return writeFailure(
@@ -406,13 +486,13 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
   }
 
   if (forgetIdentity === undefined && chosen === undefined) {
-    const list = await runEffect(client.listProjects);
+    const list = await runEffect(client.listProjects({ conditions: [], limit: 200 }));
     if (!list.succeeded) {
       if (args[1] === "show") {
         return writeFailure(transportFailure(list.error), json, "project.show");
       }
     } else {
-      const selection = await selectProject(list.value.projects, options);
+      const selection = await selectProject(list.value.items, options);
       if ("exitCode" in selection) {
         if (args[1] === "show") {
           return writeFailure(selection, json, "project.show");

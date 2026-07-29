@@ -7,6 +7,11 @@ export const ProjectRequestReceipt = Schema.Struct({
   fingerprint: Schema.String.check(
     Schema.isPattern(/^[0-9a-f]{64}$/, { expected: "a SHA-256 request fingerprint" }),
   ),
+  selectorLookupKey: Schema.optionalKey(
+    Schema.String.check(
+      Schema.isPattern(/^[0-9a-f]{64}$/, { expected: "a SHA-256 selector lookup key" }),
+    ),
+  ),
   result: ProjectMutationResult,
 });
 export type ProjectRequestReceipt = typeof ProjectRequestReceipt.Type;

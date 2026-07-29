@@ -163,6 +163,7 @@ describe("kojo init", () => {
     expect(first.exitCode).toBe(1);
     expect(first.stderr).toContain("dependency");
     expect(first.stderr).toContain("bun add @kojo/workflow");
+    expect(first.stdout).toMatch(/Request Key: [0-9a-f-]+\n/);
     expect(await pathsExist(project, ["kojo.config.ts", ".gitignore", ".kojo"])).toEqual([
       true,
       true,
@@ -171,6 +172,18 @@ describe("kojo init", () => {
     const firstIdentity = JSON.parse(
       await readFile(join(project, ".kojo", "project.json"), "utf8"),
     ).projectIdentity;
+
+    const suppliedProject = join(directory, "supplied-key-project");
+    const suppliedKey = "needs-attention-supplied-key";
+    await run(["git", "init", suppliedProject]);
+    await writeFile(join(suppliedProject, "bun.lock"), "");
+    const supplied = await runCli(
+      ["init", suppliedProject, "--request-key", suppliedKey, "--json"],
+      join(directory, "missing.sock"),
+      directory,
+    );
+    expect(supplied.exitCode).toBe(1);
+    expect(JSON.parse(supplied.stdout).requestKey).toBe(suppliedKey);
 
     await symlink(workflowPackagePath, dependencyPath, "dir");
     const retried = await runCli(["init", project], join(directory, "missing.sock"), directory);

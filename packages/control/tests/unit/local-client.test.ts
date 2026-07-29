@@ -43,7 +43,7 @@ const controlClient = (
     },
     ListProjects: () => {
       requests.push("ListProjects");
-      return Effect.succeed({ projects: [] });
+      return Effect.succeed({ items: [], nextCursor: null });
     },
   }) as unknown as KojoControlClient;
 

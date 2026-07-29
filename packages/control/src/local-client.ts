@@ -15,6 +15,7 @@ import {
   PROTOCOL_VERSION,
   type ProjectIdentity,
   type ProjectList,
+  type ProjectListInput,
   type ProjectMutationResult,
   type ProjectQueryResult,
   type ProjectSelector,
@@ -125,15 +126,19 @@ export const makeLocalClient = (options: LocalClientOptions) => {
   const getHostOverview = activateAndRetry(
     request("projects:list", (client, host) =>
       Effect.gen(function* () {
-        const { projects } = yield* client.ListProjects();
-        return { host, projects } satisfies HostOverview;
+        const { items } = yield* client.ListProjects({ conditions: [], limit: 200 });
+        return {
+          host,
+          projects: items.map(({ identity, path }) => ({ identity, path })),
+        } satisfies HostOverview;
       }),
     ),
   );
 
-  const listProjects = activateAndRetry(
-    request("projects:list", (client) => client.ListProjects()),
-  ) satisfies Effect.Effect<ProjectList, LocalClientError>;
+  const listProjects = (input: ProjectListInput = { conditions: [], limit: 50 }) =>
+    activateAndRetry(
+      request("projects:list", (client) => client.ListProjects(input)),
+    ) satisfies Effect.Effect<ProjectList, LocalClientError>;
 
   const showProject = (identity: ProjectIdentity) =>
     activateAndRetry(request("projects:show", (client) => client.ShowProject({ identity })));
@@ -168,7 +173,9 @@ export const makeLocalClient = (options: LocalClientOptions) => {
       HostOverview,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;
-    readonly listProjects: Effect.Effect<
+    readonly listProjects: (
+      input?: ProjectListInput,
+    ) => Effect.Effect<
       ProjectList,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;

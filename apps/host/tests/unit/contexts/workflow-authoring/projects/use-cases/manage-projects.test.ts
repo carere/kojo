@@ -20,6 +20,7 @@ import {
   ProjectForgetGuard,
   type ProjectForgetGuardShape,
 } from "../../../../../../src/contexts/workflow-execution/projects/services/project-forget-guard";
+import { ProjectRuntime } from "../../../../../../src/contexts/workflow-execution/projects/services/project-runtime";
 
 const identity = Schema.decodeUnknownSync(ProjectIdentity)("00000000-0000-7000-8000-000000000001");
 const requestKey = (suffix: string) =>
@@ -60,7 +61,15 @@ const makeLayout = (
   });
 
 const makeForgetGuard = (blockers: ReturnType<ProjectForgetGuardShape["inspect"]>) =>
-  Layer.succeed(ProjectForgetGuard, { inspect: () => blockers });
+  Layer.mergeAll(
+    Layer.succeed(ProjectForgetGuard, { inspect: () => blockers }),
+    Layer.succeed(ProjectRuntime, {
+      prepareProject: () => Effect.succeed(true),
+      inspectForgetBlockers: () => blockers,
+      coordinateForget: (_project, operation) => Effect.flatMap(blockers, operation),
+      runLifecycleMutation: (_project, mutation) => mutation,
+    }),
+  );
 
 const noForgetBlockers = Effect.succeed({
   assessment: "available" as const,
@@ -103,7 +112,7 @@ it.effect("rejects a duplicate live identity and accepts the path after a move",
     expect(refusedRedelivery).toEqual(duplicate);
     const movedResult = yield* registerProject("inputB", requestKey("3"));
     expect(movedResult).toMatchObject({ ok: true, project: moved });
-    expect((yield* listProjects).projects).toEqual([moved]);
+    expect((yield* listProjects()).items).toEqual([{ ...moved, condition: "needs-attention" }]);
   }).pipe(Effect.provide(layer));
 });
 
@@ -161,7 +170,7 @@ it.effect("blocks forgetting a Project with an enabled Workflow Schedule", () =>
         findingKeys: [],
       },
     });
-    expect((yield* listProjects).projects).toEqual([project]);
+    expect((yield* listProjects()).items).toEqual([{ ...project, condition: "needs-attention" }]);
   }).pipe(Effect.provide(layer));
 });
 
@@ -191,7 +200,7 @@ it.effect("blocks forgetting a Project with a non-final Workflow Run", () => {
         findingKeys: [],
       },
     });
-    expect((yield* listProjects).projects).toEqual([project]);
+    expect((yield* listProjects()).items).toEqual([{ ...project, condition: "needs-attention" }]);
   }).pipe(Effect.provide(layer));
 });
 
@@ -218,3 +227,28 @@ it.effect("replays forget only for the identical original selector", () => {
     ).toMatchObject({ ok: false, error: { code: "request-key-conflict" } });
   }).pipe(Effect.provide(layer));
 });
+
+it.effect(
+  "conflicts when the same forget selector and Request Key are reused with another identity",
+  () => {
+    const project: ProjectSnapshot = { identity, path: "/projects/first" };
+    const changedIdentity = Schema.decodeUnknownSync(ProjectIdentity)(
+      "00000000-0000-7000-8000-000000000002",
+    );
+    const layer = Layer.mergeAll(
+      makeStore(),
+      makeLayout({ input: project }),
+      makeForgetGuard(noForgetBlockers),
+    );
+
+    return Effect.gen(function* () {
+      yield* registerProject("input", requestKey("1"));
+      const selector = { kind: "path" as const, path: project.path };
+      expect(yield* forgetProject(identity, selector, requestKey("2"))).toMatchObject({ ok: true });
+      expect(yield* forgetProject(changedIdentity, selector, requestKey("2"))).toMatchObject({
+        ok: false,
+        error: { code: "request-key-conflict" },
+      });
+    }).pipe(Effect.provide(layer));
+  },
+);

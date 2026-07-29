@@ -8,6 +8,7 @@ export interface ProjectForgetBlockers {
 }
 
 export interface ProjectStoreShape {
+  readonly prepare: (project: ProjectSnapshot) => Effect.Effect<boolean>;
   readonly inspectForgetBlockers: (
     project: ProjectSnapshot,
   ) => Effect.Effect<ProjectForgetBlockers>;

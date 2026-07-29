@@ -1,52 +1,14 @@
 import { fileURLToPath } from "node:url";
-import { Layer, Schema } from "effect";
-import {
-  ProjectDefinitionLoader,
-  ProjectDefinitionValidation,
-  type ProjectDefinitionValidation as ProjectDefinitionValidationResult,
-} from "../services/project-definition-loader";
+import { validateProjectDefinitionInSubprocess } from "@kojo/control/project-definition-validation";
+import { Layer } from "effect";
+import { ProjectDefinitionLoader } from "../services/project-definition-loader";
 
 const runnerPath = fileURLToPath(
   new URL("./project-definition-loader-process.ts", import.meta.url),
 );
 
-export const validateProjectDefinition = async (
-  path: string,
-  timeoutMs = 1_000,
-): Promise<ProjectDefinitionValidationResult> => {
-  let envelope: unknown;
-  const child = Bun.spawn([process.execPath, runnerPath, path], {
-    stdout: "ignore",
-    stderr: "ignore",
-    ipc: (message) => {
-      envelope = message;
-    },
-  });
-  let timedOut = false;
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    child.kill("SIGKILL");
-  }, timeoutMs);
-  const exitCode = await child.exited;
-  clearTimeout(timeout);
-  if (timedOut) {
-    return {
-      ok: false,
-      findingKey: "configuration.load-failed",
-      message: "Kojo Configuration validation timed out.",
-    };
-  }
-  try {
-    if (exitCode !== 0 || envelope === undefined) throw new Error("missing result");
-    return Schema.decodeUnknownSync(ProjectDefinitionValidation)(envelope);
-  } catch {
-    return {
-      ok: false,
-      findingKey: "configuration.load-failed",
-      message: "Kojo Configuration could not be loaded safely.",
-    };
-  }
-};
+export const validateProjectDefinition = (path: string, timeoutMs = 1_000) =>
+  validateProjectDefinitionInSubprocess(runnerPath, path, timeoutMs);
 
 export const SubprocessProjectDefinitionLoaderLive = Layer.succeed(ProjectDefinitionLoader, {
   validate: validateProjectDefinition,

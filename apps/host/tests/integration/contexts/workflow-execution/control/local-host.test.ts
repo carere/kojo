@@ -156,6 +156,7 @@ const startTestHost = (socketPath: string, diagnosticPath: string) => {
       ProjectForgetGuardLive.pipe(
         Layer.provide(ProjectRuntimeLive.pipe(Layer.provide(DrizzleProjectStoreLive))),
       ),
+      ProjectRuntimeLive.pipe(Layer.provide(DrizzleProjectStoreLive)),
     ]),
   );
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });

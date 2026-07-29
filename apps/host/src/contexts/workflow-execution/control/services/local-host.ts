@@ -108,12 +108,12 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           String(options.requestId),
           getHostInformation,
         ),
-      ListProjects: (_payload, options) =>
+      ListProjects: (payload, options) =>
         withHostRequestDiagnostic(
           hostIdentity,
           "ListProjects",
           String(options.requestId),
-          listProjects,
+          listProjects(payload),
         ),
       ShowProject: ({ identity }, options) =>
         withHostRequestDiagnostic(

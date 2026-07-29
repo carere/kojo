@@ -14,7 +14,6 @@ import {
   startKojoHost,
 } from "../contexts/workflow-execution/control/services/local-host";
 import { DrizzleProjectStoreLive } from "../contexts/workflow-execution/projects/adapters/drizzle-project-store";
-import { ProjectForgetGuardLive } from "../contexts/workflow-execution/projects/services/project-forget-guard";
 import { ProjectRuntimeLive } from "../contexts/workflow-execution/projects/services/project-runtime";
 
 export const startLiveKojoHost = async () => {
@@ -37,9 +36,7 @@ export const startLiveKojoHost = async () => {
     Layer.provide([
       projectIndex,
       projectLayout,
-      ProjectForgetGuardLive.pipe(
-        Layer.provide(ProjectRuntimeLive.pipe(Layer.provide(DrizzleProjectStoreLive))),
-      ),
+      ProjectRuntimeLive.pipe(Layer.provide(DrizzleProjectStoreLive)),
     ]),
   );
 

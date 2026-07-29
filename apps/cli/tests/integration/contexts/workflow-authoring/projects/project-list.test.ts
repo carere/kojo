@@ -19,7 +19,7 @@ describe("kojo project list", () => {
     const result = await runCli(["project", "list"], host.socketPath);
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toBe("Kojo Host 0.1.0 (protocol 1.0)\nNo Kojo Projects.\n");
+    expect(result.stdout).toBe("No Kojo Projects.\n");
     expect(result.stderr).toBe("");
   });
 
@@ -34,12 +34,8 @@ describe("kojo project list", () => {
       schemaVersion: 1,
       command: "project.list",
       result: {
-        host: {
-          protocol: { major: 1, minor: 0 },
-          hostVersion: "0.1.0",
-          capabilities: ["projects:list", "projects:show", "projects:register", "projects:forget"],
-        },
-        projects: [],
+        items: [],
+        nextCursor: null,
       },
       warnings: [],
     });

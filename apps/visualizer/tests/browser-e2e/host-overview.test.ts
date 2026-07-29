@@ -59,7 +59,7 @@ test("loads the Host-authoritative Project state and reconciles Navigator prefer
   expect((await runKojoCli(["init", firstPath], fixture.host.socketPath)).exitCode).toBe(0);
   expect((await runKojoCli(["init", secondPath], fixture.host.socketPath)).exitCode).toBe(0);
   const listed = await runKojoCli(["project", "list", "--json"], fixture.host.socketPath);
-  expect(JSON.parse(listed.stdout).result.projects).toHaveLength(2);
+  expect(JSON.parse(listed.stdout).result.items).toHaveLength(2);
   const firstIdentity = JSON.parse(await readFile(join(firstPath, ".kojo", "project.json"), "utf8"))
     .projectIdentity as string;
   const secondIdentity = JSON.parse(
