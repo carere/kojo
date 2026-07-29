@@ -138,7 +138,11 @@ const startFixture = async (): Promise<Fixture> => {
   try {
     await waitFor(async () => {
       try {
-        return (await fetch(`http://127.0.0.1:${port}`)).ok;
+        return (
+          await fetch(`http://127.0.0.1:${port}`, {
+            signal: AbortSignal.timeout(1_000),
+          })
+        ).ok;
       } catch {
         return false;
       }

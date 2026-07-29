@@ -3,6 +3,6 @@
   "root": false,
   "extends": "//",
   "files": {
-    "includes": ["src/**/*", "tests/**/*", "vitest.config.ts"]
+    "includes": ["src/**/*", "tests/**/*", "*.ts"]
   }
 }

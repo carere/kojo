@@ -6,7 +6,7 @@
     "includes": [
       "src/**/*",
       "tests/**/*",
-      "vite.config.ts",
+      "*.ts",
       "tsconfig.json",
       "!src/routeTree.gen.ts",
       "!src/i18n"
