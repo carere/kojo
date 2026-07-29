@@ -59,6 +59,40 @@ it.effect("negotiates before reading the authoritative Project list", () =>
   }),
 );
 
+it.effect("discovers additive capabilities only after the legacy-safe handshake", () =>
+  Effect.gen(function* () {
+    const requests: Array<string> = [];
+    const legacyResponse = {
+      protocol: { major: 1, minor: 1 },
+      hostVersion: "0.1.0",
+      capabilities: ["projects:list"],
+    } as const;
+    const fullResponse = {
+      ...legacyResponse,
+      capabilities: ["projects:list", "projects:list-page"],
+    } as const;
+    const transport = {
+      Negotiate: () => {
+        requests.push("Negotiate");
+        return Effect.succeed(legacyResponse);
+      },
+      NegotiateCapabilities: () => {
+        requests.push("NegotiateCapabilities");
+        return Effect.succeed(fullResponse);
+      },
+      ListProjectPage: () => {
+        requests.push("ListProjectPage");
+        return Effect.succeed({ ok: true as const, page: { items: [], nextCursor: null } });
+      },
+    } as unknown as KojoControlClient;
+
+    const result = yield* makeLocalClient({ connect: Effect.succeed(transport) }).listProjectPage();
+
+    expect(result).toEqual({ ok: true, page: { items: [], nextCursor: null } });
+    expect(requests).toEqual(["Negotiate", "NegotiateCapabilities", "ListProjectPage"]);
+  }),
+);
+
 it.effect("keeps every authoritative Project in the unpaged Host overview", () =>
   Effect.gen(function* () {
     const projects = Array.from({ length: 201 }, (_, index) => ({

@@ -3,8 +3,18 @@ import { Context, Effect, Layer } from "effect";
 import { type ProjectForgetBlockers, ProjectStore } from "./project-store";
 
 export interface ProjectRuntimeShape {
-  readonly migrateProject: (project: ProjectSnapshot) => Effect.Effect<boolean>;
-  readonly readiness: (project: ProjectSnapshot) => Effect.Effect<ProjectCondition>;
+  readonly coordinateRegistration: <A>(
+    project: ProjectSnapshot,
+    operation: (migrated: boolean) => Effect.Effect<A>,
+  ) => Effect.Effect<A>;
+  readonly coordinateLifecycle: <A>(
+    project: ProjectSnapshot,
+    operation: Effect.Effect<A>,
+  ) => Effect.Effect<A>;
+  readonly readiness: (
+    indexedProject: ProjectSnapshot,
+    validatedProject: ProjectSnapshot,
+  ) => Effect.Effect<ProjectCondition>;
   readonly inspectForgetBlockers: (
     project: ProjectSnapshot,
   ) => Effect.Effect<ProjectForgetBlockers>;
@@ -36,8 +46,20 @@ export const ProjectRuntimeLive = Layer.effect(
         return result;
       });
     return {
-      migrateProject: (project: ProjectSnapshot) => serialize(project, store.migrate(project)),
-      readiness: (project: ProjectSnapshot) => serialize(project, store.readiness(project)),
+      coordinateRegistration: <A>(
+        project: ProjectSnapshot,
+        operation: (migrated: boolean) => Effect.Effect<A>,
+      ) => serialize(project, Effect.flatMap(store.migrate(project), operation)),
+      coordinateLifecycle: <A>(project: ProjectSnapshot, operation: Effect.Effect<A>) =>
+        serialize(project, operation),
+      readiness: (indexedProject: ProjectSnapshot, validatedProject: ProjectSnapshot) =>
+        serialize(
+          indexedProject,
+          indexedProject.identity !== validatedProject.identity ||
+            indexedProject.path !== validatedProject.path
+            ? Effect.succeed("needs-attention" as const)
+            : store.readiness(indexedProject),
+        ),
       inspectForgetBlockers: (project: ProjectSnapshot) =>
         serialize(project, store.inspectForgetBlockers(project)),
       coordinateForget: <A>(

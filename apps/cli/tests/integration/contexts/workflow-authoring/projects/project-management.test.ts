@@ -123,13 +123,16 @@ describe("Kojo Project discovery", () => {
         )
       ).exitCode,
     ).toBe(0);
-    const missingAnchor = await runCli(
+    const continuedAfterDeletedAnchor = await runCli(
       ["project", "list", "--condition", "ready", "--cursor", firstResult.nextCursor, "--json"],
       host.socketPath,
       directory,
     );
-    expect(missingAnchor.exitCode).toBe(2);
-    expect(JSON.parse(missingAnchor.stdout).error.code).toBe("project-cursor-anchor-missing");
+    expect(continuedAfterDeletedAnchor.exitCode).toBe(0);
+    expect(JSON.parse(continuedAfterDeletedAnchor.stdout).result).toMatchObject({
+      items: [expect.objectContaining({ condition: "ready" })],
+      nextCursor: null,
+    });
 
     expect(
       (await runCli(["project", "list", "--limit", "201"], host.socketPath, directory)).exitCode,
@@ -222,7 +225,7 @@ describe("Kojo Project discovery", () => {
       host.socketPath,
       directory,
     );
-    expect(registered.exitCode).toBe(0);
+    expect(registered, registered.stderr).toMatchObject({ exitCode: 0 });
     expect(JSON.parse(registered.stdout).result.project).toEqual({
       identity,
       path: canonicalProject,
@@ -522,6 +525,108 @@ describe("Kojo Project discovery", () => {
       findingKeys: ["store.open-failed"],
     });
     expect(await Bun.file(databasePath).exists()).toBe(false);
+  });
+
+  it("marks an indexed Project needs-attention when Project metadata identity changes", async () => {
+    const directory = await temporaryDirectory("kojo-project-identity-drift-");
+    const project = join(directory, "project");
+    await git(["init", project]);
+    const host = await startKojoHostProcess();
+    cleanups.push(host.stop);
+    expect((await runCli(["init", project], host.socketPath, directory)).exitCode).toBe(0);
+    const metadataPath = join(project, ".kojo", "project.json");
+    const indexedIdentity = JSON.parse(await readFile(metadataPath, "utf8")).projectIdentity;
+    await Bun.write(
+      metadataPath,
+      `${JSON.stringify({
+        layoutVersion: 1,
+        projectIdentity: "00000000-0000-7000-8000-000000000099",
+      })}\n`,
+    );
+    await chmod(metadataPath, 0o600);
+
+    const listed = await runCli(["project", "list", "--json"], host.socketPath, directory);
+
+    expect(listed.exitCode).toBe(0);
+    expect(JSON.parse(listed.stdout).result.items).toContainEqual({
+      identity: indexedIdentity,
+      path: await realpath(project),
+      condition: "needs-attention",
+    });
+  });
+
+  it("restores and removes a pending verified migration backup before accepting registration", async () => {
+    const directory = await temporaryDirectory("kojo-project-migration-recovery-");
+    const hostStore = join(directory, "host-store");
+    const project = join(directory, "project");
+    await git(["init", project]);
+    const firstHost = await startKojoHostProcess({ storePath: hostStore });
+    expect((await runCli(["init", project], firstHost.socketPath, directory)).exitCode).toBe(0);
+    await firstHost.stop();
+    const databasePath = join(project, ".kojo", "kojo.sqlite");
+    const backupPath = `${databasePath}.migration-backup`;
+    const backupSource = new Database(databasePath, { readonly: true });
+    backupSource.query("VACUUM INTO ?").run(backupPath);
+    backupSource.close();
+    await chmod(backupPath, 0o600);
+    const database = new Database(databasePath);
+    database.exec(
+      "INSERT INTO kojo_retention_policy(singleton_key, row_version, updated_at_ms) VALUES (1, 1, 1)",
+    );
+    database.close();
+
+    const restartedHost = await startKojoHostProcess({ storePath: hostStore });
+    cleanups.push(restartedHost.stop);
+    const registered = await runCli(
+      ["project", "register", project, "--request-key", "migration-recovery", "--json"],
+      restartedHost.socketPath,
+      directory,
+    );
+
+    expect(registered, registered.stderr).toMatchObject({ exitCode: 0 });
+    expect(await Bun.file(backupPath).exists()).toBe(false);
+    const restored = new Database(databasePath, { readonly: true });
+    expect(restored.query("SELECT * FROM kojo_retention_policy").all()).toEqual([]);
+    restored.close();
+  });
+
+  it("rejects a pending migration backup owned by another Project", async () => {
+    const directory = await temporaryDirectory("kojo-project-foreign-backup-");
+    const hostStore = join(directory, "host-store");
+    const firstProject = join(directory, "first");
+    const secondProject = join(directory, "second");
+    await git(["init", firstProject]);
+    await git(["init", secondProject]);
+    const firstHost = await startKojoHostProcess({ storePath: hostStore });
+    expect((await runCli(["init", firstProject], firstHost.socketPath, directory)).exitCode).toBe(
+      0,
+    );
+    expect((await runCli(["init", secondProject], firstHost.socketPath, directory)).exitCode).toBe(
+      0,
+    );
+    await firstHost.stop();
+    const secondDatabase = join(secondProject, ".kojo", "kojo.sqlite");
+    const secondContents = await Bun.file(secondDatabase).arrayBuffer();
+    const foreignBackup = `${secondDatabase}.migration-backup`;
+    const foreignSource = new Database(join(firstProject, ".kojo", "kojo.sqlite"), {
+      readonly: true,
+    });
+    foreignSource.query("VACUUM INTO ?").run(foreignBackup);
+    foreignSource.close();
+    await chmod(foreignBackup, 0o600);
+
+    const restartedHost = await startKojoHostProcess({ storePath: hostStore });
+    cleanups.push(restartedHost.stop);
+    const registered = await runCli(
+      ["project", "register", secondProject, "--request-key", "foreign-backup", "--json"],
+      restartedHost.socketPath,
+      directory,
+    );
+
+    expect(registered.exitCode).toBe(1);
+    expect(JSON.parse(registered.stdout).error.findingKeys).toEqual(["store.migration-failed"]);
+    expect(await Bun.file(secondDatabase).arrayBuffer()).toEqual(secondContents);
+    expect(await Bun.file(foreignBackup).exists()).toBe(true);
   });
 
   it("finds indexed Projects after the Host restarts", async () => {

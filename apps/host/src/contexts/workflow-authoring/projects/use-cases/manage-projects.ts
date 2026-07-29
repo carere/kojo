@@ -191,7 +191,7 @@ export const listProjectPage = (
           return {
             ...project,
             condition: validation.ok
-              ? yield* runtime.readiness(project)
+              ? yield* runtime.readiness(project, validation.project)
               : ("needs-attention" as const),
           };
         }),
@@ -207,24 +207,17 @@ export const listProjectPage = (
       .sort((left, right) => right.identity.localeCompare(left.identity));
     const after = decoded.cursor?.sort.identity;
     const start =
-      after === undefined ? 0 : filtered.findIndex((item) => item.identity === after) + 1;
-    if (after !== undefined && start === 0) {
-      return {
-        ok: false,
-        error: {
-          code: "project-cursor-anchor-missing",
-          message: "The Project cursor anchor is no longer available.",
-          next: "Start a new Project list without --cursor.",
-        },
-      };
-    }
-    const items = filtered.slice(start, start + input.limit);
+      after === undefined
+        ? 0
+        : filtered.findIndex((item) => item.identity.localeCompare(after) < 0);
+    const pageStart = start < 0 ? filtered.length : start;
+    const items = filtered.slice(pageStart, pageStart + input.limit);
     return {
       ok: true,
       page: {
         items,
         nextCursor:
-          start + items.length < filtered.length && items.length > 0
+          pageStart + items.length < filtered.length && items.length > 0
             ? encodeCursor(items[items.length - 1].identity, filters)
             : null,
       },
@@ -272,97 +265,125 @@ export const registerProject = (
     const store = yield* ProjectIndexStore;
     const layout = yield* ProjectLayout;
     const runtime = yield* ProjectRuntime;
-    return yield* store.update((state) =>
-      Effect.gen(function* () {
+    const requestFingerprint = fingerprint("register", path);
+    const initial = yield* store.read;
+    const existingReceipt = initial.receipts.find(
+      (candidate) => candidate.requestKey === requestKey,
+    );
+    if (existingReceipt !== undefined) {
+      return existingReceipt.operation === "register" &&
+        existingReceipt.fingerprint === requestFingerprint
+        ? replay(existingReceipt.result)
+        : requestConflict(requestKey);
+    }
+
+    const validation = yield* layout.validate(path);
+    if (!validation.ok) {
+      return yield* store.update((state) => {
         const receipt = state.receipts.find((candidate) => candidate.requestKey === requestKey);
-        const requestFingerprint = fingerprint("register", path);
         if (receipt !== undefined) {
-          return {
+          return Effect.succeed({
             state,
             result:
               receipt.operation === "register" && receipt.fingerprint === requestFingerprint
                 ? replay(receipt.result)
                 : requestConflict(requestKey),
-          };
+          });
         }
-
-        const validation = yield* layout.validate(path);
-        if (!validation.ok) {
-          const result = mutationFailure(
-            requestKey,
-            "project-layout-invalid",
-            validation.message,
-            "Run kojo init for this working tree.",
-            { kind: "project-path", path },
-            [validation.findingKey],
-          );
-          return { state: record(state, requestKey, "register", path, result), result };
-        }
-        const project = validation.project;
-        if (!(yield* runtime.migrateProject(project))) {
-          const result = mutationFailure(
-            requestKey,
-            "project-layout-invalid",
-            "Kojo Project database migration could not be completed safely.",
-            "Restore the Project database and retry registration.",
-            { kind: "project", identity: project.identity },
-            ["store.migration-failed"],
-          );
-          return { state: record(state, requestKey, "register", path, result), result };
-        }
-        const samePath = state.projects.find((candidate) => candidate.path === project.path);
-        if (samePath !== undefined && samePath.identity !== project.identity) {
-          const result = mutationFailure(
-            requestKey,
-            "project-layout-invalid",
-            "This Project path is already indexed with another Project Identity.",
-            "Inspect the Project metadata and Project Index before retrying.",
-            { kind: "project-path", path: project.path },
-            ["layout.path-conflict"],
-          );
-          return { state: record(state, requestKey, "register", path, result), result };
-        }
-
-        const existing = state.projects.find(
-          (candidate) => candidate.identity === project.identity,
+        const result = mutationFailure(
+          requestKey,
+          "project-layout-invalid",
+          validation.message,
+          "Run kojo init for this working tree.",
+          { kind: "project-path", path },
+          [validation.findingKey],
         );
-        if (existing !== undefined && existing.path !== project.path) {
-          const previous = yield* layout.inspectIndexedPath(existing.path);
-          if (previous.status === "valid" && previous.identity === project.identity) {
+        return Effect.succeed({
+          state: record(state, requestKey, "register", path, result),
+          result,
+        });
+      });
+    }
+    const project = validation.project;
+    return yield* runtime.coordinateRegistration(project, (migrated) =>
+      store.update((state) =>
+        Effect.gen(function* () {
+          const receipt = state.receipts.find((candidate) => candidate.requestKey === requestKey);
+          if (receipt !== undefined) {
+            return {
+              state,
+              result:
+                receipt.operation === "register" && receipt.fingerprint === requestFingerprint
+                  ? replay(receipt.result)
+                  : requestConflict(requestKey),
+            };
+          }
+          if (!migrated) {
             const result = mutationFailure(
               requestKey,
-              "project-identity-duplicate",
-              "The same Project Identity is present at two working-tree paths.",
-              "Run kojo init --new-identity on the copied working tree.",
+              "project-layout-invalid",
+              "Kojo Project database migration could not be completed safely.",
+              "Restore the Project database and retry registration.",
               { kind: "project", identity: project.identity },
-              ["project.identity-duplicate"],
+              ["store.migration-failed"],
             );
             return { state: record(state, requestKey, "register", path, result), result };
           }
-          if (previous.status === "invalid") {
+
+          const samePath = state.projects.find((candidate) => candidate.path === project.path);
+          if (samePath !== undefined && samePath.identity !== project.identity) {
             const result = mutationFailure(
               requestKey,
-              "project-identity-duplicate",
-              "Kojo cannot safely distinguish a moved Project from a duplicate identity.",
-              "Resolve the previous path or assign a new Project Identity explicitly.",
-              { kind: "project", identity: project.identity },
+              "project-layout-invalid",
+              "This Project path is already indexed with another Project Identity.",
+              "Inspect the Project metadata and Project Index before retrying.",
+              { kind: "project-path", path: project.path },
               ["layout.path-conflict"],
             );
             return { state: record(state, requestKey, "register", path, result), result };
           }
-        }
 
-        const projects = [
-          ...state.projects.filter(
-            (candidate) =>
-              candidate.identity !== project.identity && candidate.path !== project.path,
-          ),
-          project,
-        ];
-        const result = successfulMutation(requestKey, project, false);
-        const nextState = record({ ...state, projects }, requestKey, "register", path, result);
-        return { state: nextState, result };
-      }),
+          const existing = state.projects.find(
+            (candidate) => candidate.identity === project.identity,
+          );
+          if (existing !== undefined && existing.path !== project.path) {
+            const previous = yield* layout.inspectIndexedPath(existing.path);
+            if (previous.status === "valid" && previous.identity === project.identity) {
+              const result = mutationFailure(
+                requestKey,
+                "project-identity-duplicate",
+                "The same Project Identity is present at two working-tree paths.",
+                "Run kojo init --new-identity on the copied working tree.",
+                { kind: "project", identity: project.identity },
+                ["project.identity-duplicate"],
+              );
+              return { state: record(state, requestKey, "register", path, result), result };
+            }
+            if (previous.status === "invalid") {
+              const result = mutationFailure(
+                requestKey,
+                "project-identity-duplicate",
+                "Kojo cannot safely distinguish a moved Project from a duplicate identity.",
+                "Resolve the previous path or assign a new Project Identity explicitly.",
+                { kind: "project", identity: project.identity },
+                ["layout.path-conflict"],
+              );
+              return { state: record(state, requestKey, "register", path, result), result };
+            }
+          }
+
+          const projects = [
+            ...state.projects.filter(
+              (candidate) =>
+                candidate.identity !== project.identity && candidate.path !== project.path,
+            ),
+            project,
+          ];
+          const result = successfulMutation(requestKey, project, false);
+          const nextState = record({ ...state, projects }, requestKey, "register", path, result);
+          return { state: nextState, result };
+        }),
+      ),
     );
   });
 
@@ -394,9 +415,24 @@ export const forgetProject = (
         [],
       );
       return yield* store.update((latest) =>
-        Effect.succeed({
-          state: record(latest, requestKey, "forget", input, result, selectorLookupKey(selector)),
-          result,
+        Effect.sync(() => {
+          const currentReceipt = latest.receipts.find(
+            (candidate) => candidate.requestKey === requestKey,
+          );
+          if (currentReceipt !== undefined) {
+            return {
+              state: latest,
+              result:
+                currentReceipt.operation === "forget" &&
+                currentReceipt.fingerprint === requestFingerprint
+                  ? replay(currentReceipt.result)
+                  : requestConflict(requestKey),
+            };
+          }
+          return {
+            state: record(latest, requestKey, "forget", input, result, selectorLookupKey(selector)),
+            result,
+          };
         }),
       );
     }

@@ -46,3 +46,44 @@ export const validateProjectDefinitionValue = (
   Array.isArray(configuration.workflows)
     ? { ok: true }
     : invalidProjectDefinition();
+
+export interface ProjectDefinitionEvaluationPlatform {
+  readonly dependencyAvailable: (root: string) => Promise<boolean>;
+  readonly installCommand: (root: string) => string;
+  readonly loadDefaultExport: (configurationPath: string) => Promise<unknown>;
+}
+
+export const evaluateProjectDefinitionWith = async (
+  platform: ProjectDefinitionEvaluationPlatform,
+  configurationPath: string,
+  root: string,
+): Promise<ProjectDefinitionValidation> => {
+  if (!(await platform.dependencyAvailable(root))) {
+    return missingProjectDefinitionDependency(platform.installCommand(root));
+  }
+  try {
+    return validateProjectDefinitionValue(await platform.loadDefaultExport(configurationPath));
+  } catch {
+    return unavailableProjectDefinition();
+  }
+};
+
+export interface ProjectDefinitionSubprocessResult {
+  readonly envelope?: unknown;
+  readonly exitCode: number;
+  readonly timedOut: boolean;
+}
+
+export const validateProjectDefinitionSubprocessResult = (
+  result: ProjectDefinitionSubprocessResult,
+): ProjectDefinitionValidation => {
+  if (result.timedOut) {
+    return unavailableProjectDefinition("Kojo Configuration validation timed out.");
+  }
+  try {
+    if (result.exitCode !== 0 || result.envelope === undefined) throw new Error("missing result");
+    return Schema.decodeUnknownSync(ProjectDefinitionValidation)(result.envelope);
+  } catch {
+    return unavailableProjectDefinition();
+  }
+};

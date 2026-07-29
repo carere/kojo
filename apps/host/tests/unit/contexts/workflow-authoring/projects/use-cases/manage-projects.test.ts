@@ -63,7 +63,8 @@ const makeRuntime = (
   condition: "ready" | "limited" | "needs-attention" = "ready",
 ) =>
   Layer.succeed(ProjectRuntime, {
-    migrateProject: () => Effect.succeed(true),
+    coordinateRegistration: (_project, operation) => operation(true),
+    coordinateLifecycle: (_project, operation) => operation,
     readiness: () => Effect.succeed(condition),
     inspectForgetBlockers: () => blockers,
     coordinateForget: (_project, operation) => Effect.flatMap(blockers, operation),
@@ -262,5 +263,46 @@ it.effect("uses Runtime readiness for Project condition filtering", () => {
       ok: true,
       page: { items: [{ ...project, condition: "limited" }], nextCursor: null },
     });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("acquires the Project Runtime before the Project Index for register and forget", () => {
+  const project: ProjectSnapshot = { identity, path: "/projects/lock-order" };
+  let state = emptyProjectIndexState();
+  let runtimeOwned = false;
+  const store = Layer.succeed(ProjectIndexStore, {
+    read: Effect.sync(() => state),
+    update: (change) =>
+      Effect.gen(function* () {
+        if (!runtimeOwned) throw new Error("Project Index acquired before Project Runtime");
+        const update = yield* change(state);
+        state = update.state;
+        return update.result;
+      }),
+  });
+  const withinRuntime = <A>(effect: Effect.Effect<A>) =>
+    Effect.gen(function* () {
+      runtimeOwned = true;
+      try {
+        return yield* effect;
+      } finally {
+        runtimeOwned = false;
+      }
+    });
+  const runtime = Layer.succeed(ProjectRuntime, {
+    coordinateRegistration: (_project, operation) => withinRuntime(operation(true)),
+    coordinateLifecycle: (_project, operation) => withinRuntime(operation),
+    readiness: () => Effect.succeed("ready" as const),
+    inspectForgetBlockers: () => noForgetBlockers,
+    coordinateForget: (_project, operation) =>
+      withinRuntime(Effect.flatMap(noForgetBlockers, operation)),
+  });
+  const layer = Layer.mergeAll(store, makeLayout({ input: project }), runtime);
+
+  return Effect.gen(function* () {
+    expect(yield* registerProject("input", requestKey("1"))).toMatchObject({ ok: true });
+    expect(
+      yield* forgetProject(identity, { kind: "identity", identity }, requestKey("2")),
+    ).toMatchObject({ ok: true });
   }).pipe(Effect.provide(layer));
 });

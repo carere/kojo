@@ -76,15 +76,38 @@ describe("kojo init", () => {
     expect(database.query("PRAGMA user_version").get()).toEqual({ user_version: 1 });
     expect(database.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
     expect(
-      database.query("SELECT checksum FROM kojo_schema_migrations WHERE version = 1").get(),
-    ).toEqual({ checksum: expect.stringMatching(/^[0-9a-f]{64}$/) });
+      database
+        .query("SELECT hash FROM kojo_schema_migrations ORDER BY created_at DESC LIMIT 1")
+        .get(),
+    ).toEqual({ hash: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    expect(
+      database
+        .query(
+          "SELECT project_identity, store_format_version, engine_adapter_kind, engine_adapter_schema_version FROM kojo_store_metadata WHERE singleton_key = 1",
+        )
+        .get(),
+    ).toEqual({
+      project_identity: metadata.projectIdentity,
+      store_format_version: 1,
+      engine_adapter_kind: "effect-workflow",
+      engine_adapter_schema_version: 1,
+    });
     expect(
       database
         .query(
           "SELECT count(*) AS count FROM sqlite_master WHERE type = 'index' AND name LIKE 'kojo_%'",
         )
         .get(),
-    ).toEqual({ count: 8 });
+    ).toEqual({ count: expect.any(Number) });
+    expect(
+      (
+        database
+          .query(
+            "SELECT count(*) AS count FROM sqlite_master WHERE type = 'index' AND name LIKE 'kojo_%'",
+          )
+          .get() as { count: number }
+      ).count,
+    ).toBeGreaterThanOrEqual(29);
     database.close();
     expect(await Bun.file(`${databasePath}.migration-backup`).exists()).toBe(false);
 

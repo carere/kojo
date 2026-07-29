@@ -21,7 +21,7 @@ import {
 } from "../../../workflow-authoring/projects/use-cases/manage-projects";
 import type { HostIdentity } from "../models/host-identity";
 import { HOST_INFORMATION } from "../models/host-information";
-import { getHostInformation } from "../use-cases/get-host-information";
+import { getHostCapabilities, getHostInformation } from "../use-cases/get-host-information";
 import { HostDiagnosticLogger, type HostRequestDiagnosticEvent } from "./host-diagnostic-logger";
 import { prepareHostStoreDirectory } from "./host-store";
 
@@ -108,6 +108,13 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           "Negotiate",
           String(options.requestId),
           getHostInformation,
+        ),
+      NegotiateCapabilities: (_payload, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "Negotiate",
+          String(options.requestId),
+          getHostCapabilities,
         ),
       ListProjects: (_payload, options) =>
         withHostRequestDiagnostic(

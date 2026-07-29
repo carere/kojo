@@ -1,4 +1,3 @@
-import { realpath } from "node:fs/promises";
 import { sep } from "node:path";
 import { ProjectIdentity as ProjectIdentitySchema, type ProjectSnapshot } from "@kojo/control";
 import { Schema } from "effect";
@@ -18,6 +17,7 @@ export interface ProjectSelectionFailure {
 export const selectProject = async (
   projects: ReadonlyArray<ProjectSnapshot>,
   selection: ProjectSelection,
+  canonicalPath?: string,
 ): Promise<ProjectSnapshot | ProjectSelectionFailure> => {
   if (selection.projectId !== undefined) {
     try {
@@ -41,10 +41,7 @@ export const selectProject = async (
     }
   }
 
-  let path: string;
-  try {
-    path = await realpath(selection.projectPath ?? process.cwd());
-  } catch {
+  if (canonicalPath === undefined) {
     return {
       code: "project-not-found",
       exitCode: 4,
@@ -53,7 +50,10 @@ export const selectProject = async (
     };
   }
   const matches = projects
-    .filter((project) => path === project.path || path.startsWith(`${project.path}${sep}`))
+    .filter(
+      (project) =>
+        canonicalPath === project.path || canonicalPath.startsWith(`${project.path}${sep}`),
+    )
     .sort((left, right) => right.path.length - left.path.length);
   return (
     matches[0] ?? {

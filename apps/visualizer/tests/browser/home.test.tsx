@@ -61,7 +61,7 @@ test("shows Host connectivity and the authoritative empty Project state", async 
           loadOverview={() =>
             Promise.resolve({
               host: {
-                protocol: { major: 1, minor: 0 },
+                protocol: { major: 1, minor: 1 },
                 hostVersion: "0.1.0",
                 capabilities: ["projects:list"],
               },

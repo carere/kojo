@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { asc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
+import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { Effect, Layer, Schema } from "effect";
 import { ProjectStore } from "../../contexts/workflow-execution/projects/services/project-store";
 import { workflowRuns, workflowScheduleStates } from "./project-store-schema";
@@ -22,10 +23,46 @@ import { workflowRuns, workflowScheduleStates } from "./project-store-schema";
 const ScheduleBlockerRows = Schema.Array(Schema.Struct({ scheduleKey: Schema.String }));
 const RunBlockerRows = Schema.Array(Schema.Struct({ runId: Schema.String }));
 const CURRENT_VERSION = 1;
+const ENGINE_ADAPTER_KIND = "effect-workflow";
+const ENGINE_ADAPTER_SCHEMA_VERSION = 1;
+const EFFECT_FAMILY_VERSION = "4.0.0-beta.102";
 const REQUIRED_OBJECTS = [
   "kojo_schema_migrations",
+  "kojo_store_metadata",
+  "kojo_control_requests",
+  "kojo_control_requests_active_idx",
+  "kojo_control_requests_expiry_idx",
+  "kojo_control_requests_run_idx",
+  "kojo_control_requests_schedule_idx",
   "kojo_workflow_runs",
   "kojo_workflow_schedule_states",
+  "kojo_workflow_schedule_occurrences",
+  "kojo_schedule_occurrences_history_idx",
+  "kojo_schedule_occurrences_outcome_idx",
+  "kojo_schedule_occurrences_due_idx",
+  "kojo_schedule_occurrences_linked_run_unique",
+  "kojo_engine_operations",
+  "kojo_engine_operations_run_idx",
+  "kojo_engine_operations_pending_idx",
+  "kojo_workflow_activity_attempts",
+  "kojo_activity_attempts_run_idx",
+  "kojo_activity_attempts_idempotency_idx",
+  "kojo_execution_events",
+  "kojo_execution_events_kind_idx",
+  "kojo_execution_events_engine_operation_idx",
+  "kojo_execution_events_activity_attempt_idx",
+  "kojo_execution_events_boundary_idx",
+  "kojo_execution_events_child_run_idx",
+  "kojo_execution_artifacts",
+  "kojo_execution_artifacts_run_idx",
+  "kojo_execution_artifacts_condition_idx",
+  "kojo_execution_event_artifacts",
+  "kojo_retention_policy",
+  "kojo_deletion_intents",
+  "kojo_deletion_intents_active_idx",
+  "kojo_deletion_items",
+  "kojo_deletion_items_next_idx",
+  "kojo_execution_events_immutable",
   "kojo_schedule_states_due_idx",
   "kojo_schedule_states_workflow_idx",
   "kojo_workflow_runs_accepted_idx",
@@ -35,6 +72,8 @@ const REQUIRED_OBJECTS = [
   "kojo_workflow_runs_state_updated_idx",
   "kojo_workflow_runs_workflow_idx",
 ] as const;
+
+const migrationFolder = fileURLToPath(new URL("./migrations", import.meta.url));
 
 const migration = readFileSync(
   fileURLToPath(new URL("./migrations/0001_project_lifecycle.sql", import.meta.url)),
@@ -97,14 +136,44 @@ const configureReadOnly = (connection: Database) => {
 const version = (connection: Database) =>
   (connection.query("PRAGMA user_version").get() as { readonly user_version: number }).user_version;
 
-const assertCurrentSchema = (connection: Database) => {
+const assertStoreMetadata = (
+  connection: Database,
+  project: { readonly identity: string },
+  expectedVersion: number,
+) => {
+  const metadata = connection
+    .query(
+      "SELECT project_identity, store_format_version, engine_adapter_kind, engine_adapter_schema_version, effect_family_version FROM kojo_store_metadata WHERE singleton_key = 1",
+    )
+    .get() as
+    | {
+        readonly project_identity: string;
+        readonly store_format_version: number;
+        readonly engine_adapter_kind: string;
+        readonly engine_adapter_schema_version: number;
+        readonly effect_family_version: string;
+      }
+    | undefined;
+  if (
+    metadata?.project_identity !== project.identity ||
+    metadata.store_format_version !== expectedVersion ||
+    metadata.engine_adapter_kind !== ENGINE_ADAPTER_KIND ||
+    metadata.engine_adapter_schema_version !== ENGINE_ADAPTER_SCHEMA_VERSION ||
+    metadata.effect_family_version !== EFFECT_FAMILY_VERSION
+  ) {
+    throw new Error("Project store ownership or engine compatibility mismatch");
+  }
+};
+
+const assertCurrentSchema = (connection: Database, project: { readonly identity: string }) => {
   if (version(connection) !== CURRENT_VERSION) throw new Error("unsupported Project store version");
   const migrationRow = connection
-    .query("SELECT checksum FROM kojo_schema_migrations WHERE version = ?")
-    .get(CURRENT_VERSION) as { readonly checksum: string } | undefined;
-  if (migrationRow?.checksum !== migrationChecksum) {
+    .query("SELECT hash FROM kojo_schema_migrations ORDER BY created_at DESC LIMIT 1")
+    .get() as { readonly hash: string } | undefined;
+  if (migrationRow?.hash !== migrationChecksum) {
     throw new Error("Project store migration checksum mismatch");
   }
+  assertStoreMetadata(connection, project, CURRENT_VERSION);
   const rows = connection
     .query(
       `SELECT name, type, sql FROM sqlite_master WHERE name IN (${REQUIRED_OBJECTS.map(() => "?").join(", ")})`,
@@ -116,7 +185,9 @@ const assertCurrentSchema = (connection: Database) => {
   }>;
   if (rows.length !== REQUIRED_OBJECTS.length)
     throw new Error("Project store schema is incomplete");
-  for (const table of rows.filter((row) => row.type === "table")) {
+  for (const table of rows.filter(
+    (row) => row.type === "table" && row.name !== "kojo_schema_migrations",
+  )) {
     if (!/\bSTRICT\s*$/i.test(table.sql.trim())) {
       throw new Error("Project store table is not STRICT");
     }
@@ -132,12 +203,16 @@ const assertProjectIdentity = (project: { readonly identity: string; readonly pa
   }
 };
 
-const verifyBackup = (path: string) => {
+const verifyBackup = (path: string, project: { readonly identity: string }) => {
   assertDatabaseFile(path);
   const backup = new Database(path, { readonly: true, strict: true });
   try {
     configureReadOnly(backup);
     assertIntegrity(backup);
+    const backupVersion = version(backup);
+    if (backupVersion > CURRENT_VERSION) throw new Error("unsupported Project store version");
+    assertStoreMetadata(backup, project, backupVersion);
+    if (backupVersion === CURRENT_VERSION) assertCurrentSchema(backup, project);
   } finally {
     backup.close();
   }
@@ -150,7 +225,7 @@ export const migrateProjectStore = (project: {
   const path = databasePath(project.path);
   const backupPath = `${path}.migration-backup`;
   if (existsSync(backupPath)) {
-    verifyBackup(backupPath);
+    verifyBackup(backupPath, project);
     copyFileSync(backupPath, path);
     chmodSync(path, 0o600);
   }
@@ -163,8 +238,10 @@ export const migrateProjectStore = (project: {
     assertIntegrity(connection);
     const current = version(connection);
     if (current > CURRENT_VERSION) throw new Error("unsupported Project store version");
+    assertStoreMetadata(connection, project, current);
     if (current === CURRENT_VERSION) {
-      assertCurrentSchema(connection);
+      assertCurrentSchema(connection, project);
+      succeeded = true;
       return;
     }
 
@@ -177,45 +254,55 @@ export const migrateProjectStore = (project: {
     } finally {
       closeSync(backupHandle);
     }
-    verifyBackup(backupPath);
-    connection.exec("BEGIN IMMEDIATE");
-    try {
-      connection.exec(migration);
-      connection
-        .query("INSERT INTO kojo_schema_migrations(version, checksum, applied_at) VALUES (?, ?, ?)")
-        .run(CURRENT_VERSION, migrationChecksum, new Date().toISOString());
-      connection.exec(`PRAGMA user_version = ${CURRENT_VERSION}`);
-      assertCurrentSchema(connection);
-      connection.exec("COMMIT");
-    } catch (error) {
-      connection.exec("ROLLBACK");
-      throw error;
-    }
+    verifyBackup(backupPath, project);
+    migrate(drizzle(connection), {
+      migrationsFolder: migrationFolder,
+      migrationsTable: "kojo_schema_migrations",
+    });
+    const migratedAt = Date.now();
+    connection
+      .query(
+        "UPDATE kojo_store_metadata SET database_instance_id = COALESCE(NULLIF(database_instance_id, ''), ?), store_format_version = ?, engine_adapter_kind = ?, engine_adapter_schema_version = ?, effect_family_version = ?, last_migrated_at_ms = ? WHERE singleton_key = 1 AND project_identity = ?",
+      )
+      .run(
+        randomUUID(),
+        CURRENT_VERSION,
+        ENGINE_ADAPTER_KIND,
+        ENGINE_ADAPTER_SCHEMA_VERSION,
+        EFFECT_FAMILY_VERSION,
+        migratedAt,
+        project.identity,
+      );
+    connection.exec(`PRAGMA user_version = ${CURRENT_VERSION}`);
+    assertCurrentSchema(connection, project);
     assertIntegrity(connection);
+    connection.query("PRAGMA wal_checkpoint(TRUNCATE)").get();
     succeeded = true;
   } finally {
     connection.close();
     if (succeeded) {
       if (existsSync(backupPath)) unlinkSync(backupPath);
     } else if (existsSync(backupPath)) {
-      verifyBackup(backupPath);
+      verifyBackup(backupPath, project);
       copyFileSync(backupPath, path);
       chmodSync(path, 0o600);
     }
   }
 };
 
-const inspectReadiness = (projectPath: string) => {
+const inspectReadiness = (project: { readonly identity: string; readonly path: string }) => {
   try {
-    const path = databasePath(projectPath);
+    const path = databasePath(project.path);
+    if (existsSync(`${path}.migration-backup`)) return "needs-attention" as const;
     assertDatabaseFile(path);
     const connection = new Database(path, { readonly: true, strict: true });
     try {
       configureReadOnly(connection);
       assertIntegrity(connection);
       const current = version(connection);
+      assertStoreMetadata(connection, project, current);
       if (current === 0) return "limited" as const;
-      assertCurrentSchema(connection);
+      assertCurrentSchema(connection, project);
       return "ready" as const;
     } finally {
       connection.close();
@@ -225,15 +312,17 @@ const inspectReadiness = (projectPath: string) => {
   }
 };
 
-const inspectBlockers = (projectPath: string) => {
+const inspectBlockers = (project: { readonly identity: string; readonly path: string }) => {
   try {
-    const path = databasePath(projectPath);
+    const path = databasePath(project.path);
+    if (existsSync(`${path}.migration-backup`))
+      throw new Error("Project migration recovery pending");
     assertDatabaseFile(path);
     const connection = new Database(path, { readonly: true, strict: true });
     try {
       configureReadOnly(connection);
       assertIntegrity(connection);
-      assertCurrentSchema(connection);
+      assertCurrentSchema(connection, project);
       const store = drizzle(connection);
       const scheduleRows = store
         .select({ scheduleKey: workflowScheduleStates.scheduleKey })
@@ -271,7 +360,7 @@ export const DrizzleProjectStoreLive = Layer.sync(ProjectStore, () => {
   return {
     migrate: (project) =>
       Effect.sync(() => {
-        if (inspectReadiness(project.path) === "ready") return true;
+        if (inspectReadiness(project) === "ready") return true;
         if (attemptedMigrations.has(project.identity)) return false;
         attemptedMigrations.add(project.identity);
         try {
@@ -281,7 +370,7 @@ export const DrizzleProjectStoreLive = Layer.sync(ProjectStore, () => {
           return false;
         }
       }),
-    readiness: (project) => Effect.sync(() => inspectReadiness(project.path)),
-    inspectForgetBlockers: (project) => Effect.sync(() => inspectBlockers(project.path)),
+    readiness: (project) => Effect.sync(() => inspectReadiness(project)),
+    inspectForgetBlockers: (project) => Effect.sync(() => inspectBlockers(project)),
   };
 });

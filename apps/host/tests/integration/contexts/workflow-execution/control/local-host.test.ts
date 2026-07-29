@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { BunSocketServer } from "@effect/platform-bun";
 import { afterEach, describe, expect, it } from "@effect/vitest";
+import { ProjectIdentity, RequestKey } from "@kojo/control";
 import { connectUnixControlClient, makeLocalClient } from "@kojo/control/local-client";
 import { Effect, Exit, Layer, Schema } from "effect";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
@@ -24,6 +25,11 @@ const cleanups: Array<() => Promise<void>> = [];
 const TEST_HOST_IDENTITY = Schema.decodeUnknownSync(HostIdentity)(
   "host:00000000-0000-4000-8000-000000000000",
 );
+const LegacyHostInformation = Schema.Struct({
+  protocol: Schema.Struct({ major: Schema.Number, minor: Schema.Number }),
+  hostVersion: Schema.String,
+  capabilities: Schema.Array(Schema.Literal("projects:list")),
+});
 
 afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
@@ -40,6 +46,18 @@ describe("local Kojo Host control", () => {
         const server = yield* Effect.promise(() => startTestHost(socketPath, diagnosticPath));
         cleanups.push(() => close(server, directory));
 
+        const legacyHandshake = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const client = yield* connectUnixControlClient(socketPath);
+            return yield* client.Negotiate();
+          }),
+        );
+        expect(Schema.decodeUnknownSync(LegacyHostInformation)(legacyHandshake)).toEqual({
+          protocol: { major: 1, minor: 1 },
+          hostVersion: "0.1.0",
+          capabilities: ["projects:list"],
+        });
+
         const overview = yield* makeLocalClient({
           connect: connectUnixControlClient(socketPath),
           maxAttempts: 1,
@@ -47,7 +65,7 @@ describe("local Kojo Host control", () => {
 
         expect(overview).toEqual({
           host: {
-            protocol: { major: 1, minor: 0 },
+            protocol: { major: 1, minor: 1 },
             hostVersion: "0.1.0",
             capabilities: [
               "projects:list",
@@ -73,8 +91,10 @@ describe("local Kojo Host control", () => {
           .trim()
           .split("\n")
           .map((line) => JSON.parse(line));
-        expect(events).toHaveLength(2);
+        expect(events).toHaveLength(4);
         expect(events.map(({ operation, outcome }) => ({ operation, outcome }))).toEqual([
+          { operation: "Negotiate", outcome: "success" },
+          { operation: "Negotiate", outcome: "success" },
           { operation: "Negotiate", outcome: "success" },
           { operation: "ListProjects", outcome: "success" },
         ]);
@@ -84,7 +104,7 @@ describe("local Kojo Host control", () => {
           hostIdentity: "host:00000000-0000-4000-8000-000000000000",
           hostVersion: "0.1.0",
           protocolMajor: 1,
-          protocolMinor: 0,
+          protocolMinor: 1,
         });
       }),
   );
@@ -112,6 +132,49 @@ describe("local Kojo Host control", () => {
         maxAttempts: 1,
       }).getHostOverview;
       expect(overview.host.hostVersion).toBe("0.1.0");
+    }),
+  );
+
+  it.effect("atomically conflicts concurrent failed forgets that reuse one Request Key", () =>
+    Effect.gen(function* () {
+      const directory = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "kojo-host-forget-")));
+      const socketPath = join(directory, "host.sock");
+      const server = yield* Effect.promise(() =>
+        startTestHost(socketPath, join(directory, "diagnostics.jsonl")),
+      );
+      cleanups.push(() => close(server, directory));
+      const firstIdentity = Schema.decodeUnknownSync(ProjectIdentity)(
+        "00000000-0000-7000-8000-000000000001",
+      );
+      const secondIdentity = Schema.decodeUnknownSync(ProjectIdentity)(
+        "00000000-0000-7000-8000-000000000002",
+      );
+      const requestKey = Schema.decodeUnknownSync(RequestKey)("shared-forget-request");
+      const client = makeLocalClient({
+        connect: connectUnixControlClient(socketPath),
+        maxAttempts: 1,
+      });
+
+      const results = yield* Effect.all(
+        [
+          client.forgetProject(
+            firstIdentity,
+            { kind: "identity", identity: firstIdentity },
+            requestKey,
+          ),
+          client.forgetProject(
+            secondIdentity,
+            { kind: "identity", identity: secondIdentity },
+            requestKey,
+          ),
+        ],
+        { concurrency: "unbounded" },
+      );
+
+      expect(results.map((result) => (result.ok ? "success" : result.error.code)).sort()).toEqual([
+        "project-not-found",
+        "request-key-conflict",
+      ]);
     }),
   );
 

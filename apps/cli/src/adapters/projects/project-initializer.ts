@@ -16,7 +16,7 @@ import {
 import { join } from "node:path";
 import { ProjectIdentity, type ProjectSnapshot } from "@kojo/control";
 import { Schema } from "effect";
-import { validateProjectDefinition } from "../../../../adapters/project-definition/subprocess-project-definition-validator";
+import { validateProjectDefinition } from "../project-definition/subprocess-project-definition-validator";
 
 const CONFIGURATION =
   'import { defineConfig } from "@kojo/workflow";\n\nexport default defineConfig({ workflows: [] });\n';
@@ -183,10 +183,27 @@ const appendIgnoreRule = async (path: string) => {
   }
 };
 
-const createDatabase = async (path: string) => {
+const createDatabase = async (path: string, identity: ProjectSnapshot["identity"]) => {
   const temporaryPath = `${path}.${randomUUID()}.tmp`;
   try {
     const database = new Database(temporaryPath, { create: true, strict: true });
+    database.exec(`CREATE TABLE kojo_store_metadata (
+      singleton_key INTEGER PRIMARY KEY NOT NULL CHECK (singleton_key = 1),
+      project_identity TEXT NOT NULL UNIQUE,
+      database_instance_id TEXT NOT NULL UNIQUE,
+      store_format_version INTEGER NOT NULL,
+      engine_adapter_kind TEXT NOT NULL,
+      engine_adapter_schema_version INTEGER NOT NULL,
+      effect_family_version TEXT NOT NULL,
+      created_at_ms INTEGER NOT NULL,
+      last_migrated_at_ms INTEGER NOT NULL
+    ) STRICT`);
+    const createdAt = Date.now();
+    database
+      .query(
+        "INSERT INTO kojo_store_metadata VALUES (1, ?, ?, 0, 'effect-workflow', 1, '4.0.0-beta.102', ?, ?)",
+      )
+      .run(identity, randomUUID(), createdAt, createdAt);
     database.exec("PRAGMA user_version = 0");
     database.close();
     await chmod(temporaryPath, 0o600);
@@ -198,7 +215,7 @@ const createDatabase = async (path: string) => {
   }
 };
 
-const validateDatabase = (path: string) => {
+const validateDatabase = (path: string, identity: ProjectSnapshot["identity"]) => {
   const database = new Database(path, { readonly: true, strict: true });
   try {
     const check = database.query("PRAGMA quick_check").get() as
@@ -207,7 +224,19 @@ const validateDatabase = (path: string) => {
     const version = database.query("PRAGMA user_version").get() as
       | { readonly user_version: number }
       | undefined;
-    if (check?.quick_check !== "ok" || ![0, 1].includes(version?.user_version ?? -1)) {
+    const metadata = database
+      .query(
+        "SELECT project_identity, store_format_version FROM kojo_store_metadata WHERE singleton_key = 1",
+      )
+      .get() as
+      | { readonly project_identity: string; readonly store_format_version: number }
+      | undefined;
+    if (
+      check?.quick_check !== "ok" ||
+      ![0, 1].includes(version?.user_version ?? -1) ||
+      metadata?.project_identity !== identity ||
+      metadata.store_format_version !== version?.user_version
+    ) {
       throw new Error("unsupported database state");
     }
   } finally {
@@ -258,9 +287,14 @@ export const initializeProject = async (path: string): Promise<ProjectSnapshot> 
     );
   }
 
+  const identity =
+    metadata === undefined
+      ? Schema.decodeUnknownSync(ProjectIdentity)(Bun.randomUUIDv7())
+      : await readProjectIdentity(metadataPath);
+
   if (database !== undefined) {
     try {
-      validateDatabase(databasePath);
+      validateDatabase(databasePath, identity);
     } catch {
       throw new ProjectInitializationError(
         `${databasePath} Project database is invalid or needs migration; no files were changed.`,
@@ -284,13 +318,6 @@ export const initializeProject = async (path: string): Promise<ProjectSnapshot> 
     throw new ProjectInitializationError(
       `${root} cannot be changed safely; no files were changed.`,
     );
-  }
-
-  let identity: ProjectSnapshot["identity"];
-  if (metadata === undefined) {
-    identity = Schema.decodeUnknownSync(ProjectIdentity)(Bun.randomUUIDv7());
-  } else {
-    identity = await readProjectIdentity(metadataPath);
   }
 
   let layoutMutated = false;
@@ -328,7 +355,7 @@ export const initializeProject = async (path: string): Promise<ProjectSnapshot> 
         0o600,
       );
       layoutMutated = true;
-      await createDatabase(databasePath);
+      await createDatabase(databasePath, identity);
       layoutMutated = true;
     }
     await enforceMode(metadataPath, metadata, 0o600);

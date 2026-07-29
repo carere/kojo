@@ -1,5 +1,66 @@
 import { sql } from "drizzle-orm";
-import { blob, check, index, integer, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
+import {
+  blob,
+  check,
+  index,
+  integer,
+  primaryKey,
+  sqliteTable,
+  text,
+  unique,
+} from "drizzle-orm/sqlite-core";
+
+export const storeMetadata = sqliteTable(
+  "kojo_store_metadata",
+  {
+    singletonKey: integer("singleton_key").primaryKey(),
+    projectIdentity: text("project_identity").notNull().unique(),
+    databaseInstanceId: text("database_instance_id").notNull().unique(),
+    storeFormatVersion: integer("store_format_version").notNull(),
+    engineAdapterKind: text("engine_adapter_kind").notNull(),
+    engineAdapterSchemaVersion: integer("engine_adapter_schema_version").notNull(),
+    effectFamilyVersion: text("effect_family_version").notNull(),
+    createdAtMs: integer("created_at_ms").notNull(),
+    lastMigratedAtMs: integer("last_migrated_at_ms").notNull(),
+  },
+  (table) => [check("store_metadata_singleton", sql`${table.singletonKey} = 1`)],
+);
+
+export const controlRequests = sqliteTable(
+  "kojo_control_requests",
+  {
+    requestKey: text("request_key").primaryKey(),
+    operationKind: text("operation_kind").notNull(),
+    requestSha256: blob("request_sha256").notNull(),
+    targetKind: text("target_kind").notNull(),
+    targetRunId: text("target_run_id"),
+    targetScheduleKey: text("target_schedule_key"),
+    state: text("state").notNull(),
+    resultEncodingVersion: integer("result_encoding_version"),
+    resultSchemaIdentity: text("result_schema_identity"),
+    resultJson: text("result_json"),
+    resultSensitivityMapVersion: integer("result_sensitivity_map_version"),
+    resultSensitivityMapJson: text("result_sensitivity_map_json"),
+    resultSha256: blob("result_sha256"),
+    resultCode: text("result_code"),
+    safeErrorCode: text("safe_error_code"),
+    createdAtMs: integer("created_at_ms").notNull(),
+    completedAtMs: integer("completed_at_ms"),
+    expiresAtMs: integer("expires_at_ms"),
+  },
+  (table) => [
+    check(
+      "control_request_state_valid",
+      sql`${table.state} IN ('pending', 'completed', 'needs-attention')`,
+    ),
+    index("kojo_control_requests_active_idx")
+      .on(table.createdAtMs, table.requestKey)
+      .where(sql`${table.state} != 'completed'`),
+    index("kojo_control_requests_expiry_idx").on(table.expiresAtMs),
+    index("kojo_control_requests_run_idx").on(table.targetRunId),
+    index("kojo_control_requests_schedule_idx").on(table.targetScheduleKey),
+  ],
+);
 
 export const workflowScheduleStates = sqliteTable(
   "kojo_workflow_schedule_states",
@@ -117,8 +178,248 @@ export const workflowRuns = sqliteTable(
   ],
 );
 
+export const workflowScheduleOccurrences = sqliteTable(
+  "kojo_workflow_schedule_occurrences",
+  {
+    scheduleKey: text("schedule_key").notNull(),
+    scheduledAtMs: integer("scheduled_at_ms").notNull(),
+    appliedRevision: text("applied_revision").notNull(),
+    resolvedInputEncodingVersion: integer("resolved_input_encoding_version").notNull(),
+    resolvedInputSchemaIdentity: text("resolved_input_schema_identity").notNull(),
+    resolvedInputJson: text("resolved_input_json").notNull(),
+    resolvedInputSensitivityMapVersion: integer("resolved_input_sensitivity_map_version").notNull(),
+    resolvedInputSensitivityMapJson: text("resolved_input_sensitivity_map_json").notNull(),
+    resolvedInputSha256: blob("resolved_input_sha256").notNull(),
+    outcome: text("outcome").notNull(),
+    reasonCode: text("reason_code"),
+    deliveryAttemptCount: integer("delivery_attempt_count").notNull(),
+    plannedAtMs: integer("planned_at_ms").notNull(),
+    firstAttemptedAtMs: integer("first_attempted_at_ms"),
+    processedAtMs: integer("processed_at_ms"),
+    linkedRunId: text("linked_run_id"),
+    deletedRunId: text("deleted_run_id"),
+    deletedRunAtMs: integer("deleted_run_at_ms"),
+    rowVersion: integer("row_version").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.scheduleKey, table.scheduledAtMs] }),
+    check(
+      "schedule_occurrence_outcome_valid",
+      sql`${table.outcome} IN ('planned', 'started', 'skipped', 'invalidated', 'failed')`,
+    ),
+    index("kojo_schedule_occurrences_history_idx").on(table.scheduleKey, table.scheduledAtMs),
+    index("kojo_schedule_occurrences_outcome_idx").on(table.outcome, table.scheduledAtMs),
+    index("kojo_schedule_occurrences_due_idx")
+      .on(table.scheduledAtMs, table.scheduleKey)
+      .where(sql`${table.outcome} = 'planned'`),
+    unique("kojo_schedule_occurrences_linked_run_unique").on(table.linkedRunId),
+  ],
+);
+
+export const engineOperations = sqliteTable(
+  "kojo_engine_operations",
+  {
+    operationId: text("operation_id").primaryKey(),
+    runId: text("run_id").notNull(),
+    kind: text("kind").notNull(),
+    operationKey: text("operation_key").notNull(),
+    requestEncodingVersion: integer("request_encoding_version").notNull(),
+    requestSchemaIdentity: text("request_schema_identity").notNull(),
+    requestJson: text("request_json").notNull(),
+    requestSensitivityMapVersion: integer("request_sensitivity_map_version").notNull(),
+    requestSensitivityMapJson: text("request_sensitivity_map_json").notNull(),
+    requestSha256: blob("request_sha256").notNull(),
+    state: text("state").notNull(),
+    attemptCount: integer("attempt_count").notNull(),
+    nextAttemptAtMs: integer("next_attempt_at_ms"),
+    lastAttemptedAtMs: integer("last_attempted_at_ms"),
+    confirmedAtMs: integer("confirmed_at_ms"),
+    confirmationEventId: text("confirmation_event_id").unique(),
+    safeErrorCode: text("safe_error_code"),
+    createdAtMs: integer("created_at_ms").notNull(),
+    updatedAtMs: integer("updated_at_ms").notNull(),
+  },
+  (table) => [
+    unique("engine_operation_identity").on(table.runId, table.kind, table.operationKey),
+    check(
+      "engine_operation_state_valid",
+      sql`${table.state} IN ('pending', 'confirmed', 'needs-attention')`,
+    ),
+    index("kojo_engine_operations_run_idx").on(table.runId, table.createdAtMs),
+    index("kojo_engine_operations_pending_idx")
+      .on(table.nextAttemptAtMs, table.operationId)
+      .where(sql`${table.state} = 'pending'`),
+  ],
+);
+
+export const workflowActivityAttempts = sqliteTable(
+  "kojo_workflow_activity_attempts",
+  {
+    attemptId: text("attempt_id").primaryKey(),
+    runId: text("run_id").notNull(),
+    durableOperationKey: text("durable_operation_key").notNull(),
+    activityName: text("activity_name").notNull(),
+    effectRetryNumber: integer("effect_retry_number").notNull(),
+    invocationNumber: integer("invocation_number").notNull(),
+    activityIdempotencyKey: text("activity_idempotency_key").notNull(),
+    state: text("state").notNull(),
+    outcomeCode: text("outcome_code"),
+    outcomeSummaryJson: text("outcome_summary_json"),
+    startedAtMs: integer("started_at_ms").notNull(),
+    resultObservedAtMs: integer("result_observed_at_ms"),
+    engineConfirmedAtMs: integer("engine_confirmed_at_ms"),
+  },
+  (table) => [
+    unique("workflow_activity_attempt_identity").on(
+      table.runId,
+      table.durableOperationKey,
+      table.effectRetryNumber,
+      table.invocationNumber,
+    ),
+    check(
+      "workflow_activity_attempt_state_valid",
+      sql`${table.state} IN ('started', 'result-observed', 'engine-confirmed')`,
+    ),
+    index("kojo_activity_attempts_run_idx").on(
+      table.runId,
+      table.durableOperationKey,
+      table.startedAtMs,
+    ),
+    index("kojo_activity_attempts_idempotency_idx").on(table.activityIdempotencyKey),
+  ],
+);
+
+export const executionEvents = sqliteTable(
+  "kojo_execution_events",
+  {
+    eventId: text("event_id").primaryKey(),
+    runId: text("run_id").notNull(),
+    sequence: integer("sequence").notNull(),
+    envelopeVersion: integer("envelope_version").notNull(),
+    kind: text("kind").notNull(),
+    kindVersion: integer("kind_version").notNull(),
+    recordedAtMs: integer("recorded_at_ms").notNull(),
+    observedAtMs: integer("observed_at_ms"),
+    engineOperationId: text("engine_operation_id"),
+    activityAttemptId: text("activity_attempt_id"),
+    boundaryId: text("boundary_id"),
+    childRunId: text("child_run_id"),
+    payloadEncodingVersion: integer("payload_encoding_version").notNull(),
+    payloadSchemaIdentity: text("payload_schema_identity").notNull(),
+    payloadJson: text("payload_json").notNull(),
+    payloadSensitivityMapVersion: integer("payload_sensitivity_map_version").notNull(),
+    payloadSensitivityMapJson: text("payload_sensitivity_map_json").notNull(),
+    payloadSha256: blob("payload_sha256").notNull(),
+  },
+  (table) => [
+    unique("execution_event_sequence").on(table.runId, table.sequence),
+    unique("execution_event_identity").on(table.runId, table.eventId),
+    index("kojo_execution_events_kind_idx").on(table.runId, table.kind, table.sequence),
+    index("kojo_execution_events_engine_operation_idx").on(table.engineOperationId),
+    index("kojo_execution_events_activity_attempt_idx").on(table.activityAttemptId),
+    index("kojo_execution_events_boundary_idx").on(table.boundaryId),
+    index("kojo_execution_events_child_run_idx").on(table.childRunId),
+  ],
+);
+
+export const executionArtifacts = sqliteTable(
+  "kojo_execution_artifacts",
+  {
+    artifactId: text("artifact_id").primaryKey(),
+    runId: text("run_id").notNull(),
+    storageKey: text("storage_key").notNull().unique(),
+    displayName: text("display_name").notNull(),
+    mediaType: text("media_type").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    sha256: blob("sha256").notNull(),
+    condition: text("condition").notNull(),
+    createdAtMs: integer("created_at_ms").notNull(),
+    unavailableAtMs: integer("unavailable_at_ms"),
+    unavailableReasonCode: text("unavailable_reason_code"),
+  },
+  (table) => [
+    unique("execution_artifact_run_identity").on(table.runId, table.artifactId),
+    check(
+      "execution_artifact_condition_valid",
+      sql`${table.condition} IN ('available', 'missing', 'expired')`,
+    ),
+    index("kojo_execution_artifacts_run_idx").on(table.runId, table.createdAtMs),
+    index("kojo_execution_artifacts_condition_idx").on(table.condition),
+  ],
+);
+
+export const executionEventArtifacts = sqliteTable(
+  "kojo_execution_event_artifacts",
+  {
+    runId: text("run_id").notNull(),
+    eventId: text("event_id").notNull(),
+    artifactId: text("artifact_id").notNull(),
+    role: text("role").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.eventId, table.artifactId, table.role] })],
+);
+
+export const retentionPolicy = sqliteTable(
+  "kojo_retention_policy",
+  {
+    singletonKey: integer("singleton_key").primaryKey(),
+    diagnosticMaxAgeMs: integer("diagnostic_max_age_ms"),
+    diagnosticMaxBytes: integer("diagnostic_max_bytes"),
+    disposableMaxAgeMs: integer("disposable_max_age_ms"),
+    disposableMaxBytes: integer("disposable_max_bytes"),
+    rowVersion: integer("row_version").notNull(),
+    updatedAtMs: integer("updated_at_ms").notNull(),
+  },
+  (table) => [check("retention_policy_singleton", sql`${table.singletonKey} = 1`)],
+);
+
+export const deletionIntents = sqliteTable(
+  "kojo_deletion_intents",
+  {
+    deletionId: text("deletion_id").primaryKey(),
+    requestKey: text("request_key").notNull().unique(),
+    targetKind: text("target_kind").notNull(),
+    targetSha256: blob("target_sha256").notNull(),
+    targetSnapshotJson: text("target_snapshot_json").notNull(),
+    expectedRevision: integer("expected_revision"),
+    phase: text("phase").notNull(),
+    safeErrorCode: text("safe_error_code"),
+    createdAtMs: integer("created_at_ms").notNull(),
+    updatedAtMs: integer("updated_at_ms").notNull(),
+  },
+  (table) => [
+    check(
+      "deletion_intent_phase_valid",
+      sql`${table.phase} IN ('quiescing', 'clearing-engine', 'clearing-owned-content', 'deleting-records', 'needs-attention')`,
+    ),
+    index("kojo_deletion_intents_active_idx").on(table.phase, table.updatedAtMs),
+  ],
+);
+
+export const deletionItems = sqliteTable(
+  "kojo_deletion_items",
+  {
+    deletionId: text("deletion_id").notNull(),
+    itemKind: text("item_kind").notNull(),
+    itemKey: text("item_key").notNull(),
+    stableOrder: integer("stable_order").notNull(),
+    state: text("state").notNull(),
+    attemptCount: integer("attempt_count").notNull(),
+    completedAtMs: integer("completed_at_ms"),
+    safeErrorCode: text("safe_error_code"),
+  },
+  (table) => [
+    primaryKey({ columns: [table.deletionId, table.itemKind, table.itemKey] }),
+    check(
+      "deletion_item_state_valid",
+      sql`${table.state} IN ('pending', 'completed', 'warning', 'needs-attention')`,
+    ),
+    index("kojo_deletion_items_next_idx").on(table.deletionId, table.state, table.stableOrder),
+  ],
+);
+
 export const projectStoreMigrations = sqliteTable("kojo_schema_migrations", {
-  version: integer("version").primaryKey(),
-  checksum: text("checksum").notNull(),
-  appliedAt: text("applied_at").notNull(),
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  hash: text("hash").notNull(),
+  createdAt: integer("created_at").notNull(),
 });

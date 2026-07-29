@@ -4,7 +4,7 @@ import { Rpc, RpcGroup } from "effect/unstable/rpc";
 
 export { ProjectIdentity } from "@kojo/workflow";
 
-export const PROTOCOL_VERSION = { major: 1, minor: 0 } as const;
+export const PROTOCOL_VERSION = { major: 1, minor: 1 } as const;
 export const CONTROL_CAPABILITIES = [
   "projects:list",
   "projects:list-page",
@@ -13,7 +13,10 @@ export const CONTROL_CAPABILITIES = [
   "projects:forget",
 ] as const;
 
-export const ControlCapability = Schema.Literals(CONTROL_CAPABILITIES);
+export const ControlCapability = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(128),
+);
 export type ControlCapability = typeof ControlCapability.Type;
 
 export const ProtocolVersion = Schema.Struct({
@@ -76,7 +79,6 @@ export const ProjectListCursorErrorCode = Schema.Literals([
   "project-cursor-malformed",
   "project-cursor-version-unsupported",
   "project-cursor-filter-mismatch",
-  "project-cursor-anchor-missing",
 ]);
 export type ProjectListCursorErrorCode = typeof ProjectListCursorErrorCode.Type;
 
@@ -183,6 +185,10 @@ export const Negotiate = Rpc.make("Negotiate", {
   success: HostInformation,
 });
 
+export const NegotiateCapabilities = Rpc.make("NegotiateCapabilities", {
+  success: HostInformation,
+});
+
 export const ListProjects = Rpc.make("ListProjects", {
   success: ProjectList,
 });
@@ -214,6 +220,7 @@ export const ReplayForgetProject = Rpc.make("ReplayForgetProject", {
 
 export const KojoControl = RpcGroup.make(
   Negotiate,
+  NegotiateCapabilities,
   ListProjects,
   ListProjectPage,
   ShowProject,

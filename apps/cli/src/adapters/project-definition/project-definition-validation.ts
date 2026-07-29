@@ -1,13 +1,10 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
-  missingProjectDefinitionDependency,
-  ProjectDefinitionValidation,
+  evaluateProjectDefinitionWith,
   type ProjectDefinitionValidation as ProjectDefinitionValidationResult,
-  unavailableProjectDefinition,
-  validateProjectDefinitionValue,
+  validateProjectDefinitionSubprocessResult,
 } from "@kojo/control/project-definition-validation";
-import { Schema } from "effect";
 
 const packageManagerCommand = (root: string) => {
   if (existsSync(join(root, "bun.lock")) || existsSync(join(root, "bun.lockb"))) {
@@ -20,29 +17,31 @@ const packageManagerCommand = (root: string) => {
 
 export const evaluateProjectDefinition = async (
   configurationPath: string,
-): Promise<ProjectDefinitionValidationResult> => {
-  const root = dirname(configurationPath);
-  try {
-    await Bun.resolve("@kojo/workflow", root);
-  } catch {
-    return missingProjectDefinitionDependency(packageManagerCommand(root));
-  }
-  try {
-    const built = await Bun.build({
-      entrypoints: [configurationPath],
-      format: "esm",
-      target: "bun",
-    });
-    if (!built.success || built.outputs.length !== 1) throw new Error("build failed");
-    const evaluationUrl = URL.createObjectURL(
-      new Blob([await built.outputs[0].text()], { type: "text/javascript" }),
-    );
-    const module = await import(evaluationUrl).finally(() => URL.revokeObjectURL(evaluationUrl));
-    return validateProjectDefinitionValue(module.default);
-  } catch {
-    return unavailableProjectDefinition();
-  }
-};
+): Promise<ProjectDefinitionValidationResult> =>
+  evaluateProjectDefinitionWith(
+    {
+      dependencyAvailable: async (root) => {
+        try {
+          await Bun.resolve("@kojo/workflow", root);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      installCommand: packageManagerCommand,
+      loadDefaultExport: async (path) => {
+        const built = await Bun.build({ entrypoints: [path], format: "esm", target: "bun" });
+        if (!built.success || built.outputs.length !== 1) throw new Error("build failed");
+        const url = URL.createObjectURL(
+          new Blob([await built.outputs[0].text()], { type: "text/javascript" }),
+        );
+        const module = await import(url).finally(() => URL.revokeObjectURL(url));
+        return module.default;
+      },
+    },
+    configurationPath,
+    dirname(configurationPath),
+  );
 
 export const validateProjectDefinitionInSubprocess = async (
   runnerPath: string,
@@ -64,11 +63,9 @@ export const validateProjectDefinitionInSubprocess = async (
   }, timeoutMs);
   const exitCode = await child.exited;
   clearTimeout(timeout);
-  if (timedOut) return unavailableProjectDefinition("Kojo Configuration validation timed out.");
-  try {
-    if (exitCode !== 0 || envelope === undefined) throw new Error("missing result");
-    return Schema.decodeUnknownSync(ProjectDefinitionValidation)(envelope);
-  } catch {
-    return unavailableProjectDefinition();
-  }
+  return validateProjectDefinitionSubprocessResult({
+    timedOut,
+    exitCode,
+    ...(envelope === undefined ? {} : { envelope }),
+  });
 };

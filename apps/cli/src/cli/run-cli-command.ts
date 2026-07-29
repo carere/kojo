@@ -25,7 +25,8 @@ import {
   initializeProject,
   ProjectInitializationError,
   resolveInitializedProject,
-} from "../contexts/workflow-authoring/projects/services/project-initializer";
+} from "../adapters/projects/project-initializer";
+import { resolveProjectSelectionPath } from "../adapters/projects/project-selection-path";
 import { selectProject } from "../contexts/workflow-authoring/projects/use-cases/select-project";
 
 interface CliFailure {
@@ -522,7 +523,13 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
         return writeFailure(listFailure, json, "project.show");
       }
     } else {
-      const selection = await selectProject(projects, options);
+      const selection = await selectProject(
+        projects,
+        options,
+        options.projectId === undefined
+          ? await resolveProjectSelectionPath(options.projectPath ?? process.cwd())
+          : undefined,
+      );
       if ("exitCode" in selection) {
         if (args[1] === "show") {
           return writeFailure(selection, json, "project.show");

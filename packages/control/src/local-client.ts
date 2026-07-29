@@ -80,17 +80,21 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     Effect.scoped(
       Effect.gen(function* () {
         const client = yield* options.connect;
-        const host = yield* client.Negotiate().pipe(Effect.mapError(safeUnavailable));
+        const legacyHost = yield* client.Negotiate().pipe(Effect.mapError(safeUnavailable));
 
-        if (host.protocol.major !== PROTOCOL_VERSION.major) {
+        if (legacyHost.protocol.major !== PROTOCOL_VERSION.major) {
           return yield* Effect.fail(
             new IncompatibleProtocolError({
               clientMajor: PROTOCOL_VERSION.major,
-              hostMajor: host.protocol.major,
-              message: `Kojo Host protocol ${host.protocol.major} is incompatible with client protocol ${PROTOCOL_VERSION.major}.`,
+              hostMajor: legacyHost.protocol.major,
+              message: `Kojo Host protocol ${legacyHost.protocol.major} is incompatible with client protocol ${PROTOCOL_VERSION.major}.`,
             }),
           );
         }
+        const host =
+          legacyHost.protocol.minor >= 1
+            ? yield* client.NegotiateCapabilities().pipe(Effect.mapError(safeUnavailable))
+            : legacyHost;
         if (!host.capabilities.includes(capability)) {
           return yield* Effect.fail(
             new UnsupportedControlCapabilityError({
