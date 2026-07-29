@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "@effect/vitest";
-import { connectUnixTransport, makeLocalClient } from "@kojo/control/local-client";
+import { connectUnixControlClient, makeLocalClient } from "@kojo/control/local-client";
 import { Effect } from "effect";
 import {
   type KojoHostServer,
@@ -26,7 +26,7 @@ describe("local Kojo Host control", () => {
         cleanups.push(() => close(server, directory));
 
         const overview = yield* makeLocalClient({
-          connect: connectUnixTransport(socketPath),
+          connect: connectUnixControlClient(socketPath),
           maxAttempts: 1,
         }).getHostOverview;
 

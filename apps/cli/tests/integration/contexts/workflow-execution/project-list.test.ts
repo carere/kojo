@@ -10,7 +10,7 @@ afterEach(async () => {
 });
 
 describe("kojo project list", () => {
-  it("shows Host readiness and the empty Project state to a person", async () => {
+  it("shows Host connectivity and the empty Project state to a person", async () => {
     const { socketPath } = await startTemporaryHost();
 
     const result = await runCli(["project", "list"], socketPath);
@@ -27,9 +27,9 @@ describe("kojo project list", () => {
 
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({
-      version: 1,
+      schemaVersion: 1,
       command: "project.list",
-      data: {
+      result: {
         host: {
           protocol: { major: 1, minor: 0 },
           hostVersion: "0.1.0",
@@ -37,6 +37,7 @@ describe("kojo project list", () => {
         },
         projects: [],
       },
+      warnings: [],
     });
     expect(result.stderr).toBe("");
   });
@@ -45,11 +46,13 @@ describe("kojo project list", () => {
     const directory = await mkdtemp(join(tmpdir(), "kojo-cli-missing-"));
     cleanups.push(() => rm(directory, { recursive: true }));
 
-    const result = await runCli(["project", "list", "--json"], join(directory, "missing.sock"));
+    const result = await runCli(["project", "list"], join(directory, "missing.sock"));
 
-    expect(result.exitCode).toBe(4);
+    expect(result.exitCode).toBe(3);
     expect(result.stdout).toBe("");
-    expect(result.stderr).toBe("Kojo Host is unavailable.\n");
+    expect(result.stderr).toBe(
+      "Kojo Host is unavailable.\nNext: Start the Kojo Host and try again.\n",
+    );
     expect(result.stderr).not.toContain(directory);
   });
 });

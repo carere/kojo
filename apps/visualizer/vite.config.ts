@@ -75,6 +75,14 @@ export default defineConfig({
           },
         },
       },
+      {
+        extends: true,
+        test: {
+          name: "browser-e2e",
+          environment: "node",
+          include: ["tests/browser-e2e/**/*.test.ts"],
+        },
+      },
     ],
   },
 });

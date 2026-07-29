@@ -42,13 +42,3 @@ export const ListProjects = Rpc.make("ListProjects", {
 });
 
 export const KojoControl = RpcGroup.make(Negotiate, ListProjects);
-
-export type ControlRequest =
-  | { readonly operation: "negotiate" }
-  | { readonly operation: "projects.list" };
-
-export type ControlResponse<Request extends ControlRequest> = Request extends {
-  readonly operation: "negotiate";
-}
-  ? HostInformation
-  : ProjectList;

@@ -1,13 +1,12 @@
-import { Data, Effect, Exit, Schema } from "effect";
+import { BunSocket } from "@effect/platform-bun";
+import { Data, Effect } from "effect";
 import type * as Duration from "effect/Duration";
-import {
-  type ControlRequest,
-  type ControlResponse,
-  HostInformation,
-  type HostOverview,
-  PROTOCOL_VERSION,
-  ProjectList,
-} from "./index";
+import type { Scope } from "effect/Scope";
+import type { RpcGroup } from "effect/unstable/rpc";
+import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
+import type { RpcClientError } from "effect/unstable/rpc/RpcClientError";
+import { Socket } from "effect/unstable/socket";
+import { type HostOverview, KojoControl, PROTOCOL_VERSION } from "./index";
 
 export class LocalTransportError extends Data.TaggedError("LocalTransportError")<{
   readonly message: string;
@@ -19,15 +18,13 @@ export class IncompatibleProtocolError extends Data.TaggedError("IncompatiblePro
   readonly message: string;
 }> {}
 
-export interface LocalTransport {
-  readonly request: <Request extends ControlRequest>(
-    request: Request,
-  ) => Effect.Effect<ControlResponse<Request>, LocalTransportError>;
-  readonly close: Effect.Effect<void>;
-}
+export type KojoControlClient = RpcClient.RpcClient<
+  RpcGroup.Rpcs<typeof KojoControl>,
+  RpcClientError
+>;
 
 export interface LocalClientOptions {
-  readonly connect: Effect.Effect<LocalTransport, LocalTransportError>;
+  readonly connect: Effect.Effect<KojoControlClient, LocalTransportError, Scope>;
   readonly activate?: Effect.Effect<void>;
   readonly maxAttempts?: number;
   readonly retryDelay?: Duration.Input;
@@ -39,125 +36,62 @@ export const makeLocalClient = (options: LocalClientOptions) => {
   const maxAttempts = Math.max(1, options.maxAttempts ?? 5);
   const retryDelay = options.retryDelay ?? "50 millis";
 
-  const discover = Effect.gen(function* () {
-    const initial = yield* Effect.exit(options.connect);
-    if (Exit.isSuccess(initial)) return initial.value;
+  const exchange = Effect.scoped(
+    Effect.gen(function* () {
+      const client = yield* options.connect;
+      const host = yield* client.Negotiate().pipe(Effect.mapError(safeUnavailable));
 
-    yield* options.activate ?? Effect.void;
+      if (host.protocol.major !== PROTOCOL_VERSION.major) {
+        return yield* Effect.fail(
+          new IncompatibleProtocolError({
+            clientMajor: PROTOCOL_VERSION.major,
+            hostMajor: host.protocol.major,
+            message: `Kojo Host protocol ${host.protocol.major} is incompatible with client protocol ${PROTOCOL_VERSION.major}.`,
+          }),
+        );
+      }
 
-    let attempt = 1;
-    while (attempt < maxAttempts) {
-      if (retryDelay !== "0 millis") yield* Effect.sleep(retryDelay);
-      const next = yield* Effect.exit(options.connect);
-      if (Exit.isSuccess(next)) return next.value;
-      attempt += 1;
-    }
+      const { projects } = yield* client.ListProjects().pipe(Effect.mapError(safeUnavailable));
+      return { host, projects };
+    }),
+  );
 
-    return yield* Effect.fail(safeUnavailable());
-  });
+  const retryTransport = (
+    attempt: number,
+  ): Effect.Effect<HostOverview, LocalTransportError | IncompatibleProtocolError> =>
+    exchange.pipe(
+      Effect.catchTag("LocalTransportError", () => {
+        if (attempt >= maxAttempts) return Effect.fail(safeUnavailable());
+        const delay = retryDelay === "0 millis" ? Effect.void : Effect.sleep(retryDelay);
+        return Effect.andThen(delay, retryTransport(attempt + 1));
+      }),
+    );
 
   const getHostOverview: Effect.Effect<
     HostOverview,
     LocalTransportError | IncompatibleProtocolError
-  > = Effect.acquireUseRelease(
-    discover,
-    (transport) =>
-      Effect.gen(function* () {
-        const host = yield* transport.request({ operation: "negotiate" });
-
-        if (host.protocol.major !== PROTOCOL_VERSION.major) {
-          return yield* Effect.fail(
-            new IncompatibleProtocolError({
-              clientMajor: PROTOCOL_VERSION.major,
-              hostMajor: host.protocol.major,
-              message: `Kojo Host protocol ${host.protocol.major} is incompatible with client protocol ${PROTOCOL_VERSION.major}. Upgrade Kojo Host or this client.`,
-            }),
-          );
-        }
-
-        const { projects } = yield* transport.request({ operation: "projects.list" });
-        return { host, projects };
-      }),
-    (transport) => transport.close,
+  > = exchange.pipe(
+    Effect.catchTag("LocalTransportError", () =>
+      Effect.andThen(options.activate ?? Effect.void, retryTransport(2)),
+    ),
   );
 
   return { getHostOverview } as const;
 };
 
-interface SocketState {
-  buffer: string;
-  pending?: {
-    resolve: (value: unknown) => void;
-    reject: () => void;
-  };
-}
-
-export const connectUnixTransport = (
-  socketPath: string,
-): Effect.Effect<LocalTransport, LocalTransportError> =>
-  Effect.tryPromise({
-    try: async () => {
-      const state: SocketState = { buffer: "" };
-      const socket = await Bun.connect<SocketState>({
-        unix: socketPath,
-        socket: {
-          open(openSocket) {
-            openSocket.data = state;
-          },
-          data(openSocket, bytes) {
-            const current = openSocket.data;
-            current.buffer += new TextDecoder().decode(bytes);
-            const newline = current.buffer.indexOf("\n");
-            if (newline < 0 || current.pending === undefined) return;
-
-            const line = current.buffer.slice(0, newline);
-            current.buffer = current.buffer.slice(newline + 1);
-            const pending = current.pending;
-            current.pending = undefined;
-            try {
-              pending.resolve(JSON.parse(line));
-            } catch {
-              pending.reject();
-            }
-          },
-          close(openSocket) {
-            openSocket.data.pending?.reject();
-          },
-          error(openSocket) {
-            openSocket.data.pending?.reject();
-          },
-        },
-      });
-
-      return {
-        request: <Request extends ControlRequest>(request: Request) =>
-          Effect.tryPromise({
-            try: () =>
-              new Promise<ControlResponse<Request>>((resolve, reject) => {
-                state.pending = {
-                  resolve: (value) => {
-                    try {
-                      const decoded =
-                        request.operation === "negotiate"
-                          ? Schema.decodeUnknownSync(HostInformation)(value)
-                          : Schema.decodeUnknownSync(ProjectList)(value);
-                      resolve(decoded as ControlResponse<Request>);
-                    } catch {
-                      reject();
-                    }
-                  },
-                  reject,
-                };
-                socket.write(`${JSON.stringify(request)}\n`);
-                socket.flush();
-              }),
-            catch: safeUnavailable,
-          }),
-        close: Effect.sync(() => socket.end()),
-      } satisfies LocalTransport;
-    },
-    catch: safeUnavailable,
-  });
+export const connectUnixControlClient = (socketPath: string) =>
+  Effect.gen(function* () {
+    const socket = yield* BunSocket.makeNet({ path: socketPath });
+    const protocol = yield* RpcClient.makeProtocolSocket({
+      retryTransientErrors: false,
+    }).pipe(
+      Effect.provideService(Socket.Socket, socket),
+      Effect.provideService(RpcSerialization.RpcSerialization, RpcSerialization.ndjson),
+    );
+    return yield* RpcClient.make(KojoControl).pipe(
+      Effect.provideService(RpcClient.Protocol, protocol),
+    );
+  }).pipe(Effect.mapError(safeUnavailable));
 
 export const defaultSocketPath = () => {
   const runtimeDirectory = process.env.XDG_RUNTIME_DIR;
@@ -180,6 +114,6 @@ export const activateKojoHost = Effect.tryPromise({
 
 export const makeDefaultLocalClient = (socketPath = defaultSocketPath()) =>
   makeLocalClient({
-    connect: connectUnixTransport(socketPath),
+    connect: connectUnixControlClient(socketPath),
     activate: activateKojoHost,
   });

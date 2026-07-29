@@ -91,6 +91,7 @@
       "name": "@kojo/control",
       "version": "0.1.0",
       "dependencies": {
+        "@effect/platform-bun": "4.0.0-beta.102",
         "@kojo/workflow": "workspace:*",
         "effect": "4.0.0-beta.102",
       },

@@ -47,7 +47,9 @@ export function VisualizerHome(props: VisualizerHomeProps) {
         <Show when={overview()}>
           {(current) => (
             <section aria-live="polite" class="space-y-2 rounded-lg border p-4">
-              <h2 class="font-semibold text-lg">Kojo Host {current().host.hostVersion} is ready</h2>
+              <h2 class="font-semibold text-lg">
+                Connected to Kojo Host {current().host.hostVersion}
+              </h2>
               <p class="text-muted-foreground text-sm">
                 {current().projects.length === 0
                   ? "No Kojo Projects yet."

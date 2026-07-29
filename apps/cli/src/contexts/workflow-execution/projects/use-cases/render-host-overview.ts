@@ -2,7 +2,12 @@ import type { HostOverview } from "@kojo/control";
 
 export const renderHostOverview = (overview: HostOverview, json: boolean) => {
   if (json) {
-    return `${JSON.stringify({ version: 1, command: "project.list", data: overview })}\n`;
+    return `${JSON.stringify({
+      schemaVersion: 1,
+      command: "project.list",
+      result: overview,
+      warnings: [],
+    })}\n`;
   }
 
   const { host, projects } = overview;

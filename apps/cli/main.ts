@@ -24,14 +24,14 @@ export const runCli = (args: ReadonlyArray<string>) => {
     client.getHostOverview.pipe(
       Effect.match({
         onFailure: (error) => {
-          const message =
+          const failure =
             error instanceof IncompatibleProtocolError
-              ? error.message
+              ? `${error.message}\nNext: Upgrade Kojo Host or this CLI so their protocol major versions match.`
               : error instanceof LocalTransportError
-                ? error.message
-                : "Kojo Host request failed.";
-          process.stderr.write(`${message}\n`);
-          return error instanceof IncompatibleProtocolError ? 5 : 4;
+                ? `${error.message}\nNext: Start the Kojo Host and try again.`
+                : "Kojo Host request failed.\nNext: Try the command again.";
+          process.stderr.write(`${failure}\n`);
+          return 3;
         },
         onSuccess: (overview) => {
           process.stdout.write(renderHostOverview(overview, json));

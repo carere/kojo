@@ -2,10 +2,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "@effect/vitest";
+import { LocalTransportError } from "@kojo/control/local-client";
 import { Effect } from "effect";
 import { FetchHttpClient } from "effect/unstable/http";
 import { RpcTest } from "effect/unstable/rpc";
-import { VisualizerApi } from "../../../src/contexts/shared/models/contracts";
+import { HostOverviewError, VisualizerApi } from "../../../src/contexts/shared/models/contracts";
 import { disposeApi, handleApiRequest } from "../../../src/contexts/shared/server";
 import { VisualizerApiHandlers } from "../../../src/contexts/shared/server/handlers";
 import {
@@ -39,6 +40,28 @@ describe("visualizer health", () => {
           },
           projects: [],
         }),
+      }),
+    ),
+  );
+
+  it.effect("preserves safe Host transport failures as typed browser-operation errors", () =>
+    Effect.gen(function* () {
+      const client = yield* RpcTest.makeClient(VisualizerApi);
+      const error = yield* Effect.flip(client.HostOverview());
+
+      expect(error).toEqual(
+        new HostOverviewError({
+          code: "host-unavailable",
+          message: "Kojo Host is unavailable.",
+          next: "Start the Kojo Host and try again.",
+        }),
+      );
+    }).pipe(
+      Effect.provide(VisualizerApiHandlers),
+      Effect.provideService(HostControlClient, {
+        getHostOverview: Effect.fail(
+          new LocalTransportError({ message: "Kojo Host is unavailable." }),
+        ),
       }),
     ),
   );

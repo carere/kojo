@@ -2,7 +2,7 @@ import { expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 import {
   IncompatibleProtocolError,
-  type LocalTransport,
+  type KojoControlClient,
   LocalTransportError,
   makeLocalClient,
 } from "../../src/local-client";
@@ -13,46 +13,46 @@ const handshake = {
   capabilities: ["projects:list"],
 } as const;
 
+const controlClient = (
+  requests: Array<string>,
+  host:
+    | typeof handshake
+    | { readonly protocol: { readonly major: 2; readonly minor: 0 } } = handshake,
+) =>
+  ({
+    Negotiate: () => {
+      requests.push("Negotiate");
+      return Effect.succeed(host);
+    },
+    ListProjects: () => {
+      requests.push("ListProjects");
+      return Effect.succeed({ projects: [] });
+    },
+  }) as unknown as KojoControlClient;
+
 it.effect("negotiates before reading the authoritative Project list", () =>
   Effect.gen(function* () {
     const requests: Array<string> = [];
-    const transport: LocalTransport = {
-      request: (request) => {
-        requests.push(request.operation);
-        return Effect.succeed(
-          request.operation === "negotiate" ? handshake : { projects: [] },
-        ) as never;
-      },
-      close: Effect.void,
-    };
 
-    const client = makeLocalClient({ connect: Effect.succeed(transport) });
+    const client = makeLocalClient({ connect: Effect.succeed(controlClient(requests)) });
     const overview = yield* client.getHostOverview;
 
     expect(overview).toEqual({ host: handshake, projects: [] });
-    expect(requests).toEqual(["negotiate", "projects.list"]);
+    expect(requests).toEqual(["Negotiate", "ListProjects"]);
   }),
 );
 
 it.effect("stops before Project lifecycle work when the protocol major is incompatible", () =>
   Effect.gen(function* () {
     const requests: Array<string> = [];
-    const transport: LocalTransport = {
-      request: (request) => {
-        requests.push(request.operation);
-        return Effect.succeed({
-          ...handshake,
-          protocol: { major: 2, minor: 0 },
-        }) as never;
-      },
-      close: Effect.void,
-    };
 
-    const client = makeLocalClient({ connect: Effect.succeed(transport) });
+    const client = makeLocalClient({
+      connect: Effect.succeed(controlClient(requests, { protocol: { major: 2, minor: 0 } })),
+    });
     const error = yield* Effect.flip(client.getHostOverview);
 
     expect(error).toBeInstanceOf(IncompatibleProtocolError);
-    expect(requests).toEqual(["negotiate"]);
+    expect(requests).toEqual(["Negotiate"]);
   }),
 );
 
@@ -60,11 +60,7 @@ it.effect("activates once and retries discovery within a bound", () =>
   Effect.gen(function* () {
     let attempts = 0;
     let activations = 0;
-    const transport: LocalTransport = {
-      request: (request) =>
-        Effect.succeed(request.operation === "negotiate" ? handshake : { projects: [] }) as never,
-      close: Effect.void,
-    };
+    const transport = controlClient([]);
     const client = makeLocalClient({
       connect: Effect.suspend(() => {
         attempts += 1;

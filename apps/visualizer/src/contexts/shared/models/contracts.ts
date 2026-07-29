@@ -9,8 +9,18 @@ export const Health = Rpc.make("Health", {
   }),
 });
 
+export class HostOverviewError extends Schema.TaggedErrorClass<HostOverviewError>()(
+  "HostOverviewError",
+  {
+    code: Schema.Literals(["host-unavailable", "incompatible-protocol"]),
+    message: Schema.String,
+    next: Schema.String,
+  },
+) {}
+
 export const HostOverview = Rpc.make("HostOverview", {
   success: HostOverviewSchema,
+  error: HostOverviewError,
 });
 
 export const VisualizerApi = RpcGroup.make(Health, HostOverview);

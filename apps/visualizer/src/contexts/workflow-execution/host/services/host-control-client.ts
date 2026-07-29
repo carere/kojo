@@ -1,9 +1,17 @@
 import type { HostOverview } from "@kojo/control";
-import { defaultSocketPath, makeDefaultLocalClient } from "@kojo/control/local-client";
+import {
+  defaultSocketPath,
+  type IncompatibleProtocolError,
+  type LocalTransportError,
+  makeDefaultLocalClient,
+} from "@kojo/control/local-client";
 import { Context, Effect, Layer } from "effect";
 
 export interface HostControlClientShape {
-  readonly getHostOverview: Effect.Effect<HostOverview>;
+  readonly getHostOverview: Effect.Effect<
+    HostOverview,
+    LocalTransportError | IncompatibleProtocolError
+  >;
 }
 
 export class HostControlClient extends Context.Service<HostControlClient, HostControlClientShape>()(
@@ -11,9 +19,8 @@ export class HostControlClient extends Context.Service<HostControlClient, HostCo
 ) {}
 
 export const HostControlClientLive = Layer.succeed(HostControlClient, {
-  getHostOverview: Effect.suspend(() =>
-    makeDefaultLocalClient(
-      process.env.KOJO_HOST_SOCKET ?? defaultSocketPath(),
-    ).getHostOverview.pipe(Effect.orDie),
+  getHostOverview: Effect.suspend(
+    () =>
+      makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath()).getHostOverview,
   ),
 });

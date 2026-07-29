@@ -40,7 +40,7 @@ tasks:
     type: test
 
   browser-test:
-    command: bun --bun vitest run --project browser
+    command: bun --bun vitest run --project browser --project browser-e2e
     description: Run visualizer browser tests
     inputs:
       - "@group(configs)"

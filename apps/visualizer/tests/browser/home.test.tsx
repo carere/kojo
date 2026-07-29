@@ -52,7 +52,7 @@ test("switches to the dark color mode", async () => {
   expect(document.documentElement.style.colorScheme).toBe("dark");
 });
 
-test("shows Host readiness and the authoritative empty Project state", async () => {
+test("shows Host connectivity and the authoritative empty Project state", async () => {
   setLocale("en", { reload: false });
   const root = document.createElement("div");
   document.body.append(root);
@@ -76,6 +76,6 @@ test("shows Host readiness and the authoritative empty Project state", async () 
     root,
   );
 
-  await expect.element(page.getByText("Kojo Host 0.1.0 is ready")).toBeVisible();
+  await expect.element(page.getByText("Connected to Kojo Host 0.1.0")).toBeVisible();
   await expect.element(page.getByText("No Kojo Projects yet.")).toBeVisible();
 });
