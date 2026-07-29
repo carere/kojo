@@ -119,6 +119,13 @@ describe("Drizzle Project store recovery", () => {
         )
         .run(),
     ).toThrow();
+    expect(() =>
+      database
+        .query(
+          "INSERT INTO kojo_retention_policy(singleton_key, row_version, updated_at_ms) VALUES (1, 0, -1)",
+        )
+        .run(),
+    ).toThrow();
     database.close();
   });
 });
@@ -139,21 +146,13 @@ const initializedProject = async (prefix: string) => {
   await chmod(metadataPath, 0o600);
   const databasePath = join(dataPath, "kojo.sqlite");
   const database = new Database(databasePath, { create: true, strict: true });
-  database.exec(`CREATE TABLE kojo_store_metadata (
+  database.exec(`CREATE TABLE kojo_project_store_identity (
     singleton_key INTEGER PRIMARY KEY NOT NULL CHECK (singleton_key = 1),
     project_identity TEXT NOT NULL UNIQUE,
-    database_instance_id TEXT NOT NULL UNIQUE,
-    store_format_version INTEGER NOT NULL,
-    engine_adapter_kind TEXT NOT NULL,
-    engine_adapter_schema_version INTEGER NOT NULL,
-    effect_family_version TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL,
-    last_migrated_at_ms INTEGER NOT NULL
+    database_instance_id TEXT NOT NULL UNIQUE
   ) STRICT`);
   database
-    .query(
-      "INSERT INTO kojo_store_metadata VALUES (1, ?, ?, 0, 'effect-workflow', 1, '4.0.0-beta.102', 1, 1)",
-    )
+    .query("INSERT INTO kojo_project_store_identity VALUES (1, ?, ?)")
     .run(identity, randomUUID());
   database.exec("PRAGMA user_version = 0");
   database.close();

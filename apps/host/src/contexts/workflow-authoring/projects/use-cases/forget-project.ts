@@ -75,108 +75,108 @@ export const forgetProject = (
       );
     }
 
-    const result = yield* runtime.coordinateForget(project, (blockers) =>
-      store.update((latest) =>
-        Effect.gen(function* () {
-          const currentReceipt = latest.receipts.find(
-            (candidate) => candidate.requestKey === requestKey,
-          );
-          if (currentReceipt !== undefined) {
-            return {
-              state: latest,
-              result:
-                currentReceipt.operation === "forget" &&
-                currentReceipt.fingerprint === requestFingerprint
-                  ? replay(currentReceipt.result)
-                  : requestConflict(requestKey),
-            };
-          }
-          const currentProject = latest.projects.find(
-            (candidate) => candidate.identity === identity,
-          );
-          if (currentProject === undefined || !selectorMatchesProject(selector, currentProject)) {
-            const result = mutationFailure(
-              requestKey,
-              "project-not-found",
-              "Kojo Project was not found in the Project Index.",
-              "Choose a listed Project Identity.",
-              { kind: "project", identity },
-              [],
+    return yield* runtime.coordinateForget(project, (blockers) =>
+      store
+        .update((latest) =>
+          Effect.gen(function* () {
+            const currentReceipt = latest.receipts.find(
+              (candidate) => candidate.requestKey === requestKey,
             );
-            return {
-              state: record(
-                latest,
+            if (currentReceipt !== undefined) {
+              return {
+                state: latest,
+                result:
+                  currentReceipt.operation === "forget" &&
+                  currentReceipt.fingerprint === requestFingerprint
+                    ? replay(currentReceipt.result)
+                    : requestConflict(requestKey),
+              };
+            }
+            const currentProject = latest.projects.find(
+              (candidate) => candidate.identity === identity,
+            );
+            if (currentProject === undefined || !selectorMatchesProject(selector, currentProject)) {
+              const result = mutationFailure(
                 requestKey,
-                "forget",
-                input,
+                "project-not-found",
+                "Kojo Project was not found in the Project Index.",
+                "Choose a listed Project Identity.",
+                { kind: "project", identity },
+                [],
+              );
+              return {
+                state: record(
+                  latest,
+                  requestKey,
+                  "forget",
+                  input,
+                  result,
+                  selectorLookupKey(selector),
+                ),
                 result,
-                selectorLookupKey(selector),
-              ),
-              result,
-            };
-          }
+              };
+            }
 
-          if (blockers.assessment === "unavailable") {
-            const result = mutationFailure(
-              requestKey,
-              "project-forget-blocked",
-              "Kojo could not verify that Project execution state is safe to forget.",
-              "Restore Project database readiness and retry.",
-              { kind: "project", identity },
-              ["store.open-failed"],
-            );
-            return {
-              state: record(
-                latest,
+            if (blockers.assessment === "unavailable") {
+              const result = mutationFailure(
                 requestKey,
-                "forget",
-                input,
+                "project-forget-blocked",
+                "Kojo could not verify that Project execution state is safe to forget.",
+                "Restore Project database readiness and retry.",
+                { kind: "project", identity },
+                ["store.open-failed"],
+              );
+              return {
+                state: record(
+                  latest,
+                  requestKey,
+                  "forget",
+                  input,
+                  result,
+                  selectorLookupKey(selector),
+                ),
                 result,
-                selectorLookupKey(selector),
-              ),
-              result,
-            };
-          }
-          if (blockers.enabledScheduleKeys.length > 0 || blockers.nonFinalRunIds.length > 0) {
-            const result = mutationFailure(
-              requestKey,
-              "project-forget-blocked",
-              "Kojo Project cannot be forgotten while it has enabled Workflow Schedules or non-final Workflow Runs.",
-              "Disable every Workflow Schedule and finish or stop every non-final Workflow Run, then retry.",
-              { kind: "project", identity },
-              [],
-            );
-            return {
-              state: record(
-                latest,
+              };
+            }
+            if (blockers.enabledScheduleKeys.length > 0 || blockers.nonFinalRunIds.length > 0) {
+              const result = mutationFailure(
                 requestKey,
-                "forget",
-                input,
+                "project-forget-blocked",
+                "Kojo Project cannot be forgotten while it has enabled Workflow Schedules or non-final Workflow Runs.",
+                "Disable every Workflow Schedule and finish or stop every non-final Workflow Run, then retry.",
+                { kind: "project", identity },
+                [],
+              );
+              return {
+                state: record(
+                  latest,
+                  requestKey,
+                  "forget",
+                  input,
+                  result,
+                  selectorLookupKey(selector),
+                ),
                 result,
-                selectorLookupKey(selector),
-              ),
-              result,
-            };
-          }
+              };
+            }
 
-          const result = successfulMutation(requestKey, project, false);
-          const nextState = record(
-            {
-              ...latest,
-              projects: latest.projects.filter((candidate) => candidate.identity !== identity),
-            },
-            requestKey,
-            "forget",
-            input,
-            result,
-            selectorLookupKey(selector),
-          );
-          return { state: nextState, result };
-        }),
-      ),
+            const result = successfulMutation(requestKey, project, false);
+            const nextState = record(
+              {
+                ...latest,
+                projects: latest.projects.filter((candidate) => candidate.identity !== identity),
+              },
+              requestKey,
+              "forget",
+              input,
+              result,
+              selectorLookupKey(selector),
+            );
+            return { state: nextState, result };
+          }),
+        )
+        .pipe(Effect.map((result) => ({ deactivate: result.ok, result }))),
     );
-    if (result.ok) yield* runtime.deactivate(project);
-    return result;
   });
 
 export const replayForgetProject = (

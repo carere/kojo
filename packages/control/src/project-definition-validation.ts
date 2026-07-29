@@ -87,3 +87,41 @@ export const validateProjectDefinitionSubprocessResult = (
     return unavailableProjectDefinition();
   }
 };
+
+export const selectProjectDefinitionInstallCommand = (
+  hasProjectFile: (name: string) => boolean,
+) => {
+  if (hasProjectFile("bun.lock") || hasProjectFile("bun.lockb")) {
+    return "bun add @kojo/workflow";
+  }
+  if (hasProjectFile("pnpm-lock.yaml")) return "pnpm add @kojo/workflow";
+  if (hasProjectFile("yarn.lock")) return "yarn add @kojo/workflow";
+  return "npm install @kojo/workflow";
+};
+
+export interface ProjectDefinitionValidationProcess {
+  readonly exited: Promise<number>;
+  readonly kill: () => void;
+}
+
+export const validateProjectDefinitionInSubprocessWith = async (
+  start: (receive: (envelope: unknown) => void) => ProjectDefinitionValidationProcess,
+  timeoutMs: number,
+): Promise<ProjectDefinitionValidation> => {
+  let envelope: unknown;
+  const child = start((message) => {
+    envelope = message;
+  });
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    child.kill();
+  }, timeoutMs);
+  const exitCode = await child.exited;
+  clearTimeout(timeout);
+  return validateProjectDefinitionSubprocessResult({
+    timedOut,
+    exitCode,
+    ...(envelope === undefined ? {} : { envelope }),
+  });
+};

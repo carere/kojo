@@ -542,6 +542,8 @@ export const retentionPolicy = sqliteTable(
   },
   (table) => [
     check("retention_policy_singleton", sql`${table.singletonKey} = 1`),
+    check("retention_policy_row_version_positive", sql`${table.rowVersion} > 0`),
+    check("retention_policy_updated_non_negative", sql`${table.updatedAtMs} >= 0`),
     check(
       "retention_diagnostic_age_positive",
       sql`${table.diagnosticMaxAgeMs} IS NULL OR ${table.diagnosticMaxAgeMs} > 0`,

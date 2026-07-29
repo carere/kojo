@@ -229,11 +229,23 @@ const assertVersionZero = (connection: Database, project: { readonly identity: s
   const objects = connection
     .query("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
     .all() as ReadonlyArray<{ readonly name: string }>;
-  if (objects.length === 0) return;
-  if (objects.length !== 1 || objects[0]?.name !== "kojo_store_metadata") {
+  if (objects.length !== 1 || objects[0]?.name !== "kojo_project_store_identity") {
     throw new Error("unsupported version-zero Project store");
   }
-  assertStoreMetadata(connection, project, 0);
+  const identity = connection
+    .query(
+      "SELECT project_identity, database_instance_id FROM kojo_project_store_identity WHERE singleton_key = 1",
+    )
+    .get() as
+    | { readonly database_instance_id: string; readonly project_identity: string }
+    | undefined;
+  if (
+    identity?.project_identity !== project.identity ||
+    identity.database_instance_id.length === 0
+  ) {
+    throw new Error("version-zero Project store identity mismatch");
+  }
+  return identity.database_instance_id;
 };
 
 const assertCurrentSchema = (connection: Database, project: { readonly identity: string }) => {
@@ -310,8 +322,9 @@ export const migrateProjectStore = (project: {
     assertIntegrity(connection);
     const current = version(connection);
     if (current > CURRENT_VERSION) throw new Error("unsupported Project store version");
-    if (current === 0) assertVersionZero(connection, project);
-    else assertStoreMetadata(connection, project, current);
+    const versionZeroDatabaseId =
+      current === 0 ? assertVersionZero(connection, project) : undefined;
+    if (current !== 0) assertStoreMetadata(connection, project, current);
     if (current === CURRENT_VERSION) {
       assertCurrentSchema(connection, project);
     }
@@ -329,6 +342,9 @@ export const migrateProjectStore = (project: {
       verifyBackup(backupPath, project);
     }
     if (current < CURRENT_VERSION) {
+      if (versionZeroDatabaseId === undefined) {
+        throw new Error("version-zero Project store identity is unavailable");
+      }
       migrate(drizzle(connection), {
         migrationsFolder: migrationFolder,
         migrationsTable: "kojo_schema_migrations",
@@ -340,13 +356,14 @@ export const migrateProjectStore = (project: {
         )
         .run(
           project.identity,
-          randomUUID(),
+          versionZeroDatabaseId,
           ENGINE_ADAPTER_KIND,
           ENGINE_ADAPTER_SCHEMA_VERSION,
           EFFECT_FAMILY_VERSION,
           migratedAt,
           migratedAt,
         );
+      connection.exec("DROP TABLE kojo_project_store_identity");
       connection
         .query(
           "UPDATE kojo_store_metadata SET database_instance_id = COALESCE(NULLIF(database_instance_id, ''), ?), store_format_version = ?, engine_adapter_kind = ?, engine_adapter_schema_version = ?, effect_family_version = ?, last_migrated_at_ms = ? WHERE singleton_key = 1 AND project_identity = ?",
@@ -492,7 +509,14 @@ export const DrizzleProjectStoreLive = Layer.sync(ProjectStore, () => {
     completeMigration: (project, succeeded) =>
       Effect.sync(() => {
         try {
-          return completeProjectStoreMigration(project, succeeded);
+          const completed = completeProjectStoreMigration(project, succeeded);
+          if (completed) {
+            const prefix = `${project.path}:`;
+            for (const attempt of attemptedMigrations) {
+              if (attempt.startsWith(prefix)) attemptedMigrations.delete(attempt);
+            }
+          }
+          return completed;
         } catch {
           return false;
         }

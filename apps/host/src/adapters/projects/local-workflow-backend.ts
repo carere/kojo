@@ -1,13 +1,15 @@
+import { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { BunCrypto } from "@effect/platform-bun";
 import { SqliteClient } from "@effect/sql-sqlite-bun";
 import type { ProjectSnapshot } from "@kojo/control";
-import { Context, Effect, Exit, Layer, Option, Scope } from "effect";
+import { Context, Duration, Effect, Exit, Layer, Option, Scope } from "effect";
 import {
   ClusterWorkflowEngine,
   RunnerAddress,
   ShardId,
   Sharding,
+  ShardingConfig,
   SingleRunner,
 } from "effect/unstable/cluster";
 import { SqlClient } from "effect/unstable/sql";
@@ -18,6 +20,9 @@ import {
 } from "../../contexts/workflow-execution/projects/services/workflow-backend";
 
 const databasePath = (project: ProjectSnapshot) => join(project.path, ".kojo", "kojo.sqlite");
+const shardLockExpirationSeconds = Math.ceil(
+  Duration.toSeconds(ShardingConfig.defaults.shardLockExpiration),
+);
 
 const configure = (sql: SqlClient.SqlClient) =>
   Effect.gen(function* () {
@@ -99,15 +104,53 @@ export const makeLocalWorkflowBackendLayer = (hostIdentity: string) =>
           }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)));
         }).pipe(Effect.catchCause(() => close(project.path).pipe(Effect.as(false))));
 
+      const postflight = (project: ProjectSnapshot) =>
+        Effect.gen(function* () {
+          const backend = active.get(project.path);
+          if (backend === undefined || (yield* backend.sharding.isShutdown)) return false;
+          if (!(yield* waitForOwnership(backend.sharding))) return false;
+          yield* backend.sharding.getSnowflake;
+          return backend.engine !== undefined;
+        }).pipe(Effect.catchCause(() => Effect.succeed(false)));
+
+      const hasForeignOwnership = (project: ProjectSnapshot) =>
+        Effect.sync(() => {
+          const connection = new Database(databasePath(project), {
+            create: false,
+            readonly: true,
+            strict: true,
+          });
+          try {
+            const lockTable = connection
+              .query(
+                "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'cluster_locks'",
+              )
+              .get() as { readonly present: number } | undefined;
+            if (lockTable?.present !== 1) return false;
+            const lock = connection
+              .query(
+                "SELECT 1 AS present FROM cluster_locks WHERE address <> ? AND acquired_at >= datetime('now', ?) LIMIT 1",
+              )
+              .get(
+                `${ownerAddress.host}:${ownerAddress.port}`,
+                `-${shardLockExpirationSeconds} seconds`,
+              ) as { readonly present: number } | undefined;
+            return lock?.present === 1;
+          } finally {
+            connection.close();
+          }
+        }).pipe(Effect.catchCause(() => Effect.succeed(true)));
+
       return {
         initialize: acquire,
+        postflight,
         readiness: (project: ProjectSnapshot): Effect.Effect<WorkflowBackendAssessment> =>
           Effect.gen(function* () {
             const backend = active.get(project.path);
-            if (backend === undefined) return "uninitialized";
-            if (yield* backend.sharding.isShutdown) return "needs-attention";
-            if (!(yield* waitForOwnership(backend.sharding))) return "needs-attention";
-            return backend.engine === undefined ? "needs-attention" : "ready";
+            if (backend === undefined) {
+              return (yield* hasForeignOwnership(project)) ? "needs-attention" : "uninitialized";
+            }
+            return (yield* postflight(project)) ? "ready" : "needs-attention";
           }).pipe(Effect.catchCause(() => Effect.succeed("needs-attention" as const))),
         release: (project: ProjectSnapshot) => close(project.path),
       };

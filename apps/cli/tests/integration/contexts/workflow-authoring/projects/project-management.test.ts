@@ -29,6 +29,49 @@ afterEach(async () => {
 });
 
 describe("Kojo Project discovery", () => {
+  it("rejects an empty replacement for an initialized Project database", async () => {
+    const directory = await temporaryDirectory("kojo-project-replaced-store-");
+    const project = join(directory, "project");
+    await git(["init", project]);
+    const unavailableSocket = join(directory, "missing.sock");
+    expect((await runCli(["init", project], unavailableSocket, directory)).exitCode).toBe(0);
+    const databasePath = join(project, ".kojo", "kojo.sqlite");
+    await unlink(databasePath);
+    const replacement = new Database(databasePath, { create: true });
+    replacement.exec("PRAGMA user_version = 0");
+    replacement.close();
+    await chmod(databasePath, 0o600);
+
+    const repeated = await runCli(["init", project, "--json"], unavailableSocket, directory);
+    expect(repeated.exitCode).toBe(1);
+    expect(JSON.parse(repeated.stdout).error.code).toBe("project-initialization-failed");
+  });
+
+  it("rejects a version-zero migration backup bound to another Project", async () => {
+    const directory = await temporaryDirectory("kojo-project-foreign-v0-backup-");
+    const first = join(directory, "first");
+    const second = join(directory, "second");
+    await git(["init", first]);
+    await git(["init", second]);
+    const unavailableSocket = join(directory, "missing.sock");
+    expect((await runCli(["init", first], unavailableSocket, directory)).exitCode).toBe(0);
+    expect((await runCli(["init", second], unavailableSocket, directory)).exitCode).toBe(0);
+    const secondDatabase = join(second, ".kojo", "kojo.sqlite");
+    await cp(join(first, ".kojo", "kojo.sqlite"), `${secondDatabase}.migration-backup`);
+    await chmod(`${secondDatabase}.migration-backup`, 0o600);
+
+    const host = await startKojoHostProcess();
+    cleanups.push(host.stop);
+    const refused = await runCli(
+      ["project", "register", second, "--request-key", "foreign-v0", "--json"],
+      host.socketPath,
+      directory,
+    );
+    expect(refused.exitCode).toBe(1);
+    expect(JSON.parse(refused.stdout).error.findingKeys).toEqual(["store.migration-failed"]);
+    expect(await Bun.file(`${secondDatabase}.migration-backup`).exists()).toBe(true);
+  });
+
   it("filters and paginates Project lists with the settled JSON envelope", async () => {
     const directory = await temporaryDirectory("kojo-project-list-page-");
     const host = await startKojoHostProcess();
@@ -768,6 +811,44 @@ describe("Kojo Project discovery", () => {
       directory,
     );
     expect(registered, registered.stderr).toMatchObject({ exitCode: 0 });
+  });
+
+  it("keeps concurrent register and forget ownership consistent with the Project Index", async () => {
+    const directory = await temporaryDirectory("kojo-project-register-forget-race-");
+    const project = join(directory, "project");
+    await git(["init", project]);
+    const firstHost = await startKojoHostProcess();
+    cleanups.push(firstHost.stop);
+    expect((await runCli(["init", project], firstHost.socketPath, directory)).exitCode).toBe(0);
+    const identity = JSON.parse(await readFile(join(project, ".kojo", "project.json"), "utf8"))
+      .projectIdentity as string;
+
+    const [forgotten, registered] = await Promise.all([
+      runCli(
+        ["project", "forget", "--project-id", identity, "--request-key", "race-forget"],
+        firstHost.socketPath,
+        directory,
+      ),
+      runCli(
+        ["project", "register", project, "--request-key", "race-register"],
+        firstHost.socketPath,
+        directory,
+      ),
+    ]);
+    expect(forgotten.exitCode).toBe(0);
+    expect(registered.exitCode).toBe(0);
+    const indexed = JSON.parse(
+      (await runCli(["project", "list", "--json"], firstHost.socketPath, directory)).stdout,
+    ).result.items as ReadonlyArray<unknown>;
+
+    const secondHost = await startKojoHostProcess();
+    cleanups.push(secondHost.stop);
+    const reacquired = await runCli(
+      ["project", "register", project, "--request-key", "race-probe", "--json"],
+      secondHost.socketPath,
+      directory,
+    );
+    expect(reacquired.exitCode).toBe(indexed.length === 0 ? 0 : 1);
   });
 
   it("releases the old runtime when a moved Project is forgotten", async () => {

@@ -166,10 +166,18 @@ const appendIgnoreRule = async (path: string, rule: string) => {
   }
 };
 
-const createDatabase = async (path: string, _identity: ProjectSnapshot["identity"]) => {
+const createDatabase = async (path: string, identity: ProjectSnapshot["identity"]) => {
   const temporaryPath = `${path}.${randomUUID()}.tmp`;
   try {
     const database = new Database(temporaryPath, { create: true, strict: true });
+    database.exec(`CREATE TABLE kojo_project_store_identity (
+      singleton_key INTEGER PRIMARY KEY NOT NULL CHECK (singleton_key = 1),
+      project_identity TEXT NOT NULL UNIQUE,
+      database_instance_id TEXT NOT NULL UNIQUE
+    ) STRICT`);
+    database
+      .query("INSERT INTO kojo_project_store_identity VALUES (1, ?, ?)")
+      .run(identity, randomUUID());
     database.exec("PRAGMA user_version = 0");
     database.close();
     await chmod(temporaryPath, 0o600);
@@ -193,8 +201,20 @@ const validateDatabase = (path: string, identity: ProjectSnapshot["identity"]) =
     const userObjects = database
       .query("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
       .all() as ReadonlyArray<{ readonly name: string }>;
+    const bootstrap =
+      version?.user_version === 0 &&
+      userObjects.length === 1 &&
+      userObjects[0]?.name === "kojo_project_store_identity"
+        ? (database
+            .query(
+              "SELECT project_identity, database_instance_id FROM kojo_project_store_identity WHERE singleton_key = 1",
+            )
+            .get() as
+            | { readonly database_instance_id: string; readonly project_identity: string }
+            | undefined)
+        : undefined;
     const metadata =
-      version?.user_version === 0 && userObjects.length === 0
+      version?.user_version === 0
         ? undefined
         : (database
             .query(
@@ -207,7 +227,9 @@ const validateDatabase = (path: string, identity: ProjectSnapshot["identity"]) =
       check?.quick_check !== "ok" ||
       ![0, 1].includes(version?.user_version ?? -1) ||
       (version?.user_version === 0
-        ? userObjects.length !== 0
+        ? userObjects.length !== 1 ||
+          bootstrap?.project_identity !== identity ||
+          bootstrap.database_instance_id.length === 0
         : metadata?.project_identity !== identity ||
           metadata.store_format_version !== version?.user_version)
     ) {

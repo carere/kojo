@@ -25,9 +25,10 @@ export interface ProjectRuntimeShape {
   ) => Effect.Effect<ProjectForgetBlockers>;
   readonly coordinateForget: <A>(
     project: ProjectSnapshot,
-    operation: (blockers: ProjectForgetBlockers) => Effect.Effect<A>,
+    operation: (
+      blockers: ProjectForgetBlockers,
+    ) => Effect.Effect<{ readonly deactivate: boolean; readonly result: A }>,
   ) => Effect.Effect<A>;
-  readonly deactivate: (project: ProjectSnapshot) => Effect.Effect<void>;
 }
 
 export class ProjectRuntime extends Context.Service<ProjectRuntime, ProjectRuntimeShape>()(
@@ -63,6 +64,24 @@ export const ProjectRuntimeLive = Layer.effect(
         );
         return result;
       });
+    const activate = (project: ProjectSnapshot) =>
+      Effect.gen(function* () {
+        yield* backend.release(project);
+        if (!(yield* store.migrate(project))) return false;
+        const initialized = yield* backend.initialize(project);
+        const backendReady = initialized && (yield* backend.postflight(project));
+        if (!backendReady) {
+          yield* backend.release(project);
+          yield* store.completeMigration(project, false);
+          return false;
+        }
+        const completed = yield* store.completeMigration(project, true);
+        if (!completed) {
+          yield* backend.release(project);
+          yield* store.completeMigration(project, false);
+        }
+        return completed;
+      });
     return {
       coordinateRegistration: <A>(
         project: ProjectSnapshot,
@@ -87,26 +106,12 @@ export const ProjectRuntimeLive = Layer.effect(
               const storeCondition = yield* store.readiness(project);
               if (storeCondition === "ready") {
                 const backendCondition = yield* backend.readiness(project);
-                if (backendCondition === "ready") return yield* operation(true);
+                if (backendCondition === "ready") {
+                  return yield* operation(yield* backend.postflight(project));
+                }
                 if (backendCondition === "needs-attention") return yield* operation(false);
-              } else {
-                yield* backend.release(project);
-                if (!(yield* store.migrate(project))) return yield* operation(false);
               }
-              const initialized = yield* backend.initialize(project);
-              const backendReady = initialized && (yield* backend.readiness(project)) === "ready";
-              if (!backendReady) {
-                yield* backend.release(project);
-                if (storeCondition !== "ready") yield* store.completeMigration(project, false);
-                return yield* operation(false);
-              }
-              const completed =
-                storeCondition === "ready" ? true : yield* store.completeMigration(project, true);
-              if (!completed) {
-                yield* backend.release(project);
-                yield* store.completeMigration(project, false);
-              }
-              return yield* operation(completed);
+              return yield* operation(yield* activate(project));
             }),
           ),
         ),
@@ -122,10 +127,13 @@ export const ProjectRuntimeLive = Layer.effect(
                 const storeCondition = yield* store.readiness(indexedProject);
                 if (storeCondition !== "ready") return storeCondition;
                 const backendCondition = yield* backend.readiness(indexedProject);
-                if (backendCondition === "ready") return "ready" as const;
+                if (backendCondition === "ready") {
+                  return (yield* backend.postflight(indexedProject))
+                    ? ("ready" as const)
+                    : ("needs-attention" as const);
+                }
                 if (backendCondition === "needs-attention") return "needs-attention" as const;
-                const initialized = yield* backend.initialize(indexedProject);
-                return initialized && (yield* backend.readiness(indexedProject)) === "ready"
+                return (yield* activate(indexedProject))
                   ? ("ready" as const)
                   : ("needs-attention" as const);
               }),
@@ -134,9 +142,18 @@ export const ProjectRuntimeLive = Layer.effect(
         serialize(project, store.inspectForgetBlockers(project)),
       coordinateForget: <A>(
         project: ProjectSnapshot,
-        operation: (blockers: ProjectForgetBlockers) => Effect.Effect<A>,
-      ) => serialize(project, Effect.flatMap(store.inspectForgetBlockers(project), operation)),
-      deactivate: (project) => serialize(project, backend.release(project)),
+        operation: (
+          blockers: ProjectForgetBlockers,
+        ) => Effect.Effect<{ readonly deactivate: boolean; readonly result: A }>,
+      ) =>
+        serialize(
+          project,
+          Effect.gen(function* () {
+            const outcome = yield* operation(yield* store.inspectForgetBlockers(project));
+            if (outcome.deactivate) yield* backend.release(project);
+            return outcome.result;
+          }),
+        ),
     };
   }),
 );

@@ -15,6 +15,7 @@ const project: ProjectSnapshot = {
 
 const backend = Layer.succeed(WorkflowBackend, {
   initialize: () => Effect.succeed(true),
+  postflight: () => Effect.succeed(true),
   readiness: () => Effect.succeed("ready" as const),
   release: () => Effect.void,
 });
@@ -114,6 +115,7 @@ it.effect("holds forget behind an active lifecycle mutation", () => {
         runtime.coordinateForget(project, () =>
           Effect.sync(() => {
             order.push("forget");
+            return { deactivate: false, result: undefined };
           }),
         ),
       ],
@@ -145,10 +147,11 @@ it.effect("commits migration only after the Workflow backend acquires ownership"
       }),
   });
   const initializingBackend = Layer.succeed(WorkflowBackend, {
-    readiness: () =>
+    readiness: () => Effect.succeed("uninitialized" as const),
+    postflight: () =>
       Effect.sync(() => {
         order.push("backend-ready");
-        return "ready" as const;
+        return true;
       }),
     initialize: () =>
       Effect.sync(() => {
@@ -198,6 +201,7 @@ it.effect("does not mutate the store when another Workflow backend owns the Proj
   const ownedBackend = Layer.succeed(WorkflowBackend, {
     readiness: () => Effect.succeed("needs-attention" as const),
     initialize: () => Effect.succeed(false),
+    postflight: () => Effect.succeed(false),
     release: () => Effect.void,
   });
 
@@ -216,8 +220,16 @@ it.effect("releases the previous path before acquiring a moved Project", () => {
   const previous = { ...project, path: "/old-project" };
   const order: Array<string> = [];
   const store = Layer.succeed(ProjectStore, {
-    migrate: () => Effect.succeed(true),
-    completeMigration: () => Effect.succeed(true),
+    migrate: () =>
+      Effect.sync(() => {
+        order.push("store-migrated");
+        return true;
+      }),
+    completeMigration: () =>
+      Effect.sync(() => {
+        order.push("migration-committed");
+        return true;
+      }),
     readiness: () =>
       Effect.sync(() => {
         order.push("store-ready");
@@ -237,7 +249,16 @@ it.effect("releases the previous path before acquiring a moved Project", () => {
         assessments += 1;
         return assessments === 1 ? ("uninitialized" as const) : ("ready" as const);
       }),
-    initialize: () => Effect.succeed(true),
+    initialize: () =>
+      Effect.sync(() => {
+        order.push("backend-owned");
+        return true;
+      }),
+    postflight: () =>
+      Effect.sync(() => {
+        order.push("backend-postflight");
+        return true;
+      }),
     release: (released) =>
       Effect.sync(() => {
         order.push(`released:${released.path}`);
@@ -255,6 +276,9 @@ it.effect("releases the previous path before acquiring a moved Project", () => {
     ).toBe(true);
     expect(order[0]).toBe("released:/old-project");
     expect(order[1]).toBe("store-ready");
+    expect(order).toContain("store-migrated");
+    expect(order.indexOf("store-migrated")).toBeLessThan(order.indexOf("backend-owned"));
+    expect(order.indexOf("backend-postflight")).toBeLessThan(order.indexOf("migration-committed"));
   }).pipe(Effect.provide(ProjectRuntimeLive.pipe(Layer.provide([store, movedBackend]))));
 });
 
@@ -278,10 +302,11 @@ it.effect("restores the store when Workflow ownership postflight fails", () => {
   let assessments = 0;
   const incompatibleBackend = Layer.succeed(WorkflowBackend, {
     initialize: () => Effect.succeed(true),
-    readiness: () =>
+    readiness: () => Effect.succeed("uninitialized" as const),
+    postflight: () =>
       Effect.sync(() => {
         assessments += 1;
-        return "needs-attention" as const;
+        return false;
       }),
     release: () => Effect.void,
   });

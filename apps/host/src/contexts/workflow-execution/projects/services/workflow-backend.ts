@@ -5,6 +5,7 @@ export type WorkflowBackendAssessment = "ready" | "uninitialized" | "needs-atten
 
 export interface WorkflowBackendShape {
   readonly initialize: (project: ProjectSnapshot) => Effect.Effect<boolean>;
+  readonly postflight: (project: ProjectSnapshot) => Effect.Effect<boolean>;
   readonly readiness: (project: ProjectSnapshot) => Effect.Effect<WorkflowBackendAssessment>;
   readonly release: (project: ProjectSnapshot) => Effect.Effect<void>;
 }

@@ -3,17 +3,12 @@ import { dirname, join } from "node:path";
 import {
   evaluateProjectDefinitionWith,
   type ProjectDefinitionValidation as ProjectDefinitionValidationResult,
-  validateProjectDefinitionSubprocessResult,
+  selectProjectDefinitionInstallCommand,
+  validateProjectDefinitionInSubprocessWith,
 } from "@kojo/control/project-definition-validation";
 
-const packageManagerCommand = (root: string) => {
-  if (existsSync(join(root, "bun.lock")) || existsSync(join(root, "bun.lockb"))) {
-    return "bun add @kojo/workflow";
-  }
-  if (existsSync(join(root, "pnpm-lock.yaml"))) return "pnpm add @kojo/workflow";
-  if (existsSync(join(root, "yarn.lock"))) return "yarn add @kojo/workflow";
-  return "npm install @kojo/workflow";
-};
+const packageManagerCommand = (root: string) =>
+  selectProjectDefinitionInstallCommand((name) => existsSync(join(root, name)));
 
 export const evaluateProjectDefinition = async (
   configurationPath: string,
@@ -47,25 +42,12 @@ export const validateProjectDefinitionInSubprocess = async (
   runnerPath: string,
   path: string,
   timeoutMs = 1_000,
-): Promise<ProjectDefinitionValidationResult> => {
-  let envelope: unknown;
-  const child = Bun.spawn([process.execPath, runnerPath, path], {
-    stdout: "ignore",
-    stderr: "ignore",
-    ipc: (message) => {
-      envelope = message;
-    },
-  });
-  let timedOut = false;
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    child.kill("SIGKILL");
+): Promise<ProjectDefinitionValidationResult> =>
+  validateProjectDefinitionInSubprocessWith((receive) => {
+    const child = Bun.spawn([process.execPath, runnerPath, path], {
+      stdout: "ignore",
+      stderr: "ignore",
+      ipc: receive,
+    });
+    return { exited: child.exited, kill: () => child.kill("SIGKILL") };
   }, timeoutMs);
-  const exitCode = await child.exited;
-  clearTimeout(timeout);
-  return validateProjectDefinitionSubprocessResult({
-    timedOut,
-    exitCode,
-    ...(envelope === undefined ? {} : { envelope }),
-  });
-};

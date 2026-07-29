@@ -73,8 +73,8 @@ const makeRuntime = (
     coordinateLifecycle: (_project, operation) => operation,
     readiness: () => Effect.succeed(condition),
     inspectForgetBlockers: () => blockers,
-    coordinateForget: (_project, operation) => Effect.flatMap(blockers, operation),
-    deactivate: () => Effect.void,
+    coordinateForget: (_project, operation) =>
+      Effect.map(Effect.flatMap(blockers, operation), ({ result }) => result),
   });
 
 const noForgetBlockers = Effect.succeed({
@@ -312,8 +312,9 @@ it.effect("acquires the Project Runtime before the Project Index for register an
     readiness: () => Effect.succeed("ready" as const),
     inspectForgetBlockers: () => noForgetBlockers,
     coordinateForget: (_project, operation) =>
-      withinRuntime(Effect.flatMap(noForgetBlockers, operation)),
-    deactivate: () => Effect.void,
+      withinRuntime(
+        Effect.map(Effect.flatMap(noForgetBlockers, operation), ({ result }) => result),
+      ),
   });
   const layer = Layer.mergeAll(store, makeLayout({ input: project }), runtime);
 
