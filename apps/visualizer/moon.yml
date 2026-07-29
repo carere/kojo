@@ -1,5 +1,9 @@
 $schema: "../../.moon/cache/schemas/project.json"
 
+dependsOn:
+  - id: test-support
+    scope: development
+
 tasks:
   dev:
     command: bun vite dev

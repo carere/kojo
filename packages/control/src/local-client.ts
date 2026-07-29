@@ -26,9 +26,15 @@ export type KojoControlClient = RpcClient.RpcClient<
 
 export interface LocalClientOptions {
   readonly connect: Effect.Effect<KojoControlClient, LocalTransportError, Scope>;
-  readonly activate?: Effect.Effect<void>;
+  readonly activate?: Effect.Effect<void, LocalTransportError>;
   readonly maxAttempts?: number;
   readonly retryDelay?: Duration.Input;
+}
+
+export interface OperatingSystemHostActivationOptions {
+  readonly platform: NodeJS.Platform;
+  readonly run: (command: ReadonlyArray<string>) => Promise<number>;
+  readonly userId: number;
 }
 
 const safeUnavailable = () => new LocalTransportError({ message: "Kojo Host is unavailable." });
@@ -101,17 +107,44 @@ export const defaultSocketPath = () => {
     : `${runtimeDirectory}/kojo.sock`;
 };
 
-export const activateKojoHost = Effect.tryPromise({
-  try: async () => {
-    if (process.platform !== "darwin") return;
-    const processHandle = Bun.spawn(
-      ["launchctl", "kickstart", `gui/${process.getuid?.() ?? 0}/dev.kojo.host`],
-      { stdout: "ignore", stderr: "ignore" },
-    );
-    await processHandle.exited;
+const activationCommand = (platform: NodeJS.Platform, userId: number) => {
+  if (platform === "darwin") {
+    return ["launchctl", "kickstart", `gui/${userId}/dev.kojo.host`] as const;
+  }
+  if (platform === "linux") {
+    return ["systemctl", "--user", "start", "kojo-host.service"] as const;
+  }
+  return undefined;
+};
+
+export const makeOperatingSystemHostActivation = (
+  options: OperatingSystemHostActivationOptions,
+): Effect.Effect<void, LocalTransportError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const command = activationCommand(options.platform, options.userId);
+      if (command === undefined) {
+        throw new LocalTransportError({
+          message: `Kojo Host activation is unsupported on ${options.platform}.`,
+        });
+      }
+      try {
+        await options.run(command);
+      } catch {
+        // Activation is a best-effort wake-up. Discovery still performs its bounded retries.
+      }
+    },
+    catch: (error) => (error instanceof LocalTransportError ? error : safeUnavailable()),
+  });
+
+export const activateKojoHost = makeOperatingSystemHostActivation({
+  platform: process.platform,
+  userId: process.getuid?.() ?? 0,
+  run: async (command) => {
+    const processHandle = Bun.spawn([...command], { stdout: "ignore", stderr: "ignore" });
+    return processHandle.exited;
   },
-  catch: () => undefined,
-}).pipe(Effect.ignore);
+});
 
 export const makeDefaultLocalClient = (socketPath = defaultSocketPath()) =>
   makeLocalClient({

@@ -1,9 +1,9 @@
 import { afterAll, describe, expect, it } from "@effect/vitest";
 import { LocalTransportError } from "@kojo/control/local-client";
-import { startKojoHostProcess } from "@kojo/test-support";
 import { Effect } from "effect";
 import { FetchHttpClient } from "effect/unstable/http";
 import { RpcTest } from "effect/unstable/rpc";
+import { startKojoHostProcess } from "../../../../../../../tests/support/host-process";
 import {
   HostOverviewError,
   VisualizerApi,

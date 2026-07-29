@@ -1,3 +1,4 @@
 $schema: "../../.moon/cache/schemas/project.json"
 
-tasks: {}
+id: test-support
+language: typescript

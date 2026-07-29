@@ -1,14 +1,13 @@
 import { chmod, mkdir, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { BunSocketServer } from "@effect/platform-bun";
+import { dirname } from "node:path";
 import { KojoControl } from "@kojo/control";
 import { Effect, Exit, Layer, Scope } from "effect";
-import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
+import { RpcServer } from "effect/unstable/rpc";
 import {
   HostDiagnosticLogger,
   type HostRequestDiagnosticEvent,
-  makeHostDiagnosticLoggerLayer,
 } from "../../../shared/services/host-diagnostic-logger";
+import { HOST_INFORMATION } from "../models/host-information";
 import { getHostInformation } from "../use-cases/get-host-information";
 import { listProjects } from "../use-cases/list-projects";
 
@@ -19,7 +18,8 @@ export interface KojoHostServer {
 }
 
 export interface KojoHostOptions {
-  readonly diagnosticPath?: string;
+  readonly diagnosticPath: string;
+  readonly serverLayer: Layer.Layer<never, unknown>;
   readonly socketPath: string;
 }
 
@@ -40,9 +40,9 @@ const withHostRequestDiagnostic = <A, E, R>(
         operation,
         outcome: Exit.isSuccess(exit) ? "success" : "error",
         durationMs: Math.max(0, Date.now() - startedAt),
-        hostVersion: "0.1.0",
-        protocolMajor: 1,
-        protocolMinor: 0,
+        hostVersion: HOST_INFORMATION.hostVersion,
+        protocolMajor: HOST_INFORMATION.protocol.major,
+        protocolMinor: HOST_INFORMATION.protocol.minor,
         timestamp: new Date().toISOString(),
       })
       .pipe(Effect.ignore);
@@ -66,38 +66,30 @@ const removeStaleSocket = async (socketPath: string) => {
   }
 };
 
-const makeKojoControlServerLayer = (socketPath: string, diagnosticPath: string) => {
-  const protocol = RpcServer.layerProtocolSocketServer.pipe(
-    Layer.provide([BunSocketServer.layer({ path: socketPath }), RpcSerialization.layerNdjson]),
+export const makeKojoControlServerLayer = <ProtocolError, ProtocolRequirements>(
+  protocol: Layer.Layer<RpcServer.Protocol, ProtocolError, ProtocolRequirements>,
+  diagnosticLogger: Layer.Layer<HostDiagnosticLogger>,
+) =>
+  RpcServer.layer(KojoControl).pipe(
+    Layer.provide([KojoControlHandlers.pipe(Layer.provide(diagnosticLogger)), protocol]),
   );
-
-  return RpcServer.layer(KojoControl).pipe(
-    Layer.provide([
-      KojoControlHandlers.pipe(Layer.provide(makeHostDiagnosticLoggerLayer(diagnosticPath))),
-      protocol,
-    ]),
-  );
-};
 
 export const startKojoHost = async (options: KojoHostOptions): Promise<KojoHostServer> => {
   const socketDirectory = dirname(options.socketPath);
-  const diagnosticPath = options.diagnosticPath ?? join(socketDirectory, "diagnostics.jsonl");
   await mkdir(socketDirectory, { recursive: true, mode: 0o700 });
   await chmod(socketDirectory, 0o700);
   await removeStaleSocket(options.socketPath);
   const scope = Effect.runSync(Scope.make());
   const previousUmask = process.umask(0o077);
   try {
-    await Effect.runPromise(
-      Layer.buildWithScope(makeKojoControlServerLayer(options.socketPath, diagnosticPath), scope),
-    );
+    await Effect.runPromise(Layer.buildWithScope(options.serverLayer, scope));
   } finally {
     process.umask(previousUmask);
   }
   await chmod(options.socketPath, 0o600);
 
   return {
-    diagnosticPath,
+    diagnosticPath: options.diagnosticPath,
     socketPath: options.socketPath,
     stop: async () => {
       await Effect.runPromise(Scope.close(scope, Exit.void));

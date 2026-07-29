@@ -5,6 +5,7 @@ import {
   type KojoControlClient,
   LocalTransportError,
   makeLocalClient,
+  makeOperatingSystemHostActivation,
 } from "../../src/local-client";
 
 const handshake = {
@@ -94,5 +95,53 @@ it.effect("returns a safe error when discovery remains unavailable", () =>
     const error = yield* Effect.flip(client.getHostOverview);
 
     expect(error).toEqual(new LocalTransportError({ message: "Kojo Host is unavailable." }));
+  }),
+);
+
+it.effect("asks launchd to activate the per-user Host on macOS", () =>
+  Effect.gen(function* () {
+    const commands: Array<ReadonlyArray<string>> = [];
+    yield* makeOperatingSystemHostActivation({
+      platform: "darwin",
+      userId: 501,
+      run: (command) => {
+        commands.push(command);
+        return Promise.resolve(0);
+      },
+    });
+
+    expect(commands).toEqual([["launchctl", "kickstart", "gui/501/dev.kojo.host"]]);
+  }),
+);
+
+it.effect("asks systemd to activate the per-user Host on Linux", () =>
+  Effect.gen(function* () {
+    const commands: Array<ReadonlyArray<string>> = [];
+    yield* makeOperatingSystemHostActivation({
+      platform: "linux",
+      userId: 501,
+      run: (command) => {
+        commands.push(command);
+        return Promise.resolve(0);
+      },
+    });
+
+    expect(commands).toEqual([["systemctl", "--user", "start", "kojo-host.service"]]);
+  }),
+);
+
+it.effect("returns an explicit transport failure when Host activation is unsupported", () =>
+  Effect.gen(function* () {
+    const error = yield* Effect.flip(
+      makeOperatingSystemHostActivation({
+        platform: "freebsd",
+        userId: 501,
+        run: () => Promise.resolve(0),
+      }),
+    );
+
+    expect(error).toEqual(
+      new LocalTransportError({ message: "Kojo Host activation is unsupported on freebsd." }),
+    );
   }),
 );

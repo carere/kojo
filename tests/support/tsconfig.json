@@ -2,7 +2,7 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "types": ["bun"],
-    "outDir": "../../.moon/cache/types/packages/test-support"
+    "outDir": "../../.moon/cache/types/tests/support"
   },
-  "include": ["src/**/*"]
+  "include": ["**/*.ts"]
 }

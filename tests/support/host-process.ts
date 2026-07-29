@@ -8,7 +8,7 @@ export interface KojoHostProcessFixture {
   readonly stop: () => Promise<void>;
 }
 
-const workspaceRoot = fileURLToPath(new URL("../../..", import.meta.url));
+const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
 
 export const startKojoHostProcess = async (): Promise<KojoHostProcessFixture> => {
   const directory = await mkdtemp(join(tmpdir(), "kojo-host-process-"));

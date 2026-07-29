@@ -1,8 +1,11 @@
 import { createServer } from "node:net";
 import { join } from "node:path";
-import { type KojoHostProcessFixture, startKojoHostProcess } from "@kojo/test-support";
 import { type Browser, chromium } from "playwright";
 import { afterEach, expect, test } from "vitest";
+import {
+  type KojoHostProcessFixture,
+  startKojoHostProcess,
+} from "../../../../tests/support/host-process";
 
 interface Fixture {
   readonly browser: Browser;
@@ -26,7 +29,9 @@ test("loads the authoritative empty Project state through the visualizer route a
   fixture = await startFixture();
   const page = await fixture.browser.newPage();
 
-  await page.goto(`http://127.0.0.1:${fixture.port}`, { waitUntil: "networkidle" });
+  await page.goto(`http://127.0.0.1:${fixture.port}`, { waitUntil: "domcontentloaded" });
+  await page.getByText("Connected to Kojo Host 0.1.0").waitFor({ state: "visible" });
+  await page.getByText("No Kojo Projects yet.").waitFor({ state: "visible" });
 
   expect(await page.getByText("Connected to Kojo Host 0.1.0").isVisible()).toBe(true);
   expect(await page.getByText("No Kojo Projects yet.").isVisible()).toBe(true);

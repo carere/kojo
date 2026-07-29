@@ -1,8 +1,4 @@
-import { type HostInformation, PROTOCOL_VERSION } from "@kojo/control";
 import { Effect } from "effect";
+import { HOST_INFORMATION } from "../models/host-information";
 
-export const getHostInformation: Effect.Effect<HostInformation> = Effect.succeed({
-  protocol: PROTOCOL_VERSION,
-  hostVersion: "0.1.0",
-  capabilities: ["projects:list"],
-});
+export const getHostInformation = Effect.succeed(HOST_INFORMATION);

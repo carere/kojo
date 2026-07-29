@@ -25,7 +25,6 @@
       },
       "devDependencies": {
         "@effect/vitest": "4.0.0-beta.102",
-        "@kojo/test-support": "workspace:*",
         "@types/bun": "latest",
         "typescript": "latest",
         "vitest": "^4.1.10",
@@ -75,7 +74,6 @@
       "devDependencies": {
         "@effect/vitest": "4.0.0-beta.102",
         "@inlang/paraglide-js": "^2.22.0",
-        "@kojo/test-support": "workspace:*",
         "@tailwindcss/vite": "^4.3.2",
         "@tanstack/devtools-vite": "^0.8.3",
         "@types/node": "latest",
@@ -102,14 +100,6 @@
         "@types/bun": "latest",
         "typescript": "latest",
         "vitest": "^4.1.10",
-      },
-    },
-    "packages/test-support": {
-      "name": "@kojo/test-support",
-      "version": "0.1.0",
-      "devDependencies": {
-        "@types/bun": "latest",
-        "typescript": "latest",
       },
     },
     "packages/workflow": {
@@ -255,8 +245,6 @@
     "@kojo/control": ["@kojo/control@workspace:packages/control"],
 
     "@kojo/host": ["@kojo/host@workspace:apps/host"],
-
-    "@kojo/test-support": ["@kojo/test-support@workspace:packages/test-support"],
 
     "@kojo/visualizer": ["@kojo/visualizer@workspace:apps/visualizer"],
 

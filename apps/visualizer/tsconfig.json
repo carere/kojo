@@ -20,7 +20,7 @@
       "path": "../../packages/control"
     },
     {
-      "path": "../../packages/test-support"
+      "path": "../../tests/support"
     }
   ]
 }

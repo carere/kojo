@@ -1,11 +1,15 @@
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { BunSocketServer } from "@effect/platform-bun";
 import { afterEach, describe, expect, it } from "@effect/vitest";
 import { connectUnixControlClient, makeLocalClient } from "@kojo/control/local-client";
-import { Effect } from "effect";
+import { Effect, Layer } from "effect";
+import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
+import { makeHostDiagnosticLoggerLayer } from "../../../../../src/contexts/shared/services/host-diagnostic-logger";
 import {
   type KojoHostServer,
+  makeKojoControlServerLayer,
   startKojoHost,
 } from "../../../../../src/contexts/workflow-execution/control/services/local-host";
 
@@ -22,7 +26,20 @@ describe("local Kojo Host control", () => {
       Effect.gen(function* () {
         const directory = yield* Effect.promise(() => mkdtemp(join(tmpdir(), "kojo-host-")));
         const socketPath = join(directory, "host.sock");
-        const server = yield* Effect.promise(() => startKojoHost({ socketPath }));
+        const diagnosticPath = join(directory, "diagnostics.jsonl");
+        const protocol = RpcServer.layerProtocolSocketServer.pipe(
+          Layer.provide([
+            BunSocketServer.layer({ path: socketPath }),
+            RpcSerialization.layerNdjson,
+          ]),
+        );
+        const serverLayer = makeKojoControlServerLayer(
+          protocol,
+          makeHostDiagnosticLoggerLayer(diagnosticPath),
+        );
+        const server = yield* Effect.promise(() =>
+          startKojoHost({ diagnosticPath, serverLayer, socketPath }),
+        );
         cleanups.push(() => close(server, directory));
 
         const overview = yield* makeLocalClient({

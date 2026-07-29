@@ -30,7 +30,6 @@
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0-beta.102",
-    "@kojo/test-support": "workspace:*",
     "@inlang/paraglide-js": "^2.22.0",
     "@tailwindcss/vite": "^4.3.2",
     "@tanstack/devtools-vite": "^0.8.3",
