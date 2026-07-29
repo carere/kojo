@@ -1,14 +1,13 @@
-import type { HostOverview } from "@kojo/control";
+import type { HostOverview as HostOverviewSnapshot } from "@kojo/control";
 import { Effect } from "effect";
 import { createResource, Show } from "solid-js";
-import { Button } from "#components/ui/button";
-import { m } from "../../../i18n/messages";
-import { LanguageToggle } from "../../preferences/components/language-toggle";
-import { ThemeToggle } from "../../preferences/components/theme-toggle";
-import { VisualizerApiClient, visualizerApiRuntime } from "../../shared/services/client";
+import { m } from "../../../../i18n/messages";
+import { LanguageToggle } from "../../../preferences/components/language-toggle";
+import { ThemeToggle } from "../../../preferences/components/theme-toggle";
+import { VisualizerApiClient, visualizerApiRuntime } from "../../../shared/services/client";
 
-export interface VisualizerHomeProps {
-  readonly loadOverview?: () => Promise<HostOverview | undefined>;
+export interface HostOverviewProps {
+  readonly loadOverview?: () => Promise<HostOverviewSnapshot | undefined>;
 }
 
 const loadHostOverview = async () => {
@@ -21,7 +20,7 @@ const loadHostOverview = async () => {
   }
 };
 
-export function VisualizerHome(props: VisualizerHomeProps) {
+export function HostOverview(props: HostOverviewProps) {
   const [overview] = createResource(() => (props.loadOverview ?? loadHostOverview)());
 
   return (
@@ -40,10 +39,6 @@ export function VisualizerHome(props: VisualizerHomeProps) {
         <p class="max-w-xl text-base text-muted-foreground leading-7">
           {m.visualizer_description()}
         </p>
-        <div class="flex items-center gap-3">
-          <Button type="button">{m.visualizer_ready()}</Button>
-          <span class="text-muted-foreground text-xs">{m.visualizer_rpc_ready()}</span>
-        </div>
         <Show when={overview()}>
           {(current) => (
             <section aria-live="polite" class="space-y-2 rounded-lg border p-4">

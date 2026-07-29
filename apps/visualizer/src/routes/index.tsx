@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/solid-router";
-import { VisualizerHome } from "../contexts/readiness/components/visualizer-home";
+import { HostOverview } from "../contexts/workflow-execution/host/components/host-overview";
 import type { PrototypeVariant } from "../contexts/workflow-execution/workflow-inspector/components/prototype/prototype-switcher";
 import { WorkflowInspectorPrototype } from "../contexts/workflow-execution/workflow-inspector/components/prototype/workflow-inspector-prototype";
 
@@ -24,6 +24,6 @@ function WorkflowInspectorRoute() {
       }
     />
   ) : (
-    <VisualizerHome />
+    <HostOverview />
   );
 }

@@ -1,14 +1,12 @@
-import { mkdtemp, rm, stat } from "node:fs/promises";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type KojoHostProcessFixture, startKojoHostProcess } from "@kojo/test-support";
 import { type Browser, chromium } from "playwright";
 import { afterEach, expect, test } from "vitest";
 
 interface Fixture {
   readonly browser: Browser;
-  readonly directory: string;
-  readonly host: Bun.Subprocess;
+  readonly host: KojoHostProcessFixture;
   readonly port: number;
   readonly visualizer: Bun.Subprocess;
 }
@@ -19,9 +17,8 @@ afterEach(async () => {
   if (fixture === undefined) return;
   await fixture.browser.close();
   fixture.visualizer.kill("SIGTERM");
-  fixture.host.kill("SIGTERM");
-  await Promise.all([fixture.visualizer.exited, fixture.host.exited]);
-  await rm(fixture.directory, { recursive: true });
+  await fixture.visualizer.exited;
+  await fixture.host.stop();
   fixture = undefined;
 });
 
@@ -39,29 +36,14 @@ const startFixture = async (): Promise<Fixture> => {
   const visualizerDirectory = process.cwd().endsWith("apps/visualizer")
     ? process.cwd()
     : join(process.cwd(), "apps/visualizer");
-  const directory = await mkdtemp(join(tmpdir(), "kojo-browser-"));
-  const socketPath = join(directory, "host.sock");
   const port = await availablePort();
-  const host = Bun.spawn(["bun", "run", "../host/main.ts"], {
-    cwd: visualizerDirectory,
-    env: { ...process.env, KOJO_HOST_SOCKET: socketPath },
-    stdout: "ignore",
-    stderr: "pipe",
-  });
-  await waitFor(async () => {
-    try {
-      await stat(socketPath);
-      return true;
-    } catch {
-      return false;
-    }
-  }, host);
+  const host = await startKojoHostProcess();
 
   const visualizer = Bun.spawn(
     ["bun", "vite", "dev", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
     {
       cwd: visualizerDirectory,
-      env: { ...process.env, KOJO_HOST_SOCKET: socketPath },
+      env: { ...process.env, KOJO_HOST_SOCKET: host.socketPath },
       stdout: "ignore",
       stderr: "pipe",
     },
@@ -76,7 +58,6 @@ const startFixture = async (): Promise<Fixture> => {
 
   return {
     browser: await chromium.launch({ headless: true }),
-    directory,
     host,
     port,
     visualizer,

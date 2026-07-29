@@ -2,7 +2,7 @@ import { render } from "solid-js/web";
 import { afterEach, expect, test } from "vitest";
 import { page } from "vitest/browser";
 import { ColorModeProvider } from "../../src/contexts/preferences/services/color-mode";
-import { VisualizerHome } from "../../src/contexts/readiness/components/visualizer-home";
+import { HostOverview } from "../../src/contexts/workflow-execution/host/components/host-overview";
 import { setLocale } from "../../src/i18n/runtime";
 
 let dispose: VoidFunction | undefined;
@@ -20,7 +20,7 @@ test("shows the Kojo starting point", async () => {
   dispose = render(
     () => (
       <ColorModeProvider initialColorMode="light">
-        <VisualizerHome />
+        <HostOverview />
       </ColorModeProvider>
     ),
     root,
@@ -29,8 +29,6 @@ test("shows the Kojo starting point", async () => {
   await expect
     .element(page.getByRole("heading", { name: "The new Kojo starts here." }))
     .toBeVisible();
-  await expect.element(page.getByRole("button", { name: "Ready" })).toBeVisible();
-  await expect.element(page.getByText("Effect RPC ready")).toBeVisible();
 });
 
 test("switches to the dark color mode", async () => {
@@ -40,7 +38,7 @@ test("switches to the dark color mode", async () => {
   dispose = render(
     () => (
       <ColorModeProvider initialColorMode="light">
-        <VisualizerHome />
+        <HostOverview />
       </ColorModeProvider>
     ),
     root,
@@ -59,7 +57,7 @@ test("shows Host connectivity and the authoritative empty Project state", async 
   dispose = render(
     () => (
       <ColorModeProvider initialColorMode="light">
-        <VisualizerHome
+        <HostOverview
           loadOverview={() =>
             Promise.resolve({
               host: {

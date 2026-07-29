@@ -14,7 +14,19 @@ export const runCli = (args: ReadonlyArray<string>) => {
   const command = args.filter((argument) => argument !== "--json");
 
   if (command.length !== 2 || command[0] !== "project" || command[1] !== "list") {
-    process.stderr.write("Usage: kojo project list [--json]\n");
+    const message = "Invalid command.";
+    const next = "Run: kojo project list [--json]";
+    process.stderr.write(`${message}\nNext: ${next}\n`);
+    if (json) {
+      process.stdout.write(
+        `${JSON.stringify({
+          schemaVersion: 1,
+          command: command.length === 0 ? "kojo" : command.join("."),
+          error: { code: "invalid-command", message, next },
+          warnings: [],
+        })}\n`,
+      );
+    }
     return Promise.resolve(2);
   }
 
@@ -26,11 +38,33 @@ export const runCli = (args: ReadonlyArray<string>) => {
         onFailure: (error) => {
           const failure =
             error instanceof IncompatibleProtocolError
-              ? `${error.message}\nNext: Upgrade Kojo Host or this CLI so their protocol major versions match.`
+              ? {
+                  code: "incompatible-protocol",
+                  message: error.message,
+                  next: "Upgrade Kojo Host or this CLI so their protocol major versions match.",
+                }
               : error instanceof LocalTransportError
-                ? `${error.message}\nNext: Start the Kojo Host and try again.`
-                : "Kojo Host request failed.\nNext: Try the command again.";
-          process.stderr.write(`${failure}\n`);
+                ? {
+                    code: "host-unavailable",
+                    message: error.message,
+                    next: "Start the Kojo Host and try again.",
+                  }
+                : {
+                    code: "host-request-failed",
+                    message: "Kojo Host request failed.",
+                    next: "Try the command again.",
+                  };
+          process.stderr.write(`${failure.message}\nNext: ${failure.next}\n`);
+          if (json) {
+            process.stdout.write(
+              `${JSON.stringify({
+                schemaVersion: 1,
+                command: "project.list",
+                error: failure,
+                warnings: [],
+              })}\n`,
+            );
+          }
           return 3;
         },
         onSuccess: (overview) => {

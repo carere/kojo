@@ -9,6 +9,9 @@
       "path": "./packages/control"
     },
     {
+      "path": "./packages/test-support"
+    },
+    {
       "path": "./apps/host"
     },
     {

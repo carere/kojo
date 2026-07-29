@@ -1,0 +1,8 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["bun"],
+    "outDir": "../../.moon/cache/types/packages/test-support"
+  },
+  "include": ["src/**/*"]
+}
