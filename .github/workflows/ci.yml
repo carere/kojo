@@ -44,6 +44,12 @@ jobs:
       - name: Build
         run: moon run :build
 
+      - name: Biome check
+        run: bun biome check --verbose --no-errors-on-unmatched .
+
+      - name: TypeScript build
+        run: bun tsc --build --verbose
+
       - name: Unit tests
         run: moon run :unit-test
 
@@ -52,9 +58,3 @@ jobs:
 
       - name: Browser tests
         run: moon run --concurrency 1 :browser-test
-
-      - name: TypeScript build
-        run: bun tsc --build --verbose
-
-      - name: Biome check
-        run: bun biome check --verbose --no-errors-on-unmatched .
