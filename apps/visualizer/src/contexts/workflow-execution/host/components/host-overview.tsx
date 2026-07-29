@@ -5,6 +5,7 @@ import { m } from "../../../../i18n/messages";
 import { LanguageToggle } from "../../../preferences/components/language-toggle";
 import { ThemeToggle } from "../../../preferences/components/theme-toggle";
 import { VisualizerApiClient, visualizerApiRuntime } from "../../../shared/services/client";
+import { ProjectNavigator } from "../../../workflow-authoring/projects/components/project-navigator";
 
 export interface HostOverviewProps {
   readonly loadOverview?: () => Promise<HostOverviewSnapshot | undefined>;
@@ -41,15 +42,11 @@ export function HostOverview(props: HostOverviewProps) {
         </p>
         <Show when={overview()}>
           {(current) => (
-            <section aria-live="polite" class="space-y-2 rounded-lg border p-4">
+            <section aria-live="polite" class="space-y-4">
               <h2 class="font-semibold text-lg">
                 Connected to Kojo Host {current().host.hostVersion}
               </h2>
-              <p class="text-muted-foreground text-sm">
-                {current().projects.length === 0
-                  ? "No Kojo Projects yet."
-                  : `${current().projects.length} Kojo Projects`}
-              </p>
+              <ProjectNavigator projects={current().projects} />
             </section>
           )}
         </Show>

@@ -1,11 +1,12 @@
 import { mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { BunSocketServer } from "@effect/platform-bun";
 import { afterEach, describe, expect, it } from "@effect/vitest";
 import { connectUnixControlClient, makeLocalClient } from "@kojo/control/local-client";
 import { Effect, Exit, Layer, Schema } from "effect";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
+import { makeProjectIndexLayer } from "../../../../../src/contexts/workflow-authoring/projects/services/project-index";
 import { HostIdentity } from "../../../../../src/contexts/workflow-execution/control/models/host-identity";
 import { makeHostDiagnosticLoggerLayer } from "../../../../../src/contexts/workflow-execution/control/services/host-diagnostic-logger";
 import {
@@ -44,7 +45,12 @@ describe("local Kojo Host control", () => {
           host: {
             protocol: { major: 1, minor: 0 },
             hostVersion: "0.1.0",
-            capabilities: ["projects:list"],
+            capabilities: [
+              "projects:list",
+              "projects:show",
+              "projects:register",
+              "projects:forget",
+            ],
           },
           projects: [],
         });
@@ -138,7 +144,7 @@ const startTestHost = (socketPath: string, diagnosticPath: string) => {
     protocol,
     makeHostDiagnosticLoggerLayer(diagnosticPath),
     TEST_HOST_IDENTITY,
-  );
+  ).pipe(Layer.provide(makeProjectIndexLayer(join(dirname(socketPath), "projects.json"))));
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });
 };
 

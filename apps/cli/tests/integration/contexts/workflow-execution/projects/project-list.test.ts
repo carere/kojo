@@ -36,7 +36,7 @@ describe("kojo project list", () => {
         host: {
           protocol: { major: 1, minor: 0 },
           hostVersion: "0.1.0",
-          capabilities: ["projects:list"],
+          capabilities: ["projects:list", "projects:show", "projects:register", "projects:forget"],
         },
         projects: [],
       },
@@ -91,11 +91,13 @@ describe("kojo project list", () => {
       error: {
         code: "invalid-command",
         message: "Invalid command.",
-        next: "Run: kojo project list [--json]",
+        next: "Run: kojo init [path] or kojo project list|show|register|forget",
       },
       warnings: [],
     });
-    expect(result.stderr).toBe("Invalid command.\nNext: Run: kojo project list [--json]\n");
+    expect(result.stderr).toBe(
+      "Invalid command.\nNext: Run: kojo init [path] or kojo project list|show|register|forget\n",
+    );
   });
 });
 

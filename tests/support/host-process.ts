@@ -8,10 +8,17 @@ export interface KojoHostProcessFixture {
   readonly stop: () => Promise<void>;
 }
 
+export interface KojoHostProcessOptions {
+  readonly storePath?: string;
+}
+
 const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
 
-export const startKojoHostProcess = async (): Promise<KojoHostProcessFixture> => {
-  const directory = await mkdtemp(join(tmpdir(), "kojo-host-process-"));
+export const startKojoHostProcess = async (
+  options: KojoHostProcessOptions = {},
+): Promise<KojoHostProcessFixture> => {
+  const ownsDirectory = options.storePath === undefined;
+  const directory = options.storePath ?? (await mkdtemp(join(tmpdir(), "kojo-host-process-")));
   const socketPath = join(directory, "host.sock");
   const processHandle = Bun.spawn(["bun", "run", join(workspaceRoot, "apps/host/main.ts")], {
     cwd: workspaceRoot,
@@ -25,7 +32,7 @@ export const startKojoHostProcess = async (): Promise<KojoHostProcessFixture> =>
   } catch (error) {
     processHandle.kill("SIGTERM");
     await processHandle.exited;
-    await rm(directory, { recursive: true });
+    if (ownsDirectory) await rm(directory, { recursive: true });
     throw error;
   }
 
@@ -34,7 +41,7 @@ export const startKojoHostProcess = async (): Promise<KojoHostProcessFixture> =>
     stop: async () => {
       processHandle.kill("SIGTERM");
       await processHandle.exited;
-      await rm(directory, { recursive: true });
+      if (ownsDirectory) await rm(directory, { recursive: true });
     },
   };
 };

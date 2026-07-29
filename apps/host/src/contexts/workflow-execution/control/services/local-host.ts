@@ -9,6 +9,7 @@ import type { HostIdentity } from "../models/host-identity";
 import { HOST_INFORMATION } from "../models/host-information";
 import { getHostInformation } from "../use-cases/get-host-information";
 import { listProjects } from "../use-cases/list-projects";
+import { forgetProject, registerProject, showProject } from "../use-cases/manage-projects";
 import { HostDiagnosticLogger, type HostRequestDiagnosticEvent } from "./host-diagnostic-logger";
 import { prepareHostStoreDirectory } from "./host-store";
 
@@ -76,6 +77,27 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           "ListProjects",
           String(options.requestId),
           listProjects,
+        ),
+      ShowProject: ({ identity }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ShowProject",
+          String(options.requestId),
+          showProject(identity),
+        ),
+      RegisterProject: ({ path }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "RegisterProject",
+          String(options.requestId),
+          registerProject(path),
+        ),
+      ForgetProject: ({ identity }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ForgetProject",
+          String(options.requestId),
+          forgetProject(identity),
         ),
     }),
   );

@@ -1,4 +1,6 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Browser, chromium } from "playwright";
 import { afterEach, expect, test } from "vitest";
@@ -15,17 +17,20 @@ interface Fixture {
 }
 
 let fixture: Fixture | undefined;
+const temporaryDirectories: Array<string> = [];
 
 afterEach(async () => {
-  if (fixture === undefined) return;
-  await fixture.browser.close();
-  fixture.visualizer.kill("SIGTERM");
-  await fixture.visualizer.exited;
-  await fixture.host.stop();
-  fixture = undefined;
+  if (fixture !== undefined) {
+    await fixture.browser.close();
+    fixture.visualizer.kill("SIGTERM");
+    await fixture.visualizer.exited;
+    await fixture.host.stop();
+    fixture = undefined;
+  }
+  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true })));
 });
 
-test("loads the authoritative empty Project state through the visualizer route and local Host", async () => {
+test("loads the Host-authoritative Project state and reconciles Navigator preferences by Project Identity", async () => {
   fixture = await startFixture();
   const page = await fixture.browser.newPage();
 
@@ -35,7 +40,53 @@ test("loads the authoritative empty Project state through the visualizer route a
 
   expect(await page.getByText("Connected to Kojo Host 0.1.0").isVisible()).toBe(true);
   expect(await page.getByText("No Kojo Projects yet.").isVisible()).toBe(true);
-}, 20_000);
+  const directory = await mkdtemp(join(tmpdir(), "kojo-navigator-"));
+  temporaryDirectories.push(directory);
+  const firstPath = join(directory, "first-project");
+  const secondPath = join(directory, "second-project");
+  await run(["git", "init", firstPath]);
+  await run(["git", "init", secondPath]);
+  await runCli(["init", firstPath], fixture.host.socketPath);
+  await runCli(["init", secondPath], fixture.host.socketPath);
+  const listed = await runCli(["project", "list", "--json"], fixture.host.socketPath);
+  expect(JSON.parse(listed).result.projects).toHaveLength(2);
+  const firstIdentity = JSON.parse(await readFile(join(firstPath, ".kojo", "project.json"), "utf8"))
+    .projectIdentity as string;
+  const secondIdentity = JSON.parse(
+    await readFile(join(secondPath, ".kojo", "project.json"), "utf8"),
+  ).projectIdentity as string;
+  const staleIdentity = "00000000-0000-4000-8000-000000000000";
+  await page.evaluate(
+    ({ firstIdentity, secondIdentity, staleIdentity }) => {
+      window.localStorage.setItem(
+        "kojo.navigator.preferences",
+        JSON.stringify({
+          version: 1,
+          order: [secondIdentity, staleIdentity, firstIdentity],
+          selectedProjectIdentity: secondIdentity,
+        }),
+      );
+    },
+    { firstIdentity, secondIdentity, staleIdentity },
+  );
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect.poll(() => page.locator("body").innerText()).toContain(secondIdentity);
+  const projects = page.getByRole("navigation", { name: "Kojo Projects" }).getByRole("button");
+  await expect.poll(() => projects.count()).toBe(2);
+
+  expect(await projects.nth(0).getAttribute("data-project-identity")).toBe(secondIdentity);
+  expect(await projects.nth(0).getAttribute("aria-current")).toBe("page");
+  expect(await projects.nth(1).getAttribute("data-project-identity")).toBe(firstIdentity);
+  const stored = await page.evaluate(() =>
+    JSON.parse(window.localStorage.getItem("kojo.navigator.preferences") ?? "null"),
+  );
+  expect(stored).toEqual({
+    version: 1,
+    order: [secondIdentity, firstIdentity],
+    selectedProjectIdentity: secondIdentity,
+  });
+}, 30_000);
 
 const startFixture = async (): Promise<Fixture> => {
   const visualizerDirectory = process.cwd().endsWith("apps/visualizer")
@@ -97,4 +148,29 @@ const waitFor = async (condition: () => Promise<boolean>, processHandle: Bun.Sub
     await Bun.sleep(25);
   }
   throw new Error("Timed out while starting the browser acceptance fixture.");
+};
+
+const run = async (command: ReadonlyArray<string>) => {
+  const child = Bun.spawn([...command], { stdout: "pipe", stderr: "pipe" });
+  const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  if (exitCode !== 0) throw new Error(stderr);
+};
+
+const runCli = async (args: ReadonlyArray<string>, socketPath: string) => {
+  const visualizerDirectory = process.cwd().endsWith("apps/visualizer")
+    ? process.cwd()
+    : join(process.cwd(), "apps/visualizer");
+  const child = Bun.spawn(["bun", "run", join(visualizerDirectory, "../cli/main.ts"), ...args], {
+    cwd: visualizerDirectory,
+    env: { ...process.env, KOJO_HOST_SOCKET: socketPath },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  if (exitCode !== 0) throw new Error(stderr);
+  return stdout;
 };

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
-import { runProjectListCommand } from "./src/contexts/workflow-execution/projects/use-cases/run-project-list-command";
+import { runCliCommand } from "./src/contexts/shared/use-cases/run-cli-command";
 
 if (import.meta.main) {
-  process.exitCode = await runProjectListCommand(process.argv.slice(2));
+  process.exitCode = await runCliCommand(process.argv.slice(2));
 }

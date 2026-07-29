@@ -103,8 +103,10 @@ describe("Host Diagnostic Store", () => {
       cleanups.push(() => rm(directory, { recursive: true }));
       const path = join(directory, "diagnostics.jsonl");
       const timestamp = "2026-07-15T00:00:00.000Z";
+      const projectA = projectIdentity("00000000-0000-4000-8000-00000000000a");
+      const projectB = projectIdentity("00000000-0000-4000-8000-00000000000b");
       const projectEventBytes = Buffer.byteLength(
-        `${JSON.stringify(diagnosticEvent("a-1", timestamp, projectIdentity("project-a")))}\n`,
+        `${JSON.stringify(diagnosticEvent("a-1", timestamp, projectA))}\n`,
       );
       const logger = makeHostDiagnosticLogger({
         now: () => Date.parse(timestamp),
@@ -115,10 +117,10 @@ describe("Host Diagnostic Store", () => {
         },
       });
 
-      yield* logger.emit(diagnosticEvent("a-1", timestamp, projectIdentity("project-a")));
-      yield* logger.emit(diagnosticEvent("a-2", timestamp, projectIdentity("project-a")));
-      yield* logger.emit(diagnosticEvent("a-3", timestamp, projectIdentity("project-a")));
-      yield* logger.emit(diagnosticEvent("b-1", timestamp, projectIdentity("project-b")));
+      yield* logger.emit(diagnosticEvent("a-1", timestamp, projectA));
+      yield* logger.emit(diagnosticEvent("a-2", timestamp, projectA));
+      yield* logger.emit(diagnosticEvent("a-3", timestamp, projectA));
+      yield* logger.emit(diagnosticEvent("b-1", timestamp, projectB));
       yield* logger.cleanup;
 
       const events = yield* Effect.promise(() => readDiagnosticEvents(directory));

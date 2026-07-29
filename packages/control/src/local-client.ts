@@ -8,7 +8,14 @@ import type { RpcGroup } from "effect/unstable/rpc";
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import type { RpcClientError } from "effect/unstable/rpc/RpcClientError";
 import { Socket } from "effect/unstable/socket";
-import { type HostOverview, KojoControl, PROTOCOL_VERSION } from "./index";
+import {
+  type HostOverview,
+  KojoControl,
+  PROTOCOL_VERSION,
+  type ProjectIdentity,
+  type ProjectList,
+  type ProjectOperationResult,
+} from "./index";
 
 export class LocalTransportError extends Data.TaggedError("LocalTransportError")<{
   readonly message: string;
@@ -44,47 +51,97 @@ export const makeLocalClient = (options: LocalClientOptions) => {
   const maxAttempts = Math.max(1, options.maxAttempts ?? 5);
   const retryDelay = options.retryDelay ?? "50 millis";
 
-  const exchange = Effect.scoped(
-    Effect.gen(function* () {
-      const client = yield* options.connect;
-      const host = yield* client.Negotiate().pipe(Effect.mapError(safeUnavailable));
+  const request = <A>(
+    operation: (
+      client: KojoControlClient,
+      host: HostOverview["host"],
+    ) => Effect.Effect<A, RpcClientError>,
+  ) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const client = yield* options.connect;
+        const host = yield* client.Negotiate().pipe(Effect.mapError(safeUnavailable));
 
-      if (host.protocol.major !== PROTOCOL_VERSION.major) {
-        return yield* Effect.fail(
-          new IncompatibleProtocolError({
-            clientMajor: PROTOCOL_VERSION.major,
-            hostMajor: host.protocol.major,
-            message: `Kojo Host protocol ${host.protocol.major} is incompatible with client protocol ${PROTOCOL_VERSION.major}.`,
-          }),
-        );
-      }
+        if (host.protocol.major !== PROTOCOL_VERSION.major) {
+          return yield* Effect.fail(
+            new IncompatibleProtocolError({
+              clientMajor: PROTOCOL_VERSION.major,
+              hostMajor: host.protocol.major,
+              message: `Kojo Host protocol ${host.protocol.major} is incompatible with client protocol ${PROTOCOL_VERSION.major}.`,
+            }),
+          );
+        }
 
-      const { projects } = yield* client.ListProjects().pipe(Effect.mapError(safeUnavailable));
-      return { host, projects };
-    }),
-  );
-
-  const retryTransport = (
-    attempt: number,
-  ): Effect.Effect<HostOverview, LocalTransportError | IncompatibleProtocolError> =>
-    exchange.pipe(
-      Effect.catchTag("LocalTransportError", () => {
-        if (attempt >= maxAttempts) return Effect.fail(safeUnavailable());
-        const delay = retryDelay === "0 millis" ? Effect.void : Effect.sleep(retryDelay);
-        return Effect.andThen(delay, retryTransport(attempt + 1));
+        return yield* operation(client, host).pipe(Effect.mapError(safeUnavailable));
       }),
     );
 
-  const getHostOverview: Effect.Effect<
-    HostOverview,
-    LocalTransportError | IncompatibleProtocolError
-  > = exchange.pipe(
-    Effect.catchTag("LocalTransportError", () =>
-      Effect.andThen(options.activate ?? Effect.void, retryTransport(2)),
+  const retryTransport = <A>(
+    effect: Effect.Effect<A, LocalTransportError | IncompatibleProtocolError>,
+    attempt: number,
+  ): Effect.Effect<A, LocalTransportError | IncompatibleProtocolError> =>
+    effect.pipe(
+      Effect.catchTag("LocalTransportError", () => {
+        if (attempt >= maxAttempts) return Effect.fail(safeUnavailable());
+        const delay = retryDelay === "0 millis" ? Effect.void : Effect.sleep(retryDelay);
+        return Effect.andThen(delay, retryTransport(effect, attempt + 1));
+      }),
+    );
+
+  const activateAndRetry = <A>(
+    effect: Effect.Effect<A, LocalTransportError | IncompatibleProtocolError>,
+  ) =>
+    effect.pipe(
+      Effect.catchTag("LocalTransportError", () =>
+        Effect.andThen(options.activate ?? Effect.void, retryTransport(effect, 2)),
+      ),
+    );
+
+  const getHostOverview = activateAndRetry(
+    request((client, host) =>
+      Effect.gen(function* () {
+        const { projects } = yield* client.ListProjects();
+        return { host, projects } satisfies HostOverview;
+      }),
     ),
   );
 
-  return { getHostOverview } as const;
+  const listProjects = activateAndRetry(
+    request((client) => client.ListProjects()),
+  ) satisfies Effect.Effect<ProjectList, LocalTransportError | IncompatibleProtocolError>;
+
+  const showProject = (identity: ProjectIdentity) =>
+    activateAndRetry(request((client) => client.ShowProject({ identity })));
+  const registerProject = (path: string) =>
+    activateAndRetry(request((client) => client.RegisterProject({ path })));
+  const forgetProject = (identity: ProjectIdentity) =>
+    activateAndRetry(request((client) => client.ForgetProject({ identity })));
+
+  return {
+    getHostOverview,
+    listProjects,
+    showProject,
+    registerProject,
+    forgetProject,
+  } satisfies {
+    readonly getHostOverview: Effect.Effect<
+      HostOverview,
+      LocalTransportError | IncompatibleProtocolError
+    >;
+    readonly listProjects: Effect.Effect<
+      ProjectList,
+      LocalTransportError | IncompatibleProtocolError
+    >;
+    readonly showProject: (
+      identity: ProjectIdentity,
+    ) => Effect.Effect<ProjectOperationResult, LocalTransportError | IncompatibleProtocolError>;
+    readonly registerProject: (
+      path: string,
+    ) => Effect.Effect<ProjectOperationResult, LocalTransportError | IncompatibleProtocolError>;
+    readonly forgetProject: (
+      identity: ProjectIdentity,
+    ) => Effect.Effect<ProjectOperationResult, LocalTransportError | IncompatibleProtocolError>;
+  };
 };
 
 export const connectUnixControlClient = (socketPath: string) =>

@@ -1,0 +1,198 @@
+import { cp, mkdtemp, readFile, realpath, rename, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { startKojoHostProcess } from "../../../../../../../tests/support/host-process";
+
+const cleanups: Array<() => Promise<void>> = [];
+
+afterEach(async () => {
+  await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+});
+
+describe("Kojo Project discovery", () => {
+  it("lists, selects, shows, registers, and forgets Host-authoritative Projects", async () => {
+    const directory = await temporaryDirectory("kojo-project-management-");
+    const project = join(directory, "project");
+    await git(["init", project]);
+    const host = await startKojoHostProcess();
+    cleanups.push(host.stop);
+    expect((await runCli(["init", project], host.socketPath, directory)).exitCode).toBe(0);
+    const metadataPath = join(project, ".kojo", "project.json");
+    const identity = JSON.parse(await readFile(metadataPath, "utf8")).projectIdentity as string;
+    const canonicalProject = await realpath(project);
+
+    const list = await runCli(["project", "list", "--json"], host.socketPath, directory);
+    expect(list.exitCode).toBe(0);
+    expect(JSON.parse(list.stdout).result.projects).toEqual([{ identity, path: canonicalProject }]);
+
+    const nested = join(project, ".kojo", "artifacts");
+    const inferred = await runCli(["project", "show"], host.socketPath, nested);
+    const byPath = await runCli(
+      ["project", "show", "--project", project, "--json"],
+      host.socketPath,
+      directory,
+    );
+    const byIdentity = await runCli(
+      ["project", "show", "--project-id", identity, "--json"],
+      host.socketPath,
+      directory,
+    );
+
+    expect(inferred.stdout).toContain(`Project Identity: ${identity}`);
+    expect(JSON.parse(byPath.stdout).result.project.identity).toBe(identity);
+    expect(JSON.parse(byIdentity.stdout).result.project.path).toBe(canonicalProject);
+
+    const rejectedSelector = await runCli(
+      ["project", "list", "--project-id", identity],
+      host.socketPath,
+      directory,
+    );
+    expect(rejectedSelector.exitCode).toBe(2);
+
+    const forgotten = await runCli(
+      ["project", "forget", "--project-id", identity],
+      host.socketPath,
+      directory,
+    );
+    expect(forgotten.exitCode).toBe(0);
+    expect(forgotten.stdout).toContain("Project files were not changed");
+    expect(JSON.parse(await readFile(metadataPath, "utf8")).projectIdentity).toBe(identity);
+    expect(
+      JSON.parse((await runCli(["project", "list", "--json"], host.socketPath, directory)).stdout)
+        .result.projects,
+    ).toEqual([]);
+
+    const registered = await runCli(
+      ["project", "register", nested, "--json"],
+      host.socketPath,
+      directory,
+    );
+    expect(registered.exitCode).toBe(0);
+    expect(JSON.parse(registered.stdout).result.project).toEqual({
+      identity,
+      path: canonicalProject,
+    });
+  });
+
+  it("updates an indexed path after a working tree moves", async () => {
+    const directory = await temporaryDirectory("kojo-project-move-");
+    const project = join(directory, "project");
+    const moved = join(directory, "moved-project");
+    await git(["init", project]);
+    const host = await startKojoHostProcess();
+    cleanups.push(host.stop);
+    expect((await runCli(["init", project], host.socketPath, directory)).exitCode).toBe(0);
+    const identity = JSON.parse(await readFile(join(project, ".kojo", "project.json"), "utf8"))
+      .projectIdentity as string;
+
+    await rename(project, moved);
+    const registered = await runCli(
+      ["project", "register", moved, "--json"],
+      host.socketPath,
+      directory,
+    );
+
+    expect(registered.exitCode).toBe(0);
+    expect(JSON.parse(registered.stdout).result.project).toEqual({
+      identity,
+      path: await realpath(moved),
+    });
+    const projects = JSON.parse(
+      (await runCli(["project", "list", "--json"], host.socketPath, directory)).stdout,
+    ).result.projects;
+    expect(projects).toEqual([{ identity, path: await realpath(moved) }]);
+  });
+
+  it("rejects one Project Identity at two live working-tree paths", async () => {
+    const directory = await temporaryDirectory("kojo-project-duplicate-");
+    const project = join(directory, "project");
+    const duplicate = join(directory, "duplicate");
+    await git(["init", project]);
+    const host = await startKojoHostProcess();
+    cleanups.push(host.stop);
+    expect((await runCli(["init", project], host.socketPath, directory)).exitCode).toBe(0);
+    await cp(project, duplicate, { recursive: true });
+
+    const result = await runCli(
+      ["project", "register", duplicate, "--json"],
+      host.socketPath,
+      directory,
+    );
+
+    expect(result.exitCode).toBe(4);
+    expect(JSON.parse(result.stdout).error.code).toBe("project-identity-duplicate");
+    expect(result.stderr).toContain("same Project Identity is present at two working-tree paths");
+  });
+
+  it("requires an unambiguous Project selection", async () => {
+    const directory = await temporaryDirectory("kojo-project-selection-");
+    const host = await startKojoHostProcess();
+    cleanups.push(host.stop);
+
+    const missing = await runCli(["project", "show"], host.socketPath, directory);
+    const conflicting = await runCli(
+      [
+        "project",
+        "show",
+        "--project",
+        directory,
+        "--project-id",
+        "00000000-0000-4000-8000-000000000000",
+      ],
+      host.socketPath,
+      directory,
+    );
+
+    expect(missing.exitCode).toBe(4);
+    expect(missing.stderr).toContain("could not be inferred");
+    expect(conflicting.exitCode).toBe(2);
+  });
+
+  it("finds indexed Projects after the Host restarts", async () => {
+    const directory = await temporaryDirectory("kojo-project-restart-");
+    const hostStore = join(directory, "host-store");
+    const project = join(directory, "project");
+    await git(["init", project]);
+    const firstHost = await startKojoHostProcess({ storePath: hostStore });
+    expect((await runCli(["init", project], firstHost.socketPath, directory)).exitCode).toBe(0);
+    const identity = JSON.parse(await readFile(join(project, ".kojo", "project.json"), "utf8"))
+      .projectIdentity as string;
+    await firstHost.stop();
+
+    const restartedHost = await startKojoHostProcess({ storePath: hostStore });
+    cleanups.push(restartedHost.stop);
+    const projects = JSON.parse(
+      (await runCli(["project", "list", "--json"], restartedHost.socketPath, directory)).stdout,
+    ).result.projects;
+
+    expect(projects).toEqual([{ identity, path: await realpath(project) }]);
+  });
+});
+
+const temporaryDirectory = async (prefix: string) => {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  cleanups.push(() => rm(directory, { recursive: true }));
+  return directory;
+};
+
+const git = async (args: ReadonlyArray<string>) => {
+  const child = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe" });
+  const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  if (exitCode !== 0) throw new Error(stderr);
+};
+
+const runCli = async (args: ReadonlyArray<string>, socketPath: string, cwd: string) => {
+  const child = Bun.spawn(["bun", "run", join(process.cwd(), "main.ts"), ...args], {
+    cwd,
+    env: { ...process.env, KOJO_HOST_SOCKET: socketPath },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  return { exitCode, stdout, stderr };
+};

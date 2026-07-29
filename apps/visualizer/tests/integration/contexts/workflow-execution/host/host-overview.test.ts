@@ -65,7 +65,12 @@ describe("Host overview", () => {
             host: {
               protocol: { major: 1, minor: 0 },
               hostVersion: "0.1.0",
-              capabilities: ["projects:list"],
+              capabilities: [
+                "projects:list",
+                "projects:show",
+                "projects:register",
+                "projects:forget",
+              ],
             },
             projects: [],
           });

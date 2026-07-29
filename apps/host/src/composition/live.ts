@@ -4,6 +4,7 @@ import { BunSocketServer } from "@effect/platform-bun";
 import { defaultSocketPath } from "@kojo/control/local-client";
 import { Layer } from "effect";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
+import { makeProjectIndexLayer } from "../contexts/workflow-authoring/projects/services/project-index";
 import { makeHostDiagnosticLoggerLayer } from "../contexts/workflow-execution/control/services/host-diagnostic-logger";
 import { loadHostIdentity } from "../contexts/workflow-execution/control/services/host-identity-store";
 import {
@@ -15,6 +16,7 @@ export const startLiveKojoHost = async () => {
   const socketPath = process.env.KOJO_HOST_SOCKET ?? defaultSocketPath();
   const hostStorePath = process.env.KOJO_HOST_STORE ?? join(homedir(), ".kojo", "host");
   const diagnosticPath = join(hostStorePath, "diagnostics.jsonl");
+  const projectIndex = makeProjectIndexLayer(join(hostStorePath, "projects.json"));
   const hostIdentity = await loadHostIdentity(join(hostStorePath, "identity"));
   const protocol = RpcServer.layerProtocolSocketServer.pipe(
     Layer.provide([BunSocketServer.layer({ path: socketPath }), RpcSerialization.layerNdjson]),
@@ -23,7 +25,7 @@ export const startLiveKojoHost = async () => {
     protocol,
     makeHostDiagnosticLoggerLayer(diagnosticPath),
     hostIdentity,
-  );
+  ).pipe(Layer.provide(projectIndex));
 
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });
 };
