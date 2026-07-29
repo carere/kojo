@@ -1,11 +1,10 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "noEmit": true,
     "types": ["bun"],
-    "outDir": "../../.moon/cache/types/apps/cli"
+    "outDir": "../../.moon/cache/types/apps/host"
   },
-  "include": ["src/**/*", "tests/**/*", "main.ts"],
+  "include": ["src/**/*", "tests/**/*", "main.ts", "vitest.config.ts"],
   "references": [
     {
       "path": "../../packages/control"

@@ -14,5 +14,10 @@
     },
     "outDir": "../../.moon/cache/types/apps/visualizer"
   },
-  "include": ["src/**/*", "tests/**/*", "*.ts", "*.tsx"]
+  "include": ["src/**/*", "tests/**/*", "*.ts", "*.tsx"],
+  "references": [
+    {
+      "path": "../../packages/control"
+    }
+  ]
 }

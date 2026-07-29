@@ -1,0 +1,20 @@
+$schema: "../../.moon/cache/schemas/project.json"
+
+tasks:
+  test:
+    command: bun --bun vitest run
+    inputs:
+      - "@group(configs)"
+      - "@group(sources)"
+      - "@group(tests)"
+      - "@group(workspace)"
+    type: test
+
+  integration-test:
+    command: bun --bun vitest run --passWithNoTests tests/integration
+    inputs:
+      - "@group(configs)"
+      - "@group(sources)"
+      - "@group(tests)"
+      - "@group(workspace)"
+    type: test

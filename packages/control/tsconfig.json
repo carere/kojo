@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["bun"],
+    "outDir": "../../.moon/cache/types/packages/control"
+  },
+  "include": ["src/**/*", "tests/**/*", "vitest.config.ts"],
+  "references": [
+    {
+      "path": "../workflow"
+    }
+  ]
+}

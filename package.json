@@ -6,7 +6,8 @@
   "author": "Kevin Abatan <contact@carere.dev> (https://github.com/carere)",
   "type": "module",
   "workspaces": [
-    "apps/*"
+    "apps/*",
+    "packages/*"
   ],
   "devDependencies": {
     "@biomejs/biome": "latest",

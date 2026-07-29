@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/solid-router";
+import { VisualizerHome } from "../contexts/readiness/components/visualizer-home";
 import type { PrototypeVariant } from "../contexts/workflow-execution/workflow-inspector/components/prototype/prototype-switcher";
 import { WorkflowInspectorPrototype } from "../contexts/workflow-execution/workflow-inspector/components/prototype/workflow-inspector-prototype";
 
@@ -14,7 +15,7 @@ function WorkflowInspectorRoute() {
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
 
-  return (
+  return search().prototype ? (
     <WorkflowInspectorPrototype
       showSwitcher={search().prototype}
       variant={search().variant}
@@ -22,5 +23,7 @@ function WorkflowInspectorRoute() {
         navigate({ search: { prototype: search().prototype, variant }, replace: true })
       }
     />
+  ) : (
+    <VisualizerHome />
   );
 }

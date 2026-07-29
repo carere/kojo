@@ -51,3 +51,31 @@ test("switches to the dark color mode", async () => {
   await expect.poll(() => document.documentElement.classList.contains("dark")).toBe(true);
   expect(document.documentElement.style.colorScheme).toBe("dark");
 });
+
+test("shows Host readiness and the authoritative empty Project state", async () => {
+  setLocale("en", { reload: false });
+  const root = document.createElement("div");
+  document.body.append(root);
+  dispose = render(
+    () => (
+      <ColorModeProvider initialColorMode="light">
+        <VisualizerHome
+          loadOverview={() =>
+            Promise.resolve({
+              host: {
+                protocol: { major: 1, minor: 0 },
+                hostVersion: "0.1.0",
+                capabilities: ["projects:list"],
+              },
+              projects: [],
+            })
+          }
+        />
+      </ColorModeProvider>
+    ),
+    root,
+  );
+
+  await expect.element(page.getByText("Kojo Host 0.1.0 is ready")).toBeVisible();
+  await expect.element(page.getByText("No Kojo Projects yet.")).toBeVisible();
+});

@@ -3,6 +3,15 @@
   "files": [],
   "references": [
     {
+      "path": "./packages/workflow"
+    },
+    {
+      "path": "./packages/control"
+    },
+    {
+      "path": "./apps/host"
+    },
+    {
       "path": "./apps/cli"
     },
     {

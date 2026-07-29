@@ -1,6 +1,7 @@
 import { Layer } from "effect";
 import { HttpRouter } from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
+import { HostControlClientLive } from "../../workflow-execution/host/services/host-control-client";
 import { VisualizerApi } from "../models/contracts";
 import { VisualizerApiHandlers } from "./handlers";
 
@@ -8,7 +9,12 @@ const VisualizerApiLive = RpcServer.layerHttp({
   group: VisualizerApi,
   path: "/api/rpc",
   protocol: "http",
-}).pipe(Layer.provide([VisualizerApiHandlers, RpcSerialization.layerNdjson]));
+}).pipe(
+  Layer.provide([
+    VisualizerApiHandlers.pipe(Layer.provide(HostControlClientLive)),
+    RpcSerialization.layerNdjson,
+  ]),
+);
 
 const webHandler = HttpRouter.toWebHandler(VisualizerApiLive);
 
