@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { BunSocket } from "@effect/platform-bun";
 import { Data, Effect } from "effect";
@@ -103,8 +104,8 @@ export const connectUnixControlClient = (socketPath: string) =>
 export const defaultSocketPath = () => {
   const runtimeDirectory = process.env.XDG_RUNTIME_DIR;
   return runtimeDirectory === undefined
-    ? join("/tmp", `kojo-${process.getuid?.() ?? 0}`, "control.sock")
-    : `${runtimeDirectory}/kojo.sock`;
+    ? join(homedir(), ".kojo", "run", "control.sock")
+    : join(runtimeDirectory, "kojo", "control.sock");
 };
 
 const activationCommand = (platform: NodeJS.Platform, userId: number) => {

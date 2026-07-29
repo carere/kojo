@@ -1,15 +1,14 @@
 import { afterAll, describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 import { FetchHttpClient } from "effect/unstable/http";
-import { RpcTest } from "effect/unstable/rpc";
-import { VisualizerApi } from "../../../src/contexts/shared/models/contracts";
+import { RpcGroup, RpcTest } from "effect/unstable/rpc";
+import { HealthHandler } from "../../../src/contexts/readiness/server/handlers";
+import { Health } from "../../../src/contexts/shared/models/contracts";
 import { disposeApi, handleApiRequest } from "../../../src/contexts/shared/server";
-import { VisualizerApiHandlers } from "../../../src/contexts/shared/server/handlers";
 import {
   makeVisualizerApiClientLayer,
   VisualizerApiClient,
 } from "../../../src/contexts/shared/services/client";
-import { HostControlClient } from "../../../src/contexts/workflow-execution/host/services/host-control-client";
 
 const expectedHealth = {
   service: "visualizer",
@@ -21,16 +20,11 @@ afterAll(() => disposeApi());
 describe("visualizer health", () => {
   it.effect("is implemented through the RPC contract", () =>
     Effect.gen(function* () {
-      const client = yield* RpcTest.makeClient(VisualizerApi);
+      const client = yield* RpcTest.makeClient(RpcGroup.make(Health));
       const health = yield* client.Health();
 
       expect(health).toEqual(expectedHealth);
-    }).pipe(
-      Effect.provide(VisualizerApiHandlers),
-      Effect.provideService(HostControlClient, {
-        getHostOverview: Effect.die("Host operation is not used by this test."),
-      }),
-    ),
+    }).pipe(Effect.provide(HealthHandler)),
   );
 
   it.effect("is available through the Fetch handler", () => {

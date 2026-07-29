@@ -15,7 +15,7 @@ export const startKojoHostProcess = async (): Promise<KojoHostProcessFixture> =>
   const socketPath = join(directory, "host.sock");
   const processHandle = Bun.spawn(["bun", "run", join(workspaceRoot, "apps/host/main.ts")], {
     cwd: workspaceRoot,
-    env: { ...process.env, KOJO_HOST_SOCKET: socketPath },
+    env: { ...process.env, KOJO_HOST_SOCKET: socketPath, KOJO_HOST_STORE: directory },
     stdout: "ignore",
     stderr: "pipe",
   });

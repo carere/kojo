@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, open, readFile, unlink } from "node:fs/promises";
+import { chmod, open, readFile, unlink } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname } from "node:path";
 import { KojoControl } from "@kojo/control";
@@ -12,6 +12,9 @@ import {
 import { HOST_INFORMATION } from "../models/host-information";
 import { getHostInformation } from "../use-cases/get-host-information";
 import { listProjects } from "../use-cases/list-projects";
+import { prepareHostStoreDirectory } from "./host-store";
+
+export { UnsafeHostStoreError } from "./host-store";
 
 export interface KojoHostServer {
   readonly diagnosticPath: string;
@@ -157,8 +160,8 @@ export const makeKojoControlServerLayer = <ProtocolError, ProtocolRequirements>(
 export const startKojoHost = async (options: KojoHostOptions): Promise<KojoHostServer> => {
   const socketDirectory = dirname(options.socketPath);
   const lockPath = options.lockPath ?? `${options.socketPath}.lock`;
-  await mkdir(socketDirectory, { recursive: true, mode: 0o700 });
-  await chmod(socketDirectory, 0o700);
+  await prepareHostStoreDirectory(socketDirectory);
+  if (dirname(lockPath) !== socketDirectory) await prepareHostStoreDirectory(dirname(lockPath));
   const releaseLock = await acquireHostLock(lockPath);
   let scope: Scope.Closeable | undefined;
   let mayOwnSocket = false;

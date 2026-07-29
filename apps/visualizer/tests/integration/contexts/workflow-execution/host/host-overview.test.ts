@@ -2,18 +2,18 @@ import { afterAll, describe, expect, it } from "@effect/vitest";
 import { LocalTransportError } from "@kojo/control/local-client";
 import { Effect } from "effect";
 import { FetchHttpClient } from "effect/unstable/http";
-import { RpcTest } from "effect/unstable/rpc";
+import { RpcGroup, RpcTest } from "effect/unstable/rpc";
 import { startKojoHostProcess } from "../../../../../../../tests/support/host-process";
 import {
+  HostOverview,
   HostOverviewError,
-  VisualizerApi,
 } from "../../../../../src/contexts/shared/models/contracts";
 import { disposeApi, handleApiRequest } from "../../../../../src/contexts/shared/server";
-import { VisualizerApiHandlers } from "../../../../../src/contexts/shared/server/handlers";
 import {
   makeVisualizerApiClientLayer,
   VisualizerApiClient,
 } from "../../../../../src/contexts/shared/services/client";
+import { HostOverviewHandler } from "../../../../../src/contexts/workflow-execution/host/server/handlers";
 import { HostControlClient } from "../../../../../src/contexts/workflow-execution/host/services/host-control-client";
 
 afterAll(() => disposeApi());
@@ -21,7 +21,7 @@ afterAll(() => disposeApi());
 describe("Host overview", () => {
   it.effect("preserves safe transport failures as typed browser-operation errors", () =>
     Effect.gen(function* () {
-      const client = yield* RpcTest.makeClient(VisualizerApi);
+      const client = yield* RpcTest.makeClient(RpcGroup.make(HostOverview));
       const error = yield* Effect.flip(client.HostOverview());
 
       expect(error).toEqual(
@@ -32,7 +32,7 @@ describe("Host overview", () => {
         }),
       );
     }).pipe(
-      Effect.provide(VisualizerApiHandlers),
+      Effect.provide(HostOverviewHandler),
       Effect.provideService(HostControlClient, {
         getHostOverview: Effect.fail(
           new LocalTransportError({ message: "Kojo Host is unavailable." }),

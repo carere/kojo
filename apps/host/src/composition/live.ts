@@ -1,28 +1,28 @@
-import { createHash } from "node:crypto";
-import { hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { BunSocketServer } from "@effect/platform-bun";
 import { defaultSocketPath } from "@kojo/control/local-client";
 import { Layer } from "effect";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import { makeHostDiagnosticLoggerLayer } from "../contexts/shared/services/host-diagnostic-logger";
+import { loadHostIdentity } from "../contexts/workflow-execution/control/services/host-identity-store";
 import {
   makeKojoControlServerLayer,
   startKojoHost,
 } from "../contexts/workflow-execution/control/services/local-host";
 
-export const startLiveKojoHost = () => {
+export const startLiveKojoHost = async () => {
   const socketPath = process.env.KOJO_HOST_SOCKET ?? defaultSocketPath();
-  const diagnosticPath = join(dirname(socketPath), "diagnostics.jsonl");
+  const hostStorePath = process.env.KOJO_HOST_STORE ?? join(homedir(), ".kojo", "host");
+  const diagnosticPath = join(hostStorePath, "diagnostics.jsonl");
+  const hostIdentity = await loadHostIdentity(join(hostStorePath, "identity"));
   const protocol = RpcServer.layerProtocolSocketServer.pipe(
     Layer.provide([BunSocketServer.layer({ path: socketPath }), RpcSerialization.layerNdjson]),
   );
   const serverLayer = makeKojoControlServerLayer(
     protocol,
     makeHostDiagnosticLoggerLayer(diagnosticPath),
-    `host:${createHash("sha256")
-      .update(`${hostname()}:${process.getuid?.() ?? 0}`)
-      .digest("hex")}`,
+    hostIdentity,
   );
 
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });

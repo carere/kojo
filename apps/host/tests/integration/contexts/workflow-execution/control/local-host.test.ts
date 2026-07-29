@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunSocketServer } from "@effect/platform-bun";
@@ -11,6 +11,7 @@ import {
   type KojoHostServer,
   makeKojoControlServerLayer,
   startKojoHost,
+  UnsafeHostStoreError,
 } from "../../../../../src/contexts/workflow-execution/control/services/local-host";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -96,6 +97,31 @@ describe("local Kojo Host control", () => {
         maxAttempts: 1,
       }).getHostOverview;
       expect(overview.host.hostVersion).toBe("0.1.0");
+    }),
+  );
+
+  it.effect("rejects a Host store that resolves through another user's directory", () =>
+    Effect.gen(function* () {
+      const directory = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), "kojo-host-unsafe-store-")),
+      );
+      cleanups.push(() => rm(directory, { recursive: true }));
+      const unsafeDirectory = join(directory, "unsafe");
+      yield* Effect.promise(() => symlink(tmpdir(), unsafeDirectory));
+
+      const error = yield* Effect.promise(async () => {
+        try {
+          await startTestHost(
+            join(unsafeDirectory, "host.sock"),
+            join(unsafeDirectory, "diagnostics.jsonl"),
+          );
+          return undefined;
+        } catch (cause) {
+          return cause;
+        }
+      });
+
+      expect(error).toBeInstanceOf(UnsafeHostStoreError);
     }),
   );
 });

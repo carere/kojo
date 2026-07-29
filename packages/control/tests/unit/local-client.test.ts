@@ -1,12 +1,26 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 import {
+  defaultSocketPath,
   IncompatibleProtocolError,
   type KojoControlClient,
   LocalTransportError,
   makeLocalClient,
   makeOperatingSystemHostActivation,
 } from "../../src/local-client";
+
+it("keeps fallback Host discovery inside the current user's home", () => {
+  const previousRuntimeDirectory = process.env.XDG_RUNTIME_DIR;
+  delete process.env.XDG_RUNTIME_DIR;
+  try {
+    expect(defaultSocketPath()).toBe(join(homedir(), ".kojo", "run", "control.sock"));
+  } finally {
+    if (previousRuntimeDirectory === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = previousRuntimeDirectory;
+  }
+});
 
 const handshake = {
   protocol: { major: 1, minor: 0 },
