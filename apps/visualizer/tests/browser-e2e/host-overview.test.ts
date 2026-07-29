@@ -1,9 +1,9 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Browser, chromium } from "playwright";
 import { afterEach, expect, test } from "vitest";
+import { makeTemporaryDirectory, runKojoCli } from "../../../../tests/support/cli-process";
 import {
   type KojoHostProcessFixture,
   startKojoHostProcess,
@@ -17,7 +17,7 @@ interface Fixture {
 }
 
 let fixture: Fixture | undefined;
-const temporaryDirectories: Array<string> = [];
+const temporaryDirectories: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
   if (fixture !== undefined) {
@@ -27,7 +27,7 @@ afterEach(async () => {
     await fixture.host.stop();
     fixture = undefined;
   }
-  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true })));
+  await Promise.all(temporaryDirectories.splice(0).map((cleanup) => cleanup()));
 });
 
 test("loads the Host-authoritative Project state and reconciles Navigator preferences by Project Identity", async () => {
@@ -40,16 +40,16 @@ test("loads the Host-authoritative Project state and reconciles Navigator prefer
 
   expect(await page.getByText("Connected to Kojo Host 0.1.0").isVisible()).toBe(true);
   expect(await page.getByText("No Kojo Projects yet.").isVisible()).toBe(true);
-  const directory = await mkdtemp(join(tmpdir(), "kojo-navigator-"));
-  temporaryDirectories.push(directory);
-  const firstPath = join(directory, "first-project");
-  const secondPath = join(directory, "second-project");
+  const directory = await makeTemporaryDirectory("kojo-navigator-");
+  temporaryDirectories.push(directory.cleanup);
+  const firstPath = join(directory.path, "first-project");
+  const secondPath = join(directory.path, "second-project");
   await run(["git", "init", firstPath]);
   await run(["git", "init", secondPath]);
-  await runCli(["init", firstPath], fixture.host.socketPath);
-  await runCli(["init", secondPath], fixture.host.socketPath);
-  const listed = await runCli(["project", "list", "--json"], fixture.host.socketPath);
-  expect(JSON.parse(listed).result.projects).toHaveLength(2);
+  expect((await runKojoCli(["init", firstPath], fixture.host.socketPath)).exitCode).toBe(0);
+  expect((await runKojoCli(["init", secondPath], fixture.host.socketPath)).exitCode).toBe(0);
+  const listed = await runKojoCli(["project", "list", "--json"], fixture.host.socketPath);
+  expect(JSON.parse(listed.stdout).result.projects).toHaveLength(2);
   const firstIdentity = JSON.parse(await readFile(join(firstPath, ".kojo", "project.json"), "utf8"))
     .projectIdentity as string;
   const secondIdentity = JSON.parse(
@@ -154,23 +154,4 @@ const run = async (command: ReadonlyArray<string>) => {
   const child = Bun.spawn([...command], { stdout: "pipe", stderr: "pipe" });
   const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
   if (exitCode !== 0) throw new Error(stderr);
-};
-
-const runCli = async (args: ReadonlyArray<string>, socketPath: string) => {
-  const visualizerDirectory = process.cwd().endsWith("apps/visualizer")
-    ? process.cwd()
-    : join(process.cwd(), "apps/visualizer");
-  const child = Bun.spawn(["bun", "run", join(visualizerDirectory, "../cli/main.ts"), ...args], {
-    cwd: visualizerDirectory,
-    env: { ...process.env, KOJO_HOST_SOCKET: socketPath },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  if (exitCode !== 0) throw new Error(stderr);
-  return stdout;
 };

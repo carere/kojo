@@ -5,11 +5,15 @@ import { dirname } from "node:path";
 import { KojoControl } from "@kojo/control";
 import { Effect, Exit, Layer, Scope } from "effect";
 import { RpcServer } from "effect/unstable/rpc";
+import {
+  forgetProject,
+  listProjects,
+  registerProject,
+  showProject,
+} from "../../../workflow-authoring/projects/use-cases/manage-projects";
 import type { HostIdentity } from "../models/host-identity";
 import { HOST_INFORMATION } from "../models/host-information";
 import { getHostInformation } from "../use-cases/get-host-information";
-import { listProjects } from "../use-cases/list-projects";
-import { forgetProject, registerProject, showProject } from "../use-cases/manage-projects";
 import { HostDiagnosticLogger, type HostRequestDiagnosticEvent } from "./host-diagnostic-logger";
 import { prepareHostStoreDirectory } from "./host-store";
 
@@ -85,19 +89,19 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           String(options.requestId),
           showProject(identity),
         ),
-      RegisterProject: ({ path }, options) =>
+      RegisterProject: ({ path, requestKey }, options) =>
         withHostRequestDiagnostic(
           hostIdentity,
           "RegisterProject",
           String(options.requestId),
-          registerProject(path),
+          registerProject(path, requestKey),
         ),
-      ForgetProject: ({ identity }, options) =>
+      ForgetProject: ({ identity, requestKey }, options) =>
         withHostRequestDiagnostic(
           hostIdentity,
           "ForgetProject",
           String(options.requestId),
-          forgetProject(identity),
+          forgetProject(identity, requestKey),
         ),
     }),
   );

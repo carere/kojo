@@ -1,10 +1,15 @@
-import type { ProjectSnapshot } from "@kojo/control";
+import {
+  type ProjectIdentity,
+  ProjectIdentity as ProjectIdentitySchema,
+  type ProjectSnapshot,
+} from "@kojo/control";
+import { Schema } from "effect";
 
 export const NAVIGATOR_PREFERENCES_KEY = "kojo.navigator.preferences";
 
 export interface NavigatorPreferences {
-  readonly order: ReadonlyArray<string>;
-  readonly selectedProjectIdentity?: string;
+  readonly order: ReadonlyArray<ProjectIdentity>;
+  readonly selectedProjectIdentity?: ProjectIdentity;
   readonly version: 1;
 }
 
@@ -13,14 +18,18 @@ const parsePreferences = (value: string | null): NavigatorPreferences | undefine
   try {
     const parsed = JSON.parse(value) as Partial<NavigatorPreferences>;
     if (parsed.version !== 1 || !Array.isArray(parsed.order)) return undefined;
-    if (!parsed.order.every((identity) => typeof identity === "string")) return undefined;
-    if (
-      parsed.selectedProjectIdentity !== undefined &&
-      typeof parsed.selectedProjectIdentity !== "string"
-    ) {
-      return undefined;
-    }
-    return parsed as NavigatorPreferences;
+    const order = parsed.order.map((identity) =>
+      Schema.decodeUnknownSync(ProjectIdentitySchema)(identity),
+    );
+    const selectedProjectIdentity =
+      parsed.selectedProjectIdentity === undefined
+        ? undefined
+        : Schema.decodeUnknownSync(ProjectIdentitySchema)(parsed.selectedProjectIdentity);
+    return {
+      version: 1,
+      order,
+      ...(selectedProjectIdentity === undefined ? {} : { selectedProjectIdentity }),
+    };
   } catch {
     return undefined;
   }
@@ -31,7 +40,7 @@ export const reconcileNavigatorPreferences = (
   stored: string | null,
 ): NavigatorPreferences => {
   const previous = parsePreferences(stored);
-  const identities = new Set<string>(projects.map((project) => project.identity));
+  const identities = new Set<ProjectIdentity>(projects.map((project) => project.identity));
   const retainedOrder = (previous?.order ?? []).filter(
     (identity, index, order) => identities.has(identity) && order.indexOf(identity) === index,
   );
@@ -46,14 +55,18 @@ export const reconcileNavigatorPreferences = (
     identities.has(previous.selectedProjectIdentity)
       ? previous.selectedProjectIdentity
       : order[0];
-  return { version: 1, order, selectedProjectIdentity };
+  return {
+    version: 1,
+    order,
+    ...(selectedProjectIdentity === undefined ? {} : { selectedProjectIdentity }),
+  };
 };
 
 export const orderProjects = (
   projects: ReadonlyArray<ProjectSnapshot>,
   preferences: NavigatorPreferences,
 ) => {
-  const positions = new Map<string, number>(
+  const positions = new Map<ProjectIdentity, number>(
     preferences.order.map((identity, index) => [identity, index]),
   );
   return [...projects].sort(

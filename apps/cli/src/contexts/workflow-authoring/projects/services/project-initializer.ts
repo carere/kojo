@@ -202,14 +202,24 @@ export const initializeProject = async (path: string): Promise<ProjectSnapshot> 
     ],
   );
 
-  if ((metadata === undefined) !== (database === undefined)) {
+  if (data !== undefined && (metadata === undefined || database === undefined)) {
     throw new ProjectInitializationError(
-      `${dataPath} has incomplete durable Project data; use the explicit missing-data repair after reviewing it.`,
+      `${dataPath} is an existing layout with missing durable Project data; use the explicit missing-data repair after reviewing it.`,
     );
   }
   if (data === undefined && [metadata, database, artifacts, sandboxes].some(Boolean)) {
     throw new ProjectInitializationError(
       `${dataPath} has a conflicting layout; no files were changed.`,
+    );
+  }
+  if (data !== undefined && configuration === undefined) {
+    throw new ProjectInitializationError(
+      `${configurationPath} is missing from an existing Kojo Project; restore the developer configuration before retrying.`,
+    );
+  }
+  if (data !== undefined && sandboxes === undefined) {
+    throw new ProjectInitializationError(
+      `${sandboxesPath} is missing from an existing Kojo Project; Kojo cannot prove that no non-final Workflow Run needs it.`,
     );
   }
 
@@ -260,7 +270,7 @@ export const initializeProject = async (path: string): Promise<ProjectSnapshot> 
     await chmod(metadataPath, 0o600);
     await chmod(databasePath, 0o600);
     if (artifacts === undefined) await mkdir(artifactsPath, { mode: 0o700 });
-    if (sandboxes === undefined) await mkdir(sandboxesPath, { mode: 0o700 });
+    if (data === undefined) await mkdir(sandboxesPath, { mode: 0o700 });
     await chmod(artifactsPath, 0o700);
     await chmod(sandboxesPath, 0o700);
   } catch {

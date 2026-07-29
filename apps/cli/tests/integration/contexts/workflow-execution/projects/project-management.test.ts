@@ -1,7 +1,10 @@
-import { cp, mkdtemp, readFile, realpath, rename, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { cp, readFile, realpath, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  makeTemporaryDirectory,
+  runKojoCli as runCli,
+} from "../../../../../../../tests/support/cli-process";
 import { startKojoHostProcess } from "../../../../../../../tests/support/host-process";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -168,31 +171,100 @@ describe("Kojo Project discovery", () => {
 
     expect(projects).toEqual([{ identity, path: await realpath(project) }]);
   });
+
+  it("persists Request Key receipts, redelivers mutations, and rejects conflicting reuse", async () => {
+    const directory = await temporaryDirectory("kojo-project-request-key-");
+    const hostStore = join(directory, "host-store");
+    const project = join(directory, "project");
+    const registerKey = "10000000-0000-4000-8000-000000000001";
+    const forgetKey = "10000000-0000-4000-8000-000000000002";
+    await git(["init", project]);
+    const firstHost = await startKojoHostProcess({ storePath: hostStore });
+    expect((await runCli(["init", project], firstHost.socketPath, directory)).exitCode).toBe(0);
+    const identity = JSON.parse(await readFile(join(project, ".kojo", "project.json"), "utf8"))
+      .projectIdentity as string;
+
+    const firstRegister = await runCli(
+      ["project", "register", project, "--request-key", registerKey, "--json"],
+      firstHost.socketPath,
+      directory,
+    );
+    expect(firstRegister.exitCode).toBe(0);
+    expect(JSON.parse(firstRegister.stdout)).toMatchObject({
+      requestKey: registerKey,
+      result: { alreadyApplied: false },
+    });
+    await firstHost.stop();
+
+    const restartedHost = await startKojoHostProcess({ storePath: hostStore });
+    cleanups.push(restartedHost.stop);
+    const repeatedRegister = await runCli(
+      ["project", "register", project, "--request-key", registerKey, "--json"],
+      restartedHost.socketPath,
+      directory,
+    );
+    expect(repeatedRegister.exitCode).toBe(0);
+    expect(JSON.parse(repeatedRegister.stdout)).toMatchObject({
+      requestKey: registerKey,
+      result: { alreadyApplied: true, project: { identity } },
+    });
+
+    const conflict = await runCli(
+      ["project", "forget", "--project-id", identity, "--request-key", registerKey, "--json"],
+      restartedHost.socketPath,
+      directory,
+    );
+    expect(conflict.exitCode).toBe(4);
+    expect(JSON.parse(conflict.stdout).error.code).toBe("request-key-conflict");
+
+    const firstForget = await runCli(
+      ["project", "forget", "--project-id", identity, "--request-key", forgetKey, "--json"],
+      restartedHost.socketPath,
+      directory,
+    );
+    const repeatedForget = await runCli(
+      ["project", "forget", "--project-id", identity, "--request-key", forgetKey, "--json"],
+      restartedHost.socketPath,
+      directory,
+    );
+    expect(firstForget.exitCode).toBe(0);
+    expect(JSON.parse(firstForget.stdout).result.alreadyApplied).toBe(false);
+    expect(repeatedForget.exitCode).toBe(0);
+    expect(JSON.parse(repeatedForget.stdout)).toMatchObject({
+      requestKey: forgetKey,
+      result: { alreadyApplied: true, project: { identity } },
+    });
+  });
+
+  it("generates and prints a Request Key when one is omitted", async () => {
+    const directory = await temporaryDirectory("kojo-project-generated-request-key-");
+    const project = join(directory, "project");
+    await git(["init", project]);
+    const host = await startKojoHostProcess();
+    cleanups.push(host.stop);
+    expect((await runCli(["init", project], host.socketPath, directory)).exitCode).toBe(0);
+
+    const registered = await runCli(
+      ["project", "register", project, "--json"],
+      host.socketPath,
+      directory,
+    );
+
+    expect(registered.exitCode).toBe(0);
+    expect(JSON.parse(registered.stdout).requestKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+  });
 });
 
 const temporaryDirectory = async (prefix: string) => {
-  const directory = await mkdtemp(join(tmpdir(), prefix));
-  cleanups.push(() => rm(directory, { recursive: true }));
-  return directory;
+  const directory = await makeTemporaryDirectory(prefix);
+  cleanups.push(directory.cleanup);
+  return directory.path;
 };
 
 const git = async (args: ReadonlyArray<string>) => {
   const child = Bun.spawn(["git", ...args], { stdout: "pipe", stderr: "pipe" });
   const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
   if (exitCode !== 0) throw new Error(stderr);
-};
-
-const runCli = async (args: ReadonlyArray<string>, socketPath: string, cwd: string) => {
-  const child = Bun.spawn(["bun", "run", join(process.cwd(), "main.ts"), ...args], {
-    cwd,
-    env: { ...process.env, KOJO_HOST_SOCKET: socketPath },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  return { exitCode, stdout, stderr };
 };

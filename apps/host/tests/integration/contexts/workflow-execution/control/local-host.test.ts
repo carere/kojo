@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it } from "@effect/vitest";
 import { connectUnixControlClient, makeLocalClient } from "@kojo/control/local-client";
 import { Effect, Exit, Layer, Schema } from "effect";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
-import { makeProjectIndexLayer } from "../../../../../src/contexts/workflow-authoring/projects/services/project-index";
+import { makeFileProjectIndexStoreLayer } from "../../../../../src/contexts/workflow-authoring/projects/adapters/file-project-index-store";
+import { GitProjectLayoutLive } from "../../../../../src/contexts/workflow-authoring/projects/adapters/git-project-layout";
 import { HostIdentity } from "../../../../../src/contexts/workflow-execution/control/models/host-identity";
 import { makeHostDiagnosticLoggerLayer } from "../../../../../src/contexts/workflow-execution/control/services/host-diagnostic-logger";
 import {
@@ -144,7 +145,12 @@ const startTestHost = (socketPath: string, diagnosticPath: string) => {
     protocol,
     makeHostDiagnosticLoggerLayer(diagnosticPath),
     TEST_HOST_IDENTITY,
-  ).pipe(Layer.provide(makeProjectIndexLayer(join(dirname(socketPath), "projects.json"))));
+  ).pipe(
+    Layer.provide([
+      makeFileProjectIndexStoreLayer(join(dirname(socketPath), "projects.json")),
+      GitProjectLayoutLive,
+    ]),
+  );
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });
 };
 

@@ -1,4 +1,4 @@
-import type { ProjectSnapshot } from "@kojo/control";
+import type { ProjectIdentity, ProjectSnapshot } from "@kojo/control";
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import {
   NAVIGATOR_PREFERENCES_KEY,
@@ -31,7 +31,7 @@ export function ProjectNavigator(props: ProjectNavigatorProps) {
 
   const projects = createMemo(() => orderProjects(props.projects, preferences()));
 
-  const select = (identity: string) => {
+  const select = (identity: ProjectIdentity) => {
     const next = { ...preferences(), selectedProjectIdentity: identity };
     setPreferences(next);
     window.localStorage.setItem(NAVIGATOR_PREFERENCES_KEY, JSON.stringify(next));

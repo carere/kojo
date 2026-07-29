@@ -1,7 +1,8 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  makeTemporaryDirectory,
+  runKojoCli as runCli,
+} from "../../../../../../../tests/support/cli-process";
 import { startKojoHostProcess } from "../../../../../../../tests/support/host-process";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -46,10 +47,10 @@ describe("kojo project list", () => {
   });
 
   it("reports connection failure safely on stderr", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "kojo-cli-missing-"));
-    cleanups.push(() => rm(directory, { recursive: true }));
+    const directory = await makeTemporaryDirectory("kojo-cli-missing-");
+    cleanups.push(directory.cleanup);
 
-    const result = await runCli(["project", "list"], join(directory, "missing.sock"));
+    const result = await runCli(["project", "list"], `${directory.path}/missing.sock`);
 
     expect(result.exitCode).toBe(3);
     expect(result.stdout).toBe("");
@@ -60,10 +61,10 @@ describe("kojo project list", () => {
   });
 
   it("returns a versioned JSON connection error while keeping diagnostics on stderr", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "kojo-cli-json-missing-"));
-    cleanups.push(() => rm(directory, { recursive: true }));
+    const directory = await makeTemporaryDirectory("kojo-cli-json-missing-");
+    cleanups.push(directory.cleanup);
 
-    const result = await runCli(["project", "list", "--json"], join(directory, "missing.sock"));
+    const result = await runCli(["project", "list", "--json"], `${directory.path}/missing.sock`);
 
     expect(result.exitCode).toBe(3);
     expect(JSON.parse(result.stdout)).toEqual({
@@ -100,20 +101,3 @@ describe("kojo project list", () => {
     );
   });
 });
-
-const runCli = async (args: ReadonlyArray<string>, socketPath: string) => {
-  const child = Bun.spawn(["bun", "run", "main.ts", ...args], {
-    cwd: process.cwd(),
-    env: { ...process.env, KOJO_HOST_SOCKET: socketPath },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-
-  return { exitCode, stdout, stderr };
-};

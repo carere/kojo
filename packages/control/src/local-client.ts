@@ -14,7 +14,9 @@ import {
   PROTOCOL_VERSION,
   type ProjectIdentity,
   type ProjectList,
-  type ProjectOperationResult,
+  type ProjectMutationResult,
+  type ProjectQueryResult,
+  type RequestKey,
 } from "./index";
 
 export class LocalTransportError extends Data.TaggedError("LocalTransportError")<{
@@ -112,10 +114,10 @@ export const makeLocalClient = (options: LocalClientOptions) => {
 
   const showProject = (identity: ProjectIdentity) =>
     activateAndRetry(request((client) => client.ShowProject({ identity })));
-  const registerProject = (path: string) =>
-    activateAndRetry(request((client) => client.RegisterProject({ path })));
-  const forgetProject = (identity: ProjectIdentity) =>
-    activateAndRetry(request((client) => client.ForgetProject({ identity })));
+  const registerProject = (path: string, requestKey: RequestKey) =>
+    activateAndRetry(request((client) => client.RegisterProject({ path, requestKey })));
+  const forgetProject = (identity: ProjectIdentity, requestKey: RequestKey) =>
+    activateAndRetry(request((client) => client.ForgetProject({ identity, requestKey })));
 
   return {
     getHostOverview,
@@ -134,13 +136,15 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     >;
     readonly showProject: (
       identity: ProjectIdentity,
-    ) => Effect.Effect<ProjectOperationResult, LocalTransportError | IncompatibleProtocolError>;
+    ) => Effect.Effect<ProjectQueryResult, LocalTransportError | IncompatibleProtocolError>;
     readonly registerProject: (
       path: string,
-    ) => Effect.Effect<ProjectOperationResult, LocalTransportError | IncompatibleProtocolError>;
+      requestKey: RequestKey,
+    ) => Effect.Effect<ProjectMutationResult, LocalTransportError | IncompatibleProtocolError>;
     readonly forgetProject: (
       identity: ProjectIdentity,
-    ) => Effect.Effect<ProjectOperationResult, LocalTransportError | IncompatibleProtocolError>;
+      requestKey: RequestKey,
+    ) => Effect.Effect<ProjectMutationResult, LocalTransportError | IncompatibleProtocolError>;
   };
 };
 
@@ -208,4 +212,10 @@ export const makeDefaultLocalClient = (socketPath = defaultSocketPath()) =>
   makeLocalClient({
     connect: connectUnixControlClient(socketPath),
     activate: activateKojoHost,
+  });
+
+export const makeNonActivatingLocalClient = (socketPath = defaultSocketPath()) =>
+  makeLocalClient({
+    connect: connectUnixControlClient(socketPath),
+    maxAttempts: 1,
   });

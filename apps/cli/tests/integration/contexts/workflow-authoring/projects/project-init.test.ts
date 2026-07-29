@@ -1,17 +1,20 @@
 import {
   chmod,
   lstat,
-  mkdtemp,
   readFile,
   realpath,
   rm,
   stat,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  makeTemporaryDirectory,
+  runKojoCli as runCli,
+} from "../../../../../../../tests/support/cli-process";
 import { startKojoHostProcess } from "../../../../../../../tests/support/host-process";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -126,6 +129,85 @@ describe("kojo init", () => {
     expect(await readFile(join(project, ".gitignore"), "utf8")).toBe(".kojo/\n");
   });
 
+  it("initializes safely when the Host is unavailable and can be registered later", async () => {
+    const directory = await temporaryDirectory("kojo-init-offline-");
+    const project = join(directory, "project");
+    await run(["git", "init", project]);
+
+    const initialized = await runCli(
+      ["init", project, "--json"],
+      join(directory, "missing-host.sock"),
+      directory,
+    );
+
+    expect(initialized.exitCode).toBe(0);
+    expect(JSON.parse(initialized.stdout).warnings).toEqual([
+      expect.objectContaining({ code: "project-registration-pending" }),
+    ]);
+    const identity = JSON.parse(await readFile(join(project, ".kojo", "project.json"), "utf8"))
+      .projectIdentity as string;
+
+    const host = await startKojoHostProcess();
+    cleanups.push(host.stop);
+    const registered = await runCli(
+      ["project", "register", project, "--json"],
+      host.socketPath,
+      directory,
+    );
+    expect(registered.exitCode).toBe(0);
+    expect(JSON.parse(registered.stdout).result.project.identity).toBe(identity);
+  });
+
+  it("does not recreate missing durable data in a damaged existing Project", async () => {
+    const directory = await temporaryDirectory("kojo-init-damaged-data-");
+    const project = join(directory, "project");
+    await run(["git", "init", project]);
+    const host = await startKojoHostProcess();
+    cleanups.push(host.stop);
+    expect((await runCli(["init", project], host.socketPath, directory)).exitCode).toBe(0);
+    await unlink(join(project, ".kojo", "project.json"));
+    await unlink(join(project, ".kojo", "kojo.sqlite"));
+
+    const result = await runCli(["init", project], host.socketPath, directory);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("missing durable Project data");
+    expect(await pathsExist(project, [".kojo/project.json", ".kojo/kojo.sqlite"])).toEqual([
+      false,
+      false,
+    ]);
+  });
+
+  it("does not recreate a missing configuration or sandboxes directory", async () => {
+    const directory = await temporaryDirectory("kojo-init-damaged-layout-");
+    const host = await startKojoHostProcess();
+    cleanups.push(host.stop);
+
+    const missingConfiguration = join(directory, "missing-configuration");
+    await run(["git", "init", missingConfiguration]);
+    expect(
+      (await runCli(["init", missingConfiguration], host.socketPath, directory)).exitCode,
+    ).toBe(0);
+    await unlink(join(missingConfiguration, "kojo.config.ts"));
+    const configurationResult = await runCli(
+      ["init", missingConfiguration],
+      host.socketPath,
+      directory,
+    );
+    expect(configurationResult.exitCode).toBe(1);
+    expect(configurationResult.stderr).toContain("developer configuration");
+    expect(await pathsExist(missingConfiguration, ["kojo.config.ts"])).toEqual([false]);
+
+    const missingSandboxes = join(directory, "missing-sandboxes");
+    await run(["git", "init", missingSandboxes]);
+    expect((await runCli(["init", missingSandboxes], host.socketPath, directory)).exitCode).toBe(0);
+    await rm(join(missingSandboxes, ".kojo", "sandboxes"), { recursive: true });
+    const sandboxesResult = await runCli(["init", missingSandboxes], host.socketPath, directory);
+    expect(sandboxesResult.exitCode).toBe(1);
+    expect(sandboxesResult.stderr).toContain("cannot prove");
+    expect(await pathsExist(missingSandboxes, [".kojo/sandboxes"])).toEqual([false]);
+  });
+
   it("gives clones and linked working trees distinct Project Identities", async () => {
     const directory = await temporaryDirectory("kojo-init-identities-");
     const project = join(directory, "project");
@@ -196,9 +278,9 @@ describe("kojo init", () => {
 });
 
 const temporaryDirectory = async (prefix: string) => {
-  const directory = await mkdtemp(join(tmpdir(), prefix));
-  cleanups.push(() => rm(directory, { recursive: true }));
-  return directory;
+  const directory = await makeTemporaryDirectory(prefix);
+  cleanups.push(directory.cleanup);
+  return directory.path;
 };
 
 const run = async (command: ReadonlyArray<string>) => {
@@ -208,21 +290,6 @@ const run = async (command: ReadonlyArray<string>) => {
     new Response(process.stderr).text(),
   ]);
   if (exitCode !== 0) throw new Error(`${command.join(" ")} failed: ${stderr}`);
-};
-
-const runCli = async (args: ReadonlyArray<string>, socketPath: string, cwd: string) => {
-  const child = Bun.spawn(["bun", "run", join(process.cwd(), "main.ts"), ...args], {
-    cwd,
-    env: { ...process.env, KOJO_HOST_SOCKET: socketPath },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  return { exitCode, stdout, stderr };
 };
 
 const snapshotFiles = async (project: string) => {
