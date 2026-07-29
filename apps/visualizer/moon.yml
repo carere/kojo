@@ -6,12 +6,12 @@ dependsOn:
 
 tasks:
   dev:
-    command: bun vite dev
+    command: bun --bun vite dev
     description: Start the Kojo visualizer
     preset: server
 
   build:
-    command: bun vite build
+    command: bun --bun vite build
     description: Build the Kojo visualizer
     inputs:
       - "@group(configs)"
@@ -54,7 +54,7 @@ tasks:
     type: test
 
   preview:
-    command: bun vite preview
+    command: bun --bun vite preview
     description: Preview the visualizer production build
     preset: server
 
