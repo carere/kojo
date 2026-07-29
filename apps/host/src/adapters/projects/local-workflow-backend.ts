@@ -72,7 +72,7 @@ export const makeLocalWorkflowBackendLayer = (hostIdentity: string) =>
           yield* Scope.close(backend.scope, Exit.void);
         });
 
-      const acquireOwnership = (project: ProjectSnapshot) =>
+      const tryAcquireOwnership = (project: ProjectSnapshot) =>
         Effect.sync(() => {
           if (ownership.has(project.path)) return true;
           const path = ownershipPath(project);
@@ -99,6 +99,15 @@ export const makeLocalWorkflowBackendLayer = (hostIdentity: string) =>
             return false;
           }
         }).pipe(Effect.catchCause(() => Effect.succeed(false)));
+
+      const acquireOwnership = (project: ProjectSnapshot) =>
+        Effect.gen(function* () {
+          for (let attempt = 0; attempt < 5; attempt += 1) {
+            if (yield* tryAcquireOwnership(project)) return true;
+            if (attempt < 4) yield* Effect.sleep("25 millis");
+          }
+          return false;
+        });
 
       const releaseOwnership = (path: string) =>
         Effect.sync(() => {

@@ -15,15 +15,56 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { asc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { Effect, Layer, Schema } from "effect";
 import { ProjectStore } from "../../contexts/workflow-execution/projects/services/project-store";
-import { workflowRuns, workflowScheduleStates } from "./project-store-schema";
+import {
+  deletionIntents,
+  executionEvents,
+  projectStoreIdentityBootstrap,
+  schemaMigrations,
+  storeMetadata,
+  workflowRuns,
+  workflowScheduleStates,
+} from "./project-store-schema";
 
 const ScheduleBlockerRows = Schema.Array(Schema.Struct({ scheduleKey: Schema.String }));
 const RunBlockerRows = Schema.Array(Schema.Struct({ runId: Schema.String }));
+const StoreMetadataRows = Schema.Array(
+  Schema.Struct({
+    projectIdentity: Schema.String,
+    storeFormatVersion: Schema.Int,
+    engineAdapterKind: Schema.String,
+    engineAdapterSchemaVersion: Schema.Int,
+    effectFamilyVersion: Schema.String,
+  }),
+);
+const BootstrapIdentityRows = Schema.Array(
+  Schema.Struct({
+    projectIdentity: Schema.String,
+    databaseInstanceId: Schema.String,
+  }),
+);
+const MigrationRows = Schema.Array(Schema.Struct({ hash: Schema.String }));
+const DeletionRows = Schema.Array(Schema.Struct({ deletionId: Schema.String }));
+const SemanticRunRows = Schema.Array(
+  Schema.Struct({
+    runId: Schema.String,
+    state: Schema.String,
+    lastEventSequence: Schema.Int,
+    engineReferenceVersion: Schema.Int,
+    engineReferenceJson: Schema.String,
+  }),
+);
+const SemanticEventRows = Schema.Array(
+  Schema.Struct({ runId: Schema.String, sequence: Schema.Int, kind: Schema.String }),
+);
+const ProjectMetadataFile = Schema.Struct({
+  layoutVersion: Schema.Literal(1),
+  projectIdentity: Schema.String,
+});
 const CURRENT_VERSION = 1;
 const ENGINE_ADAPTER_KIND = "effect-workflow";
 const ENGINE_ADAPTER_SCHEMA_VERSION = 1;
@@ -201,25 +242,26 @@ const assertStoreMetadata = (
   project: { readonly identity: string },
   expectedVersion: number,
 ) => {
-  const metadata = connection
-    .query(
-      "SELECT project_identity, store_format_version, engine_adapter_kind, engine_adapter_schema_version, effect_family_version FROM kojo_store_metadata WHERE singleton_key = 1",
-    )
-    .get() as
-    | {
-        readonly project_identity: string;
-        readonly store_format_version: number;
-        readonly engine_adapter_kind: string;
-        readonly engine_adapter_schema_version: number;
-        readonly effect_family_version: string;
-      }
-    | undefined;
+  const metadata = Schema.decodeUnknownSync(StoreMetadataRows)(
+    drizzle(connection)
+      .select({
+        projectIdentity: storeMetadata.projectIdentity,
+        storeFormatVersion: storeMetadata.storeFormatVersion,
+        engineAdapterKind: storeMetadata.engineAdapterKind,
+        engineAdapterSchemaVersion: storeMetadata.engineAdapterSchemaVersion,
+        effectFamilyVersion: storeMetadata.effectFamilyVersion,
+      })
+      .from(storeMetadata)
+      .where(eq(storeMetadata.singletonKey, 1))
+      .limit(1)
+      .all(),
+  )[0];
   if (
-    metadata?.project_identity !== project.identity ||
-    metadata.store_format_version !== expectedVersion ||
-    metadata.engine_adapter_kind !== ENGINE_ADAPTER_KIND ||
-    metadata.engine_adapter_schema_version !== ENGINE_ADAPTER_SCHEMA_VERSION ||
-    metadata.effect_family_version !== EFFECT_FAMILY_VERSION
+    metadata?.projectIdentity !== project.identity ||
+    metadata.storeFormatVersion !== expectedVersion ||
+    metadata.engineAdapterKind !== ENGINE_ADAPTER_KIND ||
+    metadata.engineAdapterSchemaVersion !== ENGINE_ADAPTER_SCHEMA_VERSION ||
+    metadata.effectFamilyVersion !== EFFECT_FAMILY_VERSION
   ) {
     throw new Error("Project store ownership or engine compatibility mismatch");
   }
@@ -232,27 +274,33 @@ const assertVersionZero = (connection: Database, project: { readonly identity: s
   if (objects.length !== 1 || objects[0]?.name !== "kojo_project_store_identity") {
     throw new Error("unsupported version-zero Project store");
   }
-  const identity = connection
-    .query(
-      "SELECT project_identity, database_instance_id FROM kojo_project_store_identity WHERE singleton_key = 1",
-    )
-    .get() as
-    | { readonly database_instance_id: string; readonly project_identity: string }
-    | undefined;
-  if (
-    identity?.project_identity !== project.identity ||
-    identity.database_instance_id.length === 0
-  ) {
+  const identity = Schema.decodeUnknownSync(BootstrapIdentityRows)(
+    drizzle(connection)
+      .select({
+        projectIdentity: projectStoreIdentityBootstrap.projectIdentity,
+        databaseInstanceId: projectStoreIdentityBootstrap.databaseInstanceId,
+      })
+      .from(projectStoreIdentityBootstrap)
+      .where(eq(projectStoreIdentityBootstrap.singletonKey, 1))
+      .limit(1)
+      .all(),
+  )[0];
+  if (identity?.projectIdentity !== project.identity || identity.databaseInstanceId.length === 0) {
     throw new Error("version-zero Project store identity mismatch");
   }
-  return identity.database_instance_id;
+  return identity.databaseInstanceId;
 };
 
 const assertCurrentSchema = (connection: Database, project: { readonly identity: string }) => {
   if (version(connection) !== CURRENT_VERSION) throw new Error("unsupported Project store version");
-  const migrationRow = connection
-    .query("SELECT hash FROM kojo_schema_migrations ORDER BY created_at DESC LIMIT 1")
-    .get() as { readonly hash: string } | undefined;
+  const migrationRow = Schema.decodeUnknownSync(MigrationRows)(
+    drizzle(connection)
+      .select({ hash: schemaMigrations.hash })
+      .from(schemaMigrations)
+      .orderBy(desc(schemaMigrations.createdAt))
+      .limit(1)
+      .all(),
+  )[0];
   if (migrationRow?.hash !== migrationChecksum) {
     throw new Error("Project store migration checksum mismatch");
   }
@@ -278,36 +326,60 @@ const assertCurrentSchema = (connection: Database, project: { readonly identity:
 };
 
 const assertActivationSemantics = (connection: Database) => {
-  const pendingDeletion = connection
-    .query("SELECT 1 AS present FROM kojo_deletion_intents LIMIT 1")
-    .get() as { readonly present: number } | undefined;
-  if (pendingDeletion?.present === 1) {
+  const store = drizzle(connection);
+  const pendingDeletion = Schema.decodeUnknownSync(DeletionRows)(
+    store.select({ deletionId: deletionIntents.deletionId }).from(deletionIntents).limit(1).all(),
+  );
+  if (pendingDeletion.length > 0) {
     throw new Error("Project deletion recovery is pending");
   }
 
-  const invalidNonFinalRun = connection
-    .query(
-      "SELECT 1 AS present FROM kojo_workflow_runs AS run WHERE run.state IN ('running', 'suspended', 'stopping') AND (run.last_event_sequence < 1 OR NOT EXISTS (SELECT 1 FROM kojo_execution_events AS accepted WHERE accepted.run_id = run.run_id AND accepted.sequence = 1 AND accepted.kind = 'run.accepted') OR run.last_event_sequence != (SELECT COALESCE(MAX(event.sequence), 0) FROM kojo_execution_events AS event WHERE event.run_id = run.run_id)) LIMIT 1",
-    )
-    .get() as { readonly present: number } | undefined;
-  if (invalidNonFinalRun?.present === 1) {
-    throw new Error("Project non-final Workflow Run Event invariants are invalid");
-  }
-
-  const duplicateEngineMapping = connection
-    .query(
-      "SELECT 1 AS present FROM kojo_workflow_runs GROUP BY engine_reference_version, engine_reference_json HAVING COUNT(*) > 1 LIMIT 1",
-    )
-    .get() as { readonly present: number } | undefined;
-  if (duplicateEngineMapping?.present === 1) {
-    throw new Error("Project Workflow Run engine mappings are not unique");
+  const runs = Schema.decodeUnknownSync(SemanticRunRows)(
+    store
+      .select({
+        runId: workflowRuns.runId,
+        state: workflowRuns.state,
+        lastEventSequence: workflowRuns.lastEventSequence,
+        engineReferenceVersion: workflowRuns.engineReferenceVersion,
+        engineReferenceJson: workflowRuns.engineReferenceJson,
+      })
+      .from(workflowRuns)
+      .all(),
+  );
+  const events = Schema.decodeUnknownSync(SemanticEventRows)(
+    store
+      .select({
+        runId: executionEvents.runId,
+        sequence: executionEvents.sequence,
+        kind: executionEvents.kind,
+      })
+      .from(executionEvents)
+      .all(),
+  );
+  const engineMappings = new Set<string>();
+  for (const run of runs) {
+    const mapping = `${run.engineReferenceVersion}:${run.engineReferenceJson}`;
+    if (engineMappings.has(mapping)) {
+      throw new Error("Project Workflow Run engine mappings are not unique");
+    }
+    engineMappings.add(mapping);
+    if (!["running", "suspended", "stopping"].includes(run.state)) continue;
+    const runEvents = events.filter((event) => event.runId === run.runId);
+    const lastSequence = runEvents.reduce((highest, event) => Math.max(highest, event.sequence), 0);
+    if (
+      run.lastEventSequence < 1 ||
+      run.lastEventSequence !== lastSequence ||
+      !runEvents.some((event) => event.sequence === 1 && event.kind === "run.accepted")
+    ) {
+      throw new Error("Project non-final Workflow Run Event invariants are invalid");
+    }
   }
 };
 
 const assertProjectIdentity = (project: { readonly identity: string; readonly path: string }) => {
-  const metadata = JSON.parse(
-    readFileSync(join(project.path, ".kojo", "project.json"), "utf8"),
-  ) as { readonly layoutVersion?: unknown; readonly projectIdentity?: unknown };
+  const metadata = Schema.decodeUnknownSync(ProjectMetadataFile)(
+    JSON.parse(readFileSync(join(project.path, ".kojo", "project.json"), "utf8")),
+  );
   if (metadata.layoutVersion !== 1 || metadata.projectIdentity !== project.identity) {
     throw new Error("Project Identity does not match its database owner");
   }
@@ -373,38 +445,44 @@ export const migrateProjectStore = (project: {
       if (versionZeroDatabaseId === undefined) {
         throw new Error("version-zero Project store identity is unavailable");
       }
-      migrate(drizzle(connection), {
+      const projectStore = drizzle(connection);
+      migrate(projectStore, {
         migrationsFolder: migrationFolder,
         migrationsTable: "kojo_schema_migrations",
       });
       const migratedAt = Date.now();
-      connection
-        .query(
-          "INSERT INTO kojo_store_metadata(singleton_key, project_identity, database_instance_id, store_format_version, engine_adapter_kind, engine_adapter_schema_version, effect_family_version, created_at_ms, last_migrated_at_ms) VALUES (1, ?, ?, 0, ?, ?, ?, ?, ?) ON CONFLICT(singleton_key) DO NOTHING",
-        )
-        .run(
-          project.identity,
-          versionZeroDatabaseId,
-          ENGINE_ADAPTER_KIND,
-          ENGINE_ADAPTER_SCHEMA_VERSION,
-          EFFECT_FAMILY_VERSION,
-          migratedAt,
-          migratedAt,
-        );
+      projectStore
+        .insert(storeMetadata)
+        .values({
+          singletonKey: 1,
+          projectIdentity: project.identity,
+          databaseInstanceId: versionZeroDatabaseId,
+          storeFormatVersion: 0,
+          engineAdapterKind: ENGINE_ADAPTER_KIND,
+          engineAdapterSchemaVersion: ENGINE_ADAPTER_SCHEMA_VERSION,
+          effectFamilyVersion: EFFECT_FAMILY_VERSION,
+          createdAtMs: migratedAt,
+          lastMigratedAtMs: migratedAt,
+        })
+        .onConflictDoNothing()
+        .run();
       connection.exec("DROP TABLE kojo_project_store_identity");
-      connection
-        .query(
-          "UPDATE kojo_store_metadata SET database_instance_id = COALESCE(NULLIF(database_instance_id, ''), ?), store_format_version = ?, engine_adapter_kind = ?, engine_adapter_schema_version = ?, effect_family_version = ?, last_migrated_at_ms = ? WHERE singleton_key = 1 AND project_identity = ?",
+      projectStore
+        .update(storeMetadata)
+        .set({
+          storeFormatVersion: CURRENT_VERSION,
+          engineAdapterKind: ENGINE_ADAPTER_KIND,
+          engineAdapterSchemaVersion: ENGINE_ADAPTER_SCHEMA_VERSION,
+          effectFamilyVersion: EFFECT_FAMILY_VERSION,
+          lastMigratedAtMs: migratedAt,
+        })
+        .where(
+          and(
+            eq(storeMetadata.singletonKey, 1),
+            eq(storeMetadata.projectIdentity, project.identity),
+          ),
         )
-        .run(
-          randomUUID(),
-          CURRENT_VERSION,
-          ENGINE_ADAPTER_KIND,
-          ENGINE_ADAPTER_SCHEMA_VERSION,
-          EFFECT_FAMILY_VERSION,
-          migratedAt,
-          project.identity,
-        );
+        .run();
       connection.exec(`PRAGMA user_version = ${CURRENT_VERSION}`);
     }
     assertCurrentSchema(connection, project);

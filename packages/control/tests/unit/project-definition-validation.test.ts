@@ -1,10 +1,24 @@
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { makeBunProjectDefinitionValidationAdapter } from "../../src/bun-project-definition-validation";
 import {
   selectProjectDefinitionInstallCommand,
   validateProjectDefinitionInSubprocessWith,
 } from "../../src/project-definition-validation";
 
 describe("shared Project Definition loader orchestration", () => {
+  it("keeps only configuration loading policy outside the shared Bun adapter", async () => {
+    const loaded: Array<string> = [];
+    const adapter = makeBunProjectDefinitionValidationAdapter(async (path) => {
+      loaded.push(path);
+      return { workflows: [] };
+    });
+    const configurationPath = join(process.cwd(), "kojo.config.ts");
+
+    expect(await adapter.evaluateProjectDefinition(configurationPath)).toEqual({ ok: true });
+    expect(loaded).toEqual([configurationPath]);
+  });
+
   it.each([
     ["bun.lock", "bun add @kojo/workflow"],
     ["pnpm-lock.yaml", "pnpm add @kojo/workflow"],

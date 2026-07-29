@@ -13,6 +13,22 @@ import {
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
+export const projectStoreIdentityBootstrap = sqliteTable(
+  "kojo_project_store_identity",
+  {
+    singletonKey: integer("singleton_key").primaryKey(),
+    projectIdentity: text("project_identity").notNull().unique(),
+    databaseInstanceId: text("database_instance_id").notNull().unique(),
+  },
+  (table) => [check("project_store_identity_singleton", sql`${table.singletonKey} = 1`)],
+);
+
+export const schemaMigrations = sqliteTable("kojo_schema_migrations", {
+  id: integer("id").primaryKey(),
+  hash: text("hash").notNull(),
+  createdAt: integer("created_at").notNull(),
+});
+
 export const storeMetadata = sqliteTable(
   "kojo_store_metadata",
   {

@@ -83,14 +83,14 @@ export const ProjectRuntimeLive = Layer.effect(
         const postflightReady =
           initialized && (yield* backend.postflight(project)) && (yield* store.postflight(project));
         if (!postflightReady) {
-          yield* backend.release(project);
           yield* store.completeMigration(project, false);
+          yield* backend.release(project);
           return false;
         }
         const completed = yield* store.completeMigration(project, true);
         if (!completed) {
-          yield* backend.release(project);
           yield* store.completeMigration(project, false);
+          yield* backend.release(project);
         }
         return completed;
       });

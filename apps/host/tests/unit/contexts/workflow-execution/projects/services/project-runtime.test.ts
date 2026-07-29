@@ -319,12 +319,14 @@ it.effect("releases the previous path before acquiring a moved Project", () => {
 
 it.effect("restores the store when Workflow ownership postflight fails", () => {
   const completions: Array<boolean> = [];
+  const order: Array<string> = [];
   const store = Layer.succeed(ProjectStore, {
     migrate: () => Effect.succeed(true),
     postflight: () => Effect.succeed(true),
     completeMigration: (_project, succeeded) =>
       Effect.sync(() => {
         completions.push(succeeded);
+        order.push(succeeded ? "migration-committed" : "migration-restored");
         return succeeded;
       }),
     readiness: () => Effect.succeed("limited" as const),
@@ -346,7 +348,10 @@ it.effect("restores the store when Workflow ownership postflight fails", () => {
         assessments += 1;
         return false;
       }),
-    release: () => Effect.void,
+    release: () =>
+      Effect.sync(() => {
+        order.push("ownership-released");
+      }),
   });
 
   return Effect.gen(function* () {
@@ -358,5 +363,6 @@ it.effect("restores the store when Workflow ownership postflight fails", () => {
     ).toBe(false);
     expect(assessments).toBe(1);
     expect(completions).toEqual([false]);
+    expect(order).toEqual(["migration-restored", "ownership-released"]);
   }).pipe(Effect.provide(ProjectRuntimeLive.pipe(Layer.provide([store, incompatibleBackend]))));
 });
