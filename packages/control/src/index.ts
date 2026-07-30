@@ -1,16 +1,22 @@
 import { ProjectIdentity } from "@kojo/workflow";
 import { Schema } from "effect";
 import { Rpc, RpcGroup } from "effect/unstable/rpc";
+import {
+  ProjectDefinitionSnapshot,
+  WorkflowDefinitionSnapshot,
+} from "./project-definition-validation";
 
 export { ProjectIdentity } from "@kojo/workflow";
 
-export const PROTOCOL_VERSION = { major: 1, minor: 1 } as const;
+export const PROTOCOL_VERSION = { major: 1, minor: 2 } as const;
 export const CONTROL_CAPABILITIES = [
   "projects:list",
   "projects:list-page",
   "projects:show",
   "projects:register",
   "projects:forget",
+  "workflows:list",
+  "workflows:show",
 ] as const;
 
 export const ControlCapability = Schema.String.check(
@@ -160,6 +166,29 @@ export const ProjectQueryResult = Schema.Union([
 ]);
 export type ProjectQueryResult = typeof ProjectQueryResult.Type;
 
+export const ProjectWorkflowSnapshot = Schema.Struct({
+  project: ProjectSnapshot,
+  definitions: ProjectDefinitionSnapshot,
+});
+export type ProjectWorkflowSnapshot = typeof ProjectWorkflowSnapshot.Type;
+
+export const ProjectWorkflowQueryResult = Schema.Union([
+  Schema.Struct({ ok: Schema.Literal(true), snapshot: ProjectWorkflowSnapshot }),
+  Schema.Struct({ ok: Schema.Literal(false), error: ProjectOperationError }),
+]);
+export type ProjectWorkflowQueryResult = typeof ProjectWorkflowQueryResult.Type;
+
+export const WorkflowDefinitionQueryResult = Schema.Union([
+  Schema.Struct({
+    ok: Schema.Literal(true),
+    project: ProjectSnapshot,
+    snapshotId: Schema.String,
+    workflow: WorkflowDefinitionSnapshot,
+  }),
+  Schema.Struct({ ok: Schema.Literal(false), error: ProjectOperationError }),
+]);
+export type WorkflowDefinitionQueryResult = typeof WorkflowDefinitionQueryResult.Type;
+
 export const ProjectMutationResult = Schema.Union([
   Schema.Struct({
     ok: Schema.Literal(true),
@@ -178,6 +207,7 @@ export type ProjectMutationResult = typeof ProjectMutationResult.Type;
 export const HostOverview = Schema.Struct({
   host: HostInformation,
   projects: Schema.Array(ProjectSnapshot),
+  projectDefinitions: Schema.Array(ProjectWorkflowSnapshot),
 });
 export type HostOverview = typeof HostOverview.Type;
 
@@ -203,6 +233,16 @@ export const ShowProject = Rpc.make("ShowProject", {
   success: ProjectQueryResult,
 });
 
+export const ListWorkflowDefinitions = Rpc.make("ListWorkflowDefinitions", {
+  payload: { identity: ProjectIdentity },
+  success: ProjectWorkflowQueryResult,
+});
+
+export const ShowWorkflowDefinition = Rpc.make("ShowWorkflowDefinition", {
+  payload: { identity: ProjectIdentity, workflowKey: Schema.String },
+  success: WorkflowDefinitionQueryResult,
+});
+
 export const RegisterProject = Rpc.make("RegisterProject", {
   payload: { path: Schema.String, requestKey: RequestKey },
   success: ProjectMutationResult,
@@ -224,6 +264,8 @@ export const KojoControl = RpcGroup.make(
   ListProjects,
   ListProjectPage,
   ShowProject,
+  ListWorkflowDefinitions,
+  ShowWorkflowDefinition,
   RegisterProject,
   ForgetProject,
   ReplayForgetProject,

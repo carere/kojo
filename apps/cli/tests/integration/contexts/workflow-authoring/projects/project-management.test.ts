@@ -143,7 +143,17 @@ describe("Kojo Project discovery", () => {
     });
 
     const combined = await runCli(
-      ["project", "list", "--condition", "ready", "--condition", "needs-attention", "--json"],
+      [
+        "project",
+        "list",
+        "--condition",
+        "ready",
+        "--condition",
+        "limited",
+        "--condition",
+        "needs-attention",
+        "--json",
+      ],
       host.socketPath,
       directory,
     );

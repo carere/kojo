@@ -16,6 +16,7 @@ export const evaluateProjectDefinition = async (
 ): Promise<ProjectDefinitionValidationResult> =>
   evaluateProjectDefinitionWith(
     {
+      configurationExists: async (path) => existsSync(path),
       dependencyAvailable: async (root) => {
         try {
           await Bun.resolve("@kojo/workflow", root);

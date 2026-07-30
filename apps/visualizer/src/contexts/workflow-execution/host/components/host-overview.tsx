@@ -6,6 +6,7 @@ import { LanguageToggle } from "../../../preferences/components/language-toggle"
 import { ThemeToggle } from "../../../preferences/components/theme-toggle";
 import { VisualizerApiClient, visualizerApiRuntime } from "../../../shared/services/client";
 import { ProjectNavigator } from "../../../workflow-authoring/projects/components/project-navigator";
+import { WorkflowDefinitionSnapshots } from "../../../workflow-authoring/projects/components/workflow-definition-snapshots";
 
 export interface HostOverviewProps {
   readonly loadOverview?: () => Promise<HostOverviewSnapshot | undefined>;
@@ -47,6 +48,7 @@ export function HostOverview(props: HostOverviewProps) {
                 Connected to Kojo Host {current().host.hostVersion}
               </h2>
               <ProjectNavigator projects={current().projects} />
+              <WorkflowDefinitionSnapshots snapshots={current().projectDefinitions} />
             </section>
           )}
         </Show>

@@ -11,5 +11,5 @@ export const validateProjectDefinition = (path: string, timeoutMs = 1_000) =>
   validateProjectDefinitionInSubprocess(runnerPath, path, timeoutMs);
 
 export const SubprocessProjectDefinitionLoaderLive = Layer.succeed(ProjectDefinitionLoader, {
-  validate: validateProjectDefinition,
+  load: validateProjectDefinition,
 });

@@ -34,19 +34,20 @@ export const validateProjectLayout = async (
     if (git.inside !== "true" || git.bare !== "false") throw new InvalidProjectLayoutError();
     const root = await platform.canonicalDirectory(git.root);
     await Promise.all([
-      platform.inspect(join(root, "kojo.config.ts"), "file"),
       platform.inspect(join(root, ".gitignore"), "file"),
       platform.inspect(join(root, ".kojo"), "directory", 0o700),
       platform.inspect(join(root, ".kojo", "kojo.sqlite"), "file", 0o600),
       platform.inspect(join(root, ".kojo", "artifacts"), "directory", 0o700),
       platform.inspect(join(root, ".kojo", "sandboxes"), "directory", 0o700),
     ]);
-    const definitionValidation = await definitions.validate(join(root, "kojo.config.ts"));
-    if (!definitionValidation.ok) {
-      throw new InvalidProjectLayoutError(
-        definitionValidation.message,
-        definitionValidation.findingKey,
+    const definitionValidation = await definitions.load(join(root, "kojo.config.ts"));
+    const configurationMissing =
+      !definitionValidation.ok &&
+      definitionValidation.findings.some(
+        (finding) => finding.findingKey === "configuration.missing",
       );
+    if (!configurationMissing) {
+      await platform.inspect(join(root, "kojo.config.ts"), "file");
     }
     platform.validateDatabase(join(root, ".kojo", "kojo.sqlite"));
     if (!(await platform.hasIgnoreRule(root))) {
@@ -59,6 +60,7 @@ export const validateProjectLayout = async (
     return {
       ok: true,
       project: { identity: await platform.readIdentity(root), path: root },
+      definitions: definitionValidation,
     };
   } catch (error) {
     if (error instanceof InvalidProjectLayoutError) {

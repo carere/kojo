@@ -54,7 +54,7 @@ it.effect("negotiates before reading the authoritative Project list", () =>
     const client = makeLocalClient({ connect: Effect.succeed(controlClient(requests)) });
     const overview = yield* client.getHostOverview;
 
-    expect(overview).toEqual({ host: handshake, projects: [] });
+    expect(overview).toEqual({ host: handshake, projects: [], projectDefinitions: [] });
     expect(requests).toEqual(["Negotiate", "ListProjects"]);
   }),
 );

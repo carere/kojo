@@ -1,8 +1,13 @@
 import type { ProjectIdentity, ProjectSnapshot, ReadinessFindingKey } from "@kojo/control";
+import type { ProjectDefinitionValidation } from "@kojo/control/project-definition-validation";
 import { Context, type Effect } from "effect";
 
 export type ProjectLayoutValidation =
-  | { readonly ok: true; readonly project: ProjectSnapshot }
+  | {
+      readonly ok: true;
+      readonly project: ProjectSnapshot;
+      readonly definitions: ProjectDefinitionValidation;
+    }
   | { readonly ok: false; readonly message: string; readonly findingKey: ReadinessFindingKey };
 
 export type IndexedProjectPath =

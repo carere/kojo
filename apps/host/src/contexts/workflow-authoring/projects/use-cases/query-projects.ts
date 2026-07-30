@@ -47,7 +47,7 @@ export const listProjectPage = (
           return {
             ...project,
             condition: validation.ok
-              ? yield* runtime.readiness(project, validation.project)
+              ? yield* runtime.readiness(project, validation.project, validation.definitions)
               : ("needs-attention" as const),
           };
         }),
