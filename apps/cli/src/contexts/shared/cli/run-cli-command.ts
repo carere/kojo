@@ -15,9 +15,9 @@ import {
   initializeProject,
   ProjectInitializationError,
   resolveInitializedProject,
-} from "../adapters/projects/project-initializer";
-import { resolveProjectSelectionPath } from "../adapters/projects/project-selection-path";
-import { selectProject } from "../contexts/workflow-authoring/projects/use-cases/select-project";
+} from "../../workflow-authoring/projects/services/project-initializer";
+import { resolveProjectSelectionPath } from "../../workflow-authoring/projects/services/project-selection-path";
+import { selectProject } from "../../workflow-authoring/projects/use-cases/select-project";
 import { runEffect } from "./cli-effect";
 import { canonicalSelectorPath, decodeRequestKey, parseOptions } from "./cli-options";
 import {

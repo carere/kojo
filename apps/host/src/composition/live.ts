@@ -4,24 +4,24 @@ import { BunSocketServer } from "@effect/platform-bun";
 import { defaultSocketPath } from "@kojo/control/local-client";
 import { Layer } from "effect";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
-import { DrizzleProjectStoreLive } from "../adapters/projects/drizzle-project-store";
-import { makeFileProjectIndexStoreLayer } from "../adapters/projects/file-project-index-store";
-import { GitProjectLayoutLive } from "../adapters/projects/git-project-layout";
-import { makeLocalWorkflowBackendLayer } from "../adapters/projects/local-workflow-backend";
-import { SubprocessProjectDefinitionLoaderLive } from "../adapters/projects/subprocess-project-definition-loader";
+import { makeFileProjectIndexRepositoryLayer } from "../contexts/workflow-authoring/projects/repositories/file-project-index-repository";
+import { GitProjectLayoutLive } from "../contexts/workflow-authoring/projects/services/git-project-layout";
+import { SubprocessProjectDefinitionLoaderLive } from "../contexts/workflow-authoring/projects/services/subprocess-project-definition-loader";
+import { loadHostIdentity } from "../contexts/workflow-execution/control/repositories/host-identity-repository";
 import { makeHostDiagnosticLoggerLayer } from "../contexts/workflow-execution/control/services/host-diagnostic-logger";
-import { loadHostIdentity } from "../contexts/workflow-execution/control/services/host-identity-store";
 import {
   makeKojoControlServerLayer,
   startKojoHost,
 } from "../contexts/workflow-execution/control/services/local-host";
+import { DrizzleProjectRepositoryLive } from "../contexts/workflow-execution/projects/repositories/drizzle-project-repository";
+import { makeLocalWorkflowBackendLayer } from "../contexts/workflow-execution/projects/services/local-workflow-backend";
 import { ProjectRuntimeLive } from "../contexts/workflow-execution/projects/services/project-runtime";
 
 export const startLiveKojoHost = async () => {
   const socketPath = process.env.KOJO_HOST_SOCKET ?? defaultSocketPath();
   const hostStorePath = process.env.KOJO_HOST_STORE ?? join(homedir(), ".kojo", "host");
   const diagnosticPath = join(hostStorePath, "diagnostics.jsonl");
-  const projectIndex = makeFileProjectIndexStoreLayer(join(hostStorePath, "projects.json"));
+  const projectIndex = makeFileProjectIndexRepositoryLayer(join(hostStorePath, "projects.json"));
   const projectLayout = GitProjectLayoutLive.pipe(
     Layer.provide(SubprocessProjectDefinitionLoaderLive),
   );
@@ -38,7 +38,7 @@ export const startLiveKojoHost = async () => {
       projectIndex,
       projectLayout,
       ProjectRuntimeLive.pipe(
-        Layer.provide([DrizzleProjectStoreLive, makeLocalWorkflowBackendLayer(hostIdentity)]),
+        Layer.provide([DrizzleProjectRepositoryLive, makeLocalWorkflowBackendLayer(hostIdentity)]),
       ),
     ]),
   );

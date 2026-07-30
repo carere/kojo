@@ -7,7 +7,7 @@ export interface ProjectForgetBlockers {
   readonly nonFinalRunIds: ReadonlyArray<string>;
 }
 
-export interface ProjectStoreShape {
+export interface ProjectRepositoryShape {
   readonly migrate: (project: ProjectSnapshot) => Effect.Effect<boolean>;
   readonly postflight: (project: ProjectSnapshot) => Effect.Effect<boolean>;
   readonly completeMigration: (
@@ -20,6 +20,6 @@ export interface ProjectStoreShape {
   ) => Effect.Effect<ProjectForgetBlockers>;
 }
 
-export class ProjectStore extends Context.Service<ProjectStore, ProjectStoreShape>()(
-  "kojo/host/ProjectStore",
+export class ProjectRepository extends Context.Service<ProjectRepository, ProjectRepositoryShape>()(
+  "kojo/host/ProjectRepository",
 ) {}

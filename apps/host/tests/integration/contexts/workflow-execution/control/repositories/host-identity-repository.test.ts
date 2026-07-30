@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { loadHostIdentity } from "../../../../../src/contexts/workflow-execution/control/services/host-identity-store";
+import { loadHostIdentity } from "../../../../../../src/contexts/workflow-execution/control/repositories/host-identity-repository";
 
 const cleanups: Array<() => Promise<void>> = [];
 

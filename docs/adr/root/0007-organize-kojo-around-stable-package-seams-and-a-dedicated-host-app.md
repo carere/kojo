@@ -15,7 +15,7 @@ Kojo uses three runnable applications and two shared packages. The dedicated Hos
 - `apps/visualizer` is a client of the Host. Its local server proxies browser requests to the Host; browser code never opens the Host's Unix socket or imports Host implementation modules.
 - `packages/workflow` publishes `@kojo/workflow`, the stable developer-facing authoring interface. Its package subpaths expose built-in Agent and Sandbox Provider definitions and author testing support.
 - `packages/control` provides the private `@kojo/control` package shared by the Host, CLI, and visualizer. It owns transport-neutral control commands, queries, results, errors, and event schemas. Its local-client subpath may provide the shared Unix-socket client adapter without adding transport details to the root interface.
-- Internal Host adapters remain modules inside `apps/host`. Kojo does not create a workspace package for every adapter or implementation detail.
+- Internal Host adapters remain modules inside `apps/host` under the bounded context and concept they implement. Kojo does not create a workspace package for every adapter or implementation detail.
 
 ### Public authoring seam
 
@@ -29,11 +29,12 @@ Kojo uses three runnable applications and two shared packages. The dedicated Hos
 
 - One deep `ProjectRuntime` module owns readiness, Workflow Definition reconciliation, Workflow Schedules, Workflow Runs, recovery, inspection, and project-scoped control. The Kojo Host activates and routes to Project Runtimes but does not duplicate their coordination logic.
 - A Kojo-owned `WorkflowBackend` interface is the seam for durable workflow execution. `LocalWorkflowBackend` is the production adapter over the pinned Effect Workflow, Cluster, and SQL modules; unit tests use an in-memory adapter.
-- A Kojo-owned `ProjectStore` interface is the seam for Kojo's project-local execution records. Its production adapter owns Kojo's SQLite tables while an in-memory adapter supports unit tests. Effect-owned tables remain accessible only through `LocalWorkflowBackend`, even though both use one project database.
+- A Kojo-owned `ProjectRepository` interface is the seam for Kojo's project-local execution records. Its production adapter owns Kojo's SQLite tables while an in-memory adapter supports unit tests. Effect-owned tables remain accessible only through `LocalWorkflowBackend`, even though both use one project database.
 - A Kojo-owned `ProviderRuntime` interface is the seam for Agent, Command, and Workflow Sandbox execution. The production adapter interprets built-in definitions through Sandcastle and invokes custom providers through their stable Kojo interfaces; unit tests use a fake adapter.
 - A `ProjectDefinitionLoader` interface is the seam for loading and validating `kojo.config.ts`. The production adapter loads the TypeScript configuration, while unit tests provide definitions directly.
 - The Host's Unix-socket server is a transport adapter over the control interface. It translates requests into Host and Project Runtime operations without placing transport concerns in those modules.
-- `apps/host/src/composition/live.ts` is the only production composition module. It opens the Project Index and project databases, constructs production adapters, provides their Layers, configures Host-wide Activity capacity and supervision, and starts the Unix-socket server.
+- Application behavior and adapters live under `apps/*/src/contexts/<bounded-context>/<concept>`. Ports and their adapters remain local to the context that owns them; data access uses `repositories`, while non-data capabilities use `services`. Shared application behavior lives under `src/contexts/shared`. Framework entrypoints, routes, internationalization, and styles remain outside `contexts`.
+- `apps/host/src/composition/live.ts` is the only production composition module and the explicit exception to the context layout. It opens the Project Index and project databases, constructs production adapters, provides their Layers, configures Host-wide Activity capacity and supervision, and starts the Unix-socket server.
 
 ### Dependency direction
 
@@ -46,10 +47,11 @@ Kojo uses three runnable applications and two shared packages. The dedicated Hos
 
 ### Testing ownership
 
-- Unit tests exercise Project Runtime and Host use cases through in-memory `WorkflowBackend`, `ProjectStore`, `ProviderRuntime`, and `ProjectDefinitionLoader` adapters. They do not use RPC, SQLite, or the real filesystem.
+- Unit tests exercise Project Runtime and Host use cases through in-memory `WorkflowBackend`, `ProjectRepository`, `ProviderRuntime`, and `ProjectDefinitionLoader` adapters. They do not use RPC, SQLite, or the real filesystem.
 - `@kojo/workflow/testing` is a separate author-facing test surface because it tests Workflow Definitions rather than Kojo's Host behavior.
 - Integration tests exercise real temporary project files, the project-local SQLite database, `LocalWorkflowBackend`, and control transport where those seams matter.
 - Browser tests exercise visualizer behavior through the real browser and local server rather than importing Host modules.
+- Unit and integration tests mirror their bounded-context source paths beneath `tests/unit/contexts` and `tests/integration/contexts`; browser tests remain in their separate browser project.
 
 ## Considered Options
 
@@ -64,7 +66,7 @@ Kojo uses three runnable applications and two shared packages. The dedicated Hos
 
 - Kojo ships the CLI and the internal Host executable together, but they keep separate process lifetimes and dependency graphs. Exact installer and operating-system service registration mechanics remain a later distribution decision.
 - Developers learn one stable authoring package; clients learn one transport-neutral control package; maintainers can change unstable engines and providers locally inside Host adapters.
-- The Host application is intentionally substantial, but its complexity is concentrated behind the `ProjectRuntime`, `WorkflowBackend`, `ProjectStore`, `ProviderRuntime`, and `ProjectDefinitionLoader` interfaces instead of spread across applications.
+- The Host application is intentionally substantial, but its complexity is concentrated behind the `ProjectRuntime`, `WorkflowBackend`, `ProjectRepository`, `ProviderRuntime`, and `ProjectDefinitionLoader` interfaces instead of spread across applications.
 - The control-protocol decision can define exact operations, streaming, reconnect behavior, and version negotiation without reopening package ownership or dependency direction.
 - The project-schema and Execution Trace decision can define concrete tables and queries without exposing SQL through application interfaces.
 

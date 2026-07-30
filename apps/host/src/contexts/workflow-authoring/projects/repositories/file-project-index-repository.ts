@@ -4,10 +4,10 @@ import { dirname } from "node:path";
 import { Effect, Layer, Schema } from "effect";
 import {
   emptyProjectIndexState,
+  ProjectIndexRepository,
+  type ProjectIndexRepositoryShape,
   ProjectIndexState,
-  ProjectIndexStore,
-  type ProjectIndexStoreShape,
-} from "../../contexts/workflow-authoring/projects/services/project-index-store";
+} from "./project-index-repository";
 
 const writeState = async (path: string, state: ProjectIndexState) => {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -45,7 +45,9 @@ const readState = async (path: string): Promise<ProjectIndexState> => {
   }
 };
 
-export const makeFileProjectIndexStore = async (path: string): Promise<ProjectIndexStoreShape> => {
+export const makeFileProjectIndexRepository = async (
+  path: string,
+): Promise<ProjectIndexRepositoryShape> => {
   let state = await readState(path);
   let mutation = Promise.resolve();
 
@@ -69,8 +71,8 @@ export const makeFileProjectIndexStore = async (path: string): Promise<ProjectIn
   };
 };
 
-export const makeFileProjectIndexStoreLayer = (path: string) =>
+export const makeFileProjectIndexRepositoryLayer = (path: string) =>
   Layer.effect(
-    ProjectIndexStore,
-    Effect.promise(() => makeFileProjectIndexStore(path)),
+    ProjectIndexRepository,
+    Effect.promise(() => makeFileProjectIndexRepository(path)),
   );

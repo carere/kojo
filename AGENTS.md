@@ -27,7 +27,7 @@
 
 - Application behavior lives under `apps/*/src/contexts/<bounded-context>/<concept>`. Each bounded
   context owns concept folders such as `models`, `services`, `use-cases`, `guards`, `types`, `utils`,
-  etc (list non-exhaustive) as they become necessary.
+  `components`, `hooks`, etc (list non-exhaustive) as they become necessary.
 - Every application has a `src/contexts/shared` context. Put elements used by several bounded
   contexts there, organized by concept. For example, reusable Visualizer UI primitives live in
   `src/contexts/shared/components`, common helpers live in `src/contexts/shared/lib`, and shared API

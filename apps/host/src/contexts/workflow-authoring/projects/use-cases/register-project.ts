@@ -1,7 +1,10 @@
 import type { ProjectMutationResult, ProjectSnapshot, RequestKey } from "@kojo/control";
 import { Effect } from "effect";
 import { ProjectRuntime } from "../../../workflow-execution/projects/services/project-runtime";
-import { ProjectIndexStore, successfulMutation } from "../services/project-index-store";
+import {
+  ProjectIndexRepository,
+  successfulMutation,
+} from "../repositories/project-index-repository";
 import { ProjectLayout } from "../services/project-layout";
 import { mutationFailure, replay, requestConflict } from "./project-operation-results";
 import {
@@ -20,14 +23,14 @@ export const registerProject = (
 ): Effect.Effect<
   ProjectMutationResult,
   never,
-  ProjectIndexStore | ProjectLayout | ProjectRuntime
+  ProjectIndexRepository | ProjectLayout | ProjectRuntime
 > =>
   Effect.gen(function* () {
-    const store = yield* ProjectIndexStore;
+    const repository = yield* ProjectIndexRepository;
     const layout = yield* ProjectLayout;
     const runtime = yield* ProjectRuntime;
     const requestFingerprint = fingerprint("register", path);
-    const initial = yield* store.read;
+    const initial = yield* repository.read;
     const existingReceipt = initial.receipts.find(
       (candidate) => candidate.requestKey === requestKey,
     );
@@ -40,7 +43,7 @@ export const registerProject = (
 
     const validation = yield* layout.validate(path);
     if (!validation.ok) {
-      return yield* store.update((state) => {
+      return yield* repository.update((state) => {
         const receipt = state.receipts.find((candidate) => candidate.requestKey === requestKey);
         if (receipt !== undefined) {
           return Effect.succeed({
@@ -66,7 +69,7 @@ export const registerProject = (
       });
     }
     const project = validation.project;
-    const checkConflictsBeforeMigration = store.update<RegistrationPreflight>((state) =>
+    const checkConflictsBeforeMigration = repository.update<RegistrationPreflight>((state) =>
       Effect.gen(function* () {
         const receipt = state.receipts.find((candidate) => candidate.requestKey === requestKey);
         if (receipt !== undefined) {
@@ -141,7 +144,7 @@ export const registerProject = (
       project,
       checkConflictsBeforeMigration,
       (migrated) =>
-        store.update((state) =>
+        repository.update((state) =>
           Effect.gen(function* () {
             const receipt = state.receipts.find((candidate) => candidate.requestKey === requestKey);
             if (receipt !== undefined) {

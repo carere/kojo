@@ -7,16 +7,16 @@ import { afterEach, describe, expect, it } from "@effect/vitest";
 import { ProjectIdentity, type ProjectSnapshot } from "@kojo/control";
 import { Context, Effect, Fiber, Layer, Schedule, Schema } from "effect";
 import {
-  completeProjectStoreMigration,
-  DrizzleProjectStoreLive,
-  migrateProjectStore,
-} from "../../../../../src/adapters/projects/drizzle-project-store";
-import { makeLocalWorkflowBackendLayer } from "../../../../../src/adapters/projects/local-workflow-backend";
+  completeProjectRepositoryMigration,
+  DrizzleProjectRepositoryLive,
+  migrateProjectRepository,
+} from "../../../../../src/contexts/workflow-execution/projects/repositories/drizzle-project-repository";
+import { ProjectRepository } from "../../../../../src/contexts/workflow-execution/projects/repositories/project-repository";
+import { makeLocalWorkflowBackendLayer } from "../../../../../src/contexts/workflow-execution/projects/services/local-workflow-backend";
 import {
   ProjectRuntime,
   ProjectRuntimeLive,
 } from "../../../../../src/contexts/workflow-execution/projects/services/project-runtime";
-import { ProjectStore } from "../../../../../src/contexts/workflow-execution/projects/services/project-store";
 import {
   type LocalWorkflowDefinition,
   WorkflowBackend,
@@ -90,7 +90,7 @@ describe("Local Workflow backend ownership", () => {
         postflight: () => Effect.succeed(false),
         readiness: () => Effect.succeed("uninitialized" as const),
       });
-      const store = Layer.succeed(ProjectStore, {
+      const store = Layer.succeed(ProjectRepository, {
         migrate: () => Effect.succeed(true),
         postflight: () => Effect.succeed(true),
         completeMigration: (_project, succeeded) =>
@@ -175,15 +175,15 @@ describe("Local Workflow backend ownership", () => {
         database.close();
       });
       yield* Effect.promise(() => chmod(databasePath, 0o600));
-      yield* Effect.sync(() => migrateProjectStore(project));
-      expect(completeProjectStoreMigration(project, true)).toBe(true);
+      yield* Effect.sync(() => migrateProjectRepository(project));
+      expect(completeProjectRepositoryMigration(project, true)).toBe(true);
       let quiescedBeforeRestoration = false;
 
       const backendContext = yield* Layer.build(makeLocalWorkflowBackendLayer("initialized-host"));
-      const storeContext = yield* Layer.build(DrizzleProjectStoreLive);
+      const storeContext = yield* Layer.build(DrizzleProjectRepositoryLive);
       const backend = Context.get(backendContext, WorkflowBackend);
-      const realStore = Context.get(storeContext, ProjectStore);
-      const failingStore = Layer.succeed(ProjectStore, {
+      const realStore = Context.get(storeContext, ProjectRepository);
+      const failingStore = Layer.succeed(ProjectRepository, {
         ...realStore,
         postflight: (snapshot) =>
           Effect.gen(function* () {
@@ -262,8 +262,8 @@ describe("Local Workflow backend ownership", () => {
           database.close();
         });
         yield* Effect.promise(() => chmod(databasePath, 0o600));
-        yield* Effect.sync(() => migrateProjectStore(project));
-        expect(completeProjectStoreMigration(project, true)).toBe(true);
+        yield* Effect.sync(() => migrateProjectRepository(project));
+        expect(completeProjectRepositoryMigration(project, true)).toBe(true);
 
         const wakeAfterMillis = 1_000;
         let activityInvocations = 0;
@@ -280,7 +280,10 @@ describe("Local Workflow backend ownership", () => {
             const backend = Context.get(backendContext, WorkflowBackend);
             const runtimeContext = yield* Layer.build(
               ProjectRuntimeLive.pipe(
-                Layer.provide([DrizzleProjectStoreLive, Layer.succeed(WorkflowBackend, backend)]),
+                Layer.provide([
+                  DrizzleProjectRepositoryLive,
+                  Layer.succeed(WorkflowBackend, backend),
+                ]),
               ),
             );
             const runtime = Context.get(runtimeContext, ProjectRuntime);
@@ -319,7 +322,10 @@ describe("Local Workflow backend ownership", () => {
             const backend = Context.get(backendContext, WorkflowBackend);
             const runtimeContext = yield* Layer.build(
               ProjectRuntimeLive.pipe(
-                Layer.provide([DrizzleProjectStoreLive, Layer.succeed(WorkflowBackend, backend)]),
+                Layer.provide([
+                  DrizzleProjectRepositoryLive,
+                  Layer.succeed(WorkflowBackend, backend),
+                ]),
               ),
             );
             const runtime = Context.get(runtimeContext, ProjectRuntime);

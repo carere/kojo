@@ -19,7 +19,7 @@ import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { Effect, Layer, Schema } from "effect";
-import { ProjectStore } from "../../contexts/workflow-execution/projects/services/project-store";
+import { ProjectRepository } from "./project-repository";
 import {
   deletionIntents,
   executionEvents,
@@ -28,7 +28,7 @@ import {
   storeMetadata,
   workflowRuns,
   workflowScheduleStates,
-} from "./project-store-schema";
+} from "./project-repository-schema";
 
 const ScheduleBlockerRows = Schema.Array(Schema.Struct({ scheduleKey: Schema.String }));
 const RunBlockerRows = Schema.Array(Schema.Struct({ runId: Schema.String }));
@@ -410,7 +410,7 @@ const verifyBackup = (path: string, project: { readonly identity: string }) => {
   }
 };
 
-export const migrateProjectStore = (project: {
+export const migrateProjectRepository = (project: {
   readonly identity: string;
   readonly path: string;
 }) => {
@@ -517,7 +517,7 @@ export const migrateProjectStore = (project: {
   }
 };
 
-export const completeProjectStoreMigration = (
+export const completeProjectRepositoryMigration = (
   project: { readonly identity: string; readonly path: string },
   succeeded: boolean,
   durability: { readonly syncDirectory: (path: string) => void } = {
@@ -635,7 +635,7 @@ const inspectBlockers = (project: { readonly identity: string; readonly path: st
   }
 };
 
-export const DrizzleProjectStoreLive = Layer.sync(ProjectStore, () => {
+export const DrizzleProjectRepositoryLive = Layer.sync(ProjectRepository, () => {
   const attemptedMigrations = new Set<string>();
   const failedMigrations = new Set<string>();
   const failureKey = (project: { readonly identity: string; readonly path: string }) =>
@@ -652,7 +652,7 @@ export const DrizzleProjectStoreLive = Layer.sync(ProjectStore, () => {
         if (attemptedMigrations.has(attemptKey)) return false;
         attemptedMigrations.add(attemptKey);
         try {
-          migrateProjectStore(project);
+          migrateProjectRepository(project);
           return true;
         } catch {
           failedMigrations.add(failureKey(project));
@@ -682,7 +682,7 @@ export const DrizzleProjectStoreLive = Layer.sync(ProjectStore, () => {
     completeMigration: (project, succeeded) =>
       Effect.sync(() => {
         try {
-          const completed = completeProjectStoreMigration(project, succeeded);
+          const completed = completeProjectRepositoryMigration(project, succeeded);
           if (completed) {
             const prefix = `${project.path}:`;
             for (const attempt of attemptedMigrations) {

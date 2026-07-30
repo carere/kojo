@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { Layer } from "effect";
-import { ProjectDefinitionLoader } from "../../contexts/workflow-authoring/projects/services/project-definition-loader";
 import { validateProjectDefinitionInSubprocess } from "./bun-project-definition-validation";
+import { ProjectDefinitionLoader } from "./project-definition-loader";
 
 const runnerPath = fileURLToPath(
   new URL("./project-definition-loader-process.ts", import.meta.url),

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ProjectMutationResult, RequestKey } from "@kojo/control";
-import type { ProjectIndexState } from "../services/project-index-store";
+import type { ProjectIndexState } from "../repositories/project-index-repository";
 
 export const projectMutationFingerprint = (operation: "register" | "forget", input: string) =>
   createHash("sha256").update(JSON.stringify({ operation, input })).digest("hex");

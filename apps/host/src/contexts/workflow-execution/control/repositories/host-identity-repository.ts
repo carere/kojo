@@ -3,7 +3,7 @@ import { chmod, link, lstat, readFile, unlink, writeFile } from "node:fs/promise
 import { dirname } from "node:path";
 import { Schema } from "effect";
 import { HostIdentity } from "../models/host-identity";
-import { prepareHostStoreDirectory, UnsafeHostStoreError } from "./host-store";
+import { prepareHostStoreDirectory, UnsafeHostStoreError } from "../services/host-store";
 
 export class InvalidHostIdentityError extends Error {
   override readonly name = "InvalidHostIdentityError";

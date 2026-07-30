@@ -7,11 +7,11 @@ import { afterEach, describe, expect, it } from "@effect/vitest";
 import { ProjectIdentity } from "@kojo/control";
 import { Effect, Schema } from "effect";
 import {
-  completeProjectStoreMigration,
-  DrizzleProjectStoreLive,
-  migrateProjectStore,
-} from "../../../../../src/adapters/projects/drizzle-project-store";
-import { ProjectStore } from "../../../../../src/contexts/workflow-execution/projects/services/project-store";
+  completeProjectRepositoryMigration,
+  DrizzleProjectRepositoryLive,
+  migrateProjectRepository,
+} from "../../../../../../src/contexts/workflow-execution/projects/repositories/drizzle-project-repository";
+import { ProjectRepository } from "../../../../../../src/contexts/workflow-execution/projects/repositories/project-repository";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -73,12 +73,12 @@ describe("Drizzle Project store recovery", () => {
     Effect.gen(function* () {
       const fixture = yield* Effect.promise(() => initializedProject("kojo-store-one-attempt-"));
       const attempts = yield* Effect.gen(function* () {
-        const store = yield* ProjectStore;
+        const store = yield* ProjectRepository;
         const first = yield* store.migrate(fixture.project);
         const restored = yield* store.completeMigration(fixture.project, false);
         const automaticRetry = yield* store.migrate(fixture.project);
         return { automaticRetry, first, restored };
-      }).pipe(Effect.provide(DrizzleProjectStoreLive));
+      }).pipe(Effect.provide(DrizzleProjectRepositoryLive));
 
       expect(attempts).toEqual({ first: true, restored: false, automaticRetry: false });
     }),
@@ -90,7 +90,7 @@ describe("Drizzle Project store recovery", () => {
         initializedProject("kojo-store-semantic-postflight-"),
       );
       const outcome = yield* Effect.gen(function* () {
-        const store = yield* ProjectStore;
+        const store = yield* ProjectRepository;
         const migrated = yield* store.migrate(fixture.project);
         yield* Effect.sync(() => {
           const database = new Database(fixture.databasePath);
@@ -102,7 +102,7 @@ describe("Drizzle Project store recovery", () => {
         const postflight = yield* store.postflight(fixture.project);
         const restored = yield* store.completeMigration(fixture.project, postflight);
         return { migrated, postflight, restored };
-      }).pipe(Effect.provide(DrizzleProjectStoreLive));
+      }).pipe(Effect.provide(DrizzleProjectRepositoryLive));
 
       expect(outcome).toEqual({ migrated: true, postflight: false, restored: false });
       const restored = new Database(fixture.databasePath, { readonly: true });
@@ -113,7 +113,7 @@ describe("Drizzle Project store recovery", () => {
 
   it("keeps the verified backup recoverable when completion durability fails", async () => {
     const fixture = await initializedProject("kojo-store-completion-durability-");
-    migrateProjectStore(fixture.project);
+    migrateProjectRepository(fixture.project);
     const changed = new Database(fixture.databasePath);
     changed.exec(
       "INSERT INTO kojo_retention_policy(singleton_key, row_version, updated_at_ms) VALUES (1, 1, 1)",
@@ -121,7 +121,7 @@ describe("Drizzle Project store recovery", () => {
     changed.close();
 
     expect(() =>
-      completeProjectStoreMigration(fixture.project, true, {
+      completeProjectRepositoryMigration(fixture.project, true, {
         syncDirectory: () => {
           throw new Error("directory sync failed");
         },
@@ -131,7 +131,7 @@ describe("Drizzle Project store recovery", () => {
       true,
     );
 
-    expect(completeProjectStoreMigration(fixture.project, false)).toBe(false);
+    expect(completeProjectRepositoryMigration(fixture.project, false)).toBe(false);
     const restored = new Database(fixture.databasePath, { readonly: true });
     expect(restored.query("SELECT * FROM kojo_retention_policy").all()).toEqual([]);
     restored.close();
@@ -149,7 +149,7 @@ describe("Drizzle Project store recovery", () => {
     await unlink(fixture.databasePath);
     await symlink(outsidePath, fixture.databasePath);
 
-    expect(() => migrateProjectStore(fixture.project)).toThrow("unsafe Project database");
+    expect(() => migrateProjectRepository(fixture.project)).toThrow("unsafe Project database");
     expect(await readFile(outsidePath)).toEqual(outsideBefore);
     expect(await Bun.file(backupPath).exists()).toBe(true);
   });
@@ -170,8 +170,8 @@ describe("Drizzle Project store recovery", () => {
     expect(await writer.exited).toBe(0);
     expect(await Bun.file(`${fixture.databasePath}-wal`).exists()).toBe(true);
 
-    migrateProjectStore(fixture.project);
-    expect(completeProjectStoreMigration(fixture.project, true)).toBe(true);
+    migrateProjectRepository(fixture.project);
+    expect(completeProjectRepositoryMigration(fixture.project, true)).toBe(true);
 
     const restored = new Database(fixture.databasePath, { readonly: true });
     expect(restored.query("SELECT * FROM kojo_retention_policy").all()).toEqual([]);
@@ -280,8 +280,8 @@ const initializedProject = async (prefix: string) => {
   database.close();
   await chmod(databasePath, 0o600);
   const project = { identity, path: projectPath };
-  migrateProjectStore(project);
-  expect(completeProjectStoreMigration(project, true)).toBe(true);
+  migrateProjectRepository(project);
+  expect(completeProjectRepositoryMigration(project, true)).toBe(true);
   return {
     directory,
     databasePath,
@@ -299,6 +299,6 @@ const projectStoreReadiness = (project: {
   readonly identity: ProjectIdentity;
   readonly path: string;
 }) =>
-  Effect.flatMap(ProjectStore, (store) => store.readiness(project)).pipe(
-    Effect.provide(DrizzleProjectStoreLive),
+  Effect.flatMap(ProjectRepository, (store) => store.readiness(project)).pipe(
+    Effect.provide(DrizzleProjectRepositoryLive),
   );

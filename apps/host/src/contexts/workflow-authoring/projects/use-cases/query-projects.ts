@@ -7,7 +7,7 @@ import type {
 } from "@kojo/control";
 import { Effect } from "effect";
 import { ProjectRuntime } from "../../../workflow-execution/projects/services/project-runtime";
-import { ProjectIndexStore } from "../services/project-index-store";
+import { ProjectIndexRepository } from "../repositories/project-index-repository";
 import { ProjectLayout } from "../services/project-layout";
 import {
   decodeProjectCursor as decodeCursor,
@@ -16,10 +16,10 @@ import {
 } from "./project-list-cursor";
 import { queryFailure } from "./project-operation-results";
 
-export const listProjects: Effect.Effect<ProjectList, never, ProjectIndexStore> = Effect.gen(
+export const listProjects: Effect.Effect<ProjectList, never, ProjectIndexRepository> = Effect.gen(
   function* () {
-    const store = yield* ProjectIndexStore;
-    const state = yield* store.read;
+    const repository = yield* ProjectIndexRepository;
+    const state = yield* repository.read;
     return {
       projects: [...state.projects].sort((left, right) =>
         right.identity.localeCompare(left.identity),
@@ -30,12 +30,16 @@ export const listProjects: Effect.Effect<ProjectList, never, ProjectIndexStore> 
 
 export const listProjectPage = (
   input: ProjectListInput = { conditions: [], limit: 50 },
-): Effect.Effect<ProjectListResult, never, ProjectIndexStore | ProjectLayout | ProjectRuntime> =>
+): Effect.Effect<
+  ProjectListResult,
+  never,
+  ProjectIndexRepository | ProjectLayout | ProjectRuntime
+> =>
   Effect.gen(function* () {
-    const store = yield* ProjectIndexStore;
+    const repository = yield* ProjectIndexRepository;
     const layout = yield* ProjectLayout;
     const runtime = yield* ProjectRuntime;
-    const state = yield* store.read;
+    const state = yield* repository.read;
     const assessed = yield* Effect.all(
       state.projects.map((project) =>
         Effect.gen(function* () {
@@ -78,10 +82,10 @@ export const listProjectPage = (
 
 export const showProject = (
   identity: ProjectIdentity,
-): Effect.Effect<ProjectQueryResult, never, ProjectIndexStore> =>
+): Effect.Effect<ProjectQueryResult, never, ProjectIndexRepository> =>
   Effect.gen(function* () {
-    const store = yield* ProjectIndexStore;
-    const state = yield* store.read;
+    const repository = yield* ProjectIndexRepository;
+    const state = yield* repository.read;
     const project = state.projects.find((candidate) => candidate.identity === identity);
     return project === undefined
       ? queryFailure(

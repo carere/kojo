@@ -28,16 +28,17 @@ export interface ProjectIndexUpdate<A> {
   readonly result: A;
 }
 
-export interface ProjectIndexStoreShape {
+export interface ProjectIndexRepositoryShape {
   readonly read: Effect.Effect<ProjectIndexState>;
   readonly update: <A>(
     change: (state: ProjectIndexState) => Effect.Effect<ProjectIndexUpdate<A>>,
   ) => Effect.Effect<A>;
 }
 
-export class ProjectIndexStore extends Context.Service<ProjectIndexStore, ProjectIndexStoreShape>()(
-  "kojo/host/ProjectIndexStore",
-) {}
+export class ProjectIndexRepository extends Context.Service<
+  ProjectIndexRepository,
+  ProjectIndexRepositoryShape
+>()("kojo/host/ProjectIndexRepository") {}
 
 export const emptyProjectIndexState = (): ProjectIndexState => ({
   layoutVersion: 1,

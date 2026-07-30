@@ -1,6 +1,6 @@
 import type { ProjectCondition, ProjectIdentity, ProjectSnapshot } from "@kojo/control";
 import { Context, Effect, Layer } from "effect";
-import { type ProjectForgetBlockers, ProjectStore } from "./project-store";
+import { type ProjectForgetBlockers, ProjectRepository } from "../repositories/project-repository";
 import { WorkflowBackend } from "./workflow-backend";
 
 export interface ProjectRuntimeShape {
@@ -43,7 +43,7 @@ export class ProjectRuntime extends Context.Service<ProjectRuntime, ProjectRunti
 export const ProjectRuntimeLive = Layer.effect(
   ProjectRuntime,
   Effect.gen(function* () {
-    const store = yield* ProjectStore;
+    const repository = yield* ProjectRepository;
     const backend = yield* WorkflowBackend;
     const pending = new Map<string, Promise<void>>();
     let pendingRegistration: Promise<void> = Promise.resolve();
@@ -75,23 +75,25 @@ export const ProjectRuntimeLive = Layer.effect(
       Effect.gen(function* () {
         if (!(yield* backend.acquire(project))) return false;
         yield* backend.quiesce(project);
-        if (!(yield* store.migrate(project))) {
+        if (!(yield* repository.migrate(project))) {
           yield* backend.release(project);
           return false;
         }
         const initialized = yield* backend.initialize(project);
         const postflightReady =
-          initialized && (yield* backend.postflight(project)) && (yield* store.postflight(project));
+          initialized &&
+          (yield* backend.postflight(project)) &&
+          (yield* repository.postflight(project));
         if (!postflightReady) {
           yield* backend.quiesce(project);
-          yield* store.completeMigration(project, false);
+          yield* repository.completeMigration(project, false);
           yield* backend.release(project);
           return false;
         }
-        const completed = yield* store.completeMigration(project, true);
+        const completed = yield* repository.completeMigration(project, true);
         if (!completed) {
           yield* backend.quiesce(project);
-          yield* store.completeMigration(project, false);
+          yield* repository.completeMigration(project, false);
           yield* backend.release(project);
         }
         return completed;
@@ -117,7 +119,7 @@ export const ProjectRuntimeLive = Layer.effect(
               ) {
                 yield* backend.release(preflight.previousProject);
               }
-              const storeCondition = yield* store.readiness(project);
+              const storeCondition = yield* repository.readiness(project);
               if (storeCondition === "ready") {
                 const backendCondition = yield* backend.readiness(project);
                 if (backendCondition === "ready") {
@@ -138,7 +140,7 @@ export const ProjectRuntimeLive = Layer.effect(
             indexedProject.path !== validatedProject.path
             ? Effect.succeed("needs-attention" as const)
             : Effect.gen(function* () {
-                const storeCondition = yield* store.readiness(indexedProject);
+                const storeCondition = yield* repository.readiness(indexedProject);
                 if (storeCondition !== "ready") return storeCondition;
                 const backendCondition = yield* backend.readiness(indexedProject);
                 if (backendCondition === "ready") {
@@ -153,7 +155,7 @@ export const ProjectRuntimeLive = Layer.effect(
               }),
         ),
       inspectForgetBlockers: (project: ProjectSnapshot) =>
-        serialize(project, store.inspectForgetBlockers(project)),
+        serialize(project, repository.inspectForgetBlockers(project)),
       coordinateForget: <A>(
         identity: ProjectIdentity,
         resolve: Effect.Effect<
@@ -172,7 +174,7 @@ export const ProjectRuntimeLive = Layer.effect(
             if (resolved._tag === "result") return resolved.result;
             const outcome = yield* operation(
               resolved.project,
-              yield* store.inspectForgetBlockers(resolved.project),
+              yield* repository.inspectForgetBlockers(resolved.project),
             );
             if (outcome.deactivate) yield* backend.release(resolved.project);
             return outcome.result;

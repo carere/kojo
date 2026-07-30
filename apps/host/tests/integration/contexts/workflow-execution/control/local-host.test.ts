@@ -7,11 +7,9 @@ import { ProjectIdentity, RequestKey } from "@kojo/control";
 import { connectUnixControlClient, makeLocalClient } from "@kojo/control/local-client";
 import { Effect, Exit, Layer, Schema } from "effect";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
-import { DrizzleProjectStoreLive } from "../../../../../src/adapters/projects/drizzle-project-store";
-import { makeFileProjectIndexStoreLayer } from "../../../../../src/adapters/projects/file-project-index-store";
-import { GitProjectLayoutLive } from "../../../../../src/adapters/projects/git-project-layout";
-import { makeLocalWorkflowBackendLayer } from "../../../../../src/adapters/projects/local-workflow-backend";
-import { SubprocessProjectDefinitionLoaderLive } from "../../../../../src/adapters/projects/subprocess-project-definition-loader";
+import { makeFileProjectIndexRepositoryLayer } from "../../../../../src/contexts/workflow-authoring/projects/repositories/file-project-index-repository";
+import { GitProjectLayoutLive } from "../../../../../src/contexts/workflow-authoring/projects/services/git-project-layout";
+import { SubprocessProjectDefinitionLoaderLive } from "../../../../../src/contexts/workflow-authoring/projects/services/subprocess-project-definition-loader";
 import { HostIdentity } from "../../../../../src/contexts/workflow-execution/control/models/host-identity";
 import { makeHostDiagnosticLoggerLayer } from "../../../../../src/contexts/workflow-execution/control/services/host-diagnostic-logger";
 import {
@@ -20,6 +18,8 @@ import {
   startKojoHost,
   UnsafeHostStoreError,
 } from "../../../../../src/contexts/workflow-execution/control/services/local-host";
+import { DrizzleProjectRepositoryLive } from "../../../../../src/contexts/workflow-execution/projects/repositories/drizzle-project-repository";
+import { makeLocalWorkflowBackendLayer } from "../../../../../src/contexts/workflow-execution/projects/services/local-workflow-backend";
 import { ProjectRuntimeLive } from "../../../../../src/contexts/workflow-execution/projects/services/project-runtime";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -215,10 +215,13 @@ const startTestHost = (socketPath: string, diagnosticPath: string) => {
     TEST_HOST_IDENTITY,
   ).pipe(
     Layer.provide([
-      makeFileProjectIndexStoreLayer(join(dirname(socketPath), "projects.json")),
+      makeFileProjectIndexRepositoryLayer(join(dirname(socketPath), "projects.json")),
       GitProjectLayoutLive.pipe(Layer.provide(SubprocessProjectDefinitionLoaderLive)),
       ProjectRuntimeLive.pipe(
-        Layer.provide([DrizzleProjectStoreLive, makeLocalWorkflowBackendLayer(TEST_HOST_IDENTITY)]),
+        Layer.provide([
+          DrizzleProjectRepositoryLive,
+          makeLocalWorkflowBackendLayer(TEST_HOST_IDENTITY),
+        ]),
       ),
     ]),
   );

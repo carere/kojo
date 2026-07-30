@@ -24,7 +24,7 @@ import {
   type WorkflowBackendAssessment,
   type WorkflowBackendReference,
   type WorkflowBackendState,
-} from "../../contexts/workflow-execution/projects/services/workflow-backend";
+} from "./workflow-backend";
 
 const databasePath = (project: ProjectSnapshot) => join(project.path, ".kojo", "kojo.sqlite");
 const ownershipPath = (project: ProjectSnapshot) =>

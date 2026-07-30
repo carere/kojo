@@ -20,8 +20,8 @@ import {
   initializeProjectWith,
   ProjectInitializationError,
   type ProjectInitializationPlatform,
-} from "../../contexts/workflow-authoring/projects/use-cases/initialize-project";
-import { validateProjectDefinition } from "../project-definition/subprocess-project-definition-validator";
+} from "../use-cases/initialize-project";
+import { validateProjectDefinition } from "./subprocess-project-definition-validator";
 
 const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
 

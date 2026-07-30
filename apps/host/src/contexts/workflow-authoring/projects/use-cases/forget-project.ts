@@ -8,7 +8,10 @@ import type {
 } from "@kojo/control";
 import { Effect } from "effect";
 import { ProjectRuntime } from "../../../workflow-execution/projects/services/project-runtime";
-import { ProjectIndexStore, successfulMutation } from "../services/project-index-store";
+import {
+  ProjectIndexRepository,
+  successfulMutation,
+} from "../repositories/project-index-repository";
 import { mutationFailure, replay, requestConflict } from "./project-operation-results";
 import {
   projectMutationFingerprint as fingerprint,
@@ -32,11 +35,11 @@ export const forgetProject = (
   identity: ProjectIdentity,
   selector: ProjectSelector,
   requestKey: RequestKey,
-): Effect.Effect<ProjectMutationResult, never, ProjectIndexStore | ProjectRuntime> =>
+): Effect.Effect<ProjectMutationResult, never, ProjectIndexRepository | ProjectRuntime> =>
   Effect.gen(function* () {
-    const store = yield* ProjectIndexStore;
+    const repository = yield* ProjectIndexRepository;
     const runtime = yield* ProjectRuntime;
-    const state = yield* store.read;
+    const state = yield* repository.read;
     const receipt = state.receipts.find((candidate) => candidate.requestKey === requestKey);
     const input = forgetInput(identity, selector);
     const requestFingerprint = fingerprint("forget", input);
@@ -46,7 +49,7 @@ export const forgetProject = (
         : requestConflict(requestKey);
     }
     const resolveCurrentProject: Effect.Effect<ForgetResolution> = Effect.suspend(() =>
-      store.update<ForgetResolution>((latest) =>
+      repository.update<ForgetResolution>((latest) =>
         Effect.sync(() => {
           const currentReceipt = latest.receipts.find(
             (candidate) => candidate.requestKey === requestKey,
@@ -90,7 +93,7 @@ export const forgetProject = (
     );
 
     return yield* runtime.coordinateForget(identity, resolveCurrentProject, (project, blockers) =>
-      store
+      repository
         .update((latest) =>
           Effect.gen(function* () {
             const currentReceipt = latest.receipts.find(
@@ -196,10 +199,10 @@ export const forgetProject = (
 export const replayForgetProject = (
   selector: ProjectSelector,
   requestKey: RequestKey,
-): Effect.Effect<ProjectMutationResult, never, ProjectIndexStore> =>
+): Effect.Effect<ProjectMutationResult, never, ProjectIndexRepository> =>
   Effect.gen(function* () {
-    const store = yield* ProjectIndexStore;
-    const state = yield* store.read;
+    const repository = yield* ProjectIndexRepository;
+    const state = yield* repository.read;
     const receipt = state.receipts.find((candidate) => candidate.requestKey === requestKey);
     if (
       receipt === undefined ||

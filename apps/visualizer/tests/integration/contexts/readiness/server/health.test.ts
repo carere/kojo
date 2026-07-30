@@ -2,13 +2,13 @@ import { afterAll, describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 import { FetchHttpClient } from "effect/unstable/http";
 import { RpcGroup, RpcTest } from "effect/unstable/rpc";
-import { HealthHandler } from "../../../src/contexts/readiness/server/handlers";
-import { Health } from "../../../src/contexts/shared/models/contracts";
-import { disposeApi, handleApiRequest } from "../../../src/contexts/shared/server";
+import { HealthHandler } from "../../../../../src/contexts/readiness/server/handlers";
+import { Health } from "../../../../../src/contexts/shared/models/contracts";
+import { disposeApi, handleApiRequest } from "../../../../../src/contexts/shared/server";
 import {
   makeVisualizerApiClientLayer,
   VisualizerApiClient,
-} from "../../../src/contexts/shared/services/client";
+} from "../../../../../src/contexts/shared/services/client";
 
 const expectedHealth = {
   service: "visualizer",

@@ -3,10 +3,10 @@ import { ProjectIdentity, type ProjectSnapshot, RequestKey } from "@kojo/control
 import { Effect, Fiber, Layer, Schema } from "effect";
 import {
   emptyProjectIndexState,
+  ProjectIndexRepository,
+  type ProjectIndexRepositoryShape,
   type ProjectIndexState,
-  ProjectIndexStore,
-  type ProjectIndexStoreShape,
-} from "../../../../../../src/contexts/workflow-authoring/projects/services/project-index-store";
+} from "../../../../../../src/contexts/workflow-authoring/projects/repositories/project-index-repository";
 import {
   ProjectLayout,
   type ProjectLayoutShape,
@@ -19,13 +19,13 @@ import {
   replayForgetProject,
 } from "../../../../../../src/contexts/workflow-authoring/projects/use-cases/manage-projects";
 import {
+  type ProjectForgetBlockers,
+  ProjectRepository,
+} from "../../../../../../src/contexts/workflow-execution/projects/repositories/project-repository";
+import {
   ProjectRuntime,
   ProjectRuntimeLive,
 } from "../../../../../../src/contexts/workflow-execution/projects/services/project-runtime";
-import {
-  type ProjectForgetBlockers,
-  ProjectStore,
-} from "../../../../../../src/contexts/workflow-execution/projects/services/project-store";
 import { WorkflowBackend } from "../../../../../../src/contexts/workflow-execution/projects/services/workflow-backend";
 
 const identity = Schema.decodeUnknownSync(ProjectIdentity)("00000000-0000-7000-8000-000000000001");
@@ -34,7 +34,7 @@ const requestKey = (suffix: string) =>
 
 const makeStore = () => {
   let state = emptyProjectIndexState();
-  const service: ProjectIndexStoreShape = {
+  const service: ProjectIndexRepositoryShape = {
     read: Effect.sync(() => state),
     update: (change) =>
       Effect.flatMap(change(state), (update) =>
@@ -44,7 +44,7 @@ const makeStore = () => {
         }),
       ),
   };
-  return Layer.succeed(ProjectIndexStore, service);
+  return Layer.succeed(ProjectIndexRepository, service);
 };
 
 const makeLayout = (
@@ -299,7 +299,7 @@ it.effect("acquires the Project Runtime before the Project Index for register an
   const project: ProjectSnapshot = { identity, path: "/projects/lock-order" };
   let state = emptyProjectIndexState();
   let runtimeOwned = false;
-  const store = Layer.succeed(ProjectIndexStore, {
+  const store = Layer.succeed(ProjectIndexRepository, {
     read: Effect.sync(() => state),
     update: (change) =>
       Effect.gen(function* () {
@@ -372,7 +372,7 @@ it.effect("forgets the moved Project snapshot after queued registration complete
   const inspectedPaths: Array<string> = [];
   const releasedPaths: Array<string> = [];
 
-  const indexStore = Layer.succeed(ProjectIndexStore, {
+  const indexStore = Layer.succeed(ProjectIndexRepository, {
     read: Effect.sync(() => {
       if (registrationIsMigrating) markForgetRead();
       return state;
@@ -385,7 +385,7 @@ it.effect("forgets the moved Project snapshot after queued registration complete
         }),
       ),
   });
-  const projectStore = Layer.succeed(ProjectStore, {
+  const projectStore = Layer.succeed(ProjectRepository, {
     migrate: () =>
       Effect.promise(async () => {
         registrationIsMigrating = true;

@@ -4,15 +4,15 @@ status: accepted
 
 # Use Drizzle for Kojo records and versioned Execution Events
 
-Kojo stores its authoritative project records in Drizzle-managed `STRICT` SQLite tables while Effect Workflow owns separate private tables in the same project database. `ProjectStore` uses Drizzle for every Kojo-owned migration and query; `LocalWorkflowBackend` alone composes Effect's required SQL services, interprets opaque engine references, and operates on Effect-owned storage. Versioned immutable Execution Events reconstruct the user-visible Execution Trace, while current state, engine intents, Activity Attempts, retention, and deletion remain explicit records rather than projections from that trace.
+Kojo stores its authoritative project records in Drizzle-managed `STRICT` SQLite tables while Effect Workflow owns separate private tables in the same project database. `ProjectRepository` uses Drizzle for every Kojo-owned migration and query; `LocalWorkflowBackend` alone composes Effect's required SQL services, interprets opaque engine references, and operates on Effect-owned storage. Versioned immutable Execution Events reconstruct the user-visible Execution Trace, while current state, engine intents, Activity Attempts, retention, and deletion remain explicit records rather than projections from that trace.
 
 ## Database ownership and connections
 
 - `.kojo/kojo.sqlite` is the single Project database. Every Kojo-owned table begins with `kojo_`; Effect-owned names remain private and are never queried through Drizzle.
-- `ProjectStore` uses `drizzle-orm/bun-sqlite` over a Kojo-owned `bun:sqlite` connection. Drizzle schemas are the source of truth, Drizzle Kit generates checked-in migrations, runtime `migrate()` records them in `kojo_schema_migrations`, and `drizzle-kit push` is not used against a Project database.
+- `ProjectRepository` uses `drizzle-orm/bun-sqlite` over a Kojo-owned `bun:sqlite` connection. Drizzle schemas are the source of truth, Drizzle Kit generates checked-in migrations, runtime `migrate()` records them in `kojo_schema_migrations`, and `drizzle-kit push` is not used against a Project database.
 - Drizzle-managed custom migrations express SQLite features that the schema generator cannot emit, including `STRICT` table declarations and the Execution Event update guard. Generated migration files are not edited by hand.
 - `LocalWorkflowBackend` opens Effect's separate `@effect/sql-sqlite-bun` connection to the same file because Effect does not accept Drizzle's Bun `Database` handle. Both connections enable WAL, foreign keys, a five-second busy timeout, and `synchronous=FULL`.
-- The Project Runtime is the only coordinator allowed to open writable production adapters. SQL rows, Drizzle types, Effect identities, entity addresses, and migration tables never cross `ProjectStore`, `LocalWorkflowBackend`, or `@kojo/control` boundaries.
+- The Project Runtime is the only coordinator allowed to open writable production adapters. SQL rows, Drizzle types, Effect identities, entity addresses, and migration tables never cross `ProjectRepository`, `LocalWorkflowBackend`, or `@kojo/control` boundaries.
 
 ## Physical conventions
 
@@ -20,7 +20,7 @@ Kojo stores its authoritative project records in Drizzle-managed `STRICT` SQLite
 - Public generated identities are canonical UUIDv7 strings stored as `TEXT`. Workflow Keys, Schedule Keys, revisions, Durable Operation Keys, Activity Idempotency Keys, Request Keys, and other developer or client keys are validated by Effect Schema before SQL and constrained to non-empty bounded text.
 - Instants and durations are non-negative UTC epoch milliseconds in `INTEGER` columns. Per-Run Event sequence is a positive integer and is the only authoritative ordering for an Execution Trace.
 - Boolean integers are constrained to `0` or `1`. Lifecycle strings have named `CHECK` constraints. Every JSON column has `json_valid(...)`; every SHA-256 is a 32-byte `BLOB`.
-- Application reads decode Drizzle results through Effect Schema before returning domain models. Row-local invariants are also database constraints; cross-row invariants are enforced by one `ProjectStore` transaction and audited by repair checks.
+- Application reads decode Drizzle results through Effect Schema before returning domain models. Row-local invariants are also database constraints; cross-row invariants are enforced by one `ProjectRepository` transaction and audited by repair checks.
 
 ### Payload bundle
 
@@ -335,7 +335,7 @@ Safe repair may restore a migration backup, run an approved migration, recreate 
 
 ## Consequences
 
-- The Host implementation needs Drizzle schemas, generated and custom migrations, a production `ProjectStore`, the separate `LocalWorkflowBackend`, and in-memory versions of both interfaces for unit tests.
+- The Host implementation needs Drizzle schemas, generated and custom migrations, a production `ProjectRepository`, the separate `LocalWorkflowBackend`, and in-memory versions of both interfaces for unit tests.
 - Integration tests must exercise two WAL connections, transaction crash windows, duplicate operations, Event immutability and sequence, version placeholders, masking and reveal, Artifact traversal and symlinks, export snapshots, migrations and backup restoration, repair checks, incomplete Activity Attempts, late outcomes after stop, and every deletion phase.
 - The CLI and visualizer consume the same masked-by-default control models and never acquire direct database or Effect access.
 - Distribution policy must pin compatible Drizzle, Bun SQLite, and Effect versions, but exact packaging and upgrade support remain in the map's distribution decision.

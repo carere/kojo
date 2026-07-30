@@ -5,18 +5,15 @@ import { join } from "node:path";
 import { ProjectIdentity } from "@kojo/control";
 import { Effect, Layer, Schema } from "effect";
 import {
-  ProjectDefinitionLoader,
-  type ProjectDefinitionLoaderShape,
-} from "../../contexts/workflow-authoring/projects/services/project-definition-loader";
-import {
-  ProjectLayout,
-  type ProjectLayoutShape,
-} from "../../contexts/workflow-authoring/projects/services/project-layout";
-import {
   InvalidProjectLayoutError,
   type ProjectLayoutPlatform,
   validateProjectLayout,
-} from "../../contexts/workflow-authoring/projects/use-cases/validate-project-layout";
+} from "../use-cases/validate-project-layout";
+import {
+  ProjectDefinitionLoader,
+  type ProjectDefinitionLoaderShape,
+} from "./project-definition-loader";
+import { ProjectLayout, type ProjectLayoutShape } from "./project-layout";
 
 const inspect = async (path: string, kind: "directory" | "file", mode?: number) => {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
