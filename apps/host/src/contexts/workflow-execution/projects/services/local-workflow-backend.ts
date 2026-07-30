@@ -35,13 +35,20 @@ const configure = (sql: SqlClient.SqlClient) =>
     yield* sql.unsafe("PRAGMA foreign_keys = ON");
     yield* sql.unsafe("PRAGMA busy_timeout = 5000");
     yield* sql.unsafe("PRAGMA synchronous = FULL");
+    const journal = yield* sql.unsafe<{ readonly journal_mode: string }>(
+      "PRAGMA journal_mode = WAL",
+    );
     const settings = yield* sql.unsafe<{
       readonly foreign_keys: number;
       readonly synchronous: number;
     }>(
       "SELECT (SELECT foreign_keys FROM pragma_foreign_keys) AS foreign_keys, (SELECT synchronous FROM pragma_synchronous) AS synchronous",
     );
-    if (settings[0]?.foreign_keys !== 1 || settings[0]?.synchronous !== 2) {
+    if (
+      journal[0]?.journal_mode.toLowerCase() !== "wal" ||
+      settings[0]?.foreign_keys !== 1 ||
+      settings[0]?.synchronous !== 2
+    ) {
       return yield* Effect.die("Effect Workflow database safety settings are unavailable");
     }
   });

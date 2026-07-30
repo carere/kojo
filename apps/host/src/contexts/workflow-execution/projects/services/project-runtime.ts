@@ -154,7 +154,10 @@ export const ProjectRuntimeLive = Layer.effect(
               if (storeCondition === "ready") {
                 const backendCondition = yield* backend.readiness(project);
                 if (backendCondition === "ready") {
-                  return yield* operation(yield* backend.postflight(project));
+                  const backendReady = yield* backend.postflight(project);
+                  const compatible = backendReady && (yield* repository.postflight(project));
+                  if (!compatible) yield* backend.release(project);
+                  return yield* operation(compatible);
                 }
                 if (backendCondition === "needs-attention") return yield* operation(false);
               }
@@ -186,8 +189,12 @@ export const ProjectRuntimeLive = Layer.effect(
                 if (storeCondition !== "ready") return storeCondition;
                 const backendCondition = yield* backend.readiness(indexedProject);
                 if (backendCondition === "ready") {
-                  const healthy = yield* backend.postflight(indexedProject);
-                  if (!healthy) return "needs-attention" as const;
+                  const backendReady = yield* backend.postflight(indexedProject);
+                  const healthy = backendReady && (yield* repository.postflight(indexedProject));
+                  if (!healthy) {
+                    yield* backend.release(indexedProject);
+                    return "needs-attention" as const;
+                  }
                   return definitions !== undefined && !definitions.ok
                     ? ("limited" as const)
                     : ("ready" as const);
