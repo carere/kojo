@@ -7,6 +7,13 @@ import type {
   WorkflowRunStartSnapshot,
 } from "@kojo/control";
 import { Context, type Effect } from "effect";
+import type { StoredSensitivityMap } from "../models/sensitivity-map";
+
+export interface StoredWorkflowRunSnapshot {
+  readonly outcomeSensitivityMap: StoredSensitivityMap;
+  readonly run: WorkflowRunSnapshot;
+  readonly startSnapshotSensitivityMap: StoredSensitivityMap;
+}
 
 export interface WorkflowRunStartRecord {
   readonly project: ProjectSnapshot;
@@ -16,6 +23,7 @@ export interface WorkflowRunStartRecord {
   readonly workflowKey: string;
   readonly workflowRevision: string;
   readonly encodedInput: unknown;
+  readonly inputSensitivityPaths: ReadonlyArray<string>;
   readonly startSnapshot: WorkflowRunStartSnapshot;
   readonly acceptedAtMs: number;
 }
@@ -37,13 +45,14 @@ export interface ActiveWorkflowRun {
 
 export interface WorkflowRunOutcome {
   readonly kind: "completed" | "failed";
+  readonly sensitivityPaths: ReadonlyArray<string>;
   readonly value?: unknown;
 }
 
 export type WorkflowRunStartAcceptance =
   | {
       readonly _tag: "accepted";
-      readonly run: WorkflowRunSnapshot;
+      readonly run: StoredWorkflowRunSnapshot;
       readonly alreadyApplied: boolean;
     }
   | { readonly _tag: "request-key-conflict" };
@@ -59,7 +68,7 @@ export interface WorkflowRunRepositoryShape {
   readonly show: (
     project: ProjectSnapshot,
     runId: string,
-  ) => Effect.Effect<WorkflowRunSnapshot | undefined>;
+  ) => Effect.Effect<StoredWorkflowRunSnapshot | undefined>;
   readonly pendingSubmissions: (
     project: ProjectSnapshot,
     runId?: string,

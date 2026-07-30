@@ -80,7 +80,8 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
         options.cursor !== undefined ||
         options.limit !== undefined ||
         options.states.length > 0 ||
-        options.workflowKeys.length > 0
+        options.workflowKeys.length > 0 ||
+        options.reveal
       ) {
         return writeFailure(
           invalid(
@@ -142,7 +143,8 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
         options.input !== undefined ||
         options.requestKey !== undefined ||
         options.conditions.length > 0 ||
-        options.cursor !== undefined
+        options.cursor !== undefined ||
+        options.reveal
       ) {
         return writeFailure(
           invalid(
@@ -205,7 +207,7 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
     ) {
       return writeFailure(
         invalid(
-          "Run: kojo run show <Run Identity> [--project <path>|--project-id <Project Identity>] [--json]",
+          "Run: kojo run show <Run Identity> [--reveal] [--project <path>|--project-id <Project Identity>] [--json]",
         ),
         json,
         "run.show",
@@ -217,11 +219,30 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
     } catch {
       return writeFailure(invalid("Use a valid Run Identity."), json, "run.show");
     }
-    const shown = await runEffect(client.showWorkflowRun(identity, runId));
+    const shown = await runEffect(
+      options.reveal
+        ? client.revealWorkflowRun(identity, runId)
+        : client.showWorkflowRun(identity, runId),
+    );
     if (!shown.succeeded) return writeFailure(transportFailure(shown.error), json, "run.show");
     if (!shown.value.ok)
       return writeFailure(workflowRunFailure(shown.value.error), json, "run.show");
-    writeWorkflowRun("run.show", shown.value.run, json);
+    writeWorkflowRun(
+      "run.show",
+      shown.value.run,
+      json,
+      undefined,
+      undefined,
+      options.reveal
+        ? [
+            {
+              code: "sensitive-content-not-scanned",
+              message: "Revealed content may contain arbitrary secrets; Kojo did not scan it.",
+              next: "Handle revealed content as sensitive and avoid copying it into logs or issue trackers.",
+            },
+          ]
+        : [],
+    );
     return 0;
   }
 
@@ -245,7 +266,8 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
         options.limit !== undefined ||
         options.input !== undefined ||
         options.states.length > 0 ||
-        options.workflowKeys.length > 0
+        options.workflowKeys.length > 0 ||
+        options.reveal
       ) {
         return writeFailure(
           invalid("Run: kojo workflow validate [Project path or kojo.config.ts] [--json]"),
@@ -305,6 +327,7 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       options.input !== undefined ||
       options.states.length > 0 ||
       options.workflowKeys.length > 0 ||
+      options.reveal ||
       (args[1] === "list" && options.args.length !== 0) ||
       (args[1] === "show" && options.args.length !== 1)
     ) {
@@ -397,7 +420,8 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       options.limit !== undefined ||
       options.input !== undefined ||
       options.states.length > 0 ||
-      options.workflowKeys.length > 0
+      options.workflowKeys.length > 0 ||
+      options.reveal
     ) {
       return writeFailure(
         invalid("Run: kojo init [path] [--request-key <Request Key>] [--json]"),
@@ -484,7 +508,8 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       options.requestKey !== undefined ||
       options.input !== undefined ||
       options.states.length > 0 ||
-      options.workflowKeys.length > 0
+      options.workflowKeys.length > 0 ||
+      options.reveal
     ) {
       return writeFailure(
         invalid(
@@ -554,7 +579,8 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       options.limit !== undefined ||
       options.input !== undefined ||
       options.states.length > 0 ||
-      options.workflowKeys.length > 0
+      options.workflowKeys.length > 0 ||
+      options.reveal
     ) {
       return writeFailure(
         invalid("Run: kojo project register <path> [--request-key <Request Key>] [--json]"),
@@ -590,6 +616,7 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
     options.input !== undefined ||
     options.states.length > 0 ||
     options.workflowKeys.length > 0 ||
+    options.reveal ||
     (args[1] === "show" && options.requestKey !== undefined)
   ) {
     return writeFailure(

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export interface KojoHostProcessFixture {
+  readonly diagnosticPath: string;
   readonly socketPath: string;
   readonly stop: () => Promise<void>;
 }
@@ -40,6 +41,7 @@ export const startKojoHostProcess = async (
   }
 
   return {
+    diagnosticPath: join(directory, "diagnostics.jsonl"),
     socketPath,
     stop: async () => {
       processHandle.kill("SIGTERM");

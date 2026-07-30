@@ -71,6 +71,7 @@ export interface AnyLocalWorkflowDefinition {
 export type WorkflowBackendAssessment = "ready" | "uninitialized" | "needs-attention";
 
 export interface WorkflowBackendShape {
+  readonly hostIdentity?: string;
   readonly acquire: (project: ProjectSnapshot) => Effect.Effect<boolean>;
   readonly quiesce: (project: ProjectSnapshot) => Effect.Effect<void>;
   readonly initialize: (project: ProjectSnapshot) => Effect.Effect<boolean>;

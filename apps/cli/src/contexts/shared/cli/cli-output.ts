@@ -155,6 +155,7 @@ export const writeWorkflowRun = (
   json: boolean,
   requestKey?: RequestKey,
   alreadyApplied?: boolean,
+  warnings: ReadonlyArray<CliWarning> = [],
 ) => {
   if (json) {
     process.stdout.write(
@@ -163,7 +164,7 @@ export const writeWorkflowRun = (
         command,
         ...(requestKey === undefined ? {} : { requestKey }),
         result: { run, ...(alreadyApplied === undefined ? {} : { alreadyApplied }) },
-        warnings: [],
+        warnings,
       })}\n`,
     );
     return;
@@ -173,6 +174,9 @@ export const writeWorkflowRun = (
   );
   if (requestKey !== undefined) process.stdout.write(`Request Key: ${requestKey}\n`);
   if (alreadyApplied === true) process.stdout.write("Reused an existing Workflow Run.\n");
+  for (const warning of warnings) {
+    process.stderr.write(`Warning: ${warning.message}\nNext: ${warning.next}\n`);
+  }
 };
 
 export const pendingRegistrationWarning = (project: ProjectSnapshot): CliWarning => ({

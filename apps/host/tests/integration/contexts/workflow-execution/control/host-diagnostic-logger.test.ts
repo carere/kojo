@@ -95,6 +95,32 @@ describe("Host Diagnostic Store", () => {
     }),
   );
 
+  it.effect("writes only the diagnostic allowlist and never persists supplied payload fields", () =>
+    Effect.gen(function* () {
+      const directory = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), "kojo-diagnostics-allowlist-")),
+      );
+      cleanups.push(() => rm(directory, { recursive: true }));
+      const path = join(directory, "diagnostics.jsonl");
+      const logger = makeHostDiagnosticLogger(path);
+      const unsafe = {
+        ...diagnosticEvent("request-with-payload", "2026-07-15T00:00:00.000Z"),
+        commandArguments: ["--token", "top-secret"],
+        environment: { API_TOKEN: "top-secret" },
+        exception: "top-secret",
+        payload: { token: "top-secret" },
+      } as HostRequestDiagnosticEvent;
+
+      yield* logger.emit(unsafe);
+
+      const contents = yield* Effect.promise(() => readFile(path, "utf8"));
+      expect(contents).not.toContain("top-secret");
+      expect(JSON.parse(contents)).toEqual(
+        diagnosticEvent("request-with-payload", "2026-07-15T00:00:00.000Z"),
+      );
+    }),
+  );
+
   it.effect("keeps the newest events within each Project byte limit", () =>
     Effect.gen(function* () {
       const directory = yield* Effect.promise(() =>

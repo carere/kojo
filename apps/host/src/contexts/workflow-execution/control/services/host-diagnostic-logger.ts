@@ -11,7 +11,11 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
-import { ProjectIdentity, ProjectOperationErrorCode } from "@kojo/control";
+import {
+  ProjectIdentity,
+  ProjectOperationErrorCode,
+  WorkflowRunOperationErrorCode,
+} from "@kojo/control";
 import { Context, Effect, Layer, Schema } from "effect";
 import { HostIdentity } from "../models/host-identity";
 
@@ -28,6 +32,7 @@ export interface HostDiagnosticRetentionPolicy {
 }
 
 export interface HostDiagnosticLoggerOptions {
+  readonly hostIdentity?: HostIdentity;
   readonly now?: () => number;
   readonly path: string;
   readonly retention?: Partial<HostDiagnosticRetentionPolicy>;
@@ -35,27 +40,45 @@ export interface HostDiagnosticLoggerOptions {
 
 export const HostRequestDiagnosticEvent = Schema.Struct({
   eventVersion: Schema.Literal(1),
-  eventKind: Schema.Literal("host-request.completed"),
+  eventKind: Schema.Literals([
+    "host-request.completed",
+    "project-runtime.activation.completed",
+    "workflow-run.reconciliation.completed",
+  ]),
   hostIdentity: HostIdentity,
-  requestId: Schema.String,
+  requestId: Schema.optionalKey(Schema.String),
   operation: Schema.Literals([
     "Negotiate",
+    "NegotiateCapabilities",
     "ListProjects",
+    "ListProjectPage",
     "ShowProject",
+    "ListWorkflowDefinitions",
+    "ShowWorkflowDefinition",
     "StartWorkflowRun",
     "ListWorkflowRuns",
     "ShowWorkflowRun",
+    "RevealWorkflowRun",
     "RegisterProject",
     "ForgetProject",
     "ReplayForgetProject",
+    "ProjectRuntimeActivate",
+    "ReconcileWorkflowRun",
   ]),
   outcome: Schema.Literals(["success", "error"]),
-  safeErrorCode: Schema.optionalKey(ProjectOperationErrorCode),
+  safeErrorCode: Schema.optionalKey(
+    Schema.Union([
+      ProjectOperationErrorCode,
+      WorkflowRunOperationErrorCode,
+      Schema.Literals(["project-runtime-activation-failed", "workflow-run-reconciliation-failed"]),
+    ]),
+  ),
   durationMs: Schema.Number,
   hostVersion: Schema.String,
   protocolMajor: Schema.Number,
   protocolMinor: Schema.Number,
   projectIdentity: Schema.optionalKey(ProjectIdentity),
+  runId: Schema.optionalKey(Schema.String),
   timestamp: Schema.String,
 });
 export type HostRequestDiagnosticEvent = typeof HostRequestDiagnosticEvent.Type;
@@ -63,6 +86,7 @@ export type HostRequestDiagnosticEvent = typeof HostRequestDiagnosticEvent.Type;
 export interface HostDiagnosticLoggerShape {
   readonly cleanup: Effect.Effect<void>;
   readonly emit: (event: HostRequestDiagnosticEvent) => Effect.Effect<void>;
+  readonly hostIdentity?: HostIdentity;
 }
 
 export class HostDiagnosticLogger extends Context.Service<
@@ -76,6 +100,27 @@ const defaultRetention: HostDiagnosticRetentionPolicy = {
   maxHostBytes: DEFAULT_DIAGNOSTIC_MAX_HOST_BYTES,
   maxProjectBytes: DEFAULT_DIAGNOSTIC_MAX_PROJECT_BYTES,
   segmentBytes: DEFAULT_DIAGNOSTIC_MAX_PROJECT_BYTES,
+};
+
+/** The logger accepts only this immutable, payload-free field allowlist. */
+const safeDiagnosticEvent = (value: HostRequestDiagnosticEvent): HostRequestDiagnosticEvent => {
+  const event = Schema.decodeUnknownSync(HostRequestDiagnosticEvent)(value);
+  return {
+    eventVersion: event.eventVersion,
+    eventKind: event.eventKind,
+    hostIdentity: event.hostIdentity,
+    operation: event.operation,
+    outcome: event.outcome,
+    durationMs: event.durationMs,
+    hostVersion: event.hostVersion,
+    protocolMajor: event.protocolMajor,
+    protocolMinor: event.protocolMinor,
+    timestamp: event.timestamp,
+    ...(event.requestId === undefined ? {} : { requestId: event.requestId }),
+    ...(event.safeErrorCode === undefined ? {} : { safeErrorCode: event.safeErrorCode }),
+    ...(event.projectIdentity === undefined ? {} : { projectIdentity: event.projectIdentity }),
+    ...(event.runId === undefined ? {} : { runId: event.runId }),
+  };
 };
 
 const fileSize = async (path: string) => {
@@ -239,7 +284,7 @@ export const makeHostDiagnosticLogger = (
   return {
     cleanup: Effect.suspend(() => run(cleanupStore)),
     emit: (event) => {
-      const line = `${JSON.stringify(event)}\n`;
+      const line = `${JSON.stringify(safeDiagnosticEvent(event))}\n`;
       return run(async () => {
         await mkdir(dirname(options.path), { recursive: true, mode: 0o700 });
         await chmod(dirname(options.path), 0o700);
@@ -249,6 +294,7 @@ export const makeHostDiagnosticLogger = (
         if (rotated) await cleanupStore();
       });
     },
+    ...(options.hostIdentity === undefined ? {} : { hostIdentity: options.hostIdentity }),
   };
 };
 

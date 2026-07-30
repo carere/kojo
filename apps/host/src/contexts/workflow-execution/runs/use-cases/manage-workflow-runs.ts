@@ -8,6 +8,7 @@ import type {
   WorkflowRunListResult,
   WorkflowRunOperationError,
   WorkflowRunQueryResult,
+  WorkflowRunSnapshot,
   WorkflowRunStartResult,
 } from "@kojo/control";
 import type { WorkflowDefinitionSnapshot } from "@kojo/control/project-definition-validation";
@@ -16,6 +17,8 @@ import { Effect, Option, Schema } from "effect";
 import { ProjectIndexRepository } from "../../../workflow-authoring/projects/repositories/project-index-repository";
 import { loadExecutableWorkflowDefinitions } from "../../../workflow-authoring/projects/services/project-executable-definition-loader";
 import { ProjectLayout } from "../../../workflow-authoring/projects/services/project-layout";
+import { HOST_INFORMATION } from "../../control/models/host-information";
+import { HostDiagnosticLogger } from "../../control/services/host-diagnostic-logger";
 import { ProjectRuntime } from "../../projects/services/project-runtime";
 import {
   type AnyLocalWorkflowDefinition,
@@ -23,7 +26,9 @@ import {
   type WorkflowBackendState,
   workflowBackendReference,
 } from "../../projects/services/workflow-backend";
+import { maskPayload } from "../models/sensitivity-map";
 import {
+  type StoredWorkflowRunSnapshot,
   type WorkflowRunOutcome,
   WorkflowRunRepository,
 } from "../repositories/workflow-run-repository";
@@ -84,6 +89,21 @@ const asLocalDefinition = (definition: AnyWorkflowDefinition): AnyLocalWorkflowD
   execute: (input) => definition.handler(input),
 });
 
+const maskedWorkflowRun = (stored: StoredWorkflowRunSnapshot): WorkflowRunSnapshot => ({
+  ...stored.run,
+  startSnapshot: maskPayload(
+    stored.run.startSnapshot,
+    stored.startSnapshotSensitivityMap,
+  ) as WorkflowRunSnapshot["startSnapshot"],
+  outcome:
+    stored.run.outcome === null
+      ? null
+      : (maskPayload(
+          stored.run.outcome,
+          stored.outcomeSensitivityMap,
+        ) as WorkflowRunSnapshot["outcome"]),
+});
+
 const recordOutcome = (
   repository: WorkflowRunRepository["Service"],
   project: ProjectSnapshot,
@@ -97,12 +117,16 @@ const recordOutcome = (
       try {
         const successSchema = definition.successSchema as typeof Schema.Unknown;
         const encoded = Schema.encodeSync(successSchema)(state.result);
-        outcome = { kind: "completed", value: encoded };
+        outcome = {
+          kind: "completed",
+          sensitivityPaths: definition.sensitivity?.success ?? [],
+          value: encoded,
+        };
       } catch {
-        outcome = { kind: "failed" };
+        outcome = { kind: "failed", sensitivityPaths: definition.sensitivity?.failure ?? [] };
       }
     } else {
-      outcome = { kind: "failed" };
+      outcome = { kind: "failed", sensitivityPaths: definition.sensitivity?.failure ?? [] };
     }
     yield* repository.recordOutcome(project, runId, outcome, Date.now());
   });
@@ -165,6 +189,28 @@ const reconcileRun = (
     }
   });
 
+const emitReconciliationDiagnostic = (project: ProjectSnapshot, runId: string) =>
+  Effect.gen(function* () {
+    const logger = yield* HostDiagnosticLogger;
+    if (logger.hostIdentity === undefined) return;
+    yield* logger
+      .emit({
+        eventVersion: 1,
+        eventKind: "workflow-run.reconciliation.completed",
+        hostIdentity: logger.hostIdentity,
+        operation: "ReconcileWorkflowRun",
+        outcome: "success",
+        durationMs: 0,
+        hostVersion: HOST_INFORMATION.hostVersion,
+        protocolMajor: HOST_INFORMATION.protocol.major,
+        protocolMinor: HOST_INFORMATION.protocol.minor,
+        projectIdentity: project.identity,
+        runId,
+        timestamp: new Date().toISOString(),
+      })
+      .pipe(Effect.ignore);
+  });
+
 interface ResolvedProject {
   readonly indexed: ProjectSnapshot;
   readonly project: ProjectSnapshot;
@@ -193,7 +239,7 @@ const reconcilePendingWorkflowRuns = (
 ): Effect.Effect<
   void,
   never,
-  ProjectLayout | ProjectRuntime | WorkflowBackend | WorkflowRunRepository
+  ProjectLayout | ProjectRuntime | WorkflowBackend | WorkflowRunRepository | HostDiagnosticLogger
 > =>
   Effect.gen(function* () {
     const layout = yield* ProjectLayout;
@@ -244,6 +290,17 @@ const reconcilePendingWorkflowRuns = (
         }
       }),
     );
+    for (const activeRun of yield* repository.activeRuns(validation.project)) {
+      if (
+        executable.some(
+          (candidate) =>
+            candidate.workflowKey === activeRun.workflowKey &&
+            candidate.revision === activeRun.workflowRevision,
+        )
+      ) {
+        yield* emitReconciliationDiagnostic(validation.project, activeRun.runId);
+      }
+    }
   }).pipe(Effect.catchCause(() => Effect.void));
 
 export const startWorkflowRun = (input: {
@@ -255,7 +312,12 @@ export const startWorkflowRun = (input: {
 }): Effect.Effect<
   WorkflowRunStartResult,
   never,
-  ProjectIndexRepository | ProjectLayout | ProjectRuntime | WorkflowBackend | WorkflowRunRepository
+  | ProjectIndexRepository
+  | ProjectLayout
+  | ProjectRuntime
+  | WorkflowBackend
+  | WorkflowRunRepository
+  | HostDiagnosticLogger
 > =>
   Effect.gen(function* () {
     const index = yield* ProjectIndexRepository;
@@ -438,6 +500,7 @@ export const startWorkflowRun = (input: {
           workflowKey: input.workflowKey,
           workflowRevision: input.workflowRevision,
           encodedInput,
+          inputSensitivityPaths: workflow.sensitivity.input,
           startSnapshot: snapshot,
           acceptedAtMs,
         });
@@ -460,12 +523,13 @@ export const startWorkflowRun = (input: {
       repository,
       validation.project,
       definition,
-      accepted.run.runId,
+      accepted.run.run.runId,
     ).pipe(Effect.catchCause(() => Effect.void));
-    const run = yield* repository.show(validation.project, accepted.run.runId);
+    yield* emitReconciliationDiagnostic(validation.project, accepted.run.run.runId);
+    const run = yield* repository.show(validation.project, accepted.run.run.runId);
     return {
       ok: true,
-      run: run ?? accepted.run,
+      run: maskedWorkflowRun(run ?? accepted.run),
       alreadyApplied: accepted.alreadyApplied,
       requestKey: input.requestKey,
     };
@@ -476,7 +540,12 @@ export const listWorkflowRuns = (
 ): Effect.Effect<
   WorkflowRunListResult,
   never,
-  ProjectIndexRepository | ProjectLayout | ProjectRuntime | WorkflowBackend | WorkflowRunRepository
+  | ProjectIndexRepository
+  | ProjectLayout
+  | ProjectRuntime
+  | WorkflowBackend
+  | WorkflowRunRepository
+  | HostDiagnosticLogger
 > =>
   Effect.gen(function* () {
     const resolved = yield* resolveProject(input.identity);
@@ -492,7 +561,12 @@ export const showWorkflowRun = (
 ): Effect.Effect<
   WorkflowRunQueryResult,
   never,
-  ProjectIndexRepository | ProjectLayout | ProjectRuntime | WorkflowBackend | WorkflowRunRepository
+  | ProjectIndexRepository
+  | ProjectLayout
+  | ProjectRuntime
+  | WorkflowBackend
+  | WorkflowRunRepository
+  | HostDiagnosticLogger
 > =>
   Effect.gen(function* () {
     const resolved = yield* resolveProject(identity);
@@ -510,5 +584,37 @@ export const showWorkflowRun = (
             { kind: "run", identity, runId: runId as never },
           ),
         }
-      : { ok: true, run };
+      : { ok: true, run: maskedWorkflowRun(run) };
+  });
+
+export const revealWorkflowRun = (
+  identity: ProjectIdentity,
+  runId: string,
+): Effect.Effect<
+  WorkflowRunQueryResult,
+  never,
+  | ProjectIndexRepository
+  | ProjectLayout
+  | ProjectRuntime
+  | WorkflowBackend
+  | WorkflowRunRepository
+  | HostDiagnosticLogger
+> =>
+  Effect.gen(function* () {
+    const resolved = yield* resolveProject(identity);
+    if ("code" in resolved) return { ok: false, error: resolved };
+    yield* reconcilePendingWorkflowRuns(resolved);
+    const repository = yield* WorkflowRunRepository;
+    const run = yield* repository.show(resolved.project, runId);
+    return run === undefined
+      ? {
+          ok: false,
+          error: error(
+            "run-not-found",
+            "Workflow Run was not found in this Project.",
+            "List Workflow Runs and choose a Run Identity from that Project.",
+            { kind: "run", identity, runId: runId as never },
+          ),
+        }
+      : { ok: true, run: run.run };
   });

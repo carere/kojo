@@ -8,7 +8,7 @@ import {
 
 export { ProjectIdentity } from "@kojo/workflow";
 
-export const PROTOCOL_VERSION = { major: 1, minor: 2 } as const;
+export const PROTOCOL_VERSION = { major: 1, minor: 3 } as const;
 export const CONTROL_CAPABILITIES = [
   "projects:list",
   "projects:list-page",
@@ -20,6 +20,7 @@ export const CONTROL_CAPABILITIES = [
   "runs:start",
   "runs:list",
   "runs:show",
+  "runs:reveal",
 ] as const;
 
 export const ControlCapability = Schema.String.check(
@@ -226,6 +227,15 @@ export const WorkflowRunStartSnapshot = Schema.Struct({
 });
 export type WorkflowRunStartSnapshot = typeof WorkflowRunStartSnapshot.Type;
 
+/**
+ * A value that was deliberately withheld from ordinary inspection. It contains
+ * neither a preview nor metadata about the exact value.
+ */
+export const MaskedWorkflowValue = Schema.Struct({
+  _tag: Schema.Literal("sensitive-value-masked"),
+});
+export type MaskedWorkflowValue = typeof MaskedWorkflowValue.Type;
+
 export const WorkflowRunListItem = Schema.Struct({
   runId: WorkflowRunId,
   workflowKey: Schema.String,
@@ -241,13 +251,15 @@ export type WorkflowRunListItem = typeof WorkflowRunListItem.Type;
 export const WorkflowRunSnapshot = Schema.Struct({
   ...WorkflowRunListItem.fields,
   startRequestKey: RequestKey,
-  startSnapshot: WorkflowRunStartSnapshot,
-  outcome: Schema.NullOr(
+  startSnapshot: Schema.Union([WorkflowRunStartSnapshot, MaskedWorkflowValue]),
+  outcome: Schema.Union([
+    Schema.Null,
     Schema.Struct({
       kind: Schema.Literals(["completed", "failed"]),
       value: Schema.optionalKey(Schema.Unknown),
     }),
-  ),
+    MaskedWorkflowValue,
+  ]),
 });
 export type WorkflowRunSnapshot = typeof WorkflowRunSnapshot.Type;
 
@@ -399,6 +411,15 @@ export const ShowWorkflowRun = Rpc.make("ShowWorkflowRun", {
   success: WorkflowRunQueryResult,
 });
 
+/**
+ * Reveals one Run inspection response only. This request never changes Project
+ * policy or the durable Run record.
+ */
+export const RevealWorkflowRun = Rpc.make("RevealWorkflowRun", {
+  payload: { identity: ProjectIdentity, runId: WorkflowRunId },
+  success: WorkflowRunQueryResult,
+});
+
 export const RegisterProject = Rpc.make("RegisterProject", {
   payload: { path: Schema.String, requestKey: RequestKey },
   success: ProjectMutationResult,
@@ -425,6 +446,7 @@ export const KojoControl = RpcGroup.make(
   StartWorkflowRun,
   ListWorkflowRuns,
   ShowWorkflowRun,
+  RevealWorkflowRun,
   RegisterProject,
   ForgetProject,
   ReplayForgetProject,

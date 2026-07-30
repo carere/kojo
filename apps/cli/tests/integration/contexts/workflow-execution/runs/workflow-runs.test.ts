@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { mkdir, realpath, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, it } from "vitest";
@@ -83,6 +83,30 @@ export default defineConfig({
       successSchema: Schema.String,
       failureSchema: Schema.String,
       handler: ({ message }) => Effect.sleep("3 seconds").pipe(Effect.as("echo:" + message))
+    })
+  ]
+});
+`;
+
+const sensitiveConfiguration = `
+import { Effect, Schema } from "effect";
+import { defineConfig, defineWorkflow } from "@kojo/workflow";
+
+const input = Schema.Struct({
+  credentials: Schema.Struct({ token: Schema.String }),
+  message: Schema.String,
+});
+const success = Schema.Struct({ result: Schema.String, token: Schema.String });
+export default defineConfig({
+  workflows: [
+    defineWorkflow({
+      workflowKey: "sensitive-echo",
+      revision: "1",
+      inputSchema: input,
+      successSchema: success,
+      failureSchema: Schema.String,
+      sensitivity: { input: ["credentials"], success: ["token"] },
+      handler: ({ credentials, message }) => Effect.succeed({ result: "echo:" + message, token: credentials.token })
     })
   ]
 });
@@ -292,4 +316,118 @@ it("reconciles a non-final Workflow Run after the Host restarts", async () => {
     state: "completed",
     outcome: { kind: "completed", value: "echo:after-restart" },
   });
+});
+
+it("masks marked payloads by default, fails closed for an invalid map, and reveals once with warnings", async () => {
+  const directory = await makeTemporaryDirectory("kojo-sensitive-workflow-runs-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), sensitiveConfiguration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    [
+      "run",
+      "start",
+      "sensitive-echo",
+      "--input",
+      '{"credentials":{"token":"top-secret-input"},"message":"hello"}',
+      "--json",
+    ],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  expect(started.stdout).not.toContain("top-secret-input");
+  const run = JSON.parse(started.stdout).result.run;
+  expect(run.startSnapshot.input).toEqual({
+    credentials: { _tag: "sensitive-value-masked" },
+    message: "hello",
+  });
+  expect(run.outcome).toEqual({
+    kind: "completed",
+    value: { result: "echo:hello", token: { _tag: "sensitive-value-masked" } },
+  });
+
+  const database = new Database(join(project, ".kojo", "kojo.sqlite"));
+  const maps = database
+    .query(
+      `SELECT payload_sensitivity_map_json
+       FROM kojo_execution_events WHERE run_id = ? ORDER BY sequence`,
+    )
+    .all(run.runId) as ReadonlyArray<{ readonly payload_sensitivity_map_json: string }>;
+  expect(JSON.parse(maps[0]?.payload_sensitivity_map_json ?? "null")).toEqual([
+    "input.credentials",
+  ]);
+  database.exec("DROP TRIGGER kojo_execution_events_immutable");
+  database
+    .query(
+      "UPDATE kojo_execution_events SET payload_sensitivity_map_version = 2 WHERE run_id = ? AND sequence = 1",
+    )
+    .run(run.runId);
+  database.close();
+
+  const failedClosed = await runKojoCli(
+    ["run", "show", run.runId, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(failedClosed.exitCode, `${failedClosed.stdout}${failedClosed.stderr}`).toBe(0);
+  expect(JSON.parse(failedClosed.stdout).result.run.startSnapshot).toEqual({
+    _tag: "sensitive-value-masked",
+  });
+
+  const revealed = await runKojoCli(
+    ["run", "show", run.runId, "--reveal", "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(revealed.exitCode, `${revealed.stdout}${revealed.stderr}`).toBe(0);
+  const revealedResult = JSON.parse(revealed.stdout);
+  expect(revealedResult.result.run.startSnapshot.input.credentials.token).toBe("top-secret-input");
+  expect(revealedResult.warnings).toEqual([
+    expect.objectContaining({ code: "sensitive-content-not-scanned" }),
+  ]);
+
+  const humanReveal = await runKojoCli(
+    ["run", "show", run.runId, "--reveal"],
+    host.socketPath,
+    project,
+  );
+  expect(humanReveal.exitCode, `${humanReveal.stdout}${humanReveal.stderr}`).toBe(0);
+  expect(humanReveal.stderr).toContain("Revealed content may contain arbitrary secrets");
+
+  const policyDatabase = new Database(join(project, ".kojo", "kojo.sqlite"), { readonly: true });
+  try {
+    expect(policyDatabase.query("SELECT * FROM kojo_retention_policy").all()).toEqual([]);
+  } finally {
+    policyDatabase.close();
+  }
+
+  const diagnostics = (await readFile(host.diagnosticPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(diagnostics).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        eventKind: "host-request.completed",
+        operation: "RevealWorkflowRun",
+        outcome: "success",
+      }),
+      expect.objectContaining({
+        eventKind: "project-runtime.activation.completed",
+        operation: "ProjectRuntimeActivate",
+      }),
+      expect.objectContaining({
+        eventKind: "workflow-run.reconciliation.completed",
+        operation: "ReconcileWorkflowRun",
+      }),
+    ]),
+  );
+  expect(JSON.stringify(diagnostics)).not.toContain("top-secret-input");
 });

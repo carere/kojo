@@ -21,6 +21,15 @@ import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { Effect, Layer, Schema } from "effect";
 import {
+  decodeSensitivityMap,
+  encodeSensitivityMap,
+  prefixedSensitivityMap,
+  SENSITIVITY_MAP_VERSION,
+  type SensitivityMap,
+  sensitivityMap,
+} from "../../runs/models/sensitivity-map";
+import type { StoredWorkflowRunSnapshot } from "../../runs/repositories/workflow-run-repository";
+import {
   WorkflowRunRepository,
   type WorkflowRunStartRecord,
 } from "../../runs/repositories/workflow-run-repository";
@@ -952,6 +961,7 @@ type StoredRun = {
   readonly engine_confirmed_at_ms: number | null;
   readonly finalized_at_ms: number | null;
   readonly outcome_summary_json: string | null;
+  readonly outcome_event_id: string | null;
   readonly run_id: string;
   readonly start_request_key: string;
   readonly state: string;
@@ -964,7 +974,8 @@ const readStoredRun = (connection: Database, runId: string): StoredRun | undefin
   (connection
     .query(
       `SELECT run_id, start_request_key, workflow_key, workflow_revision, state,
-        accepted_at_ms, engine_confirmed_at_ms, updated_at_ms, finalized_at_ms, outcome_summary_json
+        accepted_at_ms, engine_confirmed_at_ms, updated_at_ms, finalized_at_ms, outcome_summary_json,
+        outcome_event_id
        FROM kojo_workflow_runs WHERE run_id = ?`,
     )
     .get(runId) as StoredRun | null) ?? undefined;
@@ -980,24 +991,59 @@ const toRunListItem = (row: StoredRun): WorkflowRunListItem => ({
   finalizedAtMs: row.finalized_at_ms,
 });
 
-const readRunSnapshot = (connection: Database, runId: string): WorkflowRunSnapshot | undefined => {
+const readRunSnapshot = (
+  connection: Database,
+  runId: string,
+): StoredWorkflowRunSnapshot | undefined => {
   const row = readStoredRun(connection, runId);
   if (row === undefined) return undefined;
   const accepted =
     (connection
       .query(
-        "SELECT payload_json FROM kojo_execution_events WHERE run_id = ? AND sequence = 1 AND kind = 'run.accepted'",
+        `SELECT payload_json, payload_sensitivity_map_version, payload_sensitivity_map_json
+         FROM kojo_execution_events WHERE run_id = ? AND sequence = 1 AND kind = 'run.accepted'`,
       )
-      .get(runId) as { readonly payload_json: string } | null) ?? undefined;
+      .get(runId) as {
+      readonly payload_json: string;
+      readonly payload_sensitivity_map_json: string;
+      readonly payload_sensitivity_map_version: number;
+    } | null) ?? undefined;
   if (accepted === undefined) throw new Error("Workflow Run is missing its Start Snapshot");
+  const outcomeEvent =
+    row.outcome_event_id === null
+      ? undefined
+      : ((connection
+          .query(
+            `SELECT payload_sensitivity_map_version, payload_sensitivity_map_json
+             FROM kojo_execution_events WHERE run_id = ? AND event_id = ?`,
+          )
+          .get(runId, row.outcome_event_id) as {
+          readonly payload_sensitivity_map_json: string;
+          readonly payload_sensitivity_map_version: number;
+        } | null) ?? undefined);
   return {
-    ...toRunListItem(row),
-    startRequestKey: row.start_request_key as RequestKey,
-    startSnapshot: JSON.parse(accepted.payload_json) as WorkflowRunSnapshot["startSnapshot"],
-    outcome:
+    run: {
+      ...toRunListItem(row),
+      startRequestKey: row.start_request_key as RequestKey,
+      startSnapshot: JSON.parse(accepted.payload_json) as WorkflowRunSnapshot["startSnapshot"],
+      outcome:
+        row.outcome_summary_json === null
+          ? null
+          : (JSON.parse(row.outcome_summary_json) as WorkflowRunSnapshot["outcome"]),
+    },
+    startSnapshotSensitivityMap: decodeSensitivityMap(
+      accepted.payload_sensitivity_map_version,
+      accepted.payload_sensitivity_map_json,
+    ),
+    outcomeSensitivityMap:
       row.outcome_summary_json === null
-        ? null
-        : (JSON.parse(row.outcome_summary_json) as WorkflowRunSnapshot["outcome"]),
+        ? decodeSensitivityMap(SENSITIVITY_MAP_VERSION, encodeSensitivityMap(sensitivityMap([])))
+        : outcomeEvent === undefined
+          ? decodeSensitivityMap(undefined, undefined)
+          : decodeSensitivityMap(
+              outcomeEvent.payload_sensitivity_map_version,
+              outcomeEvent.payload_sensitivity_map_json,
+            ),
   };
 };
 
@@ -1007,6 +1053,7 @@ const appendEvent = (
     readonly eventId: string;
     readonly kind: string;
     readonly payload: unknown;
+    readonly sensitivityMap: SensitivityMap;
     readonly recordedAtMs: number;
     readonly runId: string;
     readonly sequence: number;
@@ -1019,7 +1066,7 @@ const appendEvent = (
         event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms,
         payload_encoding_version, payload_schema_identity, payload_json,
         payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256
-      ) VALUES (?, ?, ?, 1, ?, 1, ?, 1, 'kojo.workflow-run-event/v1', ?, 1, '{}', ?)`,
+      ) VALUES (?, ?, ?, 1, ?, 1, ?, 1, 'kojo.workflow-run-event/v1', ?, ?, ?, ?)`,
     )
     .run(
       options.eventId,
@@ -1028,6 +1075,8 @@ const appendEvent = (
       options.kind,
       options.recordedAtMs,
       payloadJson,
+      SENSITIVITY_MAP_VERSION,
+      encodeSensitivityMap(options.sensitivityMap),
       hash(payloadJson),
     );
 };
@@ -1102,13 +1151,15 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
                 result_encoding_version, result_schema_identity, result_json,
                 result_sensitivity_map_version, result_sensitivity_map_json, result_sha256,
                 created_at_ms, completed_at_ms
-              ) VALUES (?, 'run.start', ?, 'run', ?, 'completed', 1, 'kojo.workflow-run-start/v1', ?, 1, '{}', ?, ?, ?)`,
+              ) VALUES (?, 'run.start', ?, 'run', ?, 'completed', 1, 'kojo.workflow-run-start/v1', ?, ?, ?, ?, ?, ?)`,
             )
             .run(
               start.requestKey,
               start.requestHash,
               start.runId,
               resultJson,
+              SENSITIVITY_MAP_VERSION,
+              encodeSensitivityMap(sensitivityMap([])),
               hash(resultJson),
               start.acceptedAtMs,
               start.acceptedAtMs,
@@ -1120,6 +1171,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
             recordedAtMs: start.acceptedAtMs,
             runId: start.runId,
             sequence: 1,
+            sensitivityMap: prefixedSensitivityMap("input", start.inputSensitivityPaths),
           });
           connection
             .query(
@@ -1128,12 +1180,14 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
                 request_schema_identity, request_json, request_sensitivity_map_version,
                 request_sensitivity_map_json, request_sha256, state, attempt_count,
                 next_attempt_at_ms, created_at_ms, updated_at_ms
-              ) VALUES (?, ?, 'submit', 'initial', 1, 'kojo.workflow-run-submit/v1', ?, 1, '{}', ?, 'pending', 0, ?, ?, ?)`,
+              ) VALUES (?, ?, 'submit', 'initial', 1, 'kojo.workflow-run-submit/v1', ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`,
             )
             .run(
               operationId,
               start.runId,
               operationJson,
+              SENSITIVITY_MAP_VERSION,
+              encodeSensitivityMap(prefixedSensitivityMap("input", start.inputSensitivityPaths)),
               hash(operationJson),
               start.acceptedAtMs,
               start.acceptedAtMs,
@@ -1253,6 +1307,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
             recordedAtMs: confirmedAtMs,
             runId,
             sequence: sequence.last_event_sequence + 1,
+            sensitivityMap: sensitivityMap([]),
           });
           connection
             .query(
@@ -1282,15 +1337,20 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
             .query("SELECT last_event_sequence FROM kojo_workflow_runs WHERE run_id = ?")
             .get(runId) as { readonly last_event_sequence: number };
           const eventId = randomUUID();
+          const payload = {
+            kind: outcome.kind,
+            ...(outcome.value === undefined ? {} : { value: outcome.value }),
+          };
           appendEvent(connection, {
             eventId,
             kind: outcome.kind === "completed" ? "run.completed" : "run.failed",
-            payload: outcome,
+            payload,
             recordedAtMs: finalizedAtMs,
             runId,
             sequence: sequence.last_event_sequence + 1,
+            sensitivityMap: prefixedSensitivityMap("value", outcome.sensitivityPaths),
           });
-          const outcomeJson = JSON.stringify(outcome);
+          const outcomeJson = JSON.stringify(payload);
           connection
             .query(
               `UPDATE kojo_workflow_runs

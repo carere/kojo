@@ -3,7 +3,10 @@ import type {
   ProjectDefinitionSnapshot,
   ProjectDefinitionValidation,
 } from "@kojo/control/project-definition-validation";
-import { Context, Effect, Layer } from "effect";
+import { Context, Effect, Layer, Option } from "effect";
+import type { HostIdentity } from "../../control/models/host-identity";
+import { HOST_INFORMATION } from "../../control/models/host-information";
+import { HostDiagnosticLogger } from "../../control/services/host-diagnostic-logger";
 import { type ProjectForgetBlockers, ProjectRepository } from "../repositories/project-repository";
 import { WorkflowBackend } from "./workflow-backend";
 
@@ -57,6 +60,7 @@ export const ProjectRuntimeLive = Layer.effect(
   Effect.gen(function* () {
     const repository = yield* ProjectRepository;
     const backend = yield* WorkflowBackend;
+    const diagnosticLogger = yield* Effect.serviceOption(HostDiagnosticLogger);
     const pending = new Map<string, Promise<void>>();
     const acceptedDefinitions = new Map<
       string,
@@ -102,8 +106,9 @@ export const ProjectRuntimeLive = Layer.effect(
         );
         return result;
       });
-    const activate = (project: ProjectSnapshot) =>
-      Effect.gen(function* () {
+    const activate = (project: ProjectSnapshot) => {
+      const startedAt = Date.now();
+      return Effect.gen(function* () {
         if (!(yield* backend.acquire(project))) return false;
         yield* backend.quiesce(project);
         if (!(yield* repository.migrate(project))) {
@@ -128,7 +133,30 @@ export const ProjectRuntimeLive = Layer.effect(
           yield* backend.release(project);
         }
         return completed;
-      });
+      }).pipe(
+        Effect.tap((activated) => {
+          if (Option.isNone(diagnosticLogger) || backend.hostIdentity === undefined) {
+            return Effect.void;
+          }
+          return diagnosticLogger.value
+            .emit({
+              eventVersion: 1,
+              eventKind: "project-runtime.activation.completed",
+              hostIdentity: backend.hostIdentity as HostIdentity,
+              operation: "ProjectRuntimeActivate",
+              outcome: activated ? "success" : "error",
+              ...(activated ? {} : { safeErrorCode: "project-runtime-activation-failed" }),
+              durationMs: Math.max(0, Date.now() - startedAt),
+              hostVersion: HOST_INFORMATION.hostVersion,
+              protocolMajor: HOST_INFORMATION.protocol.major,
+              protocolMinor: HOST_INFORMATION.protocol.minor,
+              projectIdentity: project.identity,
+              timestamp: new Date().toISOString(),
+            })
+            .pipe(Effect.ignore);
+        }),
+      );
+    };
     return {
       coordinateRegistration: <A>(
         project: ProjectSnapshot,
