@@ -20,7 +20,9 @@ import {
   type ProjectMutationResult,
   type ProjectQueryResult,
   type ProjectSelector,
+  type ProjectWorkflowQueryResult,
   type RequestKey,
+  type WorkflowDefinitionQueryResult,
 } from "./index";
 
 export class LocalTransportError extends Data.TaggedError("LocalTransportError")<{
@@ -128,15 +130,6 @@ export const makeLocalClient = (options: LocalClientOptions) => {
       ),
     );
 
-  const getHostOverview = activateAndRetry(
-    request("projects:list", (client, host) =>
-      Effect.gen(function* () {
-        const { projects } = yield* client.ListProjects();
-        return { host, projects } satisfies HostOverview;
-      }),
-    ),
-  );
-
   const listProjects = activateAndRetry(
     request("projects:list", (client) => client.ListProjects()),
   ) satisfies Effect.Effect<ProjectList, LocalClientError>;
@@ -148,6 +141,35 @@ export const makeLocalClient = (options: LocalClientOptions) => {
 
   const showProject = (identity: ProjectIdentity) =>
     activateAndRetry(request("projects:show", (client) => client.ShowProject({ identity })));
+  const listWorkflowDefinitions = (identity: ProjectIdentity) =>
+    activateAndRetry(
+      request("workflows:list", (client) => client.ListWorkflowDefinitions({ identity })),
+    );
+  const showWorkflowDefinition = (identity: ProjectIdentity, workflowKey: string) =>
+    activateAndRetry(
+      request("workflows:show", (client) =>
+        client.ShowWorkflowDefinition({ identity, workflowKey }),
+      ),
+    );
+  const getHostOverview = activateAndRetry(
+    request("projects:list", (client, host) =>
+      Effect.gen(function* () {
+        const { projects } = yield* client.ListProjects();
+        const definitions = host.capabilities.includes("workflows:list")
+          ? yield* Effect.forEach(
+              projects,
+              (project) => client.ListWorkflowDefinitions({ identity: project.identity }),
+              { concurrency: "unbounded" },
+            )
+          : [];
+        return {
+          host,
+          projects,
+          projectDefinitions: definitions.flatMap((result) => (result.ok ? [result.snapshot] : [])),
+        } satisfies HostOverview;
+      }),
+    ),
+  );
   const registerProject = (path: string, requestKey: RequestKey) =>
     activateAndRetry(
       request("projects:register", (client) => client.RegisterProject({ path, requestKey })),
@@ -172,6 +194,8 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     listProjects,
     listProjectPage,
     showProject,
+    listWorkflowDefinitions,
+    showWorkflowDefinition,
     registerProject,
     forgetProject,
     replayForgetProject,
@@ -194,6 +218,19 @@ export const makeLocalClient = (options: LocalClientOptions) => {
       identity: ProjectIdentity,
     ) => Effect.Effect<
       ProjectQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly listWorkflowDefinitions: (
+      identity: ProjectIdentity,
+    ) => Effect.Effect<
+      ProjectWorkflowQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly showWorkflowDefinition: (
+      identity: ProjectIdentity,
+      workflowKey: string,
+    ) => Effect.Effect<
+      WorkflowDefinitionQueryResult,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;
     readonly registerProject: (

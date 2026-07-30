@@ -1,3 +1,4 @@
+import { join, resolve } from "node:path";
 import {
   type ProjectCondition,
   ProjectIdentity as ProjectIdentitySchema,
@@ -17,6 +18,7 @@ import {
   resolveInitializedProject,
 } from "../../workflow-authoring/projects/services/project-initializer";
 import { resolveProjectSelectionPath } from "../../workflow-authoring/projects/services/project-selection-path";
+import { validateProjectDefinition } from "../../workflow-authoring/projects/services/subprocess-project-definition-validator";
 import { selectProject } from "../../workflow-authoring/projects/use-cases/select-project";
 import { runEffect } from "./cli-effect";
 import { canonicalSelectorPath, decodeRequestKey, parseOptions } from "./cli-options";
@@ -35,6 +37,160 @@ import {
 export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
   const json = rawArgs.includes("--json");
   const args = rawArgs.filter((argument) => argument !== "--json");
+
+  if (args[0] === "workflow") {
+    const options = parseOptions(args.slice(2));
+    if (options === undefined) {
+      return writeFailure(
+        invalid("Run: kojo workflow validate|list|show"),
+        json,
+        `workflow.${args[1] ?? "unknown"}`,
+      );
+    }
+    if (args[1] === "validate") {
+      if (
+        options.args.length > 1 ||
+        options.projectId !== undefined ||
+        options.projectPath !== undefined ||
+        options.requestKey !== undefined ||
+        options.conditions.length > 0 ||
+        options.cursor !== undefined ||
+        options.limit !== undefined
+      ) {
+        return writeFailure(
+          invalid("Run: kojo workflow validate [Project path or kojo.config.ts] [--json]"),
+          json,
+          "workflow.validate",
+        );
+      }
+      const input = options.args[0] ?? process.cwd();
+      const configurationPath = input.endsWith(".ts")
+        ? resolve(input)
+        : join(resolve(input), "kojo.config.ts");
+      const validation = await validateProjectDefinition(configurationPath);
+      if (validation.ok) {
+        if (json) {
+          process.stdout.write(
+            `${JSON.stringify({
+              schemaVersion: 1,
+              command: "workflow.validate",
+              result: validation.snapshot,
+              warnings: [],
+            })}\n`,
+          );
+        } else {
+          process.stdout.write(
+            `Kojo Configuration is valid. Accepted Workflow Definitions: ${validation.snapshot.workflows.length}\n`,
+          );
+        }
+        return 0;
+      }
+      if (json) {
+        process.stdout.write(
+          `${JSON.stringify({
+            schemaVersion: 1,
+            command: "workflow.validate",
+            error: {
+              code: validation.findingKey,
+              message: validation.message,
+              findings: validation.findings,
+            },
+            warnings: [],
+          })}\n`,
+        );
+      }
+      process.stderr.write(`${validation.message}\n`);
+      for (const finding of validation.findings.slice(1)) {
+        process.stderr.write(`${finding.message}\n`);
+      }
+      return 1;
+    }
+
+    if (
+      (args[1] !== "list" && args[1] !== "show") ||
+      options.conditions.length > 0 ||
+      options.cursor !== undefined ||
+      options.limit !== undefined ||
+      options.requestKey !== undefined ||
+      (args[1] === "list" && options.args.length !== 0) ||
+      (args[1] === "show" && options.args.length !== 1)
+    ) {
+      return writeFailure(
+        invalid(
+          "Run: kojo workflow list [--project <path>|--project-id <Project Identity>] or kojo workflow show <Workflow Key> [--project <path>|--project-id <Project Identity>]",
+        ),
+        json,
+        `workflow.${args[1] ?? "unknown"}`,
+      );
+    }
+    let identity: ProjectSnapshot["identity"];
+    if (options.projectId !== undefined) {
+      try {
+        identity = Schema.decodeUnknownSync(ProjectIdentitySchema)(options.projectId);
+      } catch {
+        return writeFailure(invalid("Use a full Project Identity."), json, `workflow.${args[1]}`);
+      }
+    } else {
+      try {
+        identity = (await resolveInitializedProject(options.projectPath ?? process.cwd())).identity;
+      } catch (error) {
+        return writeFailure(
+          invalid(
+            error instanceof ProjectInitializationError
+              ? error.message
+              : "Choose an initialized Kojo Project.",
+          ),
+          json,
+          `workflow.${args[1]}`,
+        );
+      }
+    }
+    const client = makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath());
+    if (args[1] === "list") {
+      const listed = await runEffect(client.listWorkflowDefinitions(identity));
+      if (!listed.succeeded)
+        return writeFailure(transportFailure(listed.error), json, "workflow.list");
+      if (!listed.value.ok) {
+        return writeFailure(projectQueryFailure(listed.value.error), json, "workflow.list");
+      }
+      if (json) {
+        process.stdout.write(
+          `${JSON.stringify({
+            schemaVersion: 1,
+            command: "workflow.list",
+            result: listed.value.snapshot,
+            warnings: [],
+          })}\n`,
+        );
+      } else {
+        const workflows = listed.value.snapshot.definitions.workflows;
+        process.stdout.write(
+          `${workflows.length === 0 ? "No accepted Workflow Definitions." : workflows.map((workflow) => `${workflow.workflowKey}\t${workflow.revision}`).join("\n")}\n`,
+        );
+      }
+      return 0;
+    }
+    const shown = await runEffect(client.showWorkflowDefinition(identity, options.args[0]));
+    if (!shown.succeeded) return writeFailure(transportFailure(shown.error), json, "workflow.show");
+    if (!shown.value.ok) {
+      return writeFailure(projectQueryFailure(shown.value.error), json, "workflow.show");
+    }
+    if (json) {
+      process.stdout.write(
+        `${JSON.stringify({
+          schemaVersion: 1,
+          command: "workflow.show",
+          result: shown.value,
+          warnings: [],
+        })}\n`,
+      );
+    } else {
+      process.stdout.write(
+        `${shown.value.workflow.workflowKey}\t${shown.value.workflow.revision}\t${shown.value.snapshotId}\n`,
+      );
+    }
+    return 0;
+  }
 
   if (args[0] === "init") {
     const options = parseOptions(args.slice(1));

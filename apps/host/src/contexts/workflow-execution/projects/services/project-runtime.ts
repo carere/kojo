@@ -1,4 +1,8 @@
 import type { ProjectCondition, ProjectIdentity, ProjectSnapshot } from "@kojo/control";
+import type {
+  ProjectDefinitionSnapshot,
+  ProjectDefinitionValidation,
+} from "@kojo/control/project-definition-validation";
 import { Context, Effect, Layer } from "effect";
 import { type ProjectForgetBlockers, ProjectRepository } from "../repositories/project-repository";
 import { WorkflowBackend } from "./workflow-backend";
@@ -19,7 +23,15 @@ export interface ProjectRuntimeShape {
   readonly readiness: (
     indexedProject: ProjectSnapshot,
     validatedProject: ProjectSnapshot,
+    definitions?: ProjectDefinitionValidation,
   ) => Effect.Effect<ProjectCondition>;
+  readonly acceptDefinitions: (
+    project: ProjectSnapshot,
+    definitions: ProjectDefinitionValidation,
+  ) => Effect.Effect<ProjectDefinitionSnapshot | undefined>;
+  readonly definitions: (
+    project: ProjectSnapshot,
+  ) => Effect.Effect<ProjectDefinitionSnapshot | undefined>;
   readonly inspectForgetBlockers: (
     project: ProjectSnapshot,
   ) => Effect.Effect<ProjectForgetBlockers>;
@@ -46,6 +58,10 @@ export const ProjectRuntimeLive = Layer.effect(
     const repository = yield* ProjectRepository;
     const backend = yield* WorkflowBackend;
     const pending = new Map<string, Promise<void>>();
+    const acceptedDefinitions = new Map<
+      string,
+      { readonly path: string; readonly snapshot: ProjectDefinitionSnapshot }
+    >();
     let pendingRegistration: Promise<void> = Promise.resolve();
     const serializeIdentity = <A>(identity: string, effect: Effect.Effect<A>) =>
       Effect.promise(() => {
@@ -62,6 +78,21 @@ export const ProjectRuntimeLive = Layer.effect(
       });
     const serialize = <A>(project: ProjectSnapshot, effect: Effect.Effect<A>) =>
       serializeIdentity(project.identity, effect);
+    const acceptDefinitions = (
+      project: ProjectSnapshot,
+      definitions: ProjectDefinitionValidation,
+    ) =>
+      Effect.sync(() => {
+        const accepted = acceptedDefinitions.get(project.identity);
+        if (definitions.ok) {
+          acceptedDefinitions.set(project.identity, {
+            path: project.path,
+            snapshot: definitions.snapshot,
+          });
+          return definitions.snapshot;
+        }
+        return accepted?.path === project.path ? accepted.snapshot : undefined;
+      });
     const serializeRegistration = <A>(effect: Effect.Effect<A>) =>
       Effect.promise(() => {
         const result = pendingRegistration.then(() => Effect.runPromise(effect));
@@ -133,26 +164,50 @@ export const ProjectRuntimeLive = Layer.effect(
         ),
       coordinateLifecycle: <A>(project: ProjectSnapshot, operation: Effect.Effect<A>) =>
         serialize(project, operation),
-      readiness: (indexedProject: ProjectSnapshot, validatedProject: ProjectSnapshot) =>
+      readiness: (
+        indexedProject: ProjectSnapshot,
+        validatedProject: ProjectSnapshot,
+        definitions?: ProjectDefinitionValidation,
+      ) =>
         serialize(
           indexedProject,
           indexedProject.identity !== validatedProject.identity ||
             indexedProject.path !== validatedProject.path
             ? Effect.succeed("needs-attention" as const)
             : Effect.gen(function* () {
+                const accepted =
+                  definitions === undefined
+                    ? acceptedDefinitions.get(indexedProject.identity)?.snapshot
+                    : yield* acceptDefinitions(indexedProject, definitions);
+                if (definitions !== undefined && !definitions.ok && accepted === undefined) {
+                  return "needs-attention" as const;
+                }
                 const storeCondition = yield* repository.readiness(indexedProject);
                 if (storeCondition !== "ready") return storeCondition;
                 const backendCondition = yield* backend.readiness(indexedProject);
                 if (backendCondition === "ready") {
-                  return (yield* backend.postflight(indexedProject))
-                    ? ("ready" as const)
-                    : ("needs-attention" as const);
+                  const healthy = yield* backend.postflight(indexedProject);
+                  if (!healthy) return "needs-attention" as const;
+                  return definitions !== undefined && !definitions.ok
+                    ? ("limited" as const)
+                    : ("ready" as const);
                 }
                 if (backendCondition === "needs-attention") return "needs-attention" as const;
+                if (definitions !== undefined && !definitions.ok) return "limited" as const;
                 return (yield* activate(indexedProject))
                   ? ("ready" as const)
                   : ("needs-attention" as const);
               }),
+        ),
+      acceptDefinitions: (project, definitions) =>
+        serialize(project, acceptDefinitions(project, definitions)),
+      definitions: (project) =>
+        serialize(
+          project,
+          Effect.sync(() => {
+            const accepted = acceptedDefinitions.get(project.identity);
+            return accepted?.path === project.path ? accepted.snapshot : undefined;
+          }),
         ),
       inspectForgetBlockers: (project: ProjectSnapshot) =>
         serialize(project, repository.inspectForgetBlockers(project)),

@@ -28,7 +28,10 @@ it("validates a configuration through a schema-decoded IPC result", async () => 
   const path = await project(
     'import { defineConfig } from "@kojo/workflow";\nexport default defineConfig({ workflows: [] });\n',
   );
-  expect(await validateProjectDefinition(path)).toEqual({ ok: true });
+  expect(await validateProjectDefinition(path)).toMatchObject({
+    ok: true,
+    snapshot: { workflows: [] },
+  });
 });
 
 it("does not accept forged validator text from configuration stdout", async () => {

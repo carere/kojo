@@ -1,3 +1,5 @@
+import { ProjectIdentity } from "@kojo/control";
+import { Schema } from "effect";
 import { render } from "solid-js/web";
 import { afterEach, expect, test } from "vitest";
 import { page } from "vitest/browser";
@@ -66,6 +68,7 @@ test("shows Host connectivity and the authoritative empty Project state", async 
                 capabilities: ["projects:list"],
               },
               projects: [],
+              projectDefinitions: [],
             })
           }
         />
@@ -76,4 +79,55 @@ test("shows Host connectivity and the authoritative empty Project state", async 
 
   await expect.element(page.getByText("Connected to Kojo Host 0.1.0")).toBeVisible();
   await expect.element(page.getByText("No Kojo Projects yet.")).toBeVisible();
+});
+
+test("shows accepted Workflow Definition snapshots from the Host", async () => {
+  setLocale("en", { reload: false });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+    "00000000-0000-7000-8000-000000000001",
+  );
+  dispose = render(
+    () => (
+      <ColorModeProvider initialColorMode="light">
+        <HostOverview
+          loadOverview={() =>
+            Promise.resolve({
+              host: {
+                protocol: { major: 1, minor: 2 },
+                hostVersion: "0.1.0",
+                capabilities: ["projects:list", "workflows:list"],
+              },
+              projects: [{ identity, path: "/projects/demo" }],
+              projectDefinitions: [
+                {
+                  project: { identity, path: "/projects/demo" },
+                  definitions: {
+                    snapshotId: "snapshot",
+                    workflows: [
+                      {
+                        workflowKey: "echo",
+                        revision: "1",
+                        inputSchemaFingerprint: "input",
+                        successSchemaFingerprint: "success",
+                        failureSchemaFingerprint: "failure",
+                        sourceIdentity: "source",
+                        sensitivity: { input: ["token"], success: [], failure: [] },
+                        childWorkflowKeys: [],
+                      },
+                    ],
+                  },
+                },
+              ],
+            })
+          }
+        />
+      </ColorModeProvider>
+    ),
+    root,
+  );
+
+  await expect.element(page.getByText("Accepted Workflow Definitions")).toBeVisible();
+  await expect.element(page.getByText("echo")).toBeVisible();
 });

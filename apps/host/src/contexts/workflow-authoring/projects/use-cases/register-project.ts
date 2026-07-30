@@ -69,6 +69,34 @@ export const registerProject = (
       });
     }
     const project = validation.project;
+    const definitionValidation = validation.definitions;
+    if (definitionValidation.ok === false) {
+      return yield* repository.update((state) => {
+        const receipt = state.receipts.find((candidate) => candidate.requestKey === requestKey);
+        if (receipt !== undefined) {
+          return Effect.succeed({
+            state,
+            result:
+              receipt.operation === "register" && receipt.fingerprint === requestFingerprint
+                ? replay(receipt.result)
+                : requestConflict(requestKey),
+          });
+        }
+        const result = mutationFailure(
+          requestKey,
+          "project-layout-invalid",
+          definitionValidation.message,
+          "Correct the Kojo Configuration and retry registration.",
+          { kind: "project-path", path },
+          definitionValidation.findings.map((finding) => finding.findingKey),
+        );
+        return Effect.succeed({
+          state: record(state, requestKey, "register", path, result),
+          result,
+        });
+      });
+    }
+    yield* runtime.acceptDefinitions(project, definitionValidation);
     const checkConflictsBeforeMigration = repository.update<RegistrationPreflight>((state) =>
       Effect.gen(function* () {
         const receipt = state.receipts.find((candidate) => candidate.requestKey === requestKey);

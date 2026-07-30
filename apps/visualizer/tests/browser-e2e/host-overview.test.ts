@@ -1,4 +1,4 @@
-import { mkdir, readFile, symlink } from "node:fs/promises";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -60,6 +60,25 @@ test("loads the Host-authoritative Project state and reconciles Navigator prefer
   await run(["git", "init", secondPath]);
   expect((await runKojoCli(["init", firstPath], fixture.host.socketPath)).exitCode).toBe(0);
   expect((await runKojoCli(["init", secondPath], fixture.host.socketPath)).exitCode).toBe(0);
+  await writeFile(
+    join(firstPath, "kojo.config.ts"),
+    `import { defineConfig, defineWorkflow } from "@kojo/workflow";
+
+const schema = { ast: { _tag: "StringKeyword" } };
+export default defineConfig({
+  workflows: [
+    defineWorkflow({
+      workflowKey: "echo",
+      revision: "1",
+      inputSchema: schema,
+      successSchema: schema,
+      failureSchema: schema,
+      handler: () => ({})
+    })
+  ]
+});
+`,
+  );
   const listed = await runKojoCli(["project", "list", "--json"], fixture.host.socketPath);
   expect(JSON.parse(listed.stdout).result.items).toHaveLength(2);
   const firstIdentity = JSON.parse(await readFile(join(firstPath, ".kojo", "project.json"), "utf8"))
@@ -86,6 +105,7 @@ test("loads the Host-authoritative Project state and reconciles Navigator prefer
   await expect
     .poll(() => page.locator("body").innerText(), { timeout: browserAssertionTimeoutMs })
     .toContain(secondIdentity);
+  await page.getByText("echo").waitFor({ state: "visible" });
   const projects = page.getByRole("navigation", { name: "Kojo Projects" }).getByRole("button");
   await expect.poll(() => projects.count(), { timeout: browserAssertionTimeoutMs }).toBe(2);
 

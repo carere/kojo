@@ -41,7 +41,7 @@ export const startLiveKojoHost = async () => {
         Layer.provide([DrizzleProjectRepositoryLive, makeLocalWorkflowBackendLayer(hostIdentity)]),
       ),
     ]),
-  );
+  ) as Layer.Layer<never, unknown>;
 
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });
 };

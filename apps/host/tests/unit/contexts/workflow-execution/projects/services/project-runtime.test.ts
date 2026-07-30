@@ -93,6 +93,43 @@ it.effect("marks an indexed Project needs-attention when validated identity drif
   }).pipe(Effect.provide(runtimeLayer(store)));
 });
 
+it.effect("retains an accepted definition snapshot while a replacement is invalid", () => {
+  const store = Layer.succeed(ProjectRepository, {
+    migrate: () => Effect.succeed(true),
+    postflight: () => Effect.succeed(true),
+    completeMigration: () => Effect.succeed(true),
+    readiness: () => Effect.succeed("ready" as const),
+    inspectForgetBlockers: () =>
+      Effect.succeed({
+        assessment: "available" as const,
+        enabledScheduleKeys: [],
+        nonFinalRunIds: [],
+      }),
+  });
+  const accepted = {
+    ok: true as const,
+    snapshot: { snapshotId: "accepted", workflows: [] },
+  };
+  const rejected = {
+    ok: false as const,
+    findingKey: "workflow.schema-invalid" as const,
+    message: "Workflow Definition is invalid.",
+    findings: [
+      {
+        findingKey: "workflow.schema-invalid" as const,
+        message: "Workflow Definition is invalid.",
+      },
+    ],
+  };
+
+  return Effect.gen(function* () {
+    const runtime = yield* ProjectRuntime;
+    expect(yield* runtime.acceptDefinitions(project, accepted)).toEqual(accepted.snapshot);
+    expect(yield* runtime.readiness(project, project, rejected)).toBe("limited");
+    expect(yield* runtime.definitions(project)).toEqual(accepted.snapshot);
+  }).pipe(Effect.provide(runtimeLayer(store)));
+});
+
 it.effect("holds forget behind an active lifecycle mutation", () => {
   const order: Array<string> = [];
   const store = Layer.succeed(ProjectRepository, {

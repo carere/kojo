@@ -1,4 +1,6 @@
 import { expect, it } from "@effect/vitest";
+import { defineConfig, defineWorkflow } from "@kojo/workflow";
+import { executeWorkflow } from "@kojo/workflow/testing";
 import { Effect, Schema } from "effect";
 import { HostInformation, ProjectIdentity, RequestKey } from "../../src";
 
@@ -48,3 +50,24 @@ it("accepts bounded opaque Request Keys", () => {
   expect(() => Schema.decodeUnknownSync(RequestKey)("")).toThrow();
   expect(() => Schema.decodeUnknownSync(RequestKey)("x".repeat(257))).toThrow();
 });
+
+it.effect(
+  "executes complete public Workflow Definitions through the in-memory testing surface",
+  () => {
+    const Input = Schema.Struct({ message: Schema.String });
+    const definition = defineWorkflow({
+      workflowKey: "echo",
+      revision: "1",
+      inputSchema: Input,
+      successSchema: Schema.String,
+      failureSchema: Schema.Never,
+      handler: (input) => Effect.succeed(input.message),
+    });
+    const configuration = defineConfig({ workflows: [definition] });
+
+    return Effect.gen(function* () {
+      expect(configuration.workflows).toEqual([definition]);
+      expect(yield* executeWorkflow(definition, { message: "hello" })).toBe("hello");
+    });
+  },
+);

@@ -15,9 +15,11 @@ import {
   forgetProject,
   listProjectPage,
   listProjects,
+  listWorkflowDefinitions,
   registerProject,
   replayForgetProject,
   showProject,
+  showWorkflowDefinition,
 } from "../../../workflow-authoring/projects/use-cases/manage-projects";
 import type { HostIdentity } from "../models/host-identity";
 import { HOST_INFORMATION } from "../models/host-information";
@@ -137,6 +139,20 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           String(options.requestId),
           showProject(identity),
           queryDiagnostic(identity),
+        ),
+      ListWorkflowDefinitions: ({ identity }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ShowProject",
+          String(options.requestId),
+          listWorkflowDefinitions(identity),
+        ),
+      ShowWorkflowDefinition: ({ identity, workflowKey }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ShowProject",
+          String(options.requestId),
+          showWorkflowDefinition(identity, workflowKey),
         ),
       RegisterProject: ({ path, requestKey }, options) =>
         withHostRequestDiagnostic(

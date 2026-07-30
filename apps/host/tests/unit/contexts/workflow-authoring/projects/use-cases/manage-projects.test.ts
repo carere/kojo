@@ -31,6 +31,10 @@ import { WorkflowBackend } from "../../../../../../src/contexts/workflow-executi
 const identity = Schema.decodeUnknownSync(ProjectIdentity)("00000000-0000-7000-8000-000000000001");
 const requestKey = (suffix: string) =>
   Schema.decodeUnknownSync(RequestKey)(`10000000-0000-4000-8000-${suffix.padStart(12, "0")}`);
+const validDefinitions = {
+  ok: true as const,
+  snapshot: { snapshotId: "test", workflows: [] },
+};
 
 const makeStore = () => {
   let state = emptyProjectIndexState();
@@ -61,7 +65,7 @@ const makeLayout = (
               message: "invalid test layout",
               findingKey: "configuration.invalid",
             }
-          : { ok: true as const, project: projects[path] },
+          : { ok: true as const, project: projects[path], definitions: validDefinitions },
       ),
     inspectIndexedPath: inspect,
   });
@@ -80,6 +84,9 @@ const makeRuntime = (
       ),
     coordinateLifecycle: (_project, operation) => operation,
     readiness: () => Effect.succeed(condition),
+    acceptDefinitions: (_project, definitions) =>
+      Effect.succeed(definitions.ok ? definitions.snapshot : undefined),
+    definitions: () => Effect.succeed(undefined),
     inspectForgetBlockers: () => blockers,
     coordinateForget: (_identity, resolve, operation) =>
       Effect.flatMap(resolve, (resolved) =>
@@ -327,6 +334,9 @@ it.effect("acquires the Project Runtime before the Project Index for register an
       ),
     coordinateLifecycle: (_project, operation) => withinRuntime(operation),
     readiness: () => Effect.succeed("ready" as const),
+    acceptDefinitions: (_project, definitions) =>
+      Effect.succeed(definitions.ok ? definitions.snapshot : undefined),
+    definitions: () => Effect.succeed(undefined),
     inspectForgetBlockers: () => noForgetBlockers,
     coordinateForget: (_identity, resolve, operation) =>
       withinRuntime(

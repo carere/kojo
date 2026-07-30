@@ -54,7 +54,7 @@ describe("local Kojo Host control", () => {
           }),
         );
         expect(Schema.decodeUnknownSync(LegacyHostInformation)(legacyHandshake)).toEqual({
-          protocol: { major: 1, minor: 1 },
+          protocol: { major: 1, minor: 2 },
           hostVersion: "0.1.0",
           capabilities: ["projects:list"],
         });
@@ -66,7 +66,7 @@ describe("local Kojo Host control", () => {
 
         expect(overview).toEqual({
           host: {
-            protocol: { major: 1, minor: 1 },
+            protocol: { major: 1, minor: 2 },
             hostVersion: "0.1.0",
             capabilities: [
               "projects:list",
@@ -74,9 +74,12 @@ describe("local Kojo Host control", () => {
               "projects:show",
               "projects:register",
               "projects:forget",
+              "workflows:list",
+              "workflows:show",
             ],
           },
           projects: [],
+          projectDefinitions: [],
         });
         const directoryMode = yield* Effect.promise(() => stat(directory));
         const lockMode = yield* Effect.promise(() => stat(server.lockPath));
@@ -105,7 +108,7 @@ describe("local Kojo Host control", () => {
           hostIdentity: "host:00000000-0000-4000-8000-000000000000",
           hostVersion: "0.1.0",
           protocolMajor: 1,
-          protocolMinor: 1,
+          protocolMinor: 2,
         });
       }),
   );
@@ -224,7 +227,7 @@ const startTestHost = (socketPath: string, diagnosticPath: string) => {
         ]),
       ),
     ]),
-  );
+  ) as Layer.Layer<never, unknown>;
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });
 };
 
