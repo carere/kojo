@@ -73,6 +73,13 @@ export default defineConfig({
       inputSchema: schema,
       successSchema: schema,
       failureSchema: schema,
+      schedules: [{
+        scheduleKey: "morning-echo",
+        workflowKey: "echo",
+        cron: "0 9 * * 1-5",
+        timeZone: "Europe/Paris",
+        input: { revision: "input-v1", resolve: () => "scheduled" }
+      }],
       handler: () => ({})
     })
   ]
@@ -105,7 +112,19 @@ export default defineConfig({
   await expect
     .poll(() => page.locator("body").innerText(), { timeout: browserAssertionTimeoutMs })
     .toContain(secondIdentity);
-  await page.getByText("echo").waitFor({ state: "visible" });
+  await page
+    .getByLabel("Accepted Workflow Definitions")
+    .getByText(/^echo /)
+    .waitFor({ state: "visible" });
+  const schedules = page.getByLabel("Workflow Schedules");
+  const initialScheduleText = await schedules.innerText();
+  expect(initialScheduleText).toContain("morning-echo");
+  expect(initialScheduleText).toContain("Disabled · available");
+  expect(initialScheduleText).toContain("echo · 0 9 * * 1-5 · Europe/Paris · allow overlap");
+  expect(initialScheduleText).toContain("Next: No next occurrence");
+  await page.getByRole("button", { name: "Enable" }).click();
+  await page.getByRole("button", { name: "Disable" }).waitFor({ state: "visible" });
+  expect(await schedules.innerText()).toContain("Enabled · available");
   const projects = page.getByRole("navigation", { name: "Kojo Projects" }).getByRole("button");
   await expect.poll(() => projects.count(), { timeout: browserAssertionTimeoutMs }).toBe(2);
 

@@ -8,6 +8,7 @@ import {
   type WorkflowRunId,
   WorkflowRunId as WorkflowRunIdSchema,
   type WorkflowRunState,
+  type WorkflowScheduleCondition,
 } from "@kojo/control";
 import {
   defaultSocketPath,
@@ -34,14 +35,178 @@ import {
   projectQueryFailure,
   transportFailure,
   workflowRunFailure,
+  workflowScheduleFailure,
   writeFailure,
   writeProject,
   writeWorkflowRun,
+  writeWorkflowSchedule,
 } from "./cli-output";
 
 export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
   const json = rawArgs.includes("--json");
   const args = rawArgs.filter((argument) => argument !== "--json");
+
+  if (args[0] === "schedule") {
+    const options = parseOptions(args.slice(2));
+    const command = `schedule.${args[1] ?? "unknown"}`;
+    const operation = args[1];
+    if (
+      options === undefined ||
+      !["list", "show", "next", "enable", "disable"].includes(operation ?? "")
+    ) {
+      return writeFailure(
+        invalid("Run: kojo schedule list|show|next|enable|disable"),
+        json,
+        command,
+      );
+    }
+    if (
+      options.input !== undefined ||
+      options.states.length > 0 ||
+      options.cursor !== undefined ||
+      options.limit !== undefined ||
+      options.reveal ||
+      (operation === "list" &&
+        (options.args.length !== 0 ||
+          options.requestKey !== undefined ||
+          options.revision !== undefined)) ||
+      (operation === "next" &&
+        (options.args.length !== 0 ||
+          options.requestKey !== undefined ||
+          options.revision !== undefined)) ||
+      (operation === "show" &&
+        (options.args.length !== 1 ||
+          options.requestKey !== undefined ||
+          options.revision !== undefined)) ||
+      (operation === "enable" && (options.args.length !== 1 || options.revision === undefined)) ||
+      (operation === "disable" && (options.args.length !== 1 || options.revision !== undefined))
+    ) {
+      return writeFailure(
+        invalid(
+          "Run: kojo schedule list|next [--workflow <Workflow Key>] [--condition <condition>] [--project <path>|--project-id <Project Identity>] or kojo schedule show <Schedule Key> [--project <path>|--project-id <Project Identity>] or kojo schedule enable <Schedule Key> --revision <Schedule Revision> [--request-key <Request Key>] [--project <path>|--project-id <Project Identity>] or kojo schedule disable <Schedule Key> [--request-key <Request Key>] [--project <path>|--project-id <Project Identity>]",
+        ),
+        json,
+        command,
+      );
+    }
+    const conditions = new Set<WorkflowScheduleCondition>([
+      "available",
+      "unavailable",
+      "needs-attention",
+    ]);
+    if (
+      options.conditions.some(
+        (condition) => !conditions.has(condition as WorkflowScheduleCondition),
+      )
+    ) {
+      return writeFailure(
+        invalid("Use --condition available, unavailable, or needs-attention."),
+        json,
+        command,
+      );
+    }
+    let identity: ProjectSnapshot["identity"];
+    if (options.projectId !== undefined) {
+      try {
+        identity = Schema.decodeUnknownSync(ProjectIdentitySchema)(options.projectId);
+      } catch {
+        return writeFailure(invalid("Use a full Project Identity."), json, command);
+      }
+    } else {
+      try {
+        identity = (await resolveInitializedProject(options.projectPath ?? process.cwd())).identity;
+      } catch (error) {
+        return writeFailure(
+          invalid(
+            error instanceof ProjectInitializationError
+              ? error.message
+              : "Choose an initialized Kojo Project.",
+          ),
+          json,
+          command,
+        );
+      }
+    }
+    const client = makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath());
+    const scheduleInput = {
+      identity,
+      workflowKeys: options.workflowKeys,
+      conditions: options.conditions as ReadonlyArray<WorkflowScheduleCondition>,
+    };
+    if (operation === "list" || operation === "next") {
+      const listed = await runEffect(
+        operation === "next"
+          ? client.listNextWorkflowSchedules(scheduleInput)
+          : client.listWorkflowSchedules(scheduleInput),
+      );
+      if (!listed.succeeded) return writeFailure(transportFailure(listed.error), json, command);
+      if (!listed.value.ok)
+        return writeFailure(workflowScheduleFailure(listed.value.error), json, command);
+      if (json) {
+        process.stdout.write(
+          `${JSON.stringify({ schemaVersion: 1, command, result: listed.value.schedules, warnings: [] })}\n`,
+        );
+      } else {
+        const lines = listed.value.schedules.map((schedule) => {
+          const definition = schedule.definition;
+          const next =
+            schedule.nextOccurrenceMs === null
+              ? "-"
+              : new Date(schedule.nextOccurrenceMs).toISOString();
+          return `${schedule.scheduleKey}\t${schedule.enabledIntent ? "enabled" : "disabled"}\t${schedule.condition}\t${definition?.workflowKey ?? "-"}\t${definition?.revision ?? schedule.appliedRevision ?? "-"}\t${next}`;
+        });
+        process.stdout.write(
+          `${lines.length === 0 ? "No Workflow Schedules." : lines.join("\n")}\n`,
+        );
+      }
+      return 0;
+    }
+    if (operation === "show") {
+      const shown = await runEffect(
+        client.showWorkflowSchedule(identity, options.args[0] as string),
+      );
+      if (!shown.succeeded) return writeFailure(transportFailure(shown.error), json, command);
+      if (!shown.value.ok)
+        return writeFailure(workflowScheduleFailure(shown.value.error), json, command);
+      writeWorkflowSchedule(command, shown.value.schedule, json);
+      return 0;
+    }
+    const requestKey = decodeRequestKey(options.requestKey);
+    if (requestKey === undefined) {
+      return writeFailure(
+        invalid("Use a non-empty Request Key of at most 256 characters."),
+        json,
+        command,
+      );
+    }
+    const result = await runEffect(
+      operation === "enable"
+        ? client.enableWorkflowSchedule(
+            identity,
+            options.args[0] as string,
+            options.revision as string,
+            requestKey,
+          )
+        : client.disableWorkflowSchedule(identity, options.args[0] as string, requestKey),
+    );
+    if (!result.succeeded) return writeFailure(transportFailure(result.error), json, command);
+    if (!result.value.ok) {
+      return writeFailure(
+        workflowScheduleFailure(result.value.error, result.value.requestKey),
+        json,
+        command,
+      );
+    }
+    writeWorkflowSchedule(
+      command,
+      result.value.schedule,
+      json,
+      result.value.requestKey,
+      result.value.alreadyApplied,
+      result.value.acceptedRunsContinue,
+    );
+    return 0;
+  }
 
   if (args[0] === "run") {
     const options = parseOptions(args.slice(2));

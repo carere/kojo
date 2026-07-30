@@ -15,6 +15,7 @@ import {
   ProjectIdentity,
   ProjectOperationErrorCode,
   WorkflowRunOperationErrorCode,
+  WorkflowScheduleOperationErrorCode,
 } from "@kojo/control";
 import { Context, Effect, Layer, Schema } from "effect";
 import { HostIdentity } from "../models/host-identity";
@@ -55,6 +56,11 @@ export const HostRequestDiagnosticEvent = Schema.Struct({
     "ShowProject",
     "ListWorkflowDefinitions",
     "ShowWorkflowDefinition",
+    "ListWorkflowSchedules",
+    "ShowWorkflowSchedule",
+    "ListNextWorkflowSchedules",
+    "EnableWorkflowSchedule",
+    "DisableWorkflowSchedule",
     "StartWorkflowRun",
     "ListWorkflowRuns",
     "ShowWorkflowRun",
@@ -69,6 +75,7 @@ export const HostRequestDiagnosticEvent = Schema.Struct({
   safeErrorCode: Schema.optionalKey(
     Schema.Union([
       ProjectOperationErrorCode,
+      WorkflowScheduleOperationErrorCode,
       WorkflowRunOperationErrorCode,
       Schema.Literals(["project-runtime-activation-failed", "workflow-run-reconciliation-failed"]),
     ]),

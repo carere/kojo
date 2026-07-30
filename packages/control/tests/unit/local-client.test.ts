@@ -58,6 +58,7 @@ it.effect("negotiates before reading the authoritative Project list", () =>
       host: handshake,
       projects: [],
       projectDefinitions: [],
+      workflowSchedules: [],
       workflowRuns: [],
     });
     expect(requests).toEqual(["Negotiate", "ListProjects"]);

@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import { Cron, Result, Schema } from "effect";
 
 const ProjectDefinitionFindingKey = Schema.Literals([
   "dependency.workflow-package-missing",
@@ -9,7 +9,20 @@ const ProjectDefinitionFindingKey = Schema.Literals([
   "workflow.schema-invalid",
   "workflow.revision-conflict",
   "workflow.child-definition-missing",
+  "schedule.key-duplicate",
+  "schedule.definition-invalid",
 ]);
+
+export const WorkflowScheduleSnapshot = Schema.Struct({
+  scheduleKey: Schema.String,
+  workflowKey: Schema.String,
+  revision: Schema.String,
+  cron: Schema.String,
+  timeZone: Schema.String,
+  overlapPolicy: Schema.Literals(["allow", "skip"]),
+  inputRuleRevision: Schema.String,
+});
+export type WorkflowScheduleSnapshot = typeof WorkflowScheduleSnapshot.Type;
 
 export const WorkflowDefinitionSnapshot = Schema.Struct({
   workflowKey: Schema.String,
@@ -24,6 +37,7 @@ export const WorkflowDefinitionSnapshot = Schema.Struct({
     failure: Schema.Array(Schema.String),
   }),
   childWorkflowKeys: Schema.Array(Schema.String),
+  schedules: Schema.Array(WorkflowScheduleSnapshot),
 });
 export type WorkflowDefinitionSnapshot = typeof WorkflowDefinitionSnapshot.Type;
 
@@ -179,6 +193,135 @@ interface ParsedDefinition {
   readonly snapshot: WorkflowDefinitionSnapshot;
 }
 
+const validTimeZone = (value: string) => {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const validFiveFieldCron = (value: string, timeZone: string) => {
+  if (value.trim().split(/\s+/).length !== 5) return false;
+  return !Result.isFailure(Cron.parse(value, timeZone));
+};
+
+const parseSchedule = (
+  candidate: unknown,
+  workflowKey: string,
+  index: number,
+): {
+  readonly schedule?: WorkflowScheduleSnapshot;
+  readonly findings: ReadonlyArray<ProjectDefinitionFinding>;
+} => {
+  if (typeof candidate !== "object" || candidate === null) {
+    return {
+      findings: [
+        finding(
+          "schedule.definition-invalid",
+          `Workflow Schedule ${index + 1} on Workflow Definition ${workflowKey} is not an object.`,
+          workflowKey,
+        ),
+      ],
+    };
+  }
+  const schedule = candidate as Record<string, unknown>;
+  const scheduleKey = schedule.scheduleKey;
+  const targetWorkflowKey = schedule.workflowKey;
+  const cron = schedule.cron;
+  const timeZone = schedule.timeZone;
+  const input = schedule.input;
+  const overlapPolicy = schedule.overlap ?? "allow";
+  const findings: Array<ProjectDefinitionFinding> = [];
+  if (!nonEmptyString(scheduleKey)) {
+    findings.push(
+      finding(
+        "schedule.definition-invalid",
+        `Workflow Schedule ${index + 1} on Workflow Definition ${workflowKey} has no Schedule Key.`,
+        workflowKey,
+      ),
+    );
+  }
+  if (!nonEmptyString(targetWorkflowKey) || targetWorkflowKey !== workflowKey) {
+    findings.push(
+      finding(
+        "schedule.definition-invalid",
+        `Workflow Schedule ${String(scheduleKey ?? index + 1)} must target its owning Workflow Key ${workflowKey}.`,
+        workflowKey,
+      ),
+    );
+  }
+  if (!nonEmptyString(timeZone) || !validTimeZone(timeZone)) {
+    findings.push(
+      finding(
+        "schedule.definition-invalid",
+        `Workflow Schedule ${String(scheduleKey ?? index + 1)} has an invalid IANA time zone.`,
+        workflowKey,
+      ),
+    );
+  }
+  if (
+    !nonEmptyString(cron) ||
+    !nonEmptyString(timeZone) ||
+    !validTimeZone(timeZone) ||
+    !validFiveFieldCron(cron, timeZone)
+  ) {
+    findings.push(
+      finding(
+        "schedule.definition-invalid",
+        `Workflow Schedule ${String(scheduleKey ?? index + 1)} has an invalid five-field cron expression.`,
+        workflowKey,
+      ),
+    );
+  }
+  if (overlapPolicy !== "allow" && overlapPolicy !== "skip") {
+    findings.push(
+      finding(
+        "schedule.definition-invalid",
+        `Workflow Schedule ${String(scheduleKey ?? index + 1)} has an invalid overlap policy.`,
+        workflowKey,
+      ),
+    );
+  }
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    !nonEmptyString((input as Record<string, unknown>).revision) ||
+    typeof (input as Record<string, unknown>).resolve !== "function"
+  ) {
+    findings.push(
+      finding(
+        "schedule.definition-invalid",
+        `Workflow Schedule ${String(scheduleKey ?? index + 1)} has an invalid deterministic input rule.`,
+        workflowKey,
+      ),
+    );
+  }
+  if (findings.length > 0) return { findings };
+  const inputRuleRevision = (input as { readonly revision: string }).revision;
+  return {
+    schedule: {
+      scheduleKey: scheduleKey as string,
+      workflowKey,
+      revision: digest(
+        stableJson({
+          workflowKey,
+          cron,
+          timeZone,
+          overlapPolicy,
+          inputRuleRevision,
+        }),
+      ),
+      cron: cron as string,
+      timeZone: timeZone as string,
+      overlapPolicy: overlapPolicy as "allow" | "skip",
+      inputRuleRevision,
+    },
+    findings: [],
+  };
+};
+
 const parseDefinition = (
   candidate: unknown,
   index: number,
@@ -258,6 +401,22 @@ const parseDefinition = (
       ),
     );
   }
+  const schedules = definition.schedules ?? [];
+  if (!Array.isArray(schedules)) {
+    findings.push(
+      finding(
+        "schedule.definition-invalid",
+        `Workflow Definition ${workflowKey} has invalid attached Workflow Schedules.`,
+        workflowKey,
+      ),
+    );
+  }
+  const parsedSchedules = Array.isArray(schedules)
+    ? schedules.map((schedule, scheduleIndex) =>
+        parseSchedule(schedule, workflowKey, scheduleIndex),
+      )
+    : [];
+  findings.push(...parsedSchedules.flatMap((result) => result.findings));
   if (findings.length > 0) return { findings };
 
   return {
@@ -275,6 +434,9 @@ const parseDefinition = (
           readonly failure: ReadonlyArray<string>;
         },
         childWorkflowKeys: [...(childWorkflowKeys as ReadonlyArray<string>)].sort(),
+        schedules: parsedSchedules
+          .flatMap((result) => (result.schedule === undefined ? [] : [result.schedule]))
+          .sort((left, right) => left.scheduleKey.localeCompare(right.scheduleKey)),
       },
     },
     findings: [],
@@ -347,6 +509,31 @@ export const validateProjectDefinitionValue = (
         );
       }
     }
+  }
+  const schedules = definitions.flatMap((definition) => definition.schedules);
+  const schedulesByKey = new Map<string, Array<WorkflowScheduleSnapshot>>();
+  for (const schedule of schedules) {
+    const values = schedulesByKey.get(schedule.scheduleKey) ?? [];
+    values.push(schedule);
+    schedulesByKey.set(schedule.scheduleKey, values);
+    if (!declaredKeys.has(schedule.workflowKey)) {
+      findings.push(
+        finding(
+          "schedule.definition-invalid",
+          `Workflow Schedule ${schedule.scheduleKey} targets missing Workflow Definition ${schedule.workflowKey}.`,
+          schedule.workflowKey,
+        ),
+      );
+    }
+  }
+  for (const [scheduleKey, duplicates] of schedulesByKey) {
+    if (duplicates.length < 2) continue;
+    findings.push(
+      finding(
+        "schedule.key-duplicate",
+        `Schedule Key ${scheduleKey} is registered more than once.`,
+      ),
+    );
   }
   if (findings.length > 0) return failure(findings);
 

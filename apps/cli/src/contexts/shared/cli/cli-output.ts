@@ -6,6 +6,8 @@ import type {
   RequestKey,
   WorkflowRunOperationError,
   WorkflowRunSnapshot,
+  WorkflowScheduleOperationError,
+  WorkflowScheduleSnapshot,
 } from "@kojo/control";
 import {
   IncompatibleProtocolError,
@@ -16,8 +18,10 @@ import {
 export interface CliFailure {
   readonly affectedResource?:
     | ProjectOperationError["affectedResource"]
+    | WorkflowScheduleOperationError["affectedResource"]
     | WorkflowRunOperationError["affectedResource"];
   readonly code: string;
+  readonly currentSchedule?: WorkflowScheduleSnapshot;
   readonly exitCode: number;
   readonly findingKeys?: ReadonlyArray<string>;
   readonly message: string;
@@ -85,6 +89,11 @@ export const workflowRunFailure = (
   requestKey?: RequestKey,
 ): CliFailure => ({ ...error, requestKey, exitCode: 4 });
 
+export const workflowScheduleFailure = (
+  error: WorkflowScheduleOperationError,
+  requestKey?: RequestKey,
+): CliFailure => ({ ...error, requestKey, exitCode: 4 });
+
 export const projectCursorFailure = (error: ProjectListCursorError): CliFailure => ({
   ...error,
   exitCode: 2,
@@ -109,6 +118,9 @@ export const writeFailure = (failure: CliFailure, json: boolean, command: string
             ? {}
             : { affectedResource: failure.affectedResource }),
           ...(failure.findingKeys === undefined ? {} : { findingKeys: failure.findingKeys }),
+          ...(failure.currentSchedule === undefined
+            ? {}
+            : { currentSchedule: failure.currentSchedule }),
         },
         warnings: [],
       })}\n`,
@@ -176,6 +188,55 @@ export const writeWorkflowRun = (
   if (alreadyApplied === true) process.stdout.write("Reused an existing Workflow Run.\n");
   for (const warning of warnings) {
     process.stderr.write(`Warning: ${warning.message}\nNext: ${warning.next}\n`);
+  }
+};
+
+const renderScheduleTime = (value: number | null) =>
+  value === null ? "None" : new Date(value).toISOString();
+
+export const writeWorkflowSchedule = (
+  command: string,
+  schedule: WorkflowScheduleSnapshot,
+  json: boolean,
+  requestKey?: RequestKey,
+  alreadyApplied?: boolean,
+  acceptedRunsContinue = false,
+) => {
+  if (json) {
+    process.stdout.write(
+      `${JSON.stringify({
+        schemaVersion: 1,
+        command,
+        ...(requestKey === undefined ? {} : { requestKey }),
+        result: {
+          schedule,
+          ...(alreadyApplied === undefined ? {} : { alreadyApplied }),
+          ...(acceptedRunsContinue ? { acceptedRunsContinue: true } : {}),
+        },
+        warnings: [],
+      })}\n`,
+    );
+    return;
+  }
+  const definition = schedule.definition;
+  process.stdout.write(
+    `Schedule Key: ${schedule.scheduleKey}\n` +
+      `Workflow: ${definition === null ? "Unavailable" : definition.workflowKey}\n` +
+      `Revision: ${definition?.revision ?? schedule.appliedRevision ?? "None"}\n` +
+      `Enabled: ${schedule.enabledIntent ? "yes" : "no"}\n` +
+      `Condition: ${schedule.condition}\n` +
+      `Cron: ${definition?.cron ?? "Unavailable"}\n` +
+      `Time zone: ${definition?.timeZone ?? "Unavailable"}\n` +
+      `Overlap: ${definition?.overlapPolicy ?? "Unavailable"}\n` +
+      `Next occurrence: ${renderScheduleTime(schedule.nextOccurrenceMs)}\n`,
+  );
+  if (requestKey !== undefined) process.stdout.write(`Request Key: ${requestKey}\n`);
+  if (alreadyApplied === true)
+    process.stdout.write("Reused the accepted Schedule control request.\n");
+  if (acceptedRunsContinue) {
+    process.stdout.write(
+      "Accepted Workflow Runs continue; disabling affects future occurrences only.\n",
+    );
   }
 };
 

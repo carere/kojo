@@ -10,6 +10,9 @@ import {
   type WorkflowRunListResult,
   type WorkflowRunQueryResult,
   type WorkflowRunStartResult,
+  type WorkflowScheduleListResult,
+  type WorkflowScheduleMutationResult,
+  type WorkflowScheduleQueryResult,
 } from "@kojo/control";
 import { Effect, Exit, Layer, Scope } from "effect";
 import { RpcServer } from "effect/unstable/rpc";
@@ -29,6 +32,13 @@ import {
   showWorkflowRun,
   startWorkflowRun,
 } from "../../runs/use-cases/manage-workflow-runs";
+import {
+  disableWorkflowSchedule,
+  enableWorkflowSchedule,
+  listNextWorkflowSchedules,
+  listWorkflowSchedules,
+  showWorkflowSchedule,
+} from "../../schedules/use-cases/manage-workflow-schedules";
 import type { HostIdentity } from "../models/host-identity";
 import { HOST_INFORMATION } from "../models/host-information";
 import { getHostCapabilities, getHostInformation } from "../use-cases/get-host-information";
@@ -121,6 +131,18 @@ const workflowRunDiagnostic =
     ...(result.ok ? {} : { safeErrorCode: result.error.code }),
   });
 
+const workflowScheduleDiagnostic =
+  (identity: ProjectIdentity) =>
+  (
+    result:
+      | WorkflowScheduleListResult
+      | WorkflowScheduleMutationResult
+      | WorkflowScheduleQueryResult,
+  ) => ({
+    projectIdentity: identity,
+    ...(result.ok ? {} : { safeErrorCode: result.error.code }),
+  });
+
 const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
   KojoControl.toLayer(
     KojoControl.of({
@@ -175,6 +197,46 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           String(options.requestId),
           showWorkflowDefinition(identity, workflowKey),
           queryDiagnostic(identity),
+        ),
+      ListWorkflowSchedules: (input, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ListWorkflowSchedules",
+          String(options.requestId),
+          listWorkflowSchedules(input),
+          workflowScheduleDiagnostic(input.identity),
+        ),
+      ShowWorkflowSchedule: ({ identity, scheduleKey }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ShowWorkflowSchedule",
+          String(options.requestId),
+          showWorkflowSchedule(identity, scheduleKey),
+          workflowScheduleDiagnostic(identity),
+        ),
+      ListNextWorkflowSchedules: (input, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ListNextWorkflowSchedules",
+          String(options.requestId),
+          listNextWorkflowSchedules(input),
+          workflowScheduleDiagnostic(input.identity),
+        ),
+      EnableWorkflowSchedule: ({ identity, scheduleKey, scheduleRevision, requestKey }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "EnableWorkflowSchedule",
+          String(options.requestId),
+          enableWorkflowSchedule({ identity, scheduleKey, scheduleRevision, requestKey }),
+          workflowScheduleDiagnostic(identity),
+        ),
+      DisableWorkflowSchedule: ({ identity, scheduleKey, requestKey }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "DisableWorkflowSchedule",
+          String(options.requestId),
+          disableWorkflowSchedule({ identity, scheduleKey, requestKey }),
+          workflowScheduleDiagnostic(identity),
         ),
       StartWorkflowRun: ({ identity, workflowKey, workflowRevision, input, requestKey }, options) =>
         withHostRequestDiagnostic(
