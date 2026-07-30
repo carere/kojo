@@ -289,6 +289,48 @@ it.effect("does not mutate the store when another Workflow backend owns the Proj
   }).pipe(Effect.provide(ProjectRuntimeLive.pipe(Layer.provide([store, ownedBackend]))));
 });
 
+it.effect("releases a ready Workflow backend when deep Project store postflight fails", () => {
+  const order: Array<string> = [];
+  const store = Layer.succeed(ProjectRepository, {
+    migrate: () => Effect.die("A ready Project Store must not migrate"),
+    postflight: () =>
+      Effect.sync(() => {
+        order.push("store-postflight");
+        return false;
+      }),
+    completeMigration: () => Effect.die("A ready Project Store must not complete migration"),
+    readiness: () => Effect.succeed("ready" as const),
+    inspectForgetBlockers: () =>
+      Effect.succeed({
+        assessment: "available" as const,
+        enabledScheduleKeys: [],
+        nonFinalRunIds: [],
+      }),
+  });
+  const activeBackend = Layer.succeed(WorkflowBackend, {
+    ...unusedWorkflowExecution,
+    acquire: () => Effect.die("A ready Workflow backend must not acquire ownership again"),
+    quiesce: () => Effect.void,
+    initialize: () => Effect.die("A ready Workflow backend must not initialize again"),
+    postflight: () => Effect.succeed(true),
+    readiness: () => Effect.succeed("ready" as const),
+    release: () =>
+      Effect.sync(() => {
+        order.push("backend-released");
+      }),
+  });
+
+  return Effect.gen(function* () {
+    const runtime = yield* ProjectRuntime;
+    expect(
+      yield* runtime.coordinateRegistration(project, Effect.succeed({}), (ready) =>
+        Effect.succeed(ready),
+      ),
+    ).toBe(false);
+    expect(order).toEqual(["store-postflight", "backend-released"]);
+  }).pipe(Effect.provide(ProjectRuntimeLive.pipe(Layer.provide([store, activeBackend]))));
+});
+
 it.effect("releases the previous path before acquiring a moved Project", () => {
   const previous = { ...project, path: "/old-project" };
   const order: Array<string> = [];

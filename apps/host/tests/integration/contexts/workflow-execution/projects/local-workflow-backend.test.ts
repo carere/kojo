@@ -292,6 +292,23 @@ describe("Local Workflow backend ownership", () => {
                 Effect.succeed(ready),
               ),
             ).toBe(true);
+            yield* Effect.sync(() => {
+              const connection = new Database(databasePath, { readonly: true });
+              try {
+                expect(connection.query("PRAGMA journal_mode").get()).toEqual({
+                  journal_mode: "wal",
+                });
+                expect(
+                  connection
+                    .query(
+                      "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'kojo_%' AND name NOT LIKE 'sqlite_%'",
+                    )
+                    .all(),
+                ).not.toEqual([]);
+              } finally {
+                connection.close();
+              }
+            });
 
             const accepted = yield* backend.submit(project, {
               workflowKey: definition.workflowKey,

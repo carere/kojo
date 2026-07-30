@@ -69,6 +69,52 @@ describe("Drizzle Project store recovery", () => {
     }),
   );
 
+  it.effect(
+    "rejects deep Run sequence, tree, occurrence, attempt, outcome, and Artifact invariant violations",
+    () =>
+      Effect.gen(function* () {
+        const mutations: ReadonlyArray<(database: Database) => void> = [
+          (database) =>
+            database.exec(
+              "UPDATE kojo_workflow_runs SET last_event_sequence = 3 WHERE run_id = 'run'",
+            ),
+          (database) =>
+            database.exec(
+              "PRAGMA ignore_check_constraints = ON; UPDATE kojo_workflow_runs SET trigger_kind = 'child', parent_run_id = run_id, child_invocation_key = 'cycle' WHERE run_id = 'run'; PRAGMA ignore_check_constraints = OFF",
+            ),
+          (database) =>
+            database.exec(
+              "INSERT INTO kojo_workflow_schedule_states(schedule_key, enabled_intent, condition, row_version, created_at_ms, updated_at_ms) VALUES ('schedule', 0, 'unavailable', 1, 1, 1); INSERT INTO kojo_workflow_schedule_occurrences(schedule_key, scheduled_at_ms, applied_revision, resolved_input_encoding_version, resolved_input_schema_identity, resolved_input_json, resolved_input_sensitivity_map_version, resolved_input_sensitivity_map_json, resolved_input_sha256, outcome, delivery_attempt_count, planned_at_ms, processed_at_ms, linked_run_id, row_version) VALUES ('schedule', 1, 'revision', 1, 'schema', '{}', 1, '{}', zeroblob(32), 'started', 0, 1, 1, 'run', 1)",
+            ),
+          (database) =>
+            database.exec(
+              "INSERT INTO kojo_workflow_runs(run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision, engine_reference_version, engine_reference_json, engine_reference_sha256, trigger_kind, state, last_event_sequence, row_version, accepted_at_ms, updated_at_ms) VALUES ('attempt-run', 'attempt-start', zeroblob(32), 'workflow', 'revision', 1, '{\"execution\":\"attempt\"}', randomblob(32), 'manual', 'running', 1, 1, 1, 1); INSERT INTO kojo_execution_events(event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms, activity_attempt_id, payload_encoding_version, payload_schema_identity, payload_json, payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256) VALUES ('attempt-event', 'attempt-run', 1, 1, 'run.accepted', 1, 1, 'missing-attempt', 1, 'schema', '{}', 1, '{}', zeroblob(32))",
+            ),
+          (database) =>
+            database.exec(
+              "UPDATE kojo_workflow_runs SET outcome_event_id = 'accepted' WHERE run_id = 'run'",
+            ),
+          (database) =>
+            database.exec(
+              "PRAGMA foreign_keys = OFF; INSERT INTO kojo_execution_event_artifacts(run_id, event_id, artifact_id, role) VALUES ('run', 'missing-event', 'missing-artifact', 'input'); PRAGMA foreign_keys = ON",
+            ),
+        ];
+        for (const mutate of mutations) {
+          const fixture = yield* Effect.promise(() => initializedProject("kojo-store-deep-check-"));
+          yield* Effect.sync(() => {
+            const database = new Database(fixture.databasePath);
+            try {
+              insertCompletedRun(database);
+              mutate(database);
+            } finally {
+              database.close();
+            }
+          });
+          expect(yield* projectStorePostflight(fixture.project)).toBe(false);
+        }
+      }),
+  );
+
   it.effect("does not retry a failed activation migration without an explicit retry", () =>
     Effect.gen(function* () {
       const fixture = yield* Effect.promise(() => initializedProject("kojo-store-one-attempt-"));
@@ -302,3 +348,17 @@ const projectStoreReadiness = (project: {
   Effect.flatMap(ProjectRepository, (store) => store.readiness(project)).pipe(
     Effect.provide(DrizzleProjectRepositoryLive),
   );
+
+const projectStorePostflight = (project: {
+  readonly identity: ProjectIdentity;
+  readonly path: string;
+}) =>
+  Effect.flatMap(ProjectRepository, (store) => store.postflight(project)).pipe(
+    Effect.provide(DrizzleProjectRepositoryLive),
+  );
+
+const insertCompletedRun = (database: Database) => {
+  database.exec(
+    "INSERT INTO kojo_workflow_runs(run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision, engine_reference_version, engine_reference_json, engine_reference_sha256, trigger_kind, state, outcome_event_id, last_event_sequence, row_version, accepted_at_ms, updated_at_ms, finalized_at_ms) VALUES ('run', 'start', zeroblob(32), 'workflow', 'revision', 1, '{}', zeroblob(32), 'manual', 'completed', 'outcome', 2, 1, 1, 2, 2); INSERT INTO kojo_execution_events(event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms, payload_encoding_version, payload_schema_identity, payload_json, payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256) VALUES ('accepted', 'run', 1, 1, 'run.accepted', 1, 1, 1, 'schema', '{}', 1, '{}', zeroblob(32)); INSERT INTO kojo_execution_events(event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms, payload_encoding_version, payload_schema_identity, payload_json, payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256) VALUES ('outcome', 'run', 2, 1, 'run.completed', 1, 2, 1, 'schema', '{}', 1, '{}', zeroblob(32))",
+  );
+};

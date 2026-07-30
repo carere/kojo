@@ -339,7 +339,24 @@ const assertCurrentSchema = (connection: Database, project: { readonly identity:
   }
 };
 
-const assertActivationSemantics = (connection: Database) => {
+const assertEventSequence = (
+  run: { readonly lastEventSequence: number; readonly runId: string },
+  events: ReadonlyArray<{ readonly kind: string; readonly sequence: number }>,
+) => {
+  if (run.lastEventSequence !== events.length) {
+    throw new Error("Project Workflow Run Event sequence is incomplete");
+  }
+  for (const [index, event] of events.entries()) {
+    if (event.sequence !== index + 1) {
+      throw new Error("Project Workflow Run Event sequence is incomplete");
+    }
+  }
+  if (events[0]?.kind !== "run.accepted") {
+    throw new Error("Project Workflow Run is missing its accepted Event");
+  }
+};
+
+const assertFastActivationSemantics = (connection: Database) => {
   const store = drizzle(connection);
   const pendingDeletion = Schema.decodeUnknownSync(DeletionRows)(
     store.select({ deletionId: deletionIntents.deletionId }).from(deletionIntents).limit(1).all(),
@@ -379,13 +396,198 @@ const assertActivationSemantics = (connection: Database) => {
     engineMappings.add(mapping);
     if (!["running", "suspended", "stopping"].includes(run.state)) continue;
     const runEvents = events.filter((event) => event.runId === run.runId);
-    const lastSequence = runEvents.reduce((highest, event) => Math.max(highest, event.sequence), 0);
-    if (
-      run.lastEventSequence < 1 ||
-      run.lastEventSequence !== lastSequence ||
-      !runEvents.some((event) => event.sequence === 1 && event.kind === "run.accepted")
-    ) {
+    if (run.lastEventSequence < 1) {
       throw new Error("Project non-final Workflow Run Event invariants are invalid");
+    }
+    assertEventSequence(run, runEvents);
+  }
+};
+
+const assertDeepPostflightSemantics = (connection: Database) => {
+  const runs = connection
+    .query(
+      `SELECT run_id, trigger_kind, parent_run_id, schedule_key, scheduled_at_ms, state,
+      outcome_event_id, last_event_sequence
+     FROM kojo_workflow_runs`,
+    )
+    .all() as ReadonlyArray<{
+    readonly last_event_sequence: number;
+    readonly outcome_event_id: string | null;
+    readonly parent_run_id: string | null;
+    readonly run_id: string;
+    readonly schedule_key: string | null;
+    readonly scheduled_at_ms: number | null;
+    readonly state: string;
+    readonly trigger_kind: string;
+  }>;
+  const events = connection
+    .query(
+      `SELECT event_id, run_id, sequence, kind, engine_operation_id, activity_attempt_id, child_run_id
+     FROM kojo_execution_events
+     ORDER BY run_id ASC, sequence ASC`,
+    )
+    .all() as ReadonlyArray<{
+    readonly activity_attempt_id: string | null;
+    readonly child_run_id: string | null;
+    readonly engine_operation_id: string | null;
+    readonly event_id: string;
+    readonly kind: string;
+    readonly run_id: string;
+    readonly sequence: number;
+  }>;
+  const occurrences = connection
+    .query(
+      `SELECT schedule_key, scheduled_at_ms, outcome, linked_run_id
+     FROM kojo_workflow_schedule_occurrences`,
+    )
+    .all() as ReadonlyArray<{
+    readonly linked_run_id: string | null;
+    readonly outcome: string;
+    readonly schedule_key: string;
+    readonly scheduled_at_ms: number;
+  }>;
+  const operations = connection
+    .query(
+      `SELECT operation_id, run_id, state, confirmation_event_id
+     FROM kojo_engine_operations`,
+    )
+    .all() as ReadonlyArray<{
+    readonly confirmation_event_id: string | null;
+    readonly operation_id: string;
+    readonly run_id: string;
+    readonly state: string;
+  }>;
+  const attempts = connection
+    .query("SELECT attempt_id, run_id FROM kojo_workflow_activity_attempts")
+    .all() as ReadonlyArray<{
+    readonly attempt_id: string;
+    readonly run_id: string;
+  }>;
+  const artifacts = connection
+    .query("SELECT artifact_id, run_id FROM kojo_execution_artifacts")
+    .all() as ReadonlyArray<{
+    readonly artifact_id: string;
+    readonly run_id: string;
+  }>;
+  const eventArtifacts = connection
+    .query("SELECT run_id, event_id, artifact_id FROM kojo_execution_event_artifacts")
+    .all() as ReadonlyArray<{
+    readonly artifact_id: string;
+    readonly event_id: string;
+    readonly run_id: string;
+  }>;
+
+  const runsById = new Map(runs.map((run) => [run.run_id, run]));
+  const eventsById = new Map(events.map((event) => [event.event_id, event]));
+  const eventsByRun = new Map<string, Array<(typeof events)[number]>>();
+  for (const event of events) {
+    const runEvents = eventsByRun.get(event.run_id) ?? [];
+    runEvents.push(event);
+    eventsByRun.set(event.run_id, runEvents);
+  }
+
+  for (const run of runs) {
+    const runEvents = eventsByRun.get(run.run_id) ?? [];
+    assertEventSequence(
+      { lastEventSequence: run.last_event_sequence, runId: run.run_id },
+      runEvents,
+    );
+    const terminalEvents = runEvents.filter((event) =>
+      ["run.completed", "run.failed", "run.stopped"].includes(event.kind),
+    );
+    const final = ["completed", "failed", "stopped"].includes(run.state);
+    if (!final) {
+      if (terminalEvents.length > 0) {
+        throw new Error("Project non-final Workflow Run has a terminal Event");
+      }
+      continue;
+    }
+    const outcome =
+      run.outcome_event_id === null ? undefined : eventsById.get(run.outcome_event_id);
+    if (
+      outcome?.run_id !== run.run_id ||
+      outcome.sequence !== run.last_event_sequence ||
+      outcome.kind !== `run.${run.state}` ||
+      terminalEvents.length !== 1
+    ) {
+      throw new Error("Project Workflow Run outcome invariants are invalid");
+    }
+  }
+
+  for (const run of runs) {
+    if (run.trigger_kind !== "child") continue;
+    const lineage = new Set<string>([run.run_id]);
+    let parentId = run.parent_run_id;
+    while (parentId !== null) {
+      if (lineage.has(parentId)) {
+        throw new Error("Project Workflow Run tree contains a cycle");
+      }
+      lineage.add(parentId);
+      const parent = runsById.get(parentId);
+      if (parent === undefined) {
+        throw new Error("Project Workflow Run tree is incomplete");
+      }
+      parentId = parent.parent_run_id;
+    }
+  }
+
+  for (const occurrence of occurrences) {
+    if (occurrence.outcome !== "started" || occurrence.linked_run_id === null) continue;
+    const linkedRun = runsById.get(occurrence.linked_run_id);
+    if (
+      linkedRun?.trigger_kind !== "schedule" ||
+      linkedRun.schedule_key !== occurrence.schedule_key ||
+      linkedRun.scheduled_at_ms !== occurrence.scheduled_at_ms
+    ) {
+      throw new Error("Project Workflow Schedule occurrence is linked to the wrong Run");
+    }
+  }
+
+  const operationsById = new Map(
+    operations.map((operation) => [operation.operation_id, operation]),
+  );
+  const attemptsById = new Map(attempts.map((attempt) => [attempt.attempt_id, attempt]));
+  for (const event of events) {
+    if (event.engine_operation_id !== null) {
+      const operation = operationsById.get(event.engine_operation_id);
+      if (operation?.run_id !== event.run_id) {
+        throw new Error("Project Engine Operation Event reference is invalid");
+      }
+    }
+    if (event.activity_attempt_id !== null) {
+      const attempt = attemptsById.get(event.activity_attempt_id);
+      if (attempt?.run_id !== event.run_id) {
+        throw new Error("Project Workflow Activity Attempt Event reference is invalid");
+      }
+    }
+    if (event.child_run_id !== null) {
+      const child = runsById.get(event.child_run_id);
+      if (child?.trigger_kind !== "child" || child.parent_run_id !== event.run_id) {
+        throw new Error("Project Workflow Run child Event reference is invalid");
+      }
+    }
+  }
+  for (const operation of operations) {
+    if (operation.state !== "confirmed") continue;
+    const confirmation =
+      operation.confirmation_event_id === null
+        ? undefined
+        : eventsById.get(operation.confirmation_event_id);
+    if (
+      confirmation?.run_id !== operation.run_id ||
+      confirmation.engine_operation_id !== operation.operation_id
+    ) {
+      throw new Error("Project Engine Operation confirmation is invalid");
+    }
+  }
+
+  const artifactsById = new Map(artifacts.map((artifact) => [artifact.artifact_id, artifact]));
+  for (const attachment of eventArtifacts) {
+    if (
+      eventsById.get(attachment.event_id)?.run_id !== attachment.run_id ||
+      artifactsById.get(attachment.artifact_id)?.run_id !== attachment.run_id
+    ) {
+      throw new Error("Project Execution Artifact reference is invalid");
     }
   }
 };
@@ -450,7 +652,7 @@ export const migrateProjectRepository = (project: {
     if (current !== 0) assertStoreMetadata(connection, project, current);
     if (current === CURRENT_VERSION) {
       assertCurrentSchema(connection, project);
-      assertActivationSemantics(connection);
+      assertFastActivationSemantics(connection);
     }
 
     if (!existsSync(backupPath)) {
@@ -509,7 +711,7 @@ export const migrateProjectRepository = (project: {
       connection.exec(`PRAGMA user_version = ${CURRENT_VERSION}`);
     }
     assertCurrentSchema(connection, project);
-    assertActivationSemantics(connection);
+    assertFastActivationSemantics(connection);
     assertIntegrity(connection);
     connection.query("PRAGMA wal_checkpoint(TRUNCATE)").get();
     succeeded = true;
@@ -554,7 +756,8 @@ export const completeProjectRepositoryMigration = (
     configureReadOnly(connection);
     assertIntegrity(connection);
     assertCurrentSchema(connection, project);
-    assertActivationSemantics(connection);
+    assertFastActivationSemantics(connection);
+    assertDeepPostflightSemantics(connection);
   } finally {
     connection.close();
   }
@@ -587,7 +790,7 @@ const inspectReadiness = (project: { readonly identity: string; readonly path: s
       }
       assertStoreMetadata(connection, project, current);
       assertCurrentSchema(connection, project);
-      assertActivationSemantics(connection);
+      assertFastActivationSemantics(connection);
       return "ready" as const;
     } finally {
       connection.close();
@@ -675,7 +878,8 @@ export const DrizzleProjectRepositoryLive = Layer.sync(ProjectRepository, () => 
             configureReadOnly(connection);
             assertIntegrity(connection);
             assertCurrentSchema(connection, project);
-            assertActivationSemantics(connection);
+            assertFastActivationSemantics(connection);
+            assertDeepPostflightSemantics(connection);
             return true;
           } finally {
             connection.close();
