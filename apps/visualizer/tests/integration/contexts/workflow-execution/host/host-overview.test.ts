@@ -63,7 +63,7 @@ describe("Host overview", () => {
 
           expect(overview).toEqual({
             host: {
-              protocol: { major: 1, minor: 3 },
+              protocol: { major: 1, minor: 4 },
               hostVersion: "0.1.0",
               capabilities: [
                 "projects:list",
@@ -77,6 +77,8 @@ describe("Host overview", () => {
                 "runs:list",
                 "runs:show",
                 "runs:reveal",
+                "runs:resume",
+                "runs:deferred-complete",
               ],
             },
             projects: [],

@@ -1,4 +1,8 @@
-import type { HostOverview as HostOverviewSnapshot } from "@kojo/control";
+import type {
+  HostOverview as HostOverviewSnapshot,
+  ProjectIdentity,
+  WorkflowRunId,
+} from "@kojo/control";
 import { Effect } from "effect";
 import { createResource, Show } from "solid-js";
 import { m } from "../../../../i18n/messages";
@@ -24,7 +28,39 @@ const loadHostOverview = async () => {
 };
 
 export function HostOverview(props: HostOverviewProps) {
-  const [overview] = createResource(() => (props.loadOverview ?? loadHostOverview)());
+  const [overview, { refetch }] = createResource(() => (props.loadOverview ?? loadHostOverview)());
+  const resume = async (identity: ProjectIdentity, runId: WorkflowRunId, value: unknown) => {
+    await visualizerApiRuntime.runPromise(
+      Effect.flatMap(VisualizerApiClient, (client) =>
+        client.ResumeWorkflowRun({
+          identity,
+          runId,
+          value,
+          requestKey: crypto.randomUUID() as never,
+        }),
+      ),
+    );
+    await refetch();
+  };
+  const completeDeferred = async (
+    identity: ProjectIdentity,
+    runId: WorkflowRunId,
+    token: string,
+    value: unknown,
+  ) => {
+    await visualizerApiRuntime.runPromise(
+      Effect.flatMap(VisualizerApiClient, (client) =>
+        client.CompleteWorkflowDeferred({
+          identity,
+          runId,
+          token,
+          value,
+          requestKey: crypto.randomUUID() as never,
+        }),
+      ),
+    );
+    await refetch();
+  };
 
   return (
     <main class="mx-auto flex min-h-screen max-w-3xl items-center px-6">
@@ -50,7 +86,11 @@ export function HostOverview(props: HostOverviewProps) {
               </h2>
               <ProjectNavigator projects={current().projects} />
               <WorkflowDefinitionSnapshots snapshots={current().projectDefinitions} />
-              <WorkflowRuns snapshots={current().workflowRuns} />
+              <WorkflowRuns
+                snapshots={current().workflowRuns}
+                onResume={resume}
+                onCompleteDeferred={completeDeferred}
+              />
             </section>
           )}
         </Show>

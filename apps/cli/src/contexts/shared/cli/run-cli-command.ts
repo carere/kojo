@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   type ProjectCondition,
@@ -45,9 +46,17 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
 
   if (args[0] === "run") {
     const options = parseOptions(args.slice(2));
-    const command = `run.${args[1] ?? "unknown"}`;
-    if (options === undefined || !["start", "list", "show"].includes(args[1] ?? "")) {
-      return writeFailure(invalid("Run: kojo run start|list|show"), json, command);
+    const deferredComplete = args[1] === "deferred" && options?.args[0] === "complete";
+    const command = deferredComplete ? "run.deferred.complete" : `run.${args[1] ?? "unknown"}`;
+    if (
+      options === undefined ||
+      (!["start", "list", "show", "resume"].includes(args[1] ?? "") && !deferredComplete)
+    ) {
+      return writeFailure(
+        invalid("Run: kojo run start|list|show|resume|deferred complete"),
+        json,
+        command,
+      );
     }
     const selectIdentity = async () => {
       if (options.projectId !== undefined) {
@@ -72,6 +81,95 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       );
     }
     const client = makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath());
+    const parseControlValue = async () => {
+      let source = options.value;
+      if (options.valueFile !== undefined) {
+        try {
+          source =
+            options.valueFile === "-"
+              ? await new Response(Bun.stdin.stream()).text()
+              : await readFile(options.valueFile, "utf8");
+        } catch {
+          return { ok: false as const };
+        }
+      }
+      if (source === undefined) return { ok: true as const, value: undefined };
+      try {
+        return { ok: true as const, value: JSON.parse(source) as unknown };
+      } catch {
+        return { ok: false as const };
+      }
+    };
+    if (args[1] === "resume" || deferredComplete) {
+      const expectedArguments = deferredComplete ? 3 : 1;
+      const controlArguments = deferredComplete ? options.args.slice(1) : options.args;
+      if (
+        controlArguments.length !== expectedArguments - (deferredComplete ? 1 : 0) ||
+        options.input !== undefined ||
+        options.conditions.length > 0 ||
+        options.cursor !== undefined ||
+        options.limit !== undefined ||
+        options.states.length > 0 ||
+        options.workflowKeys.length > 0 ||
+        options.reveal
+      ) {
+        return writeFailure(
+          invalid(
+            deferredComplete
+              ? "Run: kojo run deferred complete <Run Identity> <completion-token> [--value <JSON>|--value-file <path|->] [--request-key <Request Key>]"
+              : "Run: kojo run resume <Run Identity> [--value <JSON>|--value-file <path|->] [--request-key <Request Key>]",
+          ),
+          json,
+          command,
+        );
+      }
+      const requestKey = decodeRequestKey(options.requestKey);
+      if (requestKey === undefined) {
+        return writeFailure(
+          invalid("Use a non-empty Request Key of at most 256 characters."),
+          json,
+          command,
+        );
+      }
+      const parsedValue = await parseControlValue();
+      if (!parsedValue.ok) {
+        return writeFailure(invalid("Use valid JSON for --value or --value-file."), json, command);
+      }
+      let runId: WorkflowRunId;
+      try {
+        runId = Schema.decodeUnknownSync(WorkflowRunIdSchema)(controlArguments[0]);
+      } catch {
+        return writeFailure(invalid("Use a valid Run Identity."), json, command);
+      }
+      const controlled = await runEffect(
+        deferredComplete
+          ? client.completeWorkflowDeferred(
+              identity,
+              runId,
+              controlArguments[1] ?? "",
+              parsedValue.value,
+              requestKey,
+            )
+          : client.resumeWorkflowRun(identity, runId, parsedValue.value, requestKey),
+      );
+      if (!controlled.succeeded)
+        return writeFailure(transportFailure(controlled.error), json, command);
+      if (!controlled.value.ok) {
+        return writeFailure(
+          workflowRunFailure(controlled.value.error, controlled.value.requestKey),
+          json,
+          command,
+        );
+      }
+      writeWorkflowRun(
+        command,
+        controlled.value.run,
+        json,
+        controlled.value.requestKey,
+        controlled.value.alreadyApplied,
+      );
+      return 0;
+    }
     if (args[1] === "start") {
       if (
         options.args.length !== 1 ||
@@ -81,6 +179,8 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
         options.limit !== undefined ||
         options.states.length > 0 ||
         options.workflowKeys.length > 0 ||
+        options.value !== undefined ||
+        options.valueFile !== undefined ||
         options.reveal
       ) {
         return writeFailure(
@@ -142,6 +242,8 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
         options.args.length !== 0 ||
         options.input !== undefined ||
         options.requestKey !== undefined ||
+        options.value !== undefined ||
+        options.valueFile !== undefined ||
         options.conditions.length > 0 ||
         options.cursor !== undefined ||
         options.reveal
@@ -203,7 +305,9 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       options.cursor !== undefined ||
       options.limit !== undefined ||
       options.states.length > 0 ||
-      options.workflowKeys.length > 0
+      options.workflowKeys.length > 0 ||
+      options.value !== undefined ||
+      options.valueFile !== undefined
     ) {
       return writeFailure(
         invalid(

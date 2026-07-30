@@ -1,4 +1,4 @@
-import { type Effect, Schema } from "effect";
+import { Context, type Duration, Effect, Schema } from "effect";
 
 export const ProjectIdentity = Schema.String.check(
   Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, {
@@ -17,6 +17,84 @@ export const WorkflowDefinitionRevision = Schema.String.check(
   Schema.isMaxLength(200),
 ).pipe(Schema.brand("WorkflowDefinitionRevision"));
 export type WorkflowDefinitionRevision = typeof WorkflowDefinitionRevision.Type;
+
+/**
+ * An opaque, serializable reference to one durable Workflow Deferred.
+ *
+ * The token is deliberately the only deferred identity visible to workflow
+ * authors and control clients. It does not expose an Effect Workflow identity.
+ */
+export const WorkflowDeferredToken = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(1_024),
+).pipe(Schema.brand("WorkflowDeferredToken"));
+export type WorkflowDeferredToken = typeof WorkflowDeferredToken.Type;
+
+/** A durable value wait created by {@link Workflow.deferred}. */
+export interface WorkflowDeferred<Success> {
+  readonly token: WorkflowDeferredToken;
+  /** Type-only marker; it is never populated at runtime. */
+  readonly _success?: Success;
+}
+
+export interface WorkflowOperations {
+  readonly sleep: (options: {
+    readonly operationKey: string;
+    readonly duration: Duration.Input;
+  }) => Effect.Effect<void>;
+  readonly deferred: <Success extends Schema.Top>(options: {
+    readonly operationKey: string;
+    readonly successSchema: Success;
+  }) => Effect.Effect<WorkflowDeferred<Success["Type"]>>;
+  readonly awaitDeferred: <Success>(deferred: WorkflowDeferred<Success>) => Effect.Effect<Success>;
+  readonly waitForResume: <Success extends Schema.Top>(options: {
+    readonly operationKey: string;
+    readonly valueSchema: Success;
+  }) => Effect.Effect<Success["Type"]>;
+}
+
+const unavailableOperations: WorkflowOperations = {
+  sleep: () =>
+    Effect.die("Kojo Workflow operations are only available inside a Workflow Definition."),
+  deferred: () =>
+    Effect.die("Kojo Workflow operations are only available inside a Workflow Definition."),
+  awaitDeferred: () =>
+    Effect.die("Kojo Workflow operations are only available inside a Workflow Definition."),
+  waitForResume: () =>
+    Effect.die("Kojo Workflow operations are only available inside a Workflow Definition."),
+};
+
+/**
+ * The Host supplies this implementation while executing a Workflow Definition.
+ * It is a defaulted Context reference so author handlers remain closed Effects.
+ */
+export const WorkflowOperations = Context.Reference<WorkflowOperations>(
+  "kojo/workflow/operations",
+  {
+    defaultValue: () => unavailableOperations,
+  },
+);
+
+/**
+ * Stable durable primitives available inside a Workflow Definition.
+ *
+ * Each operation accepts a developer-chosen Durable Operation Key. Effect's
+ * private workflow, clock, and deferred identities never cross this API.
+ */
+export const Workflow = {
+  sleep: (options: { readonly operationKey: string; readonly duration: Duration.Input }) =>
+    Effect.flatMap(WorkflowOperations, (operations) => operations.sleep(options)),
+  deferred: <Success extends Schema.Top>(options: {
+    readonly operationKey: string;
+    readonly successSchema: Success;
+  }) => Effect.flatMap(WorkflowOperations, (operations) => operations.deferred(options)),
+  await: <Success>(deferred: WorkflowDeferred<Success>) =>
+    Effect.flatMap(WorkflowOperations, (operations) => operations.awaitDeferred(deferred)),
+  waitForResume: <Success extends Schema.Top>(options: {
+    readonly operationKey: string;
+    readonly valueSchema: Success;
+  }) => Effect.flatMap(WorkflowOperations, (operations) => operations.waitForResume(options)),
+};
 
 /**
  * Paths in a value schema that contain sensitive values. Paths use dot notation;

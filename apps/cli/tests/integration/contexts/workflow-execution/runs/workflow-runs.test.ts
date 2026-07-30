@@ -112,6 +112,43 @@ export default defineConfig({
 });
 `;
 
+const durableWaitConfiguration = `
+import { Effect, Schema } from "effect";
+import { Workflow, defineConfig, defineWorkflow } from "@kojo/workflow";
+
+const input = Schema.Struct({ message: Schema.String });
+export default defineConfig({
+  workflows: [
+    defineWorkflow({
+      workflowKey: "manual-wait",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      handler: ({ message }) => Workflow.waitForResume({
+        operationKey: "approval",
+        valueSchema: Schema.String,
+      }).pipe(Effect.map((approval) => message + ":" + approval)),
+    }),
+    defineWorkflow({
+      workflowKey: "deferred-wait",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      handler: ({ message }) => Effect.gen(function* () {
+        const deferred = yield* Workflow.deferred({
+          operationKey: "approval",
+          successSchema: Schema.String,
+        });
+        const approval = yield* Workflow.await(deferred);
+        return message + ":" + approval;
+      }),
+    }),
+  ],
+});
+`;
+
 it("starts, redelivers, lists, and shows one durable Workflow Run", async () => {
   const directory = await makeTemporaryDirectory("kojo-workflow-runs-");
   cleanups.push(directory.cleanup);
@@ -430,4 +467,210 @@ it("masks marked payloads by default, fails closed for an invalid map, and revea
     ]),
   );
   expect(JSON.stringify(diagnostics)).not.toContain("top-secret-input");
+});
+
+it("keeps manual resume and Workflow Deferred completion distinct and validates their values", async () => {
+  const directory = await makeTemporaryDirectory("kojo-durable-waits-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), durableWaitConfiguration);
+  const hostStore = join(directory.path, "host");
+  const host = await startKojoHostProcess({ storePath: hostStore });
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const manualStart = await runKojoCli(
+    ["run", "start", "manual-wait", "--input", '{"message":"manual"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(manualStart.exitCode, `${manualStart.stdout}${manualStart.stderr}`).toBe(0);
+  const manual = JSON.parse(manualStart.stdout).result.run;
+  expect(manual).toMatchObject({
+    state: "suspended",
+    suspension: { kind: "manual", operationKey: "approval" },
+  });
+
+  await host.stop();
+  const restartedHost = await startKojoHostProcess({ storePath: hostStore });
+  cleanups.push(restartedHost.stop);
+  const afterRestart = await runKojoCli(
+    ["run", "show", manual.runId, "--json"],
+    restartedHost.socketPath,
+    project,
+  );
+  expect(afterRestart.exitCode, `${afterRestart.stdout}${afterRestart.stderr}`).toBe(0);
+  expect(JSON.parse(afterRestart.stdout).result.run).toMatchObject({
+    state: "suspended",
+    suspension: { kind: "manual", operationKey: "approval" },
+  });
+
+  const rejectedResume = await runKojoCli(
+    ["run", "resume", manual.runId, "--value", "42", "--json"],
+    restartedHost.socketPath,
+    project,
+  );
+  expect(rejectedResume.exitCode, `${rejectedResume.stdout}${rejectedResume.stderr}`).toBe(4);
+  expect(JSON.parse(rejectedResume.stdout).error.code).toBe("workflow-deferred-value-invalid");
+
+  await writeFile(join(project, "approval.json"), '"approved"');
+
+  const resumed = await runKojoCli(
+    [
+      "run",
+      "resume",
+      manual.runId,
+      "--value-file",
+      "approval.json",
+      "--request-key",
+      "resume-manual-wait",
+      "--json",
+    ],
+    restartedHost.socketPath,
+    project,
+  );
+  expect(resumed.exitCode, `${resumed.stdout}${resumed.stderr}`).toBe(0);
+  expect(JSON.parse(resumed.stdout).result.run).toMatchObject({ state: "running" });
+  const resumeRedelivery = await runKojoCli(
+    [
+      "run",
+      "resume",
+      manual.runId,
+      "--value",
+      '"approved"',
+      "--request-key",
+      "resume-manual-wait",
+      "--json",
+    ],
+    restartedHost.socketPath,
+    project,
+  );
+  expect(resumeRedelivery.exitCode, `${resumeRedelivery.stdout}${resumeRedelivery.stderr}`).toBe(0);
+  expect(JSON.parse(resumeRedelivery.stdout).result.alreadyApplied).toBe(true);
+  const finalResume = await runKojoCli(
+    [
+      "run",
+      "resume",
+      manual.runId,
+      "--value",
+      '"approved"',
+      "--request-key",
+      "resume-final-run",
+      "--json",
+    ],
+    restartedHost.socketPath,
+    project,
+  );
+  expect(finalResume.exitCode).toBe(4);
+  expect(JSON.parse(finalResume.stdout).error.code).toBe("run-not-suspended");
+});
+
+it("completes a Workflow Deferred only with its token and a schema-valid value", async () => {
+  const directory = await makeTemporaryDirectory("kojo-workflow-deferred-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), durableWaitConfiguration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const deferredStart = await runKojoCli(
+    ["run", "start", "deferred-wait", "--input", '{"message":"deferred"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(deferredStart.exitCode, `${deferredStart.stdout}${deferredStart.stderr}`).toBe(0);
+  const deferred = JSON.parse(deferredStart.stdout).result.run;
+  expect(deferred).toMatchObject({
+    state: "suspended",
+    suspension: {
+      kind: "deferred",
+      operationKey: "approval",
+      completionToken: expect.any(String),
+    },
+  });
+
+  const forbiddenResume = await runKojoCli(
+    ["run", "resume", deferred.runId, "--value", '"approved"', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(forbiddenResume.exitCode).toBe(4);
+  expect(JSON.parse(forbiddenResume.stdout).error.code).toBe("run-resume-not-allowed");
+
+  const rejectedDeferred = await runKojoCli(
+    [
+      "run",
+      "deferred",
+      "complete",
+      deferred.runId,
+      deferred.suspension.completionToken,
+      "--value",
+      "42",
+      "--json",
+    ],
+    host.socketPath,
+    project,
+  );
+  expect(rejectedDeferred.exitCode).toBe(4);
+  expect(JSON.parse(rejectedDeferred.stdout).error.code).toBe("workflow-deferred-value-invalid");
+
+  const completedDeferred = await runKojoCli(
+    [
+      "run",
+      "deferred",
+      "complete",
+      deferred.runId,
+      deferred.suspension.completionToken,
+      "--value",
+      '"approved"',
+      "--request-key",
+      "complete-deferred-wait",
+      "--json",
+    ],
+    host.socketPath,
+    project,
+  );
+  expect(completedDeferred.exitCode, `${completedDeferred.stdout}${completedDeferred.stderr}`).toBe(
+    0,
+  );
+  expect(JSON.parse(completedDeferred.stdout).result.run).toMatchObject({ state: "running" });
+  const deferredRedelivery = await runKojoCli(
+    [
+      "run",
+      "deferred",
+      "complete",
+      deferred.runId,
+      deferred.suspension.completionToken,
+      "--value",
+      '"approved"',
+      "--request-key",
+      "complete-deferred-wait",
+      "--json",
+    ],
+    host.socketPath,
+    project,
+  );
+  expect(
+    deferredRedelivery.exitCode,
+    `${deferredRedelivery.stdout}${deferredRedelivery.stderr}`,
+  ).toBe(0);
+  expect(JSON.parse(deferredRedelivery.stdout).result.alreadyApplied).toBe(true);
+  let final = await runKojoCli(["run", "show", deferred.runId, "--json"], host.socketPath, project);
+  for (
+    let attempt = 0;
+    attempt < 20 && JSON.parse(final.stdout).result.run.state !== "completed";
+    attempt += 1
+  ) {
+    await Bun.sleep(50);
+    final = await runKojoCli(["run", "show", deferred.runId, "--json"], host.socketPath, project);
+  }
+  expect(final.exitCode, `${final.stdout}${final.stderr}`).toBe(0);
+  expect(JSON.parse(final.stdout).result.run, final.stdout).toMatchObject({
+    state: "completed",
+    outcome: { kind: "completed", value: "deferred:approved" },
+  });
 });

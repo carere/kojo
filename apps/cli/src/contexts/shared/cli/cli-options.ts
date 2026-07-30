@@ -13,6 +13,8 @@ export interface ParsedOptions {
   readonly conditions: ReadonlyArray<string>;
   readonly cursor?: string;
   readonly input?: string;
+  readonly value?: string;
+  readonly valueFile?: string;
   readonly limit?: string;
   readonly states: ReadonlyArray<string>;
   readonly workflowKeys: ReadonlyArray<string>;
@@ -27,6 +29,8 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
   const conditions: Array<string> = [];
   let cursor: string | undefined;
   let input: string | undefined;
+  let value: string | undefined;
+  let valueFile: string | undefined;
   let limit: string | undefined;
   const states: Array<string> = [];
   const workflowKeys: Array<string> = [];
@@ -45,6 +49,8 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
         "--condition",
         "--cursor",
         "--input",
+        "--value",
+        "--value-file",
         "--limit",
         "--state",
         "--workflow",
@@ -53,33 +59,39 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
       remaining.push(argument);
       continue;
     }
-    const value = args[index + 1];
-    if (value === undefined || value.startsWith("--")) return undefined;
+    const optionValue = args[index + 1];
+    if (optionValue === undefined || optionValue.startsWith("--")) return undefined;
     index += 1;
     if (argument === "--condition") {
-      conditions.push(value);
+      conditions.push(optionValue);
     } else if (argument === "--state") {
-      states.push(value);
+      states.push(optionValue);
     } else if (argument === "--workflow") {
-      workflowKeys.push(value);
+      workflowKeys.push(optionValue);
     } else if (argument === "--input") {
       if (input !== undefined) return undefined;
-      input = value;
+      input = optionValue;
+    } else if (argument === "--value") {
+      if (value !== undefined || valueFile !== undefined) return undefined;
+      value = optionValue;
+    } else if (argument === "--value-file") {
+      if (value !== undefined || valueFile !== undefined) return undefined;
+      valueFile = optionValue;
     } else if (argument === "--cursor") {
       if (cursor !== undefined) return undefined;
-      cursor = value;
+      cursor = optionValue;
     } else if (argument === "--limit") {
       if (limit !== undefined) return undefined;
-      limit = value;
+      limit = optionValue;
     } else if (argument === "--project") {
       if (projectPath !== undefined) return undefined;
-      projectPath = value;
+      projectPath = optionValue;
     } else if (argument === "--project-id") {
       if (projectId !== undefined) return undefined;
-      projectId = value;
+      projectId = optionValue;
     } else {
       if (requestKey !== undefined) return undefined;
-      requestKey = value;
+      requestKey = optionValue;
     }
   }
   if (projectId !== undefined && projectPath !== undefined) return undefined;
@@ -92,6 +104,8 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
     conditions,
     cursor,
     input,
+    value,
+    valueFile,
     limit,
     states,
     workflowKeys,

@@ -5,6 +5,7 @@ import { afterEach, expect, test } from "vitest";
 import { page } from "vitest/browser";
 import { ColorModeProvider } from "../../src/contexts/preferences/services/color-mode";
 import { HostOverview } from "../../src/contexts/workflow-execution/host/components/host-overview";
+import { WorkflowRuns } from "../../src/contexts/workflow-execution/runs/components/workflow-runs";
 import { setLocale } from "../../src/i18n/runtime";
 
 let dispose: VoidFunction | undefined;
@@ -135,6 +136,7 @@ test("shows accepted Workflow Definition snapshots from the Host", async () => {
                       engineConfirmedAtMs: 1,
                       updatedAtMs: 2,
                       finalizedAtMs: 2,
+                      allowedActions: [],
                     },
                   ],
                 },
@@ -151,4 +153,82 @@ test("shows accepted Workflow Definition snapshots from the Host", async () => {
   await expect.element(page.getByText("echo 1")).toBeVisible();
   await expect.element(page.getByText("00000000-0000-7000-8000-000000000010")).toBeVisible();
   await expect.element(page.getByText("completed")).toBeVisible();
+});
+
+test("only renders Host-authorized Workflow Run controls", async () => {
+  const root = document.createElement("div");
+  document.body.append(root);
+  const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+    "00000000-0000-7000-8000-000000000001",
+  );
+  const automaticRun = Schema.decodeUnknownSync(WorkflowRunId)(
+    "00000000-0000-7000-8000-000000000020",
+  );
+  const manualRun = Schema.decodeUnknownSync(WorkflowRunId)("00000000-0000-7000-8000-000000000021");
+  const deferredRun = Schema.decodeUnknownSync(WorkflowRunId)(
+    "00000000-0000-7000-8000-000000000022",
+  );
+  const resumed: Array<string> = [];
+  const completed: Array<{ readonly runId: string; readonly token: string }> = [];
+  dispose = render(
+    () => (
+      <WorkflowRuns
+        snapshots={[
+          {
+            project: { identity, path: "/projects/demo" },
+            runs: [
+              {
+                runId: automaticRun,
+                workflowKey: "clock",
+                workflowRevision: "1",
+                state: "suspended",
+                acceptedAtMs: 1,
+                engineConfirmedAtMs: 1,
+                updatedAtMs: 1,
+                finalizedAtMs: null,
+                allowedActions: [],
+              },
+              {
+                runId: manualRun,
+                workflowKey: "manual",
+                workflowRevision: "1",
+                state: "suspended",
+                acceptedAtMs: 1,
+                engineConfirmedAtMs: 1,
+                updatedAtMs: 1,
+                finalizedAtMs: null,
+                allowedActions: ["resume"],
+              },
+              {
+                runId: deferredRun,
+                workflowKey: "deferred",
+                workflowRevision: "1",
+                state: "suspended",
+                acceptedAtMs: 1,
+                engineConfirmedAtMs: 1,
+                updatedAtMs: 1,
+                finalizedAtMs: null,
+                allowedActions: ["deferred-complete"],
+              },
+            ],
+          },
+        ]}
+        onResume={async (_identity, runId) => {
+          resumed.push(runId);
+        }}
+        onCompleteDeferred={async (_identity, runId, token) => {
+          completed.push({ runId, token });
+        }}
+      />
+    ),
+    root,
+  );
+
+  expect(document.querySelector(`[aria-label="Value for ${automaticRun}"]`)).toBeNull();
+  await page.getByRole("button", { name: "Resume" }).click();
+  await page.getByLabelText(`Deferred token for ${deferredRun}`).fill("kojo.deferred.v1.token");
+  await page.getByRole("button", { name: "Complete Deferred" }).click();
+
+  expect(resumed).toEqual([manualRun]);
+  expect(completed).toEqual([{ runId: deferredRun, token: "kojo.deferred.v1.token" }]);
 });

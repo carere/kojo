@@ -1,9 +1,11 @@
 import { Database } from "bun:sqlite";
+import { Buffer } from "node:buffer";
 import { chmodSync, existsSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { BunCrypto } from "@effect/platform-bun";
 import { SqliteClient } from "@effect/sql-sqlite-bun";
 import type { ProjectSnapshot } from "@kojo/control";
+import type { WorkflowDeferred } from "@kojo/workflow";
 import { Context, Duration, Effect, Exit, Layer, Option, Schema, Scope } from "effect";
 import {
   ClusterWorkflowEngine,
@@ -15,6 +17,7 @@ import {
 import { SqlClient } from "effect/unstable/sql";
 import * as Activity from "effect/unstable/workflow/Activity";
 import * as DurableClock from "effect/unstable/workflow/DurableClock";
+import * as DurableDeferred from "effect/unstable/workflow/DurableDeferred";
 import * as Workflow from "effect/unstable/workflow/Workflow";
 import * as WorkflowEngine from "effect/unstable/workflow/WorkflowEngine";
 import {
@@ -22,8 +25,11 @@ import {
   type LocalWorkflowOperations,
   WorkflowBackend,
   type WorkflowBackendAssessment,
+  type WorkflowBackendDeferredCompletionResult,
   type WorkflowBackendReference,
+  type WorkflowBackendResumeResult,
   type WorkflowBackendState,
+  type WorkflowBackendSuspension,
 } from "./workflow-backend";
 
 const databasePath = (project: ProjectSnapshot) => join(project.path, ".kojo", "kojo.sqlite");
@@ -258,6 +264,36 @@ export const makeLocalWorkflowBackendLayer = (
             );
             return entry.observe(backend.engine, reference.runId);
           }),
+        resume: (project, reference, value) =>
+          Effect.suspend(() => {
+            const backend = getActiveBackend(active, project);
+            const entry = getEntry(
+              backend.entries,
+              reference.workflowKey,
+              reference.workflowRevision,
+            );
+            return entry.resume(backend.engine, reference.runId, value);
+          }),
+        completeDeferred: (project, reference, token, value) =>
+          Effect.suspend(() => {
+            const backend = getActiveBackend(active, project);
+            const entry = getEntry(
+              backend.entries,
+              reference.workflowKey,
+              reference.workflowRevision,
+            );
+            return entry.completeDeferred(backend.engine, reference.runId, token, value);
+          }),
+        rehydrate: (project, reference) =>
+          Effect.suspend(() => {
+            const backend = getActiveBackend(active, project);
+            const entry = getEntry(
+              backend.entries,
+              reference.workflowKey,
+              reference.workflowRevision,
+            );
+            return entry.rehydrate(backend.engine, reference.runId);
+          }),
       };
     }),
   );
@@ -276,6 +312,21 @@ interface Entry {
     engine: WorkflowEngine.WorkflowEngine["Service"],
     runId: string,
   ) => Effect.Effect<WorkflowBackendState>;
+  readonly resume: (
+    engine: WorkflowEngine.WorkflowEngine["Service"],
+    runId: string,
+    value: unknown,
+  ) => Effect.Effect<WorkflowBackendResumeResult>;
+  readonly completeDeferred: (
+    engine: WorkflowEngine.WorkflowEngine["Service"],
+    runId: string,
+    token: string,
+    value: unknown,
+  ) => Effect.Effect<WorkflowBackendDeferredCompletionResult>;
+  readonly rehydrate: (
+    engine: WorkflowEngine.WorkflowEngine["Service"],
+    runId: string,
+  ) => Effect.Effect<void>;
   readonly registration: Layer.Layer<never, never, WorkflowEngine.WorkflowEngine>;
 }
 
@@ -300,7 +351,8 @@ const makeEntries = (
       error: definition.failureSchema ?? Schema.Never,
       idempotencyKey: ({ runId }) => runId,
     });
-    const operations = makeOperations();
+    const waits = new Map<string, RegisteredWait>();
+    const operations = makeOperations(waits);
     const registration = workflow.toLayer(({ input }) =>
       Schema.decodeUnknownEffect(definition.inputSchema)(input).pipe(
         Effect.orDie,
@@ -332,10 +384,58 @@ const makeEntries = (
         ) as unknown as Effect.Effect<void>,
       observe: (engine, runId) =>
         workflow.executionId({ runId, input: undefined }).pipe(
-          Effect.flatMap((executionId) => engine.poll(workflow, executionId)),
-          Effect.map(toBackendState),
+          Effect.flatMap((executionId) =>
+            engine
+              .poll(workflow, executionId)
+              .pipe(Effect.map((state) => toBackendState(state, waits.get(executionId)))),
+          ),
           Effect.catchCause(() => Effect.succeed({ _tag: "Failed" } as const)),
         ) as unknown as Effect.Effect<WorkflowBackendState>,
+      resume: (engine, runId, value) =>
+        workflow.executionId({ runId, input: undefined }).pipe(
+          Effect.flatMap(
+            (executionId): Effect.Effect<WorkflowBackendResumeResult, never, unknown> => {
+              const wait = waits.get(executionId);
+              if (wait === undefined || wait.suspension.kind !== "manual") {
+                return Effect.succeed({ _tag: "not-manually-suspended" } as const);
+              }
+              return completeWait(engine, wait, value).pipe(
+                Effect.map((result) =>
+                  result ? ({ _tag: "resumed" } as const) : ({ _tag: "invalid-value" } as const),
+                ),
+              );
+            },
+          ),
+        ) as unknown as Effect.Effect<WorkflowBackendResumeResult>,
+      completeDeferred: (engine, runId, token, value) =>
+        workflow.executionId({ runId, input: undefined }).pipe(
+          Effect.flatMap(
+            (
+              executionId,
+            ): Effect.Effect<WorkflowBackendDeferredCompletionResult, never, unknown> => {
+              const wait = waits.get(executionId);
+              if (
+                wait === undefined ||
+                wait.suspension.kind !== "deferred" ||
+                wait.completionToken !== token
+              ) {
+                return Effect.succeed({ _tag: "not-deferred" } as const);
+              }
+              return completeWait(engine, wait, value).pipe(
+                Effect.map((result) =>
+                  result ? ({ _tag: "completed" } as const) : ({ _tag: "invalid-value" } as const),
+                ),
+              );
+            },
+          ),
+        ) as unknown as Effect.Effect<WorkflowBackendDeferredCompletionResult>,
+      rehydrate: (engine, runId) =>
+        workflow.executionId({ runId, input: undefined }).pipe(
+          Effect.flatMap((executionId) =>
+            waits.has(executionId) ? Effect.void : engine.resume(workflow, executionId),
+          ),
+          Effect.catchCause(() => Effect.void),
+        ) as unknown as Effect.Effect<void>,
       registration: registration as unknown as Layer.Layer<
         never,
         never,
@@ -345,7 +445,61 @@ const makeEntries = (
   });
 };
 
-const makeOperations = (): LocalWorkflowOperations => ({
+interface RegisteredWait {
+  readonly deferred: DurableDeferred.DurableDeferred<Schema.Top>;
+  readonly engineToken: string;
+  readonly suspension: WorkflowBackendSuspension;
+  readonly completionToken?: WorkflowDeferred<Schema.Top>["token"];
+  readonly valueSchema: Schema.Top;
+}
+
+const deferredTokenPrefix = "kojo.deferred.v1.";
+
+const toWorkflowDeferredToken = (engineToken: string): WorkflowDeferred<Schema.Top>["token"] =>
+  `${deferredTokenPrefix}${Buffer.from(engineToken).toString("base64url")}` as WorkflowDeferred<Schema.Top>["token"];
+
+const toEngineDeferredToken = (token: string): string | undefined => {
+  if (!token.startsWith(deferredTokenPrefix)) return undefined;
+  try {
+    const engineToken = Buffer.from(
+      token.slice(deferredTokenPrefix.length),
+      "base64url",
+    ).toString();
+    return engineToken.length === 0 ? undefined : engineToken;
+  } catch {
+    return undefined;
+  }
+};
+
+const validOperationKey = (operationKey: string) =>
+  operationKey.length > 0 && operationKey.length <= 200;
+
+const assertOperationKey = (operationKey: string) => {
+  if (!validOperationKey(operationKey)) {
+    throw new Error("A Durable Operation Key must contain from 1 to 200 characters.");
+  }
+};
+
+const completeWait = (
+  engine: WorkflowEngine.WorkflowEngine["Service"],
+  wait: RegisteredWait,
+  value: unknown,
+) =>
+  Effect.try({
+    try: () => Schema.decodeUnknownSync(wait.valueSchema as typeof Schema.Unknown)(value),
+    catch: () => undefined,
+  }).pipe(
+    Effect.matchEffect({
+      onFailure: () => Effect.succeed(false),
+      onSuccess: (decoded) =>
+        DurableDeferred.succeed(wait.deferred, {
+          token: wait.engineToken as never,
+          value: decoded,
+        }).pipe(Effect.provideService(WorkflowEngine.WorkflowEngine, engine), Effect.as(true)),
+    }),
+  );
+
+const makeOperations = (waits: Map<string, RegisteredWait>): LocalWorkflowOperations => ({
   activity: <
     Success extends Schema.Top,
     Failure extends Schema.Top = typeof Schema.Never,
@@ -364,11 +518,83 @@ const makeOperations = (): LocalWorkflowOperations => ({
     }) as unknown as Effect.Effect<Success["Type"], Failure["Type"]>;
   },
   sleep: ({ operationKey, duration }) =>
-    DurableClock.sleep({
-      name: operationKey,
-      duration,
-      inMemoryThreshold: Duration.zero,
-    }) as never,
+    Effect.suspend(() => {
+      assertOperationKey(operationKey);
+      return DurableClock.sleep({
+        name: `Kojo/Clock/${operationKey}`,
+        duration,
+        inMemoryThreshold: Duration.zero,
+      }) as never;
+    }),
+  deferred: <Success extends Schema.Top>({
+    operationKey,
+    successSchema,
+  }: {
+    readonly operationKey: string;
+    readonly successSchema: Success;
+  }) =>
+    Effect.suspend(() => {
+      assertOperationKey(operationKey);
+      const deferred = DurableDeferred.make(`Kojo/Deferred/${operationKey}`, {
+        success: successSchema,
+      });
+      return DurableDeferred.token(deferred).pipe(
+        Effect.map((engineToken) => {
+          const parsed = DurableDeferred.TokenParsed.fromString(engineToken);
+          const completionToken = toWorkflowDeferredToken(engineToken);
+          waits.set(parsed.executionId, {
+            deferred: deferred as DurableDeferred.DurableDeferred<Schema.Top>,
+            engineToken,
+            suspension: { kind: "deferred", operationKey, completionToken },
+            completionToken,
+            valueSchema: successSchema,
+          });
+          return { token: completionToken } as WorkflowDeferred<Success["Type"]>;
+        }),
+      );
+    }) as unknown as Effect.Effect<WorkflowDeferred<Success["Type"]>>,
+  awaitDeferred: <Success>(deferred: WorkflowDeferred<Success>) =>
+    Effect.suspend(() => {
+      const engineToken = toEngineDeferredToken(deferred.token);
+      if (engineToken === undefined) {
+        return Effect.die("Workflow Deferred token is invalid.");
+      }
+      const parsed = DurableDeferred.TokenParsed.fromString(engineToken);
+      const wait = waits.get(parsed.executionId);
+      if (
+        wait === undefined ||
+        wait.suspension.kind !== "deferred" ||
+        wait.completionToken !== deferred.token
+      ) {
+        return Effect.die("Workflow Deferred was not created in this Workflow Run.");
+      }
+      return DurableDeferred.await(wait.deferred) as Effect.Effect<Success>;
+    }),
+  waitForResume: <Success extends Schema.Top>({
+    operationKey,
+    valueSchema,
+  }: {
+    readonly operationKey: string;
+    readonly valueSchema: Success;
+  }) =>
+    Effect.suspend(() => {
+      assertOperationKey(operationKey);
+      const deferred = DurableDeferred.make(`Kojo/Resume/${operationKey}`, {
+        success: valueSchema,
+      });
+      return DurableDeferred.token(deferred).pipe(
+        Effect.flatMap((engineToken) => {
+          const parsed = DurableDeferred.TokenParsed.fromString(engineToken);
+          waits.set(parsed.executionId, {
+            deferred: deferred as DurableDeferred.DurableDeferred<Schema.Top>,
+            engineToken,
+            suspension: { kind: "manual", operationKey },
+            valueSchema,
+          });
+          return DurableDeferred.await(deferred) as Effect.Effect<Success["Type"]>;
+        }),
+      );
+    }) as unknown as Effect.Effect<Success["Type"]>,
 });
 
 const getActiveBackend = (
@@ -401,9 +627,15 @@ const makeReference = (
 
 const toBackendState = (
   result: Option.Option<Workflow.Result<unknown, unknown>>,
+  wait: RegisteredWait | undefined,
 ): WorkflowBackendState => {
   if (Option.isNone(result)) return { _tag: "Pending" };
-  if (result.value._tag === "Suspended") return { _tag: "Waiting" };
+  if (result.value._tag === "Suspended") {
+    return {
+      _tag: "Waiting",
+      suspension: wait?.suspension ?? { kind: "clock", operationKey: "durable-clock" },
+    };
+  }
   if (Exit.isSuccess(result.value.exit)) {
     return { _tag: "Completed", result: result.value.exit.value };
   }
