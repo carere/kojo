@@ -8,7 +8,7 @@ import {
 
 export { ProjectIdentity } from "@kojo/workflow";
 
-export const PROTOCOL_VERSION = { major: 1, minor: 3 } as const;
+export const PROTOCOL_VERSION = { major: 1, minor: 4 } as const;
 export const CONTROL_CAPABILITIES = [
   "projects:list",
   "projects:list-page",
@@ -17,6 +17,11 @@ export const CONTROL_CAPABILITIES = [
   "projects:forget",
   "workflows:list",
   "workflows:show",
+  "schedules:list",
+  "schedules:show",
+  "schedules:next",
+  "schedules:enable",
+  "schedules:disable",
   "runs:start",
   "runs:list",
   "runs:show",
@@ -193,6 +198,105 @@ export const WorkflowDefinitionQueryResult = Schema.Union([
 ]);
 export type WorkflowDefinitionQueryResult = typeof WorkflowDefinitionQueryResult.Type;
 
+export const WorkflowScheduleCondition = Schema.Literals([
+  "available",
+  "unavailable",
+  "needs-attention",
+]);
+export type WorkflowScheduleCondition = typeof WorkflowScheduleCondition.Type;
+
+export const WorkflowScheduleDefinition = Schema.Struct({
+  scheduleKey: Schema.String,
+  workflowKey: Schema.String,
+  revision: Schema.String,
+  cron: Schema.String,
+  timeZone: Schema.String,
+  overlapPolicy: Schema.Literals(["allow", "skip"]),
+  inputRuleRevision: Schema.String,
+});
+export type WorkflowScheduleDefinition = typeof WorkflowScheduleDefinition.Type;
+
+export const WorkflowScheduleAllowedAction = Schema.Literals(["enable", "disable"]);
+export type WorkflowScheduleAllowedAction = typeof WorkflowScheduleAllowedAction.Type;
+
+export const WorkflowScheduleSnapshot = Schema.Struct({
+  scheduleKey: Schema.String,
+  definition: Schema.NullOr(WorkflowScheduleDefinition),
+  appliedRevision: Schema.NullOr(Schema.String),
+  enabledIntent: Schema.Boolean,
+  condition: WorkflowScheduleCondition,
+  conditionReasonCode: Schema.NullOr(Schema.String),
+  highWaterMarkMs: Schema.NullOr(Schema.Number),
+  nextOccurrenceMs: Schema.NullOr(Schema.Number),
+  rowVersion: Schema.Number,
+  allowedActions: Schema.Array(WorkflowScheduleAllowedAction),
+});
+export type WorkflowScheduleSnapshot = typeof WorkflowScheduleSnapshot.Type;
+
+export const WorkflowScheduleOperationErrorCode = Schema.Literals([
+  "project-not-found",
+  "project-layout-invalid",
+  "project-runtime-not-ready",
+  "schedule-not-found",
+  "schedule-revision-conflict",
+  "request-key-conflict",
+]);
+export type WorkflowScheduleOperationErrorCode = typeof WorkflowScheduleOperationErrorCode.Type;
+
+export const WorkflowScheduleOperationError = Schema.Struct({
+  code: WorkflowScheduleOperationErrorCode,
+  message: Schema.String,
+  next: Schema.String,
+  affectedResource: Schema.Union([
+    Schema.Struct({ kind: Schema.Literal("project"), identity: ProjectIdentity }),
+    Schema.Struct({
+      kind: Schema.Literal("schedule"),
+      identity: ProjectIdentity,
+      scheduleKey: Schema.String,
+    }),
+    Schema.Struct({ kind: Schema.Literal("request-key"), requestKey: RequestKey }),
+  ]),
+  findingKeys: Schema.Array(ReadinessFindingKey),
+  currentSchedule: Schema.optionalKey(WorkflowScheduleSnapshot),
+});
+export type WorkflowScheduleOperationError = typeof WorkflowScheduleOperationError.Type;
+
+export const WorkflowScheduleListInput = Schema.Struct({
+  identity: ProjectIdentity,
+  workflowKeys: Schema.Array(Schema.String),
+  conditions: Schema.Array(WorkflowScheduleCondition),
+});
+export type WorkflowScheduleListInput = typeof WorkflowScheduleListInput.Type;
+
+export const WorkflowScheduleListResult = Schema.Union([
+  Schema.Struct({ ok: Schema.Literal(true), schedules: Schema.Array(WorkflowScheduleSnapshot) }),
+  Schema.Struct({ ok: Schema.Literal(false), error: WorkflowScheduleOperationError }),
+]);
+export type WorkflowScheduleListResult = typeof WorkflowScheduleListResult.Type;
+
+export const WorkflowScheduleQueryResult = Schema.Union([
+  Schema.Struct({ ok: Schema.Literal(true), schedule: WorkflowScheduleSnapshot }),
+  Schema.Struct({ ok: Schema.Literal(false), error: WorkflowScheduleOperationError }),
+]);
+export type WorkflowScheduleQueryResult = typeof WorkflowScheduleQueryResult.Type;
+
+export const WorkflowScheduleMutationResult = Schema.Union([
+  Schema.Struct({
+    ok: Schema.Literal(true),
+    schedule: WorkflowScheduleSnapshot,
+    alreadyApplied: Schema.Boolean,
+    /** Disable never stops a Run whose start was already accepted. */
+    acceptedRunsContinue: Schema.Boolean,
+    requestKey: RequestKey,
+  }),
+  Schema.Struct({
+    ok: Schema.Literal(false),
+    requestKey: RequestKey,
+    error: WorkflowScheduleOperationError,
+  }),
+]);
+export type WorkflowScheduleMutationResult = typeof WorkflowScheduleMutationResult.Type;
+
 export const WorkflowRunId = Schema.String.check(
   Schema.isMinLength(1),
   Schema.isMaxLength(200),
@@ -335,6 +439,12 @@ export const ProjectWorkflowRunsSnapshot = Schema.Struct({
 });
 export type ProjectWorkflowRunsSnapshot = typeof ProjectWorkflowRunsSnapshot.Type;
 
+export const ProjectWorkflowSchedulesSnapshot = Schema.Struct({
+  project: ProjectSnapshot,
+  schedules: Schema.Array(WorkflowScheduleSnapshot),
+});
+export type ProjectWorkflowSchedulesSnapshot = typeof ProjectWorkflowSchedulesSnapshot.Type;
+
 export const ProjectMutationResult = Schema.Union([
   Schema.Struct({
     ok: Schema.Literal(true),
@@ -354,6 +464,7 @@ export const HostOverview = Schema.Struct({
   host: HostInformation,
   projects: Schema.Array(ProjectSnapshot),
   projectDefinitions: Schema.Array(ProjectWorkflowSnapshot),
+  workflowSchedules: Schema.Array(ProjectWorkflowSchedulesSnapshot),
   workflowRuns: Schema.Array(ProjectWorkflowRunsSnapshot),
 });
 export type HostOverview = typeof HostOverview.Type;
@@ -388,6 +499,36 @@ export const ListWorkflowDefinitions = Rpc.make("ListWorkflowDefinitions", {
 export const ShowWorkflowDefinition = Rpc.make("ShowWorkflowDefinition", {
   payload: { identity: ProjectIdentity, workflowKey: Schema.String },
   success: WorkflowDefinitionQueryResult,
+});
+
+export const ListWorkflowSchedules = Rpc.make("ListWorkflowSchedules", {
+  payload: WorkflowScheduleListInput.fields,
+  success: WorkflowScheduleListResult,
+});
+
+export const ShowWorkflowSchedule = Rpc.make("ShowWorkflowSchedule", {
+  payload: { identity: ProjectIdentity, scheduleKey: Schema.String },
+  success: WorkflowScheduleQueryResult,
+});
+
+export const ListNextWorkflowSchedules = Rpc.make("ListNextWorkflowSchedules", {
+  payload: WorkflowScheduleListInput.fields,
+  success: WorkflowScheduleListResult,
+});
+
+export const EnableWorkflowSchedule = Rpc.make("EnableWorkflowSchedule", {
+  payload: {
+    identity: ProjectIdentity,
+    scheduleKey: Schema.String,
+    scheduleRevision: Schema.String,
+    requestKey: RequestKey,
+  },
+  success: WorkflowScheduleMutationResult,
+});
+
+export const DisableWorkflowSchedule = Rpc.make("DisableWorkflowSchedule", {
+  payload: { identity: ProjectIdentity, scheduleKey: Schema.String, requestKey: RequestKey },
+  success: WorkflowScheduleMutationResult,
 });
 
 export const StartWorkflowRun = Rpc.make("StartWorkflowRun", {
@@ -443,6 +584,11 @@ export const KojoControl = RpcGroup.make(
   ShowProject,
   ListWorkflowDefinitions,
   ShowWorkflowDefinition,
+  ListWorkflowSchedules,
+  ShowWorkflowSchedule,
+  ListNextWorkflowSchedules,
+  EnableWorkflowSchedule,
+  DisableWorkflowSchedule,
   StartWorkflowRun,
   ListWorkflowRuns,
   ShowWorkflowRun,

@@ -1,4 +1,9 @@
-import { HostOverview as HostOverviewSchema } from "@kojo/control";
+import {
+  HostOverview as HostOverviewSchema,
+  ProjectIdentity,
+  RequestKey,
+  WorkflowScheduleMutationResult,
+} from "@kojo/control";
 import { Schema } from "effect";
 import { Rpc, RpcGroup } from "effect/unstable/rpc";
 
@@ -23,4 +28,26 @@ export const HostOverview = Rpc.make("HostOverview", {
   error: HostOverviewError,
 });
 
-export const VisualizerApi = RpcGroup.make(Health, HostOverview);
+export const EnableWorkflowSchedule = Rpc.make("EnableWorkflowSchedule", {
+  payload: {
+    identity: ProjectIdentity,
+    scheduleKey: Schema.String,
+    scheduleRevision: Schema.String,
+    requestKey: RequestKey,
+  },
+  success: WorkflowScheduleMutationResult,
+  error: HostOverviewError,
+});
+
+export const DisableWorkflowSchedule = Rpc.make("DisableWorkflowSchedule", {
+  payload: { identity: ProjectIdentity, scheduleKey: Schema.String, requestKey: RequestKey },
+  success: WorkflowScheduleMutationResult,
+  error: HostOverviewError,
+});
+
+export const VisualizerApi = RpcGroup.make(
+  Health,
+  HostOverview,
+  EnableWorkflowSchedule,
+  DisableWorkflowSchedule,
+);

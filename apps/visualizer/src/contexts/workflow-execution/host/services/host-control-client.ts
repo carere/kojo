@@ -13,6 +13,12 @@ export interface HostControlClientShape {
     HostOverview,
     LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
   >;
+  readonly enableWorkflowSchedule: ReturnType<
+    typeof makeDefaultLocalClient
+  >["enableWorkflowSchedule"];
+  readonly disableWorkflowSchedule: ReturnType<
+    typeof makeDefaultLocalClient
+  >["disableWorkflowSchedule"];
 }
 
 export class HostControlClient extends Context.Service<HostControlClient, HostControlClientShape>()(
@@ -24,4 +30,16 @@ export const HostControlClientLive = Layer.succeed(HostControlClient, {
     () =>
       makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath()).getHostOverview,
   ),
+  enableWorkflowSchedule: (identity, scheduleKey, scheduleRevision, requestKey) =>
+    Effect.suspend(() =>
+      makeDefaultLocalClient(
+        process.env.KOJO_HOST_SOCKET ?? defaultSocketPath(),
+      ).enableWorkflowSchedule(identity, scheduleKey, scheduleRevision, requestKey),
+    ),
+  disableWorkflowSchedule: (identity, scheduleKey, requestKey) =>
+    Effect.suspend(() =>
+      makeDefaultLocalClient(
+        process.env.KOJO_HOST_SOCKET ?? defaultSocketPath(),
+      ).disableWorkflowSchedule(identity, scheduleKey, requestKey),
+    ),
 });

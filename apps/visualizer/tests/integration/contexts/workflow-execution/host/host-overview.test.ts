@@ -37,6 +37,8 @@ describe("Host overview", () => {
         getHostOverview: Effect.fail(
           new LocalTransportError({ message: "Kojo Host is unavailable." }),
         ),
+        enableWorkflowSchedule: () => Effect.die("Schedule control is not used by this test"),
+        disableWorkflowSchedule: () => Effect.die("Schedule control is not used by this test"),
       }),
     ),
   );
@@ -63,7 +65,7 @@ describe("Host overview", () => {
 
           expect(overview).toEqual({
             host: {
-              protocol: { major: 1, minor: 3 },
+              protocol: { major: 1, minor: 4 },
               hostVersion: "0.1.0",
               capabilities: [
                 "projects:list",
@@ -73,6 +75,11 @@ describe("Host overview", () => {
                 "projects:forget",
                 "workflows:list",
                 "workflows:show",
+                "schedules:list",
+                "schedules:show",
+                "schedules:next",
+                "schedules:enable",
+                "schedules:disable",
                 "runs:start",
                 "runs:list",
                 "runs:show",
@@ -81,6 +88,7 @@ describe("Host overview", () => {
             },
             projects: [],
             projectDefinitions: [],
+            workflowSchedules: [],
             workflowRuns: [],
           });
         }),

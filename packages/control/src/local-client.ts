@@ -28,6 +28,10 @@ import {
   type WorkflowRunListResult,
   type WorkflowRunQueryResult,
   type WorkflowRunStartResult,
+  type WorkflowScheduleListInput,
+  type WorkflowScheduleListResult,
+  type WorkflowScheduleMutationResult,
+  type WorkflowScheduleQueryResult,
 } from "./index";
 
 export class LocalTransportError extends Data.TaggedError("LocalTransportError")<{
@@ -156,6 +160,37 @@ export const makeLocalClient = (options: LocalClientOptions) => {
         client.ShowWorkflowDefinition({ identity, workflowKey }),
       ),
     );
+  const listWorkflowSchedules = (input: WorkflowScheduleListInput) =>
+    activateAndRetry(request("schedules:list", (client) => client.ListWorkflowSchedules(input)));
+  const showWorkflowSchedule = (identity: ProjectIdentity, scheduleKey: string) =>
+    activateAndRetry(
+      request("schedules:show", (client) => client.ShowWorkflowSchedule({ identity, scheduleKey })),
+    );
+  const listNextWorkflowSchedules = (input: WorkflowScheduleListInput) =>
+    activateAndRetry(
+      request("schedules:next", (client) => client.ListNextWorkflowSchedules(input)),
+    );
+  const enableWorkflowSchedule = (
+    identity: ProjectIdentity,
+    scheduleKey: string,
+    scheduleRevision: string,
+    requestKey: RequestKey,
+  ) =>
+    activateAndRetry(
+      request("schedules:enable", (client) =>
+        client.EnableWorkflowSchedule({ identity, scheduleKey, scheduleRevision, requestKey }),
+      ),
+    );
+  const disableWorkflowSchedule = (
+    identity: ProjectIdentity,
+    scheduleKey: string,
+    requestKey: RequestKey,
+  ) =>
+    activateAndRetry(
+      request("schedules:disable", (client) =>
+        client.DisableWorkflowSchedule({ identity, scheduleKey, requestKey }),
+      ),
+    );
   const startWorkflowRun = (
     identity: ProjectIdentity,
     workflowKey: string,
@@ -200,10 +235,28 @@ export const makeLocalClient = (options: LocalClientOptions) => {
               { concurrency: "unbounded" },
             )
           : [];
+        const schedules = host.capabilities.includes("schedules:list")
+          ? yield* Effect.forEach(
+              projects,
+              (project) =>
+                client.ListWorkflowSchedules({
+                  identity: project.identity,
+                  workflowKeys: [],
+                  conditions: [],
+                }),
+              { concurrency: "unbounded" },
+            )
+          : [];
         return {
           host,
           projects,
           projectDefinitions: definitions.flatMap((result) => (result.ok ? [result.snapshot] : [])),
+          workflowSchedules: schedules.flatMap((result, index) => {
+            const project = projects[index];
+            return result?.ok && project !== undefined
+              ? [{ project, schedules: result.schedules }]
+              : [];
+          }),
           workflowRuns: runs.flatMap((result, index) => {
             const project = projects[index];
             return result?.ok && project !== undefined ? [{ project, runs: result.runs }] : [];
@@ -238,6 +291,11 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     showProject,
     listWorkflowDefinitions,
     showWorkflowDefinition,
+    listWorkflowSchedules,
+    showWorkflowSchedule,
+    listNextWorkflowSchedules,
+    enableWorkflowSchedule,
+    disableWorkflowSchedule,
     startWorkflowRun,
     listWorkflowRuns,
     showWorkflowRun,
@@ -277,6 +335,42 @@ export const makeLocalClient = (options: LocalClientOptions) => {
       workflowKey: string,
     ) => Effect.Effect<
       WorkflowDefinitionQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly listWorkflowSchedules: (
+      input: WorkflowScheduleListInput,
+    ) => Effect.Effect<
+      WorkflowScheduleListResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly showWorkflowSchedule: (
+      identity: ProjectIdentity,
+      scheduleKey: string,
+    ) => Effect.Effect<
+      WorkflowScheduleQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly listNextWorkflowSchedules: (
+      input: WorkflowScheduleListInput,
+    ) => Effect.Effect<
+      WorkflowScheduleListResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly enableWorkflowSchedule: (
+      identity: ProjectIdentity,
+      scheduleKey: string,
+      scheduleRevision: string,
+      requestKey: RequestKey,
+    ) => Effect.Effect<
+      WorkflowScheduleMutationResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly disableWorkflowSchedule: (
+      identity: ProjectIdentity,
+      scheduleKey: string,
+      requestKey: RequestKey,
+    ) => Effect.Effect<
+      WorkflowScheduleMutationResult,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;
     readonly startWorkflowRun: (

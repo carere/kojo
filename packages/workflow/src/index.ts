@@ -18,6 +18,40 @@ export const WorkflowDefinitionRevision = Schema.String.check(
 ).pipe(Schema.brand("WorkflowDefinitionRevision"));
 export type WorkflowDefinitionRevision = typeof WorkflowDefinitionRevision.Type;
 
+export type WorkflowScheduleOverlapPolicy = "allow" | "skip";
+
+/**
+ * The only values an authored schedule input rule can receive. The instant is
+ * an absolute UTC instant; authors can format it in the schedule's declared
+ * time zone when their input needs local-calendar information.
+ */
+export interface WorkflowScheduleInput {
+  readonly scheduleKey: string;
+  readonly scheduledAt: Date;
+}
+
+/**
+ * An explicit revision is the author's compatibility declaration for a
+ * deterministic schedule-input calculation.
+ */
+export interface WorkflowScheduleInputRule<Input> {
+  readonly revision: string;
+  readonly resolve: (occurrence: WorkflowScheduleInput) => Input;
+}
+
+/** A recurring trigger attached to one Workflow Definition. */
+export interface WorkflowSchedule<Input> {
+  readonly scheduleKey: string;
+  /** Must name the Workflow Definition that owns this attached Schedule. */
+  readonly workflowKey: string;
+  /** A standard five-field cron expression (minute through weekday). */
+  readonly cron: string;
+  /** An explicit IANA time-zone name, for example "Europe/Paris". */
+  readonly timeZone: string;
+  readonly overlap?: WorkflowScheduleOverlapPolicy;
+  readonly input: WorkflowScheduleInputRule<Input>;
+}
+
 /**
  * Paths in a value schema that contain sensitive values. Paths use dot notation;
  * an empty array means that the corresponding value contains no marked fields.
@@ -39,6 +73,7 @@ export interface WorkflowDefinition<
   readonly successSchema: Success;
   readonly failureSchema: Failure;
   readonly sensitivity?: WorkflowSensitivity;
+  readonly schedules?: ReadonlyArray<WorkflowSchedule<Input["Type"]>>;
   /** Workflow Keys that this definition may invoke as children. */
   readonly childWorkflowKeys?: ReadonlyArray<string>;
   /**
@@ -58,6 +93,7 @@ export interface AnyWorkflowDefinition {
   readonly successSchema: Schema.Top;
   readonly failureSchema: Schema.Top;
   readonly sensitivity?: WorkflowSensitivity;
+  readonly schedules?: ReadonlyArray<WorkflowSchedule<unknown>>;
   readonly childWorkflowKeys?: ReadonlyArray<string>;
   readonly handler: (input: never) => Effect.Effect<unknown, unknown, never>;
 }
@@ -74,6 +110,10 @@ export const defineWorkflow = <
 >(
   definition: WorkflowDefinition<Input, Success, Failure>,
 ): WorkflowDefinition<Input, Success, Failure> => definition;
+
+/** Defines one immutable Workflow Schedule attached to a Workflow Definition. */
+export const defineSchedule = <Input>(schedule: WorkflowSchedule<Input>): WorkflowSchedule<Input> =>
+  schedule;
 
 export const defineConfig = <const Configuration extends KojoConfiguration>(
   configuration: Configuration,

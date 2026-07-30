@@ -69,6 +69,7 @@ test("shows Host connectivity and the authoritative empty Project state", async 
               },
               projects: [],
               projectDefinitions: [],
+              workflowSchedules: [],
               workflowRuns: [],
             })
           }
@@ -117,11 +118,13 @@ test("shows accepted Workflow Definition snapshots from the Host", async () => {
                         sourceIdentity: "source",
                         sensitivity: { input: ["token"], success: [], failure: [] },
                         childWorkflowKeys: [],
+                        schedules: [],
                       },
                     ],
                   },
                 },
               ],
+              workflowSchedules: [],
               workflowRuns: [
                 {
                   project: { identity, path: "/projects/demo" },

@@ -16,9 +16,11 @@ import {
 import {
   DrizzleProjectRepositoryLive,
   DrizzleWorkflowRunRepositoryLive,
+  DrizzleWorkflowScheduleRepositoryLive,
 } from "../contexts/workflow-execution/projects/repositories/drizzle-project-repository";
 import { makeLocalWorkflowBackendLayer } from "../contexts/workflow-execution/projects/services/local-workflow-backend";
 import { ProjectRuntimeLive } from "../contexts/workflow-execution/projects/services/project-runtime";
+import { ScheduleClockLive } from "../contexts/workflow-execution/schedules/services/schedule-clock";
 
 export const startLiveKojoHost = async () => {
   const socketPath = process.env.KOJO_HOST_SOCKET ?? defaultSocketPath();
@@ -42,6 +44,8 @@ export const startLiveKojoHost = async () => {
       projectIndex,
       projectLayout,
       DrizzleWorkflowRunRepositoryLive,
+      DrizzleWorkflowScheduleRepositoryLive,
+      ScheduleClockLive,
       workflowBackend,
       projectRuntime,
     ]),

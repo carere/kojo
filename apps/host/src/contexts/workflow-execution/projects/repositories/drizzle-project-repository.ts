@@ -15,7 +15,14 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { RequestKey, WorkflowRunListItem, WorkflowRunSnapshot } from "@kojo/control";
+import type {
+  RequestKey,
+  WorkflowRunListItem,
+  WorkflowRunSnapshot,
+  WorkflowScheduleDefinition,
+  WorkflowScheduleSnapshot,
+} from "@kojo/control";
+import type { WorkflowScheduleSnapshot as WorkflowScheduleDefinitionSnapshot } from "@kojo/control/project-definition-validation";
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
@@ -33,6 +40,7 @@ import {
   WorkflowRunRepository,
   type WorkflowRunStartRecord,
 } from "../../runs/repositories/workflow-run-repository";
+import { WorkflowScheduleRepository } from "../../schedules/repositories/workflow-schedule-repository";
 import { ProjectRepository } from "./project-repository";
 import {
   deletionIntents,
@@ -956,6 +964,158 @@ const withWritableProjectStore = <A>(
   }
 };
 
+type StoredSchedule = {
+  readonly applied_cron: string | null;
+  readonly applied_input_rule_revision: string | null;
+  readonly applied_overlap_policy: string | null;
+  readonly applied_revision: string | null;
+  readonly applied_time_zone: string | null;
+  readonly applied_workflow_key: string | null;
+  readonly condition: "available" | "unavailable" | "needs-attention";
+  readonly condition_reason_code: string | null;
+  readonly current_cron: string | null;
+  readonly current_input_rule_revision: string | null;
+  readonly current_overlap_policy: string | null;
+  readonly current_revision: string | null;
+  readonly current_time_zone: string | null;
+  readonly current_workflow_key: string | null;
+  readonly enabled_intent: number;
+  readonly high_water_mark_ms: number | null;
+  readonly next_occurrence_ms: number | null;
+  readonly row_version: number;
+  readonly schedule_key: string;
+};
+
+const scheduleSelect = `
+  SELECT schedule_key, enabled_intent, condition, condition_reason_code,
+    current_workflow_key, current_revision, current_cron, current_time_zone,
+    current_overlap_policy, current_input_rule_revision,
+    applied_workflow_key, applied_revision, applied_cron, applied_time_zone,
+    applied_overlap_policy, applied_input_rule_revision,
+    high_water_mark_ms, next_occurrence_ms, row_version
+  FROM kojo_workflow_schedule_states`;
+
+const readStoredSchedule = (
+  connection: Database,
+  scheduleKey: string,
+): StoredSchedule | undefined =>
+  (connection
+    .query(`${scheduleSelect} WHERE schedule_key = ?`)
+    .get(scheduleKey) as StoredSchedule | null) ?? undefined;
+
+const currentScheduleDefinition = (row: StoredSchedule): WorkflowScheduleDefinition | null => {
+  if (
+    row.current_workflow_key === null ||
+    row.current_revision === null ||
+    row.current_cron === null ||
+    row.current_time_zone === null ||
+    row.current_overlap_policy === null ||
+    row.current_input_rule_revision === null
+  ) {
+    return null;
+  }
+  return {
+    scheduleKey: row.schedule_key,
+    workflowKey: row.current_workflow_key,
+    revision: row.current_revision,
+    cron: row.current_cron,
+    timeZone: row.current_time_zone,
+    overlapPolicy: row.current_overlap_policy as "allow" | "skip",
+    inputRuleRevision: row.current_input_rule_revision,
+  };
+};
+
+const toScheduleSnapshot = (row: StoredSchedule): WorkflowScheduleSnapshot => {
+  const definition = currentScheduleDefinition(row);
+  const allowedActions =
+    row.enabled_intent === 1
+      ? (["disable"] as const)
+      : row.condition === "available"
+        ? (["enable"] as const)
+        : [];
+  return {
+    scheduleKey: row.schedule_key,
+    definition,
+    appliedRevision: row.applied_revision,
+    enabledIntent: row.enabled_intent === 1,
+    condition: row.condition,
+    conditionReasonCode: row.condition_reason_code,
+    highWaterMarkMs: row.high_water_mark_ms,
+    nextOccurrenceMs: row.next_occurrence_ms,
+    rowVersion: row.row_version,
+    allowedActions: [...allowedActions],
+  };
+};
+
+const listStoredSchedules = (connection: Database): ReadonlyArray<WorkflowScheduleSnapshot> =>
+  (
+    connection
+      .query(`${scheduleSelect} ORDER BY schedule_key ASC`)
+      .all() as ReadonlyArray<StoredSchedule>
+  ).map(toScheduleSnapshot);
+
+const toScheduleDefinition = (
+  definition: WorkflowScheduleDefinitionSnapshot,
+): WorkflowScheduleDefinition => ({
+  scheduleKey: definition.scheduleKey,
+  workflowKey: definition.workflowKey,
+  revision: definition.revision,
+  cron: definition.cron,
+  timeZone: definition.timeZone,
+  overlapPolicy: definition.overlapPolicy,
+  inputRuleRevision: definition.inputRuleRevision,
+});
+
+const sameScheduleDefinition = (row: StoredSchedule, definition: WorkflowScheduleDefinition) =>
+  row.current_workflow_key === definition.workflowKey &&
+  row.current_revision === definition.revision &&
+  row.current_cron === definition.cron &&
+  row.current_time_zone === definition.timeZone &&
+  row.current_overlap_policy === definition.overlapPolicy &&
+  row.current_input_rule_revision === definition.inputRuleRevision &&
+  row.applied_workflow_key === definition.workflowKey &&
+  row.applied_revision === definition.revision &&
+  row.applied_cron === definition.cron &&
+  row.applied_time_zone === definition.timeZone &&
+  row.applied_overlap_policy === definition.overlapPolicy &&
+  row.applied_input_rule_revision === definition.inputRuleRevision;
+
+const safeTimestamp = (value: number) => Math.max(0, Math.floor(value));
+
+const insertScheduleReceipt = (
+  connection: Database,
+  options: {
+    readonly acceptedAtMs: number;
+    readonly operationKind: "schedule.disable" | "schedule.enable";
+    readonly requestHash: Uint8Array;
+    readonly requestKey: RequestKey;
+    readonly scheduleKey: string;
+  },
+) => {
+  const resultJson = JSON.stringify({ scheduleKey: options.scheduleKey });
+  connection
+    .query(
+      `INSERT INTO kojo_control_requests(
+        request_key, operation_kind, request_sha256, target_kind, target_schedule_key, state,
+        result_encoding_version, result_schema_identity, result_json,
+        result_sensitivity_map_version, result_sensitivity_map_json, result_sha256,
+        created_at_ms, completed_at_ms
+      ) VALUES (?, ?, ?, 'schedule', ?, 'completed', 1, 'kojo.workflow-schedule-control/v1', ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      options.requestKey,
+      options.operationKind,
+      options.requestHash,
+      options.scheduleKey,
+      resultJson,
+      SENSITIVITY_MAP_VERSION,
+      encodeSensitivityMap(sensitivityMap([])),
+      hash(resultJson),
+      options.acceptedAtMs,
+      options.acceptedAtMs,
+    );
+};
+
 type StoredRun = {
   readonly accepted_at_ms: number;
   readonly engine_confirmed_at_ms: number | null;
@@ -1083,6 +1243,269 @@ const appendEvent = (
       hash(payloadJson),
     );
 };
+
+export const DrizzleWorkflowScheduleRepositoryLive = Layer.sync(WorkflowScheduleRepository, () => ({
+  reconcile: (project, definitions, appliedAtMs, nextOccurrence) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) =>
+        transaction(connection, () => {
+          const appliedAt = safeTimestamp(appliedAtMs);
+          const current = new Map(
+            (connection.query(scheduleSelect).all() as ReadonlyArray<StoredSchedule>).map((row) => [
+              row.schedule_key,
+              row,
+            ]),
+          );
+          const declared = new Set<string>();
+          for (const rawDefinition of definitions) {
+            const definition = toScheduleDefinition(rawDefinition);
+            declared.add(definition.scheduleKey);
+            const existing = current.get(definition.scheduleKey);
+            if (existing === undefined) {
+              connection
+                .query(
+                  `INSERT INTO kojo_workflow_schedule_states(
+                      schedule_key, enabled_intent, condition,
+                      current_workflow_key, current_revision, current_cron, current_time_zone,
+                      current_overlap_policy, current_input_rule_revision,
+                      applied_workflow_key, applied_revision, applied_cron, applied_time_zone,
+                      applied_overlap_policy, applied_input_rule_revision,
+                      row_version, created_at_ms, updated_at_ms
+                    ) VALUES (?, 0, 'available', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+                )
+                .run(
+                  definition.scheduleKey,
+                  definition.workflowKey,
+                  definition.revision,
+                  definition.cron,
+                  definition.timeZone,
+                  definition.overlapPolicy,
+                  definition.inputRuleRevision,
+                  definition.workflowKey,
+                  definition.revision,
+                  definition.cron,
+                  definition.timeZone,
+                  definition.overlapPolicy,
+                  definition.inputRuleRevision,
+                  appliedAt,
+                  appliedAt,
+                );
+              continue;
+            }
+            const changed = !sameScheduleDefinition(existing, definition);
+            const restored = existing.condition !== "available";
+            const needsNext =
+              existing.enabled_intent === 1 &&
+              (changed || restored || existing.next_occurrence_ms === null);
+            if (!changed && !restored && !needsNext) continue;
+            const strictlyAfter = Math.max(appliedAt, existing.high_water_mark_ms ?? 0);
+            const next =
+              existing.enabled_intent === 1 ? nextOccurrence(definition, strictlyAfter) : null;
+            connection
+              .query(
+                `UPDATE kojo_workflow_schedule_states
+                   SET condition = 'available', condition_reason_code = NULL,
+                     current_workflow_key = ?, current_revision = ?, current_cron = ?,
+                     current_time_zone = ?, current_overlap_policy = ?, current_input_rule_revision = ?,
+                     applied_workflow_key = ?, applied_revision = ?, applied_cron = ?,
+                     applied_time_zone = ?, applied_overlap_policy = ?, applied_input_rule_revision = ?,
+                     next_occurrence_ms = ?, row_version = row_version + 1, updated_at_ms = ?
+                   WHERE schedule_key = ?`,
+              )
+              .run(
+                definition.workflowKey,
+                definition.revision,
+                definition.cron,
+                definition.timeZone,
+                definition.overlapPolicy,
+                definition.inputRuleRevision,
+                definition.workflowKey,
+                definition.revision,
+                definition.cron,
+                definition.timeZone,
+                definition.overlapPolicy,
+                definition.inputRuleRevision,
+                next,
+                appliedAt,
+                definition.scheduleKey,
+              );
+          }
+          for (const [scheduleKey, existing] of current) {
+            if (declared.has(scheduleKey)) continue;
+            if (
+              existing.current_revision === null &&
+              existing.condition === "unavailable" &&
+              existing.next_occurrence_ms === null
+            ) {
+              continue;
+            }
+            connection
+              .query(
+                `UPDATE kojo_workflow_schedule_states
+                   SET condition = 'unavailable', condition_reason_code = 'schedule.definition-unavailable',
+                     current_workflow_key = NULL, current_revision = NULL, current_cron = NULL,
+                     current_time_zone = NULL, current_overlap_policy = NULL,
+                     current_input_rule_revision = NULL, next_occurrence_ms = NULL,
+                     row_version = row_version + 1, updated_at_ms = ?
+                   WHERE schedule_key = ?`,
+              )
+              .run(appliedAt, scheduleKey);
+          }
+          return listStoredSchedules(connection);
+        }),
+      ),
+    ),
+  list: (project, input) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) =>
+        listStoredSchedules(connection).filter(
+          (schedule) =>
+            (input.workflowKeys.length === 0 ||
+              (schedule.definition !== null &&
+                input.workflowKeys.includes(schedule.definition.workflowKey))) &&
+            (input.conditions.length === 0 || input.conditions.includes(schedule.condition)),
+        ),
+      ),
+    ),
+  show: (project, scheduleKey) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) => {
+        const schedule = readStoredSchedule(connection, scheduleKey);
+        return schedule === undefined ? undefined : toScheduleSnapshot(schedule);
+      }),
+    ),
+  enable: (input) =>
+    Effect.sync(() =>
+      withWritableProjectStore(input.project, (connection) =>
+        transaction(connection, () => {
+          const existingReceipt =
+            (connection
+              .query(
+                "SELECT operation_kind, request_sha256, target_schedule_key FROM kojo_control_requests WHERE request_key = ?",
+              )
+              .get(input.requestKey) as {
+              readonly operation_kind: string;
+              readonly request_sha256: Uint8Array;
+              readonly target_schedule_key: string | null;
+            } | null) ?? undefined;
+          if (existingReceipt !== undefined) {
+            if (
+              existingReceipt.operation_kind !== "schedule.enable" ||
+              !sameBytes(existingReceipt.request_sha256, input.requestHash) ||
+              existingReceipt.target_schedule_key !== input.scheduleKey
+            ) {
+              return { _tag: "request-key-conflict" as const };
+            }
+            const replayed = readStoredSchedule(connection, input.scheduleKey);
+            if (replayed === undefined) return { _tag: "schedule-not-found" as const };
+            return {
+              _tag: "accepted" as const,
+              alreadyApplied: true,
+              schedule: toScheduleSnapshot(replayed),
+            };
+          }
+          const schedule = readStoredSchedule(connection, input.scheduleKey);
+          if (schedule === undefined || currentScheduleDefinition(schedule) === null) {
+            return { _tag: "schedule-not-found" as const };
+          }
+          const definition = currentScheduleDefinition(schedule) as WorkflowScheduleDefinition;
+          if (definition.revision !== input.scheduleRevision) {
+            return {
+              _tag: "schedule-revision-conflict" as const,
+              schedule: toScheduleSnapshot(schedule),
+            };
+          }
+          const acceptedAt = safeTimestamp(input.acceptedAtMs);
+          const next =
+            schedule.enabled_intent === 1 && schedule.next_occurrence_ms !== null
+              ? schedule.next_occurrence_ms
+              : input.nextOccurrence(
+                  definition,
+                  Math.max(acceptedAt, schedule.high_water_mark_ms ?? 0),
+                );
+          connection
+            .query(
+              `UPDATE kojo_workflow_schedule_states
+                 SET enabled_intent = 1, next_occurrence_ms = ?, row_version = row_version + 1,
+                   updated_at_ms = ? WHERE schedule_key = ?`,
+            )
+            .run(next, acceptedAt, input.scheduleKey);
+          insertScheduleReceipt(connection, {
+            acceptedAtMs: acceptedAt,
+            operationKind: "schedule.enable",
+            requestHash: input.requestHash,
+            requestKey: input.requestKey,
+            scheduleKey: input.scheduleKey,
+          });
+          const enabled = readStoredSchedule(connection, input.scheduleKey);
+          if (enabled === undefined) throw new Error("Workflow Schedule disappeared after enable");
+          return {
+            _tag: "accepted" as const,
+            alreadyApplied: false,
+            schedule: toScheduleSnapshot(enabled),
+          };
+        }),
+      ),
+    ),
+  disable: (input) =>
+    Effect.sync(() =>
+      withWritableProjectStore(input.project, (connection) =>
+        transaction(connection, () => {
+          const existingReceipt =
+            (connection
+              .query(
+                "SELECT operation_kind, request_sha256, target_schedule_key FROM kojo_control_requests WHERE request_key = ?",
+              )
+              .get(input.requestKey) as {
+              readonly operation_kind: string;
+              readonly request_sha256: Uint8Array;
+              readonly target_schedule_key: string | null;
+            } | null) ?? undefined;
+          if (existingReceipt !== undefined) {
+            if (
+              existingReceipt.operation_kind !== "schedule.disable" ||
+              !sameBytes(existingReceipt.request_sha256, input.requestHash) ||
+              existingReceipt.target_schedule_key !== input.scheduleKey
+            ) {
+              return { _tag: "request-key-conflict" as const };
+            }
+            const replayed = readStoredSchedule(connection, input.scheduleKey);
+            if (replayed === undefined) return { _tag: "schedule-not-found" as const };
+            return {
+              _tag: "accepted" as const,
+              alreadyApplied: true,
+              schedule: toScheduleSnapshot(replayed),
+            };
+          }
+          const schedule = readStoredSchedule(connection, input.scheduleKey);
+          if (schedule === undefined) return { _tag: "schedule-not-found" as const };
+          const acceptedAt = safeTimestamp(input.acceptedAtMs);
+          connection
+            .query(
+              `UPDATE kojo_workflow_schedule_states
+                 SET enabled_intent = 0, next_occurrence_ms = NULL, row_version = row_version + 1,
+                   updated_at_ms = ? WHERE schedule_key = ?`,
+            )
+            .run(acceptedAt, input.scheduleKey);
+          insertScheduleReceipt(connection, {
+            acceptedAtMs: acceptedAt,
+            operationKind: "schedule.disable",
+            requestHash: input.requestHash,
+            requestKey: input.requestKey,
+            scheduleKey: input.scheduleKey,
+          });
+          const disabled = readStoredSchedule(connection, input.scheduleKey);
+          if (disabled === undefined)
+            throw new Error("Workflow Schedule disappeared after disable");
+          return {
+            _tag: "accepted" as const,
+            alreadyApplied: false,
+            schedule: toScheduleSnapshot(disabled),
+          };
+        }),
+      ),
+    ),
+}));
 
 export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository, () => ({
   acceptManualStart: (start: WorkflowRunStartRecord) =>
