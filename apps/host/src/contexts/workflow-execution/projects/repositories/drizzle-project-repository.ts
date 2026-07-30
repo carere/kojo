@@ -1050,6 +1050,7 @@ const readRunSnapshot = (
 const appendEvent = (
   connection: Database,
   options: {
+    readonly engineOperationId?: string;
     readonly eventId: string;
     readonly kind: string;
     readonly payload: unknown;
@@ -1064,9 +1065,10 @@ const appendEvent = (
     .query(
       `INSERT INTO kojo_execution_events(
         event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms,
+        engine_operation_id,
         payload_encoding_version, payload_schema_identity, payload_json,
         payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256
-      ) VALUES (?, ?, ?, 1, ?, 1, ?, 1, 'kojo.workflow-run-event/v1', ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, 1, ?, 1, ?, ?, 1, 'kojo.workflow-run-event/v1', ?, ?, ?, ?)`,
     )
     .run(
       options.eventId,
@@ -1074,6 +1076,7 @@ const appendEvent = (
       options.sequence,
       options.kind,
       options.recordedAtMs,
+      options.engineOperationId ?? null,
       payloadJson,
       SENSITIVITY_MAP_VERSION,
       encodeSensitivityMap(options.sensitivityMap),
@@ -1301,6 +1304,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
             .query("SELECT last_event_sequence FROM kojo_workflow_runs WHERE run_id = ?")
             .get(runId) as { readonly last_event_sequence: number };
           appendEvent(connection, {
+            engineOperationId: operation.operation_id,
             eventId,
             kind: "run.engine-confirmed",
             payload: { runId },
