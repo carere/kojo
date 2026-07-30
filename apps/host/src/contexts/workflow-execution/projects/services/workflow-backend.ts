@@ -6,8 +6,16 @@ declare const WorkflowBackendReferenceTypeId: unique symbol;
 export interface WorkflowBackendReference {
   readonly [WorkflowBackendReferenceTypeId]: typeof WorkflowBackendReferenceTypeId;
   readonly workflowKey: string;
+  readonly workflowRevision: string;
   readonly runId: string;
 }
+
+export const workflowBackendReference = (
+  workflowKey: string,
+  workflowRevision: string,
+  runId: string,
+): WorkflowBackendReference =>
+  ({ workflowKey, workflowRevision, runId }) as WorkflowBackendReference;
 
 export type WorkflowBackendState =
   | { readonly _tag: "Pending" }
@@ -37,6 +45,8 @@ export interface LocalWorkflowDefinition<
   Failure extends Schema.Top = typeof Schema.Never,
 > {
   readonly workflowKey: string;
+  /** A missing revision is retained for legacy backend fixtures only. */
+  readonly revision?: string;
   readonly inputSchema: Input;
   readonly successSchema: Success;
   readonly failureSchema?: Failure;
@@ -48,6 +58,7 @@ export interface LocalWorkflowDefinition<
 
 export interface AnyLocalWorkflowDefinition {
   readonly workflowKey: string;
+  readonly revision?: string;
   readonly inputSchema: Schema.Top;
   readonly successSchema: Schema.Top;
   readonly failureSchema?: Schema.Top;
@@ -66,10 +77,15 @@ export interface WorkflowBackendShape {
   readonly postflight: (project: ProjectSnapshot) => Effect.Effect<boolean>;
   readonly readiness: (project: ProjectSnapshot) => Effect.Effect<WorkflowBackendAssessment>;
   readonly release: (project: ProjectSnapshot) => Effect.Effect<void>;
+  readonly register: (
+    project: ProjectSnapshot,
+    definitions: ReadonlyArray<AnyLocalWorkflowDefinition>,
+  ) => Effect.Effect<void>;
   readonly submit: (
     project: ProjectSnapshot,
     options: {
       readonly workflowKey: string;
+      readonly workflowRevision: string;
       readonly runId: string;
       readonly input: unknown;
     },

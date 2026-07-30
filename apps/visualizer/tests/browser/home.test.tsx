@@ -1,4 +1,4 @@
-import { ProjectIdentity } from "@kojo/control";
+import { ProjectIdentity, WorkflowRunId } from "@kojo/control";
 import { Schema } from "effect";
 import { render } from "solid-js/web";
 import { afterEach, expect, test } from "vitest";
@@ -69,6 +69,7 @@ test("shows Host connectivity and the authoritative empty Project state", async 
               },
               projects: [],
               projectDefinitions: [],
+              workflowRuns: [],
             })
           }
         />
@@ -88,6 +89,7 @@ test("shows accepted Workflow Definition snapshots from the Host", async () => {
   const identity = Schema.decodeUnknownSync(ProjectIdentity)(
     "00000000-0000-7000-8000-000000000001",
   );
+  const runId = Schema.decodeUnknownSync(WorkflowRunId)("00000000-0000-7000-8000-000000000010");
   dispose = render(
     () => (
       <ColorModeProvider initialColorMode="light">
@@ -120,6 +122,23 @@ test("shows accepted Workflow Definition snapshots from the Host", async () => {
                   },
                 },
               ],
+              workflowRuns: [
+                {
+                  project: { identity, path: "/projects/demo" },
+                  runs: [
+                    {
+                      runId,
+                      workflowKey: "echo",
+                      workflowRevision: "1",
+                      state: "completed",
+                      acceptedAtMs: 1,
+                      engineConfirmedAtMs: 1,
+                      updatedAtMs: 2,
+                      finalizedAtMs: 2,
+                    },
+                  ],
+                },
+              ],
             })
           }
         />
@@ -129,5 +148,7 @@ test("shows accepted Workflow Definition snapshots from the Host", async () => {
   );
 
   await expect.element(page.getByText("Accepted Workflow Definitions")).toBeVisible();
-  await expect.element(page.getByText("echo")).toBeVisible();
+  await expect.element(page.getByText("echo 1")).toBeVisible();
+  await expect.element(page.getByText("00000000-0000-7000-8000-000000000010")).toBeVisible();
+  await expect.element(page.getByText("completed")).toBeVisible();
 });

@@ -21,6 +21,11 @@ import {
   showProject,
   showWorkflowDefinition,
 } from "../../../workflow-authoring/projects/use-cases/manage-projects";
+import {
+  listWorkflowRuns,
+  showWorkflowRun,
+  startWorkflowRun,
+} from "../../runs/use-cases/manage-workflow-runs";
 import type { HostIdentity } from "../models/host-identity";
 import { HOST_INFORMATION } from "../models/host-information";
 import { getHostCapabilities, getHostInformation } from "../use-cases/get-host-information";
@@ -153,6 +158,27 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           "ShowProject",
           String(options.requestId),
           showWorkflowDefinition(identity, workflowKey),
+        ),
+      StartWorkflowRun: ({ identity, workflowKey, workflowRevision, input, requestKey }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "StartWorkflowRun",
+          String(options.requestId),
+          startWorkflowRun({ identity, workflowKey, workflowRevision, input, requestKey }),
+        ),
+      ListWorkflowRuns: (input, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ListWorkflowRuns",
+          String(options.requestId),
+          listWorkflowRuns(input),
+        ),
+      ShowWorkflowRun: ({ identity, runId }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ShowWorkflowRun",
+          String(options.requestId),
+          showWorkflowRun(identity, runId),
         ),
       RegisterProject: ({ path, requestKey }, options) =>
         withHostRequestDiagnostic(

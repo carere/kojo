@@ -13,7 +13,10 @@ import {
   makeKojoControlServerLayer,
   startKojoHost,
 } from "../contexts/workflow-execution/control/services/local-host";
-import { DrizzleProjectRepositoryLive } from "../contexts/workflow-execution/projects/repositories/drizzle-project-repository";
+import {
+  DrizzleProjectRepositoryLive,
+  DrizzleWorkflowRunRepositoryLive,
+} from "../contexts/workflow-execution/projects/repositories/drizzle-project-repository";
 import { makeLocalWorkflowBackendLayer } from "../contexts/workflow-execution/projects/services/local-workflow-backend";
 import { ProjectRuntimeLive } from "../contexts/workflow-execution/projects/services/project-runtime";
 
@@ -29,6 +32,10 @@ export const startLiveKojoHost = async () => {
   const protocol = RpcServer.layerProtocolSocketServer.pipe(
     Layer.provide([BunSocketServer.layer({ path: socketPath }), RpcSerialization.layerNdjson]),
   );
+  const workflowBackend = makeLocalWorkflowBackendLayer(hostIdentity);
+  const projectRuntime = ProjectRuntimeLive.pipe(
+    Layer.provide([DrizzleProjectRepositoryLive, workflowBackend]),
+  );
   const serverLayer = makeKojoControlServerLayer(
     protocol,
     makeHostDiagnosticLoggerLayer(diagnosticPath),
@@ -37,9 +44,9 @@ export const startLiveKojoHost = async () => {
     Layer.provide([
       projectIndex,
       projectLayout,
-      ProjectRuntimeLive.pipe(
-        Layer.provide([DrizzleProjectRepositoryLive, makeLocalWorkflowBackendLayer(hostIdentity)]),
-      ),
+      DrizzleWorkflowRunRepositoryLive,
+      workflowBackend,
+      projectRuntime,
     ]),
   ) as Layer.Layer<never, unknown>;
 

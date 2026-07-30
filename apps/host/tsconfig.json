@@ -8,6 +8,9 @@
   "references": [
     {
       "path": "../../packages/control"
+    },
+    {
+      "path": "../../packages/workflow"
     }
   ]
 }

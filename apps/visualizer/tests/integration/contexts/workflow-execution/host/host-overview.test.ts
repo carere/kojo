@@ -73,10 +73,14 @@ describe("Host overview", () => {
                 "projects:forget",
                 "workflows:list",
                 "workflows:show",
+                "runs:start",
+                "runs:list",
+                "runs:show",
               ],
             },
             projects: [],
             projectDefinitions: [],
+            workflowRuns: [],
           });
         }),
       ({ host, previousSocketPath }) =>

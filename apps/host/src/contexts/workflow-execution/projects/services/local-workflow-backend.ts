@@ -48,6 +48,7 @@ const configure = (sql: SqlClient.SqlClient) =>
 
 interface ActiveBackend {
   readonly engine: WorkflowEngine.WorkflowEngine["Service"];
+  readonly entries: Map<string, Entry>;
   readonly scope: Scope.Closeable;
   readonly sharding: Sharding.Sharding["Service"];
 }
@@ -66,8 +67,8 @@ export const makeLocalWorkflowBackendLayer = (
   hostIdentity: string,
   definitions: ReadonlyArray<AnyLocalWorkflowDefinition> = [],
 ) => {
-  const entries = makeEntries(definitions);
-  const registrationLayer = entries.reduce<
+  const defaultEntries = makeEntries(definitions);
+  const registrationLayer = defaultEntries.reduce<
     Layer.Layer<never, never, WorkflowEngine.WorkflowEngine>
   >((layer, entry) => Layer.merge(layer, entry.registration), Layer.empty);
 
@@ -174,7 +175,12 @@ export const makeLocalWorkflowBackendLayer = (
               yield* Scope.close(scope, Exit.void);
               return false;
             }
-            active.set(project.path, { engine, scope, sharding });
+            active.set(project.path, {
+              engine,
+              entries: new Map(defaultEntries.map((entry) => [entry.identity, entry])),
+              scope,
+              sharding,
+            });
             return true;
           }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)));
         }).pipe(Effect.catchCause(() => quiesce(project.path).pipe(Effect.as(false))));
@@ -190,6 +196,24 @@ export const makeLocalWorkflowBackendLayer = (
 
       const release = (project: ProjectSnapshot) =>
         quiesce(project.path).pipe(Effect.andThen(releaseOwnership(project.path)));
+
+      const register = (
+        project: ProjectSnapshot,
+        definitions: ReadonlyArray<AnyLocalWorkflowDefinition>,
+      ) =>
+        Effect.gen(function* () {
+          const backend = getActiveBackend(active, project);
+          for (const entry of makeEntries(definitions)) {
+            if (backend.entries.has(entry.identity)) continue;
+            yield* Layer.buildWithScope(
+              entry.registration.pipe(
+                Layer.provide(Layer.succeed(WorkflowEngine.WorkflowEngine, backend.engine)),
+              ),
+              backend.scope,
+            );
+            backend.entries.set(entry.identity, entry);
+          }
+        });
 
       yield* Effect.addFinalizer(() =>
         Effect.forEach(Array.from(ownership.keys()), releaseOwnership, { discard: true }),
@@ -207,18 +231,23 @@ export const makeLocalWorkflowBackendLayer = (
             return (yield* postflight(project)) ? "ready" : "needs-attention";
           }).pipe(Effect.catchCause(() => Effect.succeed("needs-attention" as const))),
         release,
-        submit: (project, { workflowKey, runId, input }) =>
+        register,
+        submit: (project, { workflowKey, workflowRevision, runId, input }) =>
           Effect.suspend(() => {
             const backend = getActiveBackend(active, project);
-            const entry = getEntry(entries, workflowKey);
+            const entry = getEntry(backend.entries, workflowKey, workflowRevision);
             return entry
               .submit(backend.engine, runId, input)
-              .pipe(Effect.as(makeReference(workflowKey, runId)));
+              .pipe(Effect.as(makeReference(workflowKey, workflowRevision, runId)));
           }),
         observe: (project, reference) =>
           Effect.suspend(() => {
             const backend = getActiveBackend(active, project);
-            const entry = getEntry(entries, reference.workflowKey);
+            const entry = getEntry(
+              backend.entries,
+              reference.workflowKey,
+              reference.workflowRevision,
+            );
             return entry.observe(backend.engine, reference.runId);
           }),
       };
@@ -227,7 +256,9 @@ export const makeLocalWorkflowBackendLayer = (
 };
 
 interface Entry {
+  readonly identity: string;
   readonly workflowKey: string;
+  readonly workflowRevision: string;
   readonly submit: (
     engine: WorkflowEngine.WorkflowEngine["Service"],
     runId: string,
@@ -243,14 +274,16 @@ interface Entry {
 const makeEntries = (
   definitions: ReadonlyArray<AnyLocalWorkflowDefinition>,
 ): ReadonlyArray<Entry> => {
-  const workflowKeys = new Set<string>();
+  const identities = new Set<string>();
   return definitions.map((definition) => {
-    if (workflowKeys.has(definition.workflowKey)) {
-      throw new Error(`Duplicate Workflow Key: ${definition.workflowKey}`);
+    const workflowRevision = definition.revision ?? "default";
+    const identity = `${definition.workflowKey}:${workflowRevision}`;
+    if (identities.has(identity)) {
+      throw new Error(`Duplicate Workflow Definition: ${identity}`);
     }
-    workflowKeys.add(definition.workflowKey);
+    identities.add(identity);
 
-    const workflow = Workflow.make(`Kojo/${definition.workflowKey}`, {
+    const workflow = Workflow.make(`Kojo/${definition.workflowKey}/${workflowRevision}`, {
       payload: {
         runId: Schema.String,
         input: Schema.Unknown,
@@ -264,11 +297,19 @@ const makeEntries = (
       Schema.decodeUnknownEffect(definition.inputSchema)(input).pipe(
         Effect.orDie,
         Effect.flatMap((decoded) => definition.execute(decoded as never, operations)),
+        Effect.flatMap((result) =>
+          Schema.encodeUnknownEffect(definition.successSchema)(result).pipe(
+            Effect.orDie,
+            Effect.as(result),
+          ),
+        ),
       ),
     );
 
     return {
+      identity,
       workflowKey: definition.workflowKey,
+      workflowRevision,
       submit: (engine, runId, input) =>
         workflow.executionId({ runId, input }).pipe(
           Effect.flatMap((executionId) =>
@@ -285,6 +326,7 @@ const makeEntries = (
         workflow.executionId({ runId, input: undefined }).pipe(
           Effect.flatMap((executionId) => engine.poll(workflow, executionId)),
           Effect.map(toBackendState),
+          Effect.catchCause(() => Effect.succeed({ _tag: "Failed" } as const)),
         ) as unknown as Effect.Effect<WorkflowBackendState>,
       registration: registration as unknown as Layer.Layer<
         never,
@@ -332,14 +374,22 @@ const getActiveBackend = (
   return backend;
 };
 
-const getEntry = (entries: ReadonlyArray<Entry>, workflowKey: string): Entry => {
-  const entry = entries.find((candidate) => candidate.workflowKey === workflowKey);
+const getEntry = (
+  entries: ReadonlyMap<string, Entry>,
+  workflowKey: string,
+  workflowRevision: string,
+): Entry => {
+  const entry = entries.get(`${workflowKey}:${workflowRevision}`);
   if (entry === undefined) throw new Error(`Unknown Workflow Key: ${workflowKey}`);
   return entry;
 };
 
-const makeReference = (workflowKey: string, runId: string): WorkflowBackendReference =>
-  ({ workflowKey, runId }) as WorkflowBackendReference;
+const makeReference = (
+  workflowKey: string,
+  workflowRevision: string,
+  runId: string,
+): WorkflowBackendReference =>
+  ({ workflowKey, workflowRevision, runId }) as WorkflowBackendReference;
 
 const toBackendState = (
   result: Option.Option<Workflow.Result<unknown, unknown>>,

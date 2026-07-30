@@ -427,6 +427,7 @@ it.effect("forgets the moved Project snapshot after queued registration complete
       Effect.sync(() => {
         releasedPaths.push(project.path);
       }),
+    register: () => Effect.void,
     submit: () => Effect.die("Workflow submission is not used by Project authoring tests"),
     observe: () => Effect.die("Workflow observation is not used by Project authoring tests"),
   });

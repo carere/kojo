@@ -15,10 +15,15 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { RequestKey, WorkflowRunListItem, WorkflowRunSnapshot } from "@kojo/control";
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { Effect, Layer, Schema } from "effect";
+import {
+  WorkflowRunRepository,
+  type WorkflowRunStartRecord,
+} from "../../runs/repositories/workflow-run-repository";
 import { ProjectRepository } from "./project-repository";
 import {
   deletionIntents,
@@ -701,3 +706,405 @@ export const DrizzleProjectRepositoryLive = Layer.sync(ProjectRepository, () => 
     inspectForgetBlockers: (project) => Effect.sync(() => inspectBlockers(project)),
   };
 });
+
+const hash = (value: string) => createHash("sha256").update(value).digest();
+
+const sameBytes = (left: Uint8Array, right: Uint8Array) =>
+  left.length === right.length && left.every((value, index) => value === right[index]);
+
+const transaction = <A>(connection: Database, operation: () => A): A => {
+  connection.exec("BEGIN IMMEDIATE");
+  try {
+    const result = operation();
+    connection.exec("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      connection.exec("ROLLBACK");
+    } catch {
+      // The statement which failed may already have rolled the transaction back.
+    }
+    throw error;
+  }
+};
+
+const withWritableProjectStore = <A>(
+  project: { readonly path: string },
+  operation: (connection: Database) => A,
+): A => {
+  const path = databasePath(project.path);
+  assertDatabaseFile(path);
+  const connection = new Database(path, { strict: true });
+  try {
+    configureWritable(connection);
+    return operation(connection);
+  } finally {
+    connection.close();
+  }
+};
+
+type StoredRun = {
+  readonly accepted_at_ms: number;
+  readonly engine_confirmed_at_ms: number | null;
+  readonly finalized_at_ms: number | null;
+  readonly outcome_summary_json: string | null;
+  readonly run_id: string;
+  readonly start_request_key: string;
+  readonly state: string;
+  readonly updated_at_ms: number;
+  readonly workflow_key: string;
+  readonly workflow_revision: string;
+};
+
+const readStoredRun = (connection: Database, runId: string): StoredRun | undefined =>
+  (connection
+    .query(
+      `SELECT run_id, start_request_key, workflow_key, workflow_revision, state,
+        accepted_at_ms, engine_confirmed_at_ms, updated_at_ms, finalized_at_ms, outcome_summary_json
+       FROM kojo_workflow_runs WHERE run_id = ?`,
+    )
+    .get(runId) as StoredRun | null) ?? undefined;
+
+const toRunListItem = (row: StoredRun): WorkflowRunListItem => ({
+  runId: row.run_id as WorkflowRunListItem["runId"],
+  workflowKey: row.workflow_key,
+  workflowRevision: row.workflow_revision,
+  state: row.state as WorkflowRunListItem["state"],
+  acceptedAtMs: row.accepted_at_ms,
+  engineConfirmedAtMs: row.engine_confirmed_at_ms,
+  updatedAtMs: row.updated_at_ms,
+  finalizedAtMs: row.finalized_at_ms,
+});
+
+const readRunSnapshot = (connection: Database, runId: string): WorkflowRunSnapshot | undefined => {
+  const row = readStoredRun(connection, runId);
+  if (row === undefined) return undefined;
+  const accepted =
+    (connection
+      .query(
+        "SELECT payload_json FROM kojo_execution_events WHERE run_id = ? AND sequence = 1 AND kind = 'run.accepted'",
+      )
+      .get(runId) as { readonly payload_json: string } | null) ?? undefined;
+  if (accepted === undefined) throw new Error("Workflow Run is missing its Start Snapshot");
+  return {
+    ...toRunListItem(row),
+    startRequestKey: row.start_request_key as RequestKey,
+    startSnapshot: JSON.parse(accepted.payload_json) as WorkflowRunSnapshot["startSnapshot"],
+    outcome:
+      row.outcome_summary_json === null
+        ? null
+        : (JSON.parse(row.outcome_summary_json) as WorkflowRunSnapshot["outcome"]),
+  };
+};
+
+const appendEvent = (
+  connection: Database,
+  options: {
+    readonly eventId: string;
+    readonly kind: string;
+    readonly payload: unknown;
+    readonly recordedAtMs: number;
+    readonly runId: string;
+    readonly sequence: number;
+  },
+) => {
+  const payloadJson = JSON.stringify(options.payload);
+  connection
+    .query(
+      `INSERT INTO kojo_execution_events(
+        event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms,
+        payload_encoding_version, payload_schema_identity, payload_json,
+        payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256
+      ) VALUES (?, ?, ?, 1, ?, 1, ?, 1, 'kojo.workflow-run-event/v1', ?, 1, '{}', ?)`,
+    )
+    .run(
+      options.eventId,
+      options.runId,
+      options.sequence,
+      options.kind,
+      options.recordedAtMs,
+      payloadJson,
+      hash(payloadJson),
+    );
+};
+
+export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository, () => ({
+  acceptManualStart: (start: WorkflowRunStartRecord) =>
+    Effect.sync(() =>
+      withWritableProjectStore(start.project, (connection) =>
+        transaction(connection, () => {
+          const existing =
+            (connection
+              .query(
+                "SELECT operation_kind, request_sha256, target_run_id FROM kojo_control_requests WHERE request_key = ?",
+              )
+              .get(start.requestKey) as {
+              readonly operation_kind: string;
+              readonly request_sha256: Uint8Array;
+              readonly target_run_id: string | null;
+            } | null) ?? undefined;
+          if (existing !== undefined) {
+            if (
+              existing.operation_kind !== "run.start" ||
+              !sameBytes(existing.request_sha256, start.requestHash) ||
+              existing.target_run_id === null
+            ) {
+              return { _tag: "request-key-conflict" as const };
+            }
+            const run = readRunSnapshot(connection, existing.target_run_id);
+            if (run === undefined)
+              throw new Error("Workflow Run start receipt has no Workflow Run");
+            return { _tag: "accepted" as const, run, alreadyApplied: true };
+          }
+
+          const engineReferenceJson = JSON.stringify({
+            kind: "effect-workflow",
+            runId: start.runId,
+            workflowKey: start.workflowKey,
+            workflowRevision: start.workflowRevision,
+          });
+          const operationJson = JSON.stringify({
+            input: start.encodedInput,
+            workflowKey: start.workflowKey,
+            workflowRevision: start.workflowRevision,
+          });
+          const resultJson = JSON.stringify({ runId: start.runId });
+          const eventId = randomUUID();
+          const operationId = randomUUID();
+
+          connection
+            .query(
+              `INSERT INTO kojo_workflow_runs(
+                run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision,
+                engine_reference_version, engine_reference_json, engine_reference_sha256,
+                trigger_kind, state, last_event_sequence, row_version, accepted_at_ms, updated_at_ms
+              ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, 'manual', 'running', 1, 1, ?, ?)`,
+            )
+            .run(
+              start.runId,
+              start.requestKey,
+              start.requestHash,
+              start.workflowKey,
+              start.workflowRevision,
+              engineReferenceJson,
+              hash(engineReferenceJson),
+              start.acceptedAtMs,
+              start.acceptedAtMs,
+            );
+          connection
+            .query(
+              `INSERT INTO kojo_control_requests(
+                request_key, operation_kind, request_sha256, target_kind, target_run_id, state,
+                result_encoding_version, result_schema_identity, result_json,
+                result_sensitivity_map_version, result_sensitivity_map_json, result_sha256,
+                created_at_ms, completed_at_ms
+              ) VALUES (?, 'run.start', ?, 'run', ?, 'completed', 1, 'kojo.workflow-run-start/v1', ?, 1, '{}', ?, ?, ?)`,
+            )
+            .run(
+              start.requestKey,
+              start.requestHash,
+              start.runId,
+              resultJson,
+              hash(resultJson),
+              start.acceptedAtMs,
+              start.acceptedAtMs,
+            );
+          appendEvent(connection, {
+            eventId,
+            kind: "run.accepted",
+            payload: start.startSnapshot,
+            recordedAtMs: start.acceptedAtMs,
+            runId: start.runId,
+            sequence: 1,
+          });
+          connection
+            .query(
+              `INSERT INTO kojo_engine_operations(
+                operation_id, run_id, kind, operation_key, request_encoding_version,
+                request_schema_identity, request_json, request_sensitivity_map_version,
+                request_sensitivity_map_json, request_sha256, state, attempt_count,
+                next_attempt_at_ms, created_at_ms, updated_at_ms
+              ) VALUES (?, ?, 'submit', 'initial', 1, 'kojo.workflow-run-submit/v1', ?, 1, '{}', ?, 'pending', 0, ?, ?, ?)`,
+            )
+            .run(
+              operationId,
+              start.runId,
+              operationJson,
+              hash(operationJson),
+              start.acceptedAtMs,
+              start.acceptedAtMs,
+              start.acceptedAtMs,
+            );
+          const run = readRunSnapshot(connection, start.runId);
+          if (run === undefined) throw new Error("Workflow Run was not stored");
+          return { _tag: "accepted" as const, run, alreadyApplied: false };
+        }),
+      ),
+    ),
+  list: (project, input) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) => {
+        const clauses: Array<string> = [];
+        const parameters: Array<string | number> = [];
+        if (input.workflowKeys.length > 0) {
+          clauses.push(`workflow_key IN (${input.workflowKeys.map(() => "?").join(", ")})`);
+          parameters.push(...input.workflowKeys);
+        }
+        if (input.states.length > 0) {
+          clauses.push(`state IN (${input.states.map(() => "?").join(", ")})`);
+          parameters.push(...input.states);
+        }
+        parameters.push(input.limit);
+        const where = clauses.length === 0 ? "" : `WHERE ${clauses.join(" AND ")}`;
+        const rows = connection
+          .query(
+            `SELECT run_id, start_request_key, workflow_key, workflow_revision, state,
+              accepted_at_ms, engine_confirmed_at_ms, updated_at_ms, finalized_at_ms, outcome_summary_json
+             FROM kojo_workflow_runs ${where}
+             ORDER BY accepted_at_ms DESC, run_id DESC LIMIT ?`,
+          )
+          .all(...parameters) as ReadonlyArray<StoredRun>;
+        return rows.map(toRunListItem);
+      }),
+    ),
+  show: (project, runId) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) => readRunSnapshot(connection, runId)),
+    ),
+  pendingSubmissions: (project, runId) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) => {
+        const rows = connection
+          .query(
+            `SELECT operation.run_id, run.workflow_key, run.workflow_revision, operation.request_json
+             FROM kojo_engine_operations operation
+             JOIN kojo_workflow_runs run ON run.run_id = operation.run_id
+             WHERE operation.kind = 'submit' AND operation.state = 'pending'
+             ${runId === undefined ? "" : "AND operation.run_id = ?"}
+             ORDER BY operation.created_at_ms ASC`,
+          )
+          .all(...(runId === undefined ? [] : [runId])) as ReadonlyArray<{
+          readonly request_json: string;
+          readonly run_id: string;
+          readonly workflow_key: string;
+          readonly workflow_revision: string;
+        }>;
+        return rows.map((row) => {
+          const request = JSON.parse(row.request_json) as { readonly input: unknown };
+          return {
+            project,
+            runId: row.run_id,
+            workflowKey: row.workflow_key,
+            workflowRevision: row.workflow_revision,
+            input: request.input,
+          };
+        });
+      }),
+    ),
+  activeRuns: (project) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) => {
+        const rows = connection
+          .query(
+            `SELECT run_id, workflow_key, workflow_revision
+             FROM kojo_workflow_runs
+             WHERE state IN ('running', 'suspended', 'stopping')
+             ORDER BY accepted_at_ms ASC, run_id ASC`,
+          )
+          .all() as ReadonlyArray<{
+          readonly run_id: string;
+          readonly workflow_key: string;
+          readonly workflow_revision: string;
+        }>;
+        return rows.map((row) => ({
+          project,
+          runId: row.run_id,
+          workflowKey: row.workflow_key,
+          workflowRevision: row.workflow_revision,
+        }));
+      }),
+    ),
+  confirmSubmission: (project, runId, confirmedAtMs) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) =>
+        transaction(connection, () => {
+          const operation =
+            (connection
+              .query(
+                "SELECT operation_id FROM kojo_engine_operations WHERE run_id = ? AND kind = 'submit' AND state = 'pending'",
+              )
+              .get(runId) as { readonly operation_id: string } | null) ?? undefined;
+          if (operation === undefined) return;
+          const run = readStoredRun(connection, runId);
+          if (run === undefined)
+            throw new Error("Workflow Run disappeared before submission confirmation");
+          const eventId = randomUUID();
+          const sequence = connection
+            .query("SELECT last_event_sequence FROM kojo_workflow_runs WHERE run_id = ?")
+            .get(runId) as { readonly last_event_sequence: number };
+          appendEvent(connection, {
+            eventId,
+            kind: "run.engine-confirmed",
+            payload: { runId },
+            recordedAtMs: confirmedAtMs,
+            runId,
+            sequence: sequence.last_event_sequence + 1,
+          });
+          connection
+            .query(
+              `UPDATE kojo_engine_operations
+               SET state = 'confirmed', attempt_count = attempt_count + 1, last_attempted_at_ms = ?,
+                 confirmed_at_ms = ?, confirmation_event_id = ?, next_attempt_at_ms = NULL, updated_at_ms = ?
+               WHERE operation_id = ?`,
+            )
+            .run(confirmedAtMs, confirmedAtMs, eventId, confirmedAtMs, operation.operation_id);
+          connection
+            .query(
+              `UPDATE kojo_workflow_runs
+               SET engine_confirmed_at_ms = ?, last_event_sequence = ?, row_version = row_version + 1, updated_at_ms = ?
+               WHERE run_id = ?`,
+            )
+            .run(confirmedAtMs, sequence.last_event_sequence + 1, confirmedAtMs, runId);
+        }),
+      ),
+    ),
+  recordOutcome: (project, runId, outcome, finalizedAtMs) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) =>
+        transaction(connection, () => {
+          const run = readStoredRun(connection, runId);
+          if (run === undefined || !["running", "suspended"].includes(run.state)) return;
+          const sequence = connection
+            .query("SELECT last_event_sequence FROM kojo_workflow_runs WHERE run_id = ?")
+            .get(runId) as { readonly last_event_sequence: number };
+          const eventId = randomUUID();
+          appendEvent(connection, {
+            eventId,
+            kind: outcome.kind === "completed" ? "run.completed" : "run.failed",
+            payload: outcome,
+            recordedAtMs: finalizedAtMs,
+            runId,
+            sequence: sequence.last_event_sequence + 1,
+          });
+          const outcomeJson = JSON.stringify(outcome);
+          connection
+            .query(
+              `UPDATE kojo_workflow_runs
+               SET state = ?, outcome_event_id = ?, outcome_code = ?, outcome_summary_json = ?,
+                 last_event_sequence = ?, row_version = row_version + 1, updated_at_ms = ?, finalized_at_ms = ?
+               WHERE run_id = ?`,
+            )
+            .run(
+              outcome.kind,
+              eventId,
+              outcome.kind,
+              outcomeJson,
+              sequence.last_event_sequence + 1,
+              finalizedAtMs,
+              finalizedAtMs,
+              runId,
+            );
+        }),
+      ),
+    ),
+}));

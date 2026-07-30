@@ -295,6 +295,7 @@ describe("Local Workflow backend ownership", () => {
 
             const accepted = yield* backend.submit(project, {
               workflowKey: definition.workflowKey,
+              workflowRevision: definition.revision ?? "default",
               runId: "run:project-runtime-recovery-proof",
               input: { wakeAfterMillis },
             });

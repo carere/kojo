@@ -4,6 +4,8 @@ import type {
   ProjectOperationError,
   ProjectSnapshot,
   RequestKey,
+  WorkflowRunOperationError,
+  WorkflowRunSnapshot,
 } from "@kojo/control";
 import {
   IncompatibleProtocolError,
@@ -12,7 +14,9 @@ import {
 } from "@kojo/control/local-client";
 
 export interface CliFailure {
-  readonly affectedResource?: ProjectOperationError["affectedResource"];
+  readonly affectedResource?:
+    | ProjectOperationError["affectedResource"]
+    | WorkflowRunOperationError["affectedResource"];
   readonly code: string;
   readonly exitCode: number;
   readonly findingKeys?: ReadonlyArray<string>;
@@ -76,6 +80,11 @@ export const projectQueryFailure = (error: ProjectOperationError): CliFailure =>
   exitCode: 4,
 });
 
+export const workflowRunFailure = (
+  error: WorkflowRunOperationError,
+  requestKey?: RequestKey,
+): CliFailure => ({ ...error, requestKey, exitCode: 4 });
+
 export const projectCursorFailure = (error: ProjectListCursorError): CliFailure => ({
   ...error,
   exitCode: 2,
@@ -138,6 +147,32 @@ export const writeProject = (
       process.stderr.write(`Warning: ${warning.message}\nNext: ${warning.next}\n`);
     }
   }
+};
+
+export const writeWorkflowRun = (
+  command: string,
+  run: WorkflowRunSnapshot,
+  json: boolean,
+  requestKey?: RequestKey,
+  alreadyApplied?: boolean,
+) => {
+  if (json) {
+    process.stdout.write(
+      `${JSON.stringify({
+        schemaVersion: 1,
+        command,
+        ...(requestKey === undefined ? {} : { requestKey }),
+        result: { run, ...(alreadyApplied === undefined ? {} : { alreadyApplied }) },
+        warnings: [],
+      })}\n`,
+    );
+    return;
+  }
+  process.stdout.write(
+    `Run Identity: ${run.runId}\nWorkflow: ${run.workflowKey}@${run.workflowRevision}\nState: ${run.state}\n`,
+  );
+  if (requestKey !== undefined) process.stdout.write(`Request Key: ${requestKey}\n`);
+  if (alreadyApplied === true) process.stdout.write("Reused an existing Workflow Run.\n");
 };
 
 export const pendingRegistrationWarning = (project: ProjectSnapshot): CliWarning => ({
