@@ -1,18 +1,56 @@
 # Kojo
 
-Kojo is an open-source software factory.
+Kojo is an open-source, local-first software factory for defining, running, and inspecting durable
+software workflows.
 
-This repository contains the foundation for the next Kojo implementation.
+Developers author workflows as Effect programs inside a Kojo Project. The Kojo Host keeps Project
+state and workflow execution available independently of its clients, while the CLI and Visualizer
+provide terminal and browser access to that state.
 
-## Projects
+Kojo is under active development. This repository currently establishes the Host, Project, control,
+and workflow-authoring foundations for the wider system.
 
-- `apps/cli`: a Bun CLI built with Effect
-- `apps/visualizer`: a TanStack Start SolidJS app using SPA mode, Tailwind CSS, and Zaidan
+## Using Kojo
+
+Kojo exposes three public interfaces.
+
+### CLI
+
+The `kojo` command is the terminal interface for initializing and managing Kojo Projects. It can
+produce human-readable output or versioned JSON for automation.
+
+```sh
+kojo init .
+kojo project list
+kojo project show
+```
+
+### Visualizer
+
+The Visualizer is Kojo's browser interface. It connects to the local Kojo Host, presents
+Host-authoritative Project state, and provides the visual surface for inspecting and controlling
+workflow execution.
+
+### Workflow authoring
+
+`@kojo/workflow` is the TypeScript interface for workflow authors. A Kojo Project exposes its
+Workflow Definitions through a static `kojo.config.ts` file:
+
+```ts
+import { defineConfig } from "@kojo/workflow";
+
+export default defineConfig({
+  workflows: [],
+});
+```
+
+The package keeps Kojo's execution engine and local control protocol out of project source so the
+authoring interface can remain stable as the runtime evolves.
 
 ## Development
 
-Install [proto](https://moonrepo.dev/docs/proto/install) and
-[Cocogitto](https://docs.cocogitto.io/#installation), then verify that they are available:
+Development requires [proto](https://moonrepo.dev/docs/proto/install) for the Bun and Moon toolchain
+and [Cocogitto](https://docs.cocogitto.io/#installation) for conventional commits.
 
 ```sh
 proto --version
@@ -26,84 +64,44 @@ proto install
 bun install
 ```
 
-Run the CLI:
+Start the Kojo Host in one terminal:
 
 ```sh
-moon run cli:dev
+moon run host:dev
 ```
 
-Run the visualizer:
+Start the Visualizer in another terminal:
 
 ```sh
 moon run visualizer:dev
 ```
 
-The visualizer is available at `http://localhost:5173`.
-
-TanStack Start renders the browser application as an SPA while keeping its Bun server available.
-One wildcard server route forwards `/api/*` requests to the Effect API in
-`apps/visualizer/src/contexts/shared/server`.
-
-The API uses Effect RPC over HTTP with NDJSON serialization. Its typed client and server share the
-contract in `apps/visualizer/src/contexts/shared/models/contracts.ts`. The initial `Health`
-procedure is available through `POST /api/rpc`; future database reads and log streams can be added
-to the same RPC group. Cross-origin browser requests are rejected.
-
-Use the application-lifetime browser client like this:
-
-```ts
-import { Effect } from "effect";
-import {
-  VisualizerApiClient,
-  visualizerApiRuntime,
-} from "./contexts/shared/services/client";
-
-const health = await visualizerApiRuntime.runPromise(
-  Effect.gen(function* () {
-    const client = yield* VisualizerApiClient;
-    return yield* client.Health();
-  }),
-);
-```
-
-The Bun server creates one lazy Effect web handler for the process. Effect runs each request in its
-own scope, and the handler is disposed during development hot reloads.
-
-## Internationalization
-
-Paraglide uses the shared Inlang project in `project.inlang` and the English and French source
-messages in `messages`. The Visualizer Vite plugin compiles its generated, untracked runtime to
-`apps/visualizer/src/i18n`.
-
-Add or change translations in the root `messages` files. Do not edit the generated `src/i18n`
-folder.
-
-## Quality checks
+The Visualizer is then available at `http://localhost:5173`. Run CLI commands against the same Host
+from a third terminal:
 
 ```sh
-moon run :check
-moon run :tsc
-moon run :test
-moon run :integration-test
-moon run :browser-test
-moon run :build
+moon run cli:dev -- project list
+```
+
+Install Chromium before running the browser tests:
+
+```sh
+cd apps/visualizer
+bunx playwright install --only-shell chromium
+```
+
+Run the repository checks with:
+
+```sh
+moon run :check :tsc :unit-test :integration-test :browser-test :build
 ```
 
 Use `moon run :fix` to apply safe Biome fixes.
 
-CLI and Visualizer tests run with Vitest under Bun:
+## Contributors
 
-- Unit tests exercise Effect use cases with in-memory services.
-- Integration tests exercise real adapters and the Effect RPC boundary.
-- Visualizer browser tests use Vitest Browser Mode with Playwright and Chromium.
+Contributions are welcome. For non-trivial changes, start with a GitHub issue and use conventional
+commits created and verified with Cocogitto. See everyone who has helped on the
+[contributors page](https://github.com/carere/kojo/graphs/contributors).
 
-Effect-based unit and integration tests use `@effect/vitest`. The default `test` task runs unit
-tests; integration and browser tests have dedicated Moon tasks.
-
-## Components
-
-The visualizer is configured to consume components from the Zaidan registry:
-
-```sh
-moon run visualizer:zaidan-add -- @zaidan/<component>
-```
+Made with :love: by :carere: from :france:
