@@ -9,6 +9,7 @@ export interface ParsedOptions {
   readonly projectId?: string;
   readonly projectPath?: string;
   readonly requestKey?: string;
+  readonly reveal: boolean;
   readonly conditions: ReadonlyArray<string>;
   readonly cursor?: string;
   readonly input?: string;
@@ -22,6 +23,7 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
   let projectId: string | undefined;
   let projectPath: string | undefined;
   let requestKey: string | undefined;
+  let reveal = false;
   const conditions: Array<string> = [];
   let cursor: string | undefined;
   let input: string | undefined;
@@ -30,6 +32,11 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
   const workflowKeys: Array<string> = [];
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
+    if (argument === "--reveal") {
+      if (reveal) return undefined;
+      reveal = true;
+      continue;
+    }
     if (
       ![
         "--project",
@@ -81,6 +88,7 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
     projectId,
     projectPath,
     requestKey,
+    reveal,
     conditions,
     cursor,
     input,

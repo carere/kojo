@@ -172,6 +172,10 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     activateAndRetry(request("runs:list", (client) => client.ListWorkflowRuns(input)));
   const showWorkflowRun = (identity: ProjectIdentity, runId: WorkflowRunId) =>
     activateAndRetry(request("runs:show", (client) => client.ShowWorkflowRun({ identity, runId })));
+  const revealWorkflowRun = (identity: ProjectIdentity, runId: WorkflowRunId) =>
+    activateAndRetry(
+      request("runs:reveal", (client) => client.RevealWorkflowRun({ identity, runId })),
+    );
   const getHostOverview = activateAndRetry(
     request("projects:list", (client, host) =>
       Effect.gen(function* () {
@@ -237,6 +241,7 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     startWorkflowRun,
     listWorkflowRuns,
     showWorkflowRun,
+    revealWorkflowRun,
     registerProject,
     forgetProject,
     replayForgetProject,
@@ -291,6 +296,13 @@ export const makeLocalClient = (options: LocalClientOptions) => {
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;
     readonly showWorkflowRun: (
+      identity: ProjectIdentity,
+      runId: WorkflowRunId,
+    ) => Effect.Effect<
+      WorkflowRunQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly revealWorkflowRun: (
       identity: ProjectIdentity,
       runId: WorkflowRunId,
     ) => Effect.Effect<

@@ -7,7 +7,9 @@ import {
   type ProjectIdentity,
   type ProjectMutationResult,
   type ProjectOperationErrorCode,
-  type ProjectQueryResult,
+  type WorkflowRunListResult,
+  type WorkflowRunQueryResult,
+  type WorkflowRunStartResult,
 } from "@kojo/control";
 import { Effect, Exit, Layer, Scope } from "effect";
 import { RpcServer } from "effect/unstable/rpc";
@@ -23,6 +25,7 @@ import {
 } from "../../../workflow-authoring/projects/use-cases/manage-projects";
 import {
   listWorkflowRuns,
+  revealWorkflowRun,
   showWorkflowRun,
   startWorkflowRun,
 } from "../../runs/use-cases/manage-workflow-runs";
@@ -59,7 +62,7 @@ const withHostRequestDiagnostic = <A, E, R>(
   effect: Effect.Effect<A, E, R>,
   classify?: (value: A) => {
     readonly projectIdentity?: ProjectIdentity;
-    readonly safeErrorCode?: ProjectOperationErrorCode;
+    readonly safeErrorCode?: HostRequestDiagnosticEvent["safeErrorCode"];
   },
 ) =>
   Effect.gen(function* () {
@@ -101,10 +104,22 @@ const mutationDiagnostic = (result: ProjectMutationResult) => {
   };
 };
 
-const queryDiagnostic = (identity: ProjectIdentity) => (result: ProjectQueryResult) => ({
-  projectIdentity: identity,
-  ...(result.ok ? {} : { safeErrorCode: result.error.code }),
-});
+const queryDiagnostic =
+  (identity: ProjectIdentity) =>
+  (result: {
+    readonly ok: boolean;
+    readonly error?: { readonly code: ProjectOperationErrorCode };
+  }) => ({
+    projectIdentity: identity,
+    ...(result.ok || result.error === undefined ? {} : { safeErrorCode: result.error.code }),
+  });
+
+const workflowRunDiagnostic =
+  (identity: ProjectIdentity) =>
+  (result: WorkflowRunStartResult | WorkflowRunListResult | WorkflowRunQueryResult) => ({
+    projectIdentity: identity,
+    ...(result.ok ? {} : { safeErrorCode: result.error.code }),
+  });
 
 const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
   KojoControl.toLayer(
@@ -119,7 +134,7 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
       NegotiateCapabilities: (_payload, options) =>
         withHostRequestDiagnostic(
           hostIdentity,
-          "Negotiate",
+          "NegotiateCapabilities",
           String(options.requestId),
           getHostCapabilities,
         ),
@@ -133,7 +148,7 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
       ListProjectPage: (payload, options) =>
         withHostRequestDiagnostic(
           hostIdentity,
-          "ListProjects",
+          "ListProjectPage",
           String(options.requestId),
           listProjectPage(payload),
         ),
@@ -148,16 +163,18 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
       ListWorkflowDefinitions: ({ identity }, options) =>
         withHostRequestDiagnostic(
           hostIdentity,
-          "ShowProject",
+          "ListWorkflowDefinitions",
           String(options.requestId),
           listWorkflowDefinitions(identity),
+          queryDiagnostic(identity),
         ),
       ShowWorkflowDefinition: ({ identity, workflowKey }, options) =>
         withHostRequestDiagnostic(
           hostIdentity,
-          "ShowProject",
+          "ShowWorkflowDefinition",
           String(options.requestId),
           showWorkflowDefinition(identity, workflowKey),
+          queryDiagnostic(identity),
         ),
       StartWorkflowRun: ({ identity, workflowKey, workflowRevision, input, requestKey }, options) =>
         withHostRequestDiagnostic(
@@ -165,6 +182,7 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           "StartWorkflowRun",
           String(options.requestId),
           startWorkflowRun({ identity, workflowKey, workflowRevision, input, requestKey }),
+          workflowRunDiagnostic(identity),
         ),
       ListWorkflowRuns: (input, options) =>
         withHostRequestDiagnostic(
@@ -172,6 +190,7 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           "ListWorkflowRuns",
           String(options.requestId),
           listWorkflowRuns(input),
+          workflowRunDiagnostic(input.identity),
         ),
       ShowWorkflowRun: ({ identity, runId }, options) =>
         withHostRequestDiagnostic(
@@ -179,6 +198,15 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           "ShowWorkflowRun",
           String(options.requestId),
           showWorkflowRun(identity, runId),
+          workflowRunDiagnostic(identity),
+        ),
+      RevealWorkflowRun: ({ identity, runId }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "RevealWorkflowRun",
+          String(options.requestId),
+          revealWorkflowRun(identity, runId),
+          workflowRunDiagnostic(identity),
         ),
       RegisterProject: ({ path, requestKey }, options) =>
         withHostRequestDiagnostic(

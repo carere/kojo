@@ -57,7 +57,7 @@ describe("local Kojo Host control", () => {
           }),
         );
         expect(Schema.decodeUnknownSync(LegacyHostInformation)(legacyHandshake)).toEqual({
-          protocol: { major: 1, minor: 2 },
+          protocol: { major: 1, minor: 3 },
           hostVersion: "0.1.0",
           capabilities: ["projects:list"],
         });
@@ -69,7 +69,7 @@ describe("local Kojo Host control", () => {
 
         expect(overview).toEqual({
           host: {
-            protocol: { major: 1, minor: 2 },
+            protocol: { major: 1, minor: 3 },
             hostVersion: "0.1.0",
             capabilities: [
               "projects:list",
@@ -82,6 +82,7 @@ describe("local Kojo Host control", () => {
               "runs:start",
               "runs:list",
               "runs:show",
+              "runs:reveal",
             ],
           },
           projects: [],
@@ -89,9 +90,11 @@ describe("local Kojo Host control", () => {
           workflowRuns: [],
         });
         const directoryMode = yield* Effect.promise(() => stat(directory));
+        const diagnosticMode = yield* Effect.promise(() => stat(server.diagnosticPath));
         const lockMode = yield* Effect.promise(() => stat(server.lockPath));
         const socketMode = yield* Effect.promise(() => stat(socketPath));
         expect(directoryMode.mode & 0o777).toBe(0o700);
+        expect(diagnosticMode.mode & 0o777).toBe(0o600);
         expect(lockMode.mode & 0o777).toBe(0o600);
         expect(socketMode.mode & 0o777).toBe(0o600);
 
@@ -106,7 +109,7 @@ describe("local Kojo Host control", () => {
         expect(events.map(({ operation, outcome }) => ({ operation, outcome }))).toEqual([
           { operation: "Negotiate", outcome: "success" },
           { operation: "Negotiate", outcome: "success" },
-          { operation: "Negotiate", outcome: "success" },
+          { operation: "NegotiateCapabilities", outcome: "success" },
           { operation: "ListProjects", outcome: "success" },
         ]);
         expect(events[0]).toMatchObject({
@@ -115,7 +118,7 @@ describe("local Kojo Host control", () => {
           hostIdentity: "host:00000000-0000-4000-8000-000000000000",
           hostVersion: "0.1.0",
           protocolMajor: 1,
-          protocolMinor: 2,
+          protocolMinor: 3,
         });
       }),
   );

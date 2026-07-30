@@ -220,6 +220,7 @@ export const makeLocalWorkflowBackendLayer = (
       );
 
       return {
+        hostIdentity,
         acquire: acquireOwnership,
         quiesce: (project: ProjectSnapshot) => quiesce(project.path),
         initialize,

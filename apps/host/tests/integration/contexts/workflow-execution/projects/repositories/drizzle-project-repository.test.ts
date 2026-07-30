@@ -250,6 +250,24 @@ describe("Drizzle Project store recovery", () => {
     ).toThrow();
     database.close();
   });
+
+  it("has no persistent provider credential representation", async () => {
+    const fixture = await initializedProject("kojo-store-no-provider-credentials-");
+    const database = new Database(fixture.databasePath, { readonly: true, strict: true });
+    try {
+      const schema = (
+        database
+          .query("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+          .all() as ReadonlyArray<{ readonly sql: string }>
+      )
+        .map((row) => row.sql)
+        .join("\n")
+        .toLowerCase();
+      expect(schema).not.toMatch(/credential|api[_-]?key|access[_-]?token|secret/);
+    } finally {
+      database.close();
+    }
+  });
 });
 
 const initializedProject = async (prefix: string) => {

@@ -29,18 +29,15 @@ export const startLiveKojoHost = async () => {
     Layer.provide(SubprocessProjectDefinitionLoaderLive),
   );
   const hostIdentity = await loadHostIdentity(join(hostStorePath, "identity"));
+  const diagnostics = makeHostDiagnosticLoggerLayer({ path: diagnosticPath, hostIdentity });
   const protocol = RpcServer.layerProtocolSocketServer.pipe(
     Layer.provide([BunSocketServer.layer({ path: socketPath }), RpcSerialization.layerNdjson]),
   );
   const workflowBackend = makeLocalWorkflowBackendLayer(hostIdentity);
   const projectRuntime = ProjectRuntimeLive.pipe(
-    Layer.provide([DrizzleProjectRepositoryLive, workflowBackend]),
+    Layer.provide([DrizzleProjectRepositoryLive, workflowBackend, diagnostics]),
   );
-  const serverLayer = makeKojoControlServerLayer(
-    protocol,
-    makeHostDiagnosticLoggerLayer(diagnosticPath),
-    hostIdentity,
-  ).pipe(
+  const serverLayer = makeKojoControlServerLayer(protocol, diagnostics, hostIdentity).pipe(
     Layer.provide([
       projectIndex,
       projectLayout,
