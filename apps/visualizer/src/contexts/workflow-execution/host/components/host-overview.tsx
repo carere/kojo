@@ -1,6 +1,8 @@
 import {
   type HostOverview as HostOverviewSnapshot,
+  type ProjectIdentity,
   RequestKey,
+  type WorkflowRunId,
   type WorkflowScheduleAllowedAction,
   type WorkflowScheduleSnapshot,
 } from "@kojo/control";
@@ -60,6 +62,38 @@ export function HostOverview(props: HostOverviewProps) {
       // The next overview refresh is the authoritative recovery path for a failed control request.
     }
   };
+  const resume = async (identity: ProjectIdentity, runId: WorkflowRunId, value: unknown) => {
+    await visualizerApiRuntime.runPromise(
+      Effect.flatMap(VisualizerApiClient, (client) =>
+        client.ResumeWorkflowRun({
+          identity,
+          runId,
+          value,
+          requestKey: crypto.randomUUID() as never,
+        }),
+      ),
+    );
+    await refetch();
+  };
+  const completeDeferred = async (
+    identity: ProjectIdentity,
+    runId: WorkflowRunId,
+    token: string,
+    value: unknown,
+  ) => {
+    await visualizerApiRuntime.runPromise(
+      Effect.flatMap(VisualizerApiClient, (client) =>
+        client.CompleteWorkflowDeferred({
+          identity,
+          runId,
+          token,
+          value,
+          requestKey: crypto.randomUUID() as never,
+        }),
+      ),
+    );
+    await refetch();
+  };
 
   return (
     <main class="mx-auto flex min-h-screen max-w-3xl items-center px-6">
@@ -89,7 +123,11 @@ export function HostOverview(props: HostOverviewProps) {
                 snapshots={current().workflowSchedules}
                 onAction={controlSchedule}
               />
-              <WorkflowRuns snapshots={current().workflowRuns} />
+              <WorkflowRuns
+                snapshots={current().workflowRuns}
+                onResume={resume}
+                onCompleteDeferred={completeDeferred}
+              />
             </section>
           )}
         </Show>

@@ -5,6 +5,7 @@ import type {
   WorkflowRunListItem,
   WorkflowRunSnapshot,
   WorkflowRunStartSnapshot,
+  WorkflowRunSuspension,
 } from "@kojo/control";
 import { Context, type Effect } from "effect";
 import type { StoredSensitivityMap } from "../models/sensitivity-map";
@@ -41,6 +42,7 @@ export interface ActiveWorkflowRun {
   readonly runId: string;
   readonly workflowKey: string;
   readonly workflowRevision: string;
+  readonly state: "running" | "suspended" | "stopping";
 }
 
 export interface WorkflowRunOutcome {
@@ -87,6 +89,36 @@ export interface WorkflowRunRepositoryShape {
     outcome: WorkflowRunOutcome,
     finalizedAtMs: number,
   ) => Effect.Effect<void>;
+  readonly recordSuspension: (
+    project: ProjectSnapshot,
+    runId: string,
+    suspension: WorkflowRunSuspension,
+    suspendedAtMs: number,
+  ) => Effect.Effect<void>;
+  readonly reserveControl: (
+    project: ProjectSnapshot,
+    options: {
+      readonly kind: "run.resume" | "run.deferred-complete";
+      readonly requestHash: Uint8Array;
+      readonly requestKey: RequestKey;
+      readonly runId: string;
+      readonly requestedAtMs: number;
+    },
+  ) => Effect.Effect<
+    | { readonly _tag: "accepted" }
+    | { readonly _tag: "already-applied"; readonly run: StoredWorkflowRunSnapshot }
+    | { readonly _tag: "request-key-conflict" }
+  >;
+  readonly completeControl: (
+    project: ProjectSnapshot,
+    options: {
+      readonly kind: "run.resume" | "run.deferred-complete";
+      readonly requestKey: RequestKey;
+      readonly runId: string;
+      readonly resumedAtMs: number;
+      readonly expectedSuspension: WorkflowRunSuspension["kind"];
+    },
+  ) => Effect.Effect<StoredWorkflowRunSnapshot | undefined>;
 }
 
 export class WorkflowRunRepository extends Context.Service<

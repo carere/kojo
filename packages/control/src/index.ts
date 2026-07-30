@@ -26,6 +26,8 @@ export const CONTROL_CAPABILITIES = [
   "runs:list",
   "runs:show",
   "runs:reveal",
+  "runs:resume",
+  "runs:deferred-complete",
 ] as const;
 
 export const ControlCapability = Schema.String.check(
@@ -313,6 +315,16 @@ export const WorkflowRunState = Schema.Literals([
 ]);
 export type WorkflowRunState = typeof WorkflowRunState.Type;
 
+export const WorkflowRunSuspension = Schema.Struct({
+  kind: Schema.Literals(["clock", "manual", "deferred"]),
+  operationKey: Schema.String,
+  completionToken: Schema.optionalKey(Schema.String),
+});
+export type WorkflowRunSuspension = typeof WorkflowRunSuspension.Type;
+
+export const WorkflowRunAction = Schema.Literals(["resume", "deferred-complete"]);
+export type WorkflowRunAction = typeof WorkflowRunAction.Type;
+
 export const WorkflowRunStartSnapshot = Schema.Struct({
   workflow: Schema.Struct({
     workflowKey: Schema.String,
@@ -349,6 +361,7 @@ export const WorkflowRunListItem = Schema.Struct({
   engineConfirmedAtMs: Schema.NullOr(Schema.Number),
   updatedAtMs: Schema.Number,
   finalizedAtMs: Schema.NullOr(Schema.Number),
+  allowedActions: Schema.Array(WorkflowRunAction),
 });
 export type WorkflowRunListItem = typeof WorkflowRunListItem.Type;
 
@@ -356,6 +369,7 @@ export const WorkflowRunSnapshot = Schema.Struct({
   ...WorkflowRunListItem.fields,
   startRequestKey: RequestKey,
   startSnapshot: Schema.Union([WorkflowRunStartSnapshot, MaskedWorkflowValue]),
+  suspension: Schema.NullOr(WorkflowRunSuspension),
   outcome: Schema.Union([
     Schema.Null,
     Schema.Struct({
@@ -376,6 +390,10 @@ export const WorkflowRunOperationErrorCode = Schema.Literals([
   "workflow-input-invalid",
   "request-key-conflict",
   "run-not-found",
+  "run-not-suspended",
+  "run-resume-not-allowed",
+  "workflow-deferred-not-found",
+  "workflow-deferred-value-invalid",
 ]);
 export type WorkflowRunOperationErrorCode = typeof WorkflowRunOperationErrorCode.Type;
 
@@ -412,6 +430,21 @@ export const WorkflowRunStartResult = Schema.Union([
   }),
 ]);
 export type WorkflowRunStartResult = typeof WorkflowRunStartResult.Type;
+
+export const WorkflowRunMutationResult = Schema.Union([
+  Schema.Struct({
+    ok: Schema.Literal(true),
+    run: WorkflowRunSnapshot,
+    alreadyApplied: Schema.Boolean,
+    requestKey: RequestKey,
+  }),
+  Schema.Struct({
+    ok: Schema.Literal(false),
+    requestKey: RequestKey,
+    error: WorkflowRunOperationError,
+  }),
+]);
+export type WorkflowRunMutationResult = typeof WorkflowRunMutationResult.Type;
 
 export const WorkflowRunListInput = Schema.Struct({
   identity: ProjectIdentity,
@@ -561,6 +594,27 @@ export const RevealWorkflowRun = Rpc.make("RevealWorkflowRun", {
   success: WorkflowRunQueryResult,
 });
 
+export const ResumeWorkflowRun = Rpc.make("ResumeWorkflowRun", {
+  payload: {
+    identity: ProjectIdentity,
+    runId: WorkflowRunId,
+    value: Schema.optionalKey(Schema.Unknown),
+    requestKey: RequestKey,
+  },
+  success: WorkflowRunMutationResult,
+});
+
+export const CompleteWorkflowDeferred = Rpc.make("CompleteWorkflowDeferred", {
+  payload: {
+    identity: ProjectIdentity,
+    runId: WorkflowRunId,
+    token: Schema.String,
+    value: Schema.optionalKey(Schema.Unknown),
+    requestKey: RequestKey,
+  },
+  success: WorkflowRunMutationResult,
+});
+
 export const RegisterProject = Rpc.make("RegisterProject", {
   payload: { path: Schema.String, requestKey: RequestKey },
   success: ProjectMutationResult,
@@ -593,6 +647,8 @@ export const KojoControl = RpcGroup.make(
   ListWorkflowRuns,
   ShowWorkflowRun,
   RevealWorkflowRun,
+  ResumeWorkflowRun,
+  CompleteWorkflowDeferred,
   RegisterProject,
   ForgetProject,
   ReplayForgetProject,

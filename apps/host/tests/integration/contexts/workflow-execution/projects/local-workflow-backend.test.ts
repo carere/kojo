@@ -318,6 +318,7 @@ describe("Local Workflow backend ownership", () => {
             });
             expect(yield* awaitState(backend, project, accepted, "Waiting")).toEqual({
               _tag: "Waiting",
+              suspension: { kind: "clock", operationKey: "durable-clock" },
             });
             expect(activityInvocations).toBe(1);
 

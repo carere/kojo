@@ -1,4 +1,5 @@
 import type { ProjectSnapshot } from "@kojo/control";
+import type { WorkflowOperations } from "@kojo/workflow";
 import { Context, type Duration, type Effect, type Schema } from "effect";
 
 declare const WorkflowBackendReferenceTypeId: unique symbol;
@@ -19,11 +20,30 @@ export const workflowBackendReference = (
 
 export type WorkflowBackendState =
   | { readonly _tag: "Pending" }
-  | { readonly _tag: "Waiting" }
+  | {
+      readonly _tag: "Waiting";
+      readonly suspension: WorkflowBackendSuspension;
+    }
   | { readonly _tag: "Completed"; readonly result: unknown }
   | { readonly _tag: "Failed" };
 
-export interface LocalWorkflowOperations {
+export interface WorkflowBackendSuspension {
+  readonly kind: "clock" | "manual" | "deferred";
+  readonly operationKey: string;
+  readonly completionToken?: string;
+}
+
+export type WorkflowBackendResumeResult =
+  | { readonly _tag: "resumed" }
+  | { readonly _tag: "not-manually-suspended" }
+  | { readonly _tag: "invalid-value" };
+
+export type WorkflowBackendDeferredCompletionResult =
+  | { readonly _tag: "completed" }
+  | { readonly _tag: "not-deferred" }
+  | { readonly _tag: "invalid-value" };
+
+export interface LocalWorkflowOperations extends WorkflowOperations {
   readonly activity: <
     Success extends Schema.Top,
     Failure extends Schema.Top = typeof Schema.Never,
@@ -37,6 +57,9 @@ export interface LocalWorkflowOperations {
     readonly operationKey: string;
     readonly duration: Duration.Input;
   }) => Effect.Effect<void>;
+  readonly deferred: WorkflowOperations["deferred"];
+  readonly awaitDeferred: WorkflowOperations["awaitDeferred"];
+  readonly waitForResume: WorkflowOperations["waitForResume"];
 }
 
 export interface LocalWorkflowDefinition<
@@ -95,6 +118,22 @@ export interface WorkflowBackendShape {
     project: ProjectSnapshot,
     reference: WorkflowBackendReference,
   ) => Effect.Effect<WorkflowBackendState>;
+  readonly resume?: (
+    project: ProjectSnapshot,
+    reference: WorkflowBackendReference,
+    value: unknown,
+  ) => Effect.Effect<WorkflowBackendResumeResult>;
+  readonly completeDeferred?: (
+    project: ProjectSnapshot,
+    reference: WorkflowBackendReference,
+    token: string,
+    value: unknown,
+  ) => Effect.Effect<WorkflowBackendDeferredCompletionResult>;
+  /** Replays a suspended execution only to rebuild private wait registrations after restart. */
+  readonly rehydrate?: (
+    project: ProjectSnapshot,
+    reference: WorkflowBackendReference,
+  ) => Effect.Effect<void>;
 }
 
 export class WorkflowBackend extends Context.Service<WorkflowBackend, WorkflowBackendShape>()(

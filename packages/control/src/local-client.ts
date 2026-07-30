@@ -26,6 +26,7 @@ import {
   type WorkflowRunId,
   type WorkflowRunListInput,
   type WorkflowRunListResult,
+  type WorkflowRunMutationResult,
   type WorkflowRunQueryResult,
   type WorkflowRunStartResult,
   type WorkflowScheduleListInput,
@@ -211,6 +212,29 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     activateAndRetry(
       request("runs:reveal", (client) => client.RevealWorkflowRun({ identity, runId })),
     );
+  const resumeWorkflowRun = (
+    identity: ProjectIdentity,
+    runId: WorkflowRunId,
+    value: unknown,
+    requestKey: RequestKey,
+  ) =>
+    activateAndRetry(
+      request("runs:resume", (client) =>
+        client.ResumeWorkflowRun({ identity, runId, value, requestKey }),
+      ),
+    );
+  const completeWorkflowDeferred = (
+    identity: ProjectIdentity,
+    runId: WorkflowRunId,
+    token: string,
+    value: unknown,
+    requestKey: RequestKey,
+  ) =>
+    activateAndRetry(
+      request("runs:deferred-complete", (client) =>
+        client.CompleteWorkflowDeferred({ identity, runId, token, value, requestKey }),
+      ),
+    );
   const getHostOverview = activateAndRetry(
     request("projects:list", (client, host) =>
       Effect.gen(function* () {
@@ -300,6 +324,8 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     listWorkflowRuns,
     showWorkflowRun,
     revealWorkflowRun,
+    resumeWorkflowRun,
+    completeWorkflowDeferred,
     registerProject,
     forgetProject,
     replayForgetProject,
@@ -401,6 +427,25 @@ export const makeLocalClient = (options: LocalClientOptions) => {
       runId: WorkflowRunId,
     ) => Effect.Effect<
       WorkflowRunQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly resumeWorkflowRun: (
+      identity: ProjectIdentity,
+      runId: WorkflowRunId,
+      value: unknown,
+      requestKey: RequestKey,
+    ) => Effect.Effect<
+      WorkflowRunMutationResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly completeWorkflowDeferred: (
+      identity: ProjectIdentity,
+      runId: WorkflowRunId,
+      token: string,
+      value: unknown,
+      requestKey: RequestKey,
+    ) => Effect.Effect<
+      WorkflowRunMutationResult,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;
     readonly registerProject: (

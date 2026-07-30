@@ -8,6 +8,7 @@ import {
   type ProjectMutationResult,
   type ProjectOperationErrorCode,
   type WorkflowRunListResult,
+  type WorkflowRunMutationResult,
   type WorkflowRunQueryResult,
   type WorkflowRunStartResult,
   type WorkflowScheduleListResult,
@@ -27,7 +28,9 @@ import {
   showWorkflowDefinition,
 } from "../../../workflow-authoring/projects/use-cases/manage-projects";
 import {
+  completeWorkflowDeferred,
   listWorkflowRuns,
+  resumeWorkflowRun,
   revealWorkflowRun,
   showWorkflowRun,
   startWorkflowRun,
@@ -126,7 +129,13 @@ const queryDiagnostic =
 
 const workflowRunDiagnostic =
   (identity: ProjectIdentity) =>
-  (result: WorkflowRunStartResult | WorkflowRunListResult | WorkflowRunQueryResult) => ({
+  (
+    result:
+      | WorkflowRunStartResult
+      | WorkflowRunListResult
+      | WorkflowRunMutationResult
+      | WorkflowRunQueryResult,
+  ) => ({
     projectIdentity: identity,
     ...(result.ok ? {} : { safeErrorCode: result.error.code }),
   });
@@ -268,6 +277,22 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           "RevealWorkflowRun",
           String(options.requestId),
           revealWorkflowRun(identity, runId),
+          workflowRunDiagnostic(identity),
+        ),
+      ResumeWorkflowRun: ({ identity, runId, value, requestKey }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ResumeWorkflowRun",
+          String(options.requestId),
+          resumeWorkflowRun({ identity, runId, value, requestKey }),
+          workflowRunDiagnostic(identity),
+        ),
+      CompleteWorkflowDeferred: ({ identity, runId, token, value, requestKey }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "CompleteWorkflowDeferred",
+          String(options.requestId),
+          completeWorkflowDeferred({ identity, runId, token, value, requestKey }),
           workflowRunDiagnostic(identity),
         ),
       RegisterProject: ({ path, requestKey }, options) =>

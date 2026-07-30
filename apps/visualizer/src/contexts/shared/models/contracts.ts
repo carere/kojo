@@ -2,6 +2,8 @@ import {
   HostOverview as HostOverviewSchema,
   ProjectIdentity,
   RequestKey,
+  WorkflowRunId,
+  WorkflowRunMutationResult,
   WorkflowScheduleMutationResult,
 } from "@kojo/control";
 import { Schema } from "effect";
@@ -45,9 +47,34 @@ export const DisableWorkflowSchedule = Rpc.make("DisableWorkflowSchedule", {
   error: HostOverviewError,
 });
 
+export const ResumeWorkflowRun = Rpc.make("ResumeWorkflowRun", {
+  payload: {
+    identity: ProjectIdentity,
+    runId: WorkflowRunId,
+    value: Schema.optionalKey(Schema.Unknown),
+    requestKey: RequestKey,
+  },
+  success: WorkflowRunMutationResult,
+  error: HostOverviewError,
+});
+
+export const CompleteWorkflowDeferred = Rpc.make("CompleteWorkflowDeferred", {
+  payload: {
+    identity: ProjectIdentity,
+    runId: WorkflowRunId,
+    token: Schema.String,
+    value: Schema.optionalKey(Schema.Unknown),
+    requestKey: RequestKey,
+  },
+  success: WorkflowRunMutationResult,
+  error: HostOverviewError,
+});
+
 export const VisualizerApi = RpcGroup.make(
   Health,
   HostOverview,
   EnableWorkflowSchedule,
   DisableWorkflowSchedule,
+  ResumeWorkflowRun,
+  CompleteWorkflowDeferred,
 );
