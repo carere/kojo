@@ -14,6 +14,7 @@ const project: ProjectSnapshot = {
 };
 
 const unusedWorkflowExecution = {
+  register: () => Effect.void,
   submit: () => Effect.die("Workflow submission is not used by Project Runtime tests"),
   observe: () => Effect.die("Workflow observation is not used by Project Runtime tests"),
 };

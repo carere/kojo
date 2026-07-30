@@ -5,6 +5,9 @@ import {
   type ProjectSelector,
   type ProjectSnapshot,
   type RequestKey,
+  type WorkflowRunId,
+  WorkflowRunId as WorkflowRunIdSchema,
+  type WorkflowRunState,
 } from "@kojo/control";
 import {
   defaultSocketPath,
@@ -30,13 +33,197 @@ import {
   projectFailure,
   projectQueryFailure,
   transportFailure,
+  workflowRunFailure,
   writeFailure,
   writeProject,
+  writeWorkflowRun,
 } from "./cli-output";
 
 export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
   const json = rawArgs.includes("--json");
   const args = rawArgs.filter((argument) => argument !== "--json");
+
+  if (args[0] === "run") {
+    const options = parseOptions(args.slice(2));
+    const command = `run.${args[1] ?? "unknown"}`;
+    if (options === undefined || !["start", "list", "show"].includes(args[1] ?? "")) {
+      return writeFailure(invalid("Run: kojo run start|list|show"), json, command);
+    }
+    const selectIdentity = async () => {
+      if (options.projectId !== undefined) {
+        try {
+          return Schema.decodeUnknownSync(ProjectIdentitySchema)(options.projectId);
+        } catch {
+          return undefined;
+        }
+      }
+      try {
+        return (await resolveInitializedProject(options.projectPath ?? process.cwd())).identity;
+      } catch {
+        return undefined;
+      }
+    };
+    const identity = await selectIdentity();
+    if (identity === undefined) {
+      return writeFailure(
+        invalid("Choose an initialized Kojo Project or use a full --project-id."),
+        json,
+        command,
+      );
+    }
+    const client = makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath());
+    if (args[1] === "start") {
+      if (
+        options.args.length !== 1 ||
+        options.input === undefined ||
+        options.conditions.length > 0 ||
+        options.cursor !== undefined ||
+        options.limit !== undefined ||
+        options.states.length > 0 ||
+        options.workflowKeys.length > 0
+      ) {
+        return writeFailure(
+          invalid(
+            "Run: kojo run start <Workflow Key> --input <JSON> [--project <path>|--project-id <Project Identity>] [--request-key <Request Key>] [--json]",
+          ),
+          json,
+          "run.start",
+        );
+      }
+      const requestKey = decodeRequestKey(options.requestKey);
+      if (requestKey === undefined) {
+        return writeFailure(
+          invalid("Use a non-empty Request Key of at most 256 characters."),
+          json,
+          "run.start",
+        );
+      }
+      let workflowInput: unknown;
+      try {
+        workflowInput = JSON.parse(options.input);
+      } catch {
+        return writeFailure(invalid("Use valid JSON for --input."), json, "run.start");
+      }
+      const definition = await runEffect(client.showWorkflowDefinition(identity, options.args[0]));
+      if (!definition.succeeded)
+        return writeFailure(transportFailure(definition.error), json, "run.start");
+      if (!definition.value.ok)
+        return writeFailure(projectQueryFailure(definition.value.error), json, "run.start");
+      const started = await runEffect(
+        client.startWorkflowRun(
+          identity,
+          options.args[0],
+          definition.value.workflow.revision,
+          workflowInput,
+          requestKey,
+        ),
+      );
+      if (!started.succeeded)
+        return writeFailure(transportFailure(started.error), json, "run.start");
+      if (!started.value.ok) {
+        return writeFailure(
+          workflowRunFailure(started.value.error, started.value.requestKey),
+          json,
+          "run.start",
+        );
+      }
+      writeWorkflowRun(
+        "run.start",
+        started.value.run,
+        json,
+        started.value.requestKey,
+        started.value.alreadyApplied,
+      );
+      return 0;
+    }
+    if (args[1] === "list") {
+      if (
+        options.args.length !== 0 ||
+        options.input !== undefined ||
+        options.requestKey !== undefined ||
+        options.conditions.length > 0 ||
+        options.cursor !== undefined
+      ) {
+        return writeFailure(
+          invalid(
+            "Run: kojo run list [--workflow <Workflow Key>] [--state <state>] [--limit <1-200>] [--project <path>|--project-id <Project Identity>] [--json]",
+          ),
+          json,
+          "run.list",
+        );
+      }
+      const allowedStates = new Set<WorkflowRunState>([
+        "running",
+        "suspended",
+        "stopping",
+        "stopped",
+        "failed",
+        "completed",
+      ]);
+      if (options.states.some((state) => !allowedStates.has(state as WorkflowRunState))) {
+        return writeFailure(invalid("Use a valid Workflow Run State."), json, "run.list");
+      }
+      const limit = options.limit === undefined ? 100 : Number(options.limit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+        return writeFailure(
+          invalid("Use --limit with a whole number from 1 to 200."),
+          json,
+          "run.list",
+        );
+      }
+      const listed = await runEffect(
+        client.listWorkflowRuns({
+          identity,
+          workflowKeys: options.workflowKeys,
+          states: options.states as ReadonlyArray<WorkflowRunState>,
+          limit,
+        }),
+      );
+      if (!listed.succeeded) return writeFailure(transportFailure(listed.error), json, "run.list");
+      if (!listed.value.ok)
+        return writeFailure(workflowRunFailure(listed.value.error), json, "run.list");
+      if (json) {
+        process.stdout.write(
+          `${JSON.stringify({ schemaVersion: 1, command: "run.list", result: listed.value.runs, warnings: [] })}\n`,
+        );
+      } else {
+        process.stdout.write(
+          `${listed.value.runs.length === 0 ? "No Workflow Runs." : listed.value.runs.map((run) => `${run.runId}\t${run.state}\t${run.workflowKey}@${run.workflowRevision}`).join("\n")}\n`,
+        );
+      }
+      return 0;
+    }
+    if (
+      options.args.length !== 1 ||
+      options.input !== undefined ||
+      options.requestKey !== undefined ||
+      options.conditions.length > 0 ||
+      options.cursor !== undefined ||
+      options.limit !== undefined ||
+      options.states.length > 0 ||
+      options.workflowKeys.length > 0
+    ) {
+      return writeFailure(
+        invalid(
+          "Run: kojo run show <Run Identity> [--project <path>|--project-id <Project Identity>] [--json]",
+        ),
+        json,
+        "run.show",
+      );
+    }
+    let runId: WorkflowRunId;
+    try {
+      runId = Schema.decodeUnknownSync(WorkflowRunIdSchema)(options.args[0]);
+    } catch {
+      return writeFailure(invalid("Use a valid Run Identity."), json, "run.show");
+    }
+    const shown = await runEffect(client.showWorkflowRun(identity, runId));
+    if (!shown.succeeded) return writeFailure(transportFailure(shown.error), json, "run.show");
+    if (!shown.value.ok)
+      return writeFailure(workflowRunFailure(shown.value.error), json, "run.show");
+    writeWorkflowRun("run.show", shown.value.run, json);
+    return 0;
+  }
 
   if (args[0] === "workflow") {
     const options = parseOptions(args.slice(2));
@@ -55,7 +242,10 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
         options.requestKey !== undefined ||
         options.conditions.length > 0 ||
         options.cursor !== undefined ||
-        options.limit !== undefined
+        options.limit !== undefined ||
+        options.input !== undefined ||
+        options.states.length > 0 ||
+        options.workflowKeys.length > 0
       ) {
         return writeFailure(
           invalid("Run: kojo workflow validate [Project path or kojo.config.ts] [--json]"),
@@ -112,6 +302,9 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       options.cursor !== undefined ||
       options.limit !== undefined ||
       options.requestKey !== undefined ||
+      options.input !== undefined ||
+      options.states.length > 0 ||
+      options.workflowKeys.length > 0 ||
       (args[1] === "list" && options.args.length !== 0) ||
       (args[1] === "show" && options.args.length !== 1)
     ) {
@@ -201,7 +394,10 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       options.projectPath !== undefined ||
       options.conditions.length > 0 ||
       options.cursor !== undefined ||
-      options.limit !== undefined
+      options.limit !== undefined ||
+      options.input !== undefined ||
+      options.states.length > 0 ||
+      options.workflowKeys.length > 0
     ) {
       return writeFailure(
         invalid("Run: kojo init [path] [--request-key <Request Key>] [--json]"),
@@ -285,7 +481,10 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       options.args.length !== 0 ||
       options.projectId !== undefined ||
       options.projectPath !== undefined ||
-      options.requestKey !== undefined
+      options.requestKey !== undefined ||
+      options.input !== undefined ||
+      options.states.length > 0 ||
+      options.workflowKeys.length > 0
     ) {
       return writeFailure(
         invalid(
@@ -352,7 +551,10 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       options.projectPath !== undefined ||
       options.conditions.length > 0 ||
       options.cursor !== undefined ||
-      options.limit !== undefined
+      options.limit !== undefined ||
+      options.input !== undefined ||
+      options.states.length > 0 ||
+      options.workflowKeys.length > 0
     ) {
       return writeFailure(
         invalid("Run: kojo project register <path> [--request-key <Request Key>] [--json]"),
@@ -385,6 +587,9 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
     options.conditions.length > 0 ||
     options.cursor !== undefined ||
     options.limit !== undefined ||
+    options.input !== undefined ||
+    options.states.length > 0 ||
+    options.workflowKeys.length > 0 ||
     (args[1] === "show" && options.requestKey !== undefined)
   ) {
     return writeFailure(

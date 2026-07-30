@@ -119,6 +119,7 @@ const digest = (value: string) => {
 };
 
 const stableJson = (value: unknown, seen = new Set<object>()): string => {
+  if (value === undefined) return '"__kojo_undefined__"';
   if (value === null) return "null";
   if (typeof value === "string") return JSON.stringify(value);
   if (typeof value === "boolean") return value ? "true" : "false";
@@ -139,7 +140,13 @@ const stableJson = (value: unknown, seen = new Set<object>()): string => {
 };
 
 const schemaFingerprint = (value: unknown): string | undefined => {
-  if (typeof value !== "object" || value === null || !("ast" in value)) return undefined;
+  if (
+    (typeof value !== "object" && typeof value !== "function") ||
+    value === null ||
+    !("ast" in value)
+  ) {
+    return undefined;
+  }
   try {
     return digest(stableJson((value as { readonly ast: unknown }).ast));
   } catch {

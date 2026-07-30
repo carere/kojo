@@ -40,6 +40,7 @@
         "@effect/platform-bun": "4.0.0-beta.102",
         "@effect/sql-sqlite-bun": "4.0.0-beta.102",
         "@kojo/control": "workspace:*",
+        "@kojo/workflow": "workspace:*",
         "drizzle-orm": "^0.44.5",
         "effect": "4.0.0-beta.102",
       },

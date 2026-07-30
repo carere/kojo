@@ -18,7 +18,10 @@ import {
   startKojoHost,
   UnsafeHostStoreError,
 } from "../../../../../src/contexts/workflow-execution/control/services/local-host";
-import { DrizzleProjectRepositoryLive } from "../../../../../src/contexts/workflow-execution/projects/repositories/drizzle-project-repository";
+import {
+  DrizzleProjectRepositoryLive,
+  DrizzleWorkflowRunRepositoryLive,
+} from "../../../../../src/contexts/workflow-execution/projects/repositories/drizzle-project-repository";
 import { makeLocalWorkflowBackendLayer } from "../../../../../src/contexts/workflow-execution/projects/services/local-workflow-backend";
 import { ProjectRuntimeLive } from "../../../../../src/contexts/workflow-execution/projects/services/project-runtime";
 
@@ -76,10 +79,14 @@ describe("local Kojo Host control", () => {
               "projects:forget",
               "workflows:list",
               "workflows:show",
+              "runs:start",
+              "runs:list",
+              "runs:show",
             ],
           },
           projects: [],
           projectDefinitions: [],
+          workflowRuns: [],
         });
         const directoryMode = yield* Effect.promise(() => stat(directory));
         const lockMode = yield* Effect.promise(() => stat(server.lockPath));
@@ -220,6 +227,7 @@ const startTestHost = (socketPath: string, diagnosticPath: string) => {
     Layer.provide([
       makeFileProjectIndexRepositoryLayer(join(dirname(socketPath), "projects.json")),
       GitProjectLayoutLive.pipe(Layer.provide(SubprocessProjectDefinitionLoaderLive)),
+      DrizzleWorkflowRunRepositoryLive,
       ProjectRuntimeLive.pipe(
         Layer.provide([
           DrizzleProjectRepositoryLive,

@@ -11,7 +11,10 @@ export interface ParsedOptions {
   readonly requestKey?: string;
   readonly conditions: ReadonlyArray<string>;
   readonly cursor?: string;
+  readonly input?: string;
   readonly limit?: string;
+  readonly states: ReadonlyArray<string>;
+  readonly workflowKeys: ReadonlyArray<string>;
 }
 
 export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undefined => {
@@ -21,7 +24,10 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
   let requestKey: string | undefined;
   const conditions: Array<string> = [];
   let cursor: string | undefined;
+  let input: string | undefined;
   let limit: string | undefined;
+  const states: Array<string> = [];
+  const workflowKeys: Array<string> = [];
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (
@@ -31,7 +37,10 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
         "--request-key",
         "--condition",
         "--cursor",
+        "--input",
         "--limit",
+        "--state",
+        "--workflow",
       ].includes(argument)
     ) {
       remaining.push(argument);
@@ -42,6 +51,13 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
     index += 1;
     if (argument === "--condition") {
       conditions.push(value);
+    } else if (argument === "--state") {
+      states.push(value);
+    } else if (argument === "--workflow") {
+      workflowKeys.push(value);
+    } else if (argument === "--input") {
+      if (input !== undefined) return undefined;
+      input = value;
     } else if (argument === "--cursor") {
       if (cursor !== undefined) return undefined;
       cursor = value;
@@ -60,7 +76,18 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
     }
   }
   if (projectId !== undefined && projectPath !== undefined) return undefined;
-  return { args: remaining, projectId, projectPath, requestKey, conditions, cursor, limit };
+  return {
+    args: remaining,
+    projectId,
+    projectPath,
+    requestKey,
+    conditions,
+    cursor,
+    input,
+    limit,
+    states,
+    workflowKeys,
+  };
 };
 
 export const decodeRequestKey = (value: string | undefined): RequestKey | undefined => {

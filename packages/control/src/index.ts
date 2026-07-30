@@ -17,6 +17,9 @@ export const CONTROL_CAPABILITIES = [
   "projects:forget",
   "workflows:list",
   "workflows:show",
+  "runs:start",
+  "runs:list",
+  "runs:show",
 ] as const;
 
 export const ControlCapability = Schema.String.check(
@@ -189,6 +192,137 @@ export const WorkflowDefinitionQueryResult = Schema.Union([
 ]);
 export type WorkflowDefinitionQueryResult = typeof WorkflowDefinitionQueryResult.Type;
 
+export const WorkflowRunId = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(200),
+).pipe(Schema.brand("WorkflowRunId"));
+export type WorkflowRunId = typeof WorkflowRunId.Type;
+
+export const WorkflowRunState = Schema.Literals([
+  "running",
+  "suspended",
+  "stopping",
+  "stopped",
+  "failed",
+  "completed",
+]);
+export type WorkflowRunState = typeof WorkflowRunState.Type;
+
+export const WorkflowRunStartSnapshot = Schema.Struct({
+  workflow: Schema.Struct({
+    workflowKey: Schema.String,
+    workflowRevision: Schema.String,
+    sourceIdentity: Schema.String,
+    inputSchemaFingerprint: Schema.String,
+  }),
+  trigger: Schema.Struct({ kind: Schema.Literal("manual"), requestKey: RequestKey }),
+  environment: Schema.Struct({
+    projectIdentity: ProjectIdentity,
+    definitionSnapshotId: Schema.String,
+    runtimeKind: Schema.Literal("local-effect-workflow"),
+  }),
+  input: Schema.Unknown,
+  inputSensitivityPaths: Schema.Array(Schema.String),
+});
+export type WorkflowRunStartSnapshot = typeof WorkflowRunStartSnapshot.Type;
+
+export const WorkflowRunListItem = Schema.Struct({
+  runId: WorkflowRunId,
+  workflowKey: Schema.String,
+  workflowRevision: Schema.String,
+  state: WorkflowRunState,
+  acceptedAtMs: Schema.Number,
+  engineConfirmedAtMs: Schema.NullOr(Schema.Number),
+  updatedAtMs: Schema.Number,
+  finalizedAtMs: Schema.NullOr(Schema.Number),
+});
+export type WorkflowRunListItem = typeof WorkflowRunListItem.Type;
+
+export const WorkflowRunSnapshot = Schema.Struct({
+  ...WorkflowRunListItem.fields,
+  startRequestKey: RequestKey,
+  startSnapshot: WorkflowRunStartSnapshot,
+  outcome: Schema.NullOr(
+    Schema.Struct({
+      kind: Schema.Literals(["completed", "failed"]),
+      value: Schema.optionalKey(Schema.Unknown),
+    }),
+  ),
+});
+export type WorkflowRunSnapshot = typeof WorkflowRunSnapshot.Type;
+
+export const WorkflowRunOperationErrorCode = Schema.Literals([
+  "project-not-found",
+  "project-layout-invalid",
+  "project-runtime-not-ready",
+  "workflow-not-found",
+  "workflow-revision-conflict",
+  "workflow-input-invalid",
+  "request-key-conflict",
+  "run-not-found",
+]);
+export type WorkflowRunOperationErrorCode = typeof WorkflowRunOperationErrorCode.Type;
+
+export const WorkflowRunOperationError = Schema.Struct({
+  code: WorkflowRunOperationErrorCode,
+  message: Schema.String,
+  next: Schema.String,
+  affectedResource: Schema.Union([
+    Schema.Struct({ kind: Schema.Literal("project"), identity: ProjectIdentity }),
+    Schema.Struct({
+      kind: Schema.Literal("workflow"),
+      identity: ProjectIdentity,
+      workflowKey: Schema.String,
+    }),
+    Schema.Struct({ kind: Schema.Literal("run"), identity: ProjectIdentity, runId: WorkflowRunId }),
+    Schema.Struct({ kind: Schema.Literal("request-key"), requestKey: RequestKey }),
+  ]),
+  findingKeys: Schema.Array(ReadinessFindingKey),
+  currentWorkflow: Schema.optionalKey(WorkflowDefinitionSnapshot),
+});
+export type WorkflowRunOperationError = typeof WorkflowRunOperationError.Type;
+
+export const WorkflowRunStartResult = Schema.Union([
+  Schema.Struct({
+    ok: Schema.Literal(true),
+    run: WorkflowRunSnapshot,
+    alreadyApplied: Schema.Boolean,
+    requestKey: RequestKey,
+  }),
+  Schema.Struct({
+    ok: Schema.Literal(false),
+    requestKey: RequestKey,
+    error: WorkflowRunOperationError,
+  }),
+]);
+export type WorkflowRunStartResult = typeof WorkflowRunStartResult.Type;
+
+export const WorkflowRunListInput = Schema.Struct({
+  identity: ProjectIdentity,
+  workflowKeys: Schema.Array(Schema.String),
+  states: Schema.Array(WorkflowRunState),
+  limit: Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 200 })),
+});
+export type WorkflowRunListInput = typeof WorkflowRunListInput.Type;
+
+export const WorkflowRunListResult = Schema.Union([
+  Schema.Struct({ ok: Schema.Literal(true), runs: Schema.Array(WorkflowRunListItem) }),
+  Schema.Struct({ ok: Schema.Literal(false), error: WorkflowRunOperationError }),
+]);
+export type WorkflowRunListResult = typeof WorkflowRunListResult.Type;
+
+export const WorkflowRunQueryResult = Schema.Union([
+  Schema.Struct({ ok: Schema.Literal(true), run: WorkflowRunSnapshot }),
+  Schema.Struct({ ok: Schema.Literal(false), error: WorkflowRunOperationError }),
+]);
+export type WorkflowRunQueryResult = typeof WorkflowRunQueryResult.Type;
+
+export const ProjectWorkflowRunsSnapshot = Schema.Struct({
+  project: ProjectSnapshot,
+  runs: Schema.Array(WorkflowRunListItem),
+});
+export type ProjectWorkflowRunsSnapshot = typeof ProjectWorkflowRunsSnapshot.Type;
+
 export const ProjectMutationResult = Schema.Union([
   Schema.Struct({
     ok: Schema.Literal(true),
@@ -208,6 +342,7 @@ export const HostOverview = Schema.Struct({
   host: HostInformation,
   projects: Schema.Array(ProjectSnapshot),
   projectDefinitions: Schema.Array(ProjectWorkflowSnapshot),
+  workflowRuns: Schema.Array(ProjectWorkflowRunsSnapshot),
 });
 export type HostOverview = typeof HostOverview.Type;
 
@@ -243,6 +378,27 @@ export const ShowWorkflowDefinition = Rpc.make("ShowWorkflowDefinition", {
   success: WorkflowDefinitionQueryResult,
 });
 
+export const StartWorkflowRun = Rpc.make("StartWorkflowRun", {
+  payload: {
+    identity: ProjectIdentity,
+    workflowKey: Schema.String,
+    workflowRevision: Schema.String,
+    input: Schema.Unknown,
+    requestKey: RequestKey,
+  },
+  success: WorkflowRunStartResult,
+});
+
+export const ListWorkflowRuns = Rpc.make("ListWorkflowRuns", {
+  payload: WorkflowRunListInput.fields,
+  success: WorkflowRunListResult,
+});
+
+export const ShowWorkflowRun = Rpc.make("ShowWorkflowRun", {
+  payload: { identity: ProjectIdentity, runId: WorkflowRunId },
+  success: WorkflowRunQueryResult,
+});
+
 export const RegisterProject = Rpc.make("RegisterProject", {
   payload: { path: Schema.String, requestKey: RequestKey },
   success: ProjectMutationResult,
@@ -266,6 +422,9 @@ export const KojoControl = RpcGroup.make(
   ShowProject,
   ListWorkflowDefinitions,
   ShowWorkflowDefinition,
+  StartWorkflowRun,
+  ListWorkflowRuns,
+  ShowWorkflowRun,
   RegisterProject,
   ForgetProject,
   ReplayForgetProject,
