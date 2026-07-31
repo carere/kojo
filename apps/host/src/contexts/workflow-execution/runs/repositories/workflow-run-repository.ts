@@ -29,6 +29,7 @@ export interface WorkflowRunStartRecord {
 }
 
 export interface PendingWorkflowRunSubmission {
+  readonly engineGeneration: number;
   readonly project: ProjectSnapshot;
   readonly runId: string;
   readonly workflowKey: string;
@@ -48,6 +49,31 @@ export interface WorkflowRunOutcome {
   readonly sensitivityPaths: ReadonlyArray<string>;
   readonly value?: unknown;
 }
+
+export interface WorkflowActivityOperation {
+  readonly activityName: string;
+  readonly definitionFingerprint: string;
+  readonly durableOperationKey: string;
+}
+
+export interface WorkflowActivityAttemptRecord extends WorkflowActivityOperation {
+  readonly activityIdempotencyKey: string;
+  readonly attemptId: string;
+  readonly executionGeneration: number;
+  readonly effectRetryNumber: number;
+  readonly invocationNumber: number;
+}
+
+export type WorkflowActivityPreparation =
+  | { readonly _tag: "ready"; readonly executionGeneration: number }
+  | { readonly _tag: "awaiting-confirmation" }
+  | {
+      readonly _tag: "completed";
+      readonly confirmedAttemptId: string;
+      readonly executionGeneration: number;
+      readonly result: unknown;
+    }
+  | { readonly _tag: "conflict" };
 
 export type WorkflowRunStartAcceptance =
   | {
@@ -73,6 +99,15 @@ export interface WorkflowRunRepositoryShape {
     project: ProjectSnapshot,
     runId?: string,
   ) => Effect.Effect<ReadonlyArray<PendingWorkflowRunSubmission>>;
+  readonly recoverActivitySubmission?: (
+    project: ProjectSnapshot,
+    runId: string,
+    hostStartedAtMs: number,
+  ) => Effect.Effect<boolean>;
+  readonly engineGeneration?: (
+    project: ProjectSnapshot,
+    runId: string,
+  ) => Effect.Effect<number | undefined>;
   readonly activeRuns: (
     project: ProjectSnapshot,
   ) => Effect.Effect<ReadonlyArray<ActiveWorkflowRun>>;
@@ -86,6 +121,44 @@ export interface WorkflowRunRepositoryShape {
     runId: string,
     outcome: WorkflowRunOutcome,
     finalizedAtMs: number,
+  ) => Effect.Effect<void>;
+  readonly prepareActivity: (
+    project: ProjectSnapshot,
+    runId: string,
+    operation: WorkflowActivityOperation,
+    preparedAtMs: number,
+  ) => Effect.Effect<WorkflowActivityPreparation>;
+  readonly startActivityAttempt: (
+    project: ProjectSnapshot,
+    runId: string,
+    operation: WorkflowActivityOperation,
+    options: {
+      readonly activityIdempotencyKey: string;
+      readonly effectRetryNumber: number;
+      readonly executionGeneration: number;
+    },
+    startedAtMs: number,
+  ) => Effect.Effect<WorkflowActivityAttemptRecord>;
+  readonly observeActivityAttempt: (
+    project: ProjectSnapshot,
+    runId: string,
+    attemptId: string,
+    outcomeCode: "success" | "failure",
+    observedAtMs: number,
+  ) => Effect.Effect<void>;
+  readonly confirmActivityAttempt: (
+    project: ProjectSnapshot,
+    runId: string,
+    attemptId: string,
+    result: unknown,
+    confirmedAtMs: number,
+  ) => Effect.Effect<void>;
+  readonly recordActivityReplayReuse: (
+    project: ProjectSnapshot,
+    runId: string,
+    operation: WorkflowActivityOperation,
+    confirmedAttemptId: string,
+    recordedAtMs: number,
   ) => Effect.Effect<void>;
 }
 

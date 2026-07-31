@@ -31,9 +31,12 @@ const installWorkflowDependencies = async (path: string) => {
 
 const configuration = `
 import { Effect, Schema } from "effect";
-import { defineConfig, defineWorkflow } from "@kojo/workflow";
+import { activity, defineConfig, defineWorkflow } from "@kojo/workflow";
 
 const input = Schema.Struct({ message: Schema.String });
+const activityResult = Schema.Struct({ idempotencyKey: Schema.String, invocationNumber: Schema.Number });
+let retriedActivityInvocations = 0;
+let perRetryActivityInvocations = 0;
 export default defineConfig({
   workflows: [
     defineWorkflow({
@@ -83,6 +86,69 @@ export default defineConfig({
       successSchema: Schema.String,
       failureSchema: Schema.String,
       handler: ({ message }) => Effect.sleep("3 seconds").pipe(Effect.as("echo:" + message))
+    }),
+    defineWorkflow({
+      workflowKey: "activity-retry",
+      revision: "1",
+      inputSchema: input,
+      successSchema: activityResult,
+      failureSchema: Schema.String,
+      handler: () => activity({
+        operationKey: "send-message",
+        name: "Send message",
+        successSchema: activityResult,
+        failureSchema: Schema.String,
+        retry: { maxRetries: 1, idempotency: "stable" },
+        execute: (attempt) => Effect.suspend(() => {
+          retriedActivityInvocations += 1;
+          return retriedActivityInvocations === 1
+            ? Effect.fail("try again")
+            : Effect.succeed({ idempotencyKey: attempt.idempotencyKey, invocationNumber: attempt.invocationNumber });
+        })
+      })
+    }),
+    defineWorkflow({
+      workflowKey: "activity-per-retry",
+      revision: "1",
+      inputSchema: input,
+      successSchema: activityResult,
+      failureSchema: Schema.String,
+      handler: () => activity({
+        operationKey: "send-message-per-retry",
+        name: "Send message per retry",
+        successSchema: activityResult,
+        failureSchema: Schema.String,
+        retry: { maxRetries: 1, idempotency: "per-retry" },
+        execute: (attempt) => Effect.suspend(() => {
+          perRetryActivityInvocations += 1;
+          return perRetryActivityInvocations === 1
+            ? Effect.fail("try again")
+            : Effect.succeed({ idempotencyKey: attempt.idempotencyKey, invocationNumber: attempt.invocationNumber });
+        })
+      })
+    }),
+    defineWorkflow({
+      workflowKey: "activity-key-conflict",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      handler: () => Effect.gen(function* () {
+        yield* activity({
+          operationKey: "conflicting-operation",
+          name: "First operation",
+          successSchema: Schema.String,
+          failureSchema: Schema.String,
+          execute: () => Effect.succeed("first")
+        });
+        return yield* activity({
+          operationKey: "conflicting-operation",
+          name: "Second operation",
+          successSchema: Schema.String,
+          failureSchema: Schema.String,
+          execute: () => Effect.succeed("second")
+        });
+      })
     })
   ]
 });
@@ -111,6 +177,91 @@ export default defineConfig({
   ]
 });
 `;
+
+const crashWindowConfiguration = (proofPath: string, releasePath: string) => `
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { Effect, Schema } from "effect";
+import { activity, defineConfig, defineWorkflow } from "@kojo/workflow";
+
+const proofPath = ${JSON.stringify(proofPath)};
+const releasePath = ${JSON.stringify(releasePath)};
+const input = Schema.Struct({ message: Schema.String });
+const record = (kind, attempt) => Effect.sync(() => {
+  const alreadyRecorded = existsSync(proofPath) && readFileSync(proofPath, "utf8").includes(kind + ":");
+  appendFileSync(proofPath, kind + ":" + attempt.idempotencyKey + "\\n");
+  return alreadyRecorded;
+});
+const waitForCrashRelease = () => Effect.promise(async () => {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    if (existsSync(releasePath)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting to complete the crash-window Activity");
+});
+const completeAndCrash = () => Effect.promise(() => new Promise((resolve) => {
+  // Resolve the external Effect first. The next-tick crash then happens
+  // before Kojo can record that observed success.
+  resolve("first");
+  process.nextTick(() => process.kill(process.pid, "SIGKILL"));
+}));
+const external = (kind, holdFirstAttempt) => (attempt) => record(kind, attempt).pipe(
+  Effect.flatMap((alreadyRecorded) =>
+    holdFirstAttempt && !alreadyRecorded
+      ? waitForCrashRelease().pipe(Effect.andThen(completeAndCrash()))
+      : Effect.succeed("done")
+  )
+);
+
+export default defineConfig({
+  workflows: [
+    defineWorkflow({
+      workflowKey: "activity-crash-window",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      handler: () => activity({
+        operationKey: "send-once-after-crash",
+        successSchema: Schema.String,
+        failureSchema: Schema.String,
+        execute: external("crash", true)
+      })
+    })
+  ]
+});
+`;
+
+const waitForProof = async (path: string, prefix: string, expectedCount = 1) => {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      const lines = (await readFile(path, "utf8"))
+        .trim()
+        .split("\n")
+        .filter((line) => line.startsWith(`${prefix}:`));
+      if (lines.length >= expectedCount) return lines;
+    } catch {
+      // The first external attempt has not reached its durable proof yet.
+    }
+    await Bun.sleep(25);
+  }
+  throw new Error(`Timed out waiting for ${prefix} Activity proof.`);
+};
+
+const waitForFinalRun = async (
+  socketPath: string,
+  project: string,
+  runId: string,
+): Promise<Record<string, unknown>> => {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const shown = await runKojoCli(["run", "show", runId, "--json"], socketPath, project);
+    if (shown.exitCode === 0) {
+      const run = JSON.parse(shown.stdout).result.run as Record<string, unknown>;
+      if (run.state === "completed" || run.state === "failed") return run;
+    }
+    await Bun.sleep(50);
+  }
+  throw new Error(`Timed out waiting for Workflow Run ${runId}.`);
+};
 
 it("starts, redelivers, lists, and shows one durable Workflow Run", async () => {
   const directory = await makeTemporaryDirectory("kojo-workflow-runs-");
@@ -317,6 +468,233 @@ it("reconciles a non-final Workflow Run after the Host restarts", async () => {
     outcome: { kind: "completed", value: "echo:after-restart" },
   });
 });
+
+it("records typed Activity attempts, stable retry identity, and safe trace evidence", async () => {
+  const directory = await makeTemporaryDirectory("kojo-workflow-activities-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), configuration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "activity-retry", "--input", '{"message":"hello"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const run = JSON.parse(started.stdout).result.run;
+  expect(run).toMatchObject({
+    state: "completed",
+    activitySummary: {
+      invocationAttempts: 2,
+      incompleteAttempts: 1,
+      retries: 1,
+      durableCompletions: 1,
+      replayReuses: 0,
+    },
+    activityTrace: {
+      attempts: [
+        {
+          durableOperationKey: "send-message",
+          activityName: "Send message",
+          effectRetryNumber: 1,
+          invocationNumber: 1,
+          state: "result-observed",
+          outcomeCode: "failure",
+        },
+        {
+          durableOperationKey: "send-message",
+          effectRetryNumber: 2,
+          invocationNumber: 2,
+          state: "engine-confirmed",
+          outcomeCode: "success",
+        },
+      ],
+    },
+  });
+  expect(run.activityTrace.attempts[0].activityIdempotencyKey).toBe(
+    run.activityTrace.attempts[1].activityIdempotencyKey,
+  );
+  expect(run.outcome.value.idempotencyKey).toBe(
+    run.activityTrace.attempts[1].activityIdempotencyKey,
+  );
+
+  const database = new Database(join(project, ".kojo", "kojo.sqlite"), {
+    readonly: true,
+    strict: true,
+  });
+  try {
+    const events = database
+      .query(
+        "SELECT kind, payload_json FROM kojo_execution_events WHERE run_id = ? ORDER BY sequence",
+      )
+      .all(run.runId) as ReadonlyArray<{ readonly kind: string; readonly payload_json: string }>;
+    expect(events.map((event) => event.kind)).toEqual(
+      expect.arrayContaining([
+        "activity.attempt-started",
+        "activity.result-observed",
+        "activity.result-confirmed",
+      ]),
+    );
+    for (const event of events.filter((event) => event.kind.startsWith("activity."))) {
+      expect(JSON.parse(event.payload_json)).not.toHaveProperty("value");
+    }
+  } finally {
+    database.close();
+  }
+});
+
+it("uses a distinct external key for each per-retry Activity invocation", async () => {
+  const directory = await makeTemporaryDirectory("kojo-workflow-activity-per-retry-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), configuration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "activity-per-retry", "--input", '{"message":"hello"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const run = JSON.parse(started.stdout).result.run;
+  const attempts = run.activityTrace.attempts as ReadonlyArray<Record<string, unknown>>;
+  expect(run).toMatchObject({
+    state: "completed",
+    activitySummary: {
+      invocationAttempts: 2,
+      incompleteAttempts: 1,
+      retries: 1,
+      durableCompletions: 1,
+    },
+  });
+  expect(attempts).toHaveLength(2);
+  expect(attempts.map((attempt) => attempt.effectRetryNumber)).toEqual([1, 2]);
+  expect(attempts[0]?.activityIdempotencyKey).not.toBe(attempts[1]?.activityIdempotencyKey);
+  expect(run.outcome.value.idempotencyKey).toBe(attempts[1]?.activityIdempotencyKey);
+});
+
+it("fails a Run before external work when a Durable Operation Key is reused differently", async () => {
+  const directory = await makeTemporaryDirectory("kojo-workflow-activity-key-conflict-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), configuration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "activity-key-conflict", "--input", '{"message":"hello"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const run = JSON.parse(started.stdout).result.run;
+  expect(run).toMatchObject({
+    state: "failed",
+    outcome: { kind: "failed" },
+    activitySummary: {
+      invocationAttempts: 1,
+      durableCompletions: 1,
+    },
+    activityTrace: {
+      attempts: [
+        {
+          durableOperationKey: "conflicting-operation",
+          activityName: "First operation",
+          state: "engine-confirmed",
+        },
+      ],
+    },
+  });
+  expect(run.activityTrace.attempts).toHaveLength(1);
+});
+
+it("recovers a completed external Activity whose success was not observed before a Host crash", async () => {
+  const directory = await makeTemporaryDirectory("kojo-workflow-activity-crash-");
+  cleanups.push(directory.cleanup);
+  const hostStore = await makeTemporaryDirectory("kojo-workflow-activity-host-");
+  cleanups.push(hostStore.cleanup);
+  const project = join(directory.path, "project");
+  const proofPath = join(directory.path, "external-activity-proof.txt");
+  const releasePath = join(directory.path, "complete-activity.txt");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(
+    join(project, "kojo.config.ts"),
+    crashWindowConfiguration(proofPath, releasePath),
+  );
+
+  const firstHost = await startKojoHostProcess({ storePath: hostStore.path });
+  cleanups.push(firstHost.stop);
+  expect((await runKojoCli(["init", project], firstHost.socketPath)).exitCode).toBe(0);
+  const crashStarted = await runKojoCli(
+    ["run", "start", "activity-crash-window", "--input", '{"message":"hello"}', "--json"],
+    firstHost.socketPath,
+    project,
+  );
+  expect(crashStarted.exitCode, `${crashStarted.stdout}${crashStarted.stderr}`).toBe(0);
+  const crashRunId = JSON.parse(crashStarted.stdout).result.run.runId;
+  await waitForProof(proofPath, "crash");
+  await writeFile(releasePath, "complete");
+  await firstHost.crash();
+  const interruptedDatabase = new Database(join(project, ".kojo", "kojo.sqlite"), {
+    readonly: true,
+    strict: true,
+  });
+  try {
+    expect(
+      interruptedDatabase
+        .query(
+          `SELECT state, result_observed_at_ms
+           FROM kojo_workflow_activity_attempts
+           WHERE run_id = ?
+           ORDER BY invocation_number`,
+        )
+        .all(crashRunId),
+    ).toEqual([{ state: "started", result_observed_at_ms: null }]);
+  } finally {
+    interruptedDatabase.close();
+  }
+  // Let the abandoned local runner lease expire before the replacement Host activates the Project.
+  await Bun.sleep(1_100);
+
+  const secondHost = await startKojoHostProcess({ storePath: hostStore.path });
+  cleanups.push(secondHost.stop);
+  const secondInitialization = await runKojoCli(["init", project], secondHost.socketPath);
+  expect(
+    secondInitialization.exitCode,
+    `${secondInitialization.stdout}${secondInitialization.stderr}`,
+  ).toBe(0);
+  const crashedRun = await waitForFinalRun(secondHost.socketPath, project, crashRunId);
+  const crashAttempts = (
+    crashedRun.activityTrace as {
+      readonly attempts: ReadonlyArray<Record<string, unknown>>;
+    }
+  ).attempts;
+  expect(crashAttempts).toHaveLength(2);
+  expect(crashAttempts.map((attempt) => attempt.state)).toEqual(["started", "engine-confirmed"]);
+  expect(crashAttempts[0]?.activityIdempotencyKey).toBe(crashAttempts[1]?.activityIdempotencyKey);
+  expect(crashedRun.activitySummary as Record<string, unknown>).toMatchObject({
+    invocationAttempts: 2,
+    incompleteAttempts: 1,
+    durableCompletions: 1,
+    replayReuses: 1,
+  });
+  const crashProofs = await waitForProof(proofPath, "crash", 2);
+  expect(crashProofs).toHaveLength(2);
+  expect([...new Set(crashProofs.map((line) => line.split(":").at(-1)))]).toHaveLength(1);
+}, 45_000);
 
 it("masks marked payloads by default, fails closed for an invalid map, and reveals once with warnings", async () => {
   const directory = await makeTemporaryDirectory("kojo-sensitive-workflow-runs-");

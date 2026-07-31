@@ -135,6 +135,13 @@ test("shows accepted Workflow Definition snapshots from the Host", async () => {
                       engineConfirmedAtMs: 1,
                       updatedAtMs: 2,
                       finalizedAtMs: 2,
+                      activitySummary: {
+                        invocationAttempts: 1,
+                        incompleteAttempts: 0,
+                        retries: 0,
+                        durableCompletions: 1,
+                        replayReuses: 0,
+                      },
                     },
                   ],
                 },

@@ -1,5 +1,6 @@
 import type { ProjectSnapshot } from "@kojo/control";
 import { Context, type Duration, type Effect, type Schema } from "effect";
+import type { WorkflowRunRepository } from "../../runs/repositories/workflow-run-repository";
 
 declare const WorkflowBackendReferenceTypeId: unique symbol;
 
@@ -81,6 +82,7 @@ export interface WorkflowBackendShape {
   readonly register: (
     project: ProjectSnapshot,
     definitions: ReadonlyArray<AnyLocalWorkflowDefinition>,
+    activityRepository?: WorkflowRunRepository["Service"],
   ) => Effect.Effect<void>;
   readonly submit: (
     project: ProjectSnapshot,
@@ -89,6 +91,7 @@ export interface WorkflowBackendShape {
       readonly workflowRevision: string;
       readonly runId: string;
       readonly input: unknown;
+      readonly engineGeneration?: number;
     },
   ) => Effect.Effect<WorkflowBackendReference>;
   readonly observe: (

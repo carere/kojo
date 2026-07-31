@@ -8,6 +8,27 @@
       "when": 1753747200000,
       "tag": "0001_project_lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1785456000000,
+      "tag": "0002_workflow_activity_operations",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785542400000,
+      "tag": "0003_workflow_activity_execution_generations",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1785628800000,
+      "tag": "0004_workflow_activity_results",
+      "breakpoints": true
     }
   ]
 }

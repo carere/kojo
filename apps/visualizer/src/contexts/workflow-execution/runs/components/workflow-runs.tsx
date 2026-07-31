@@ -21,6 +21,13 @@ export function WorkflowRuns(props: WorkflowRunsProps) {
             <li>
               {run.runId} <span class="text-muted-foreground">{run.state}</span> {run.workflowKey}@
               {run.workflowRevision}
+              <span class="text-muted-foreground">
+                {" "}
+                · Activities: {run.activitySummary.invocationAttempts} attempts,{" "}
+                {run.activitySummary.incompleteAttempts} incomplete,{" "}
+                {run.activitySummary.durableCompletions} durable, {run.activitySummary.replayReuses}{" "}
+                replay reuses
+              </span>
             </li>
           )}
         </For>

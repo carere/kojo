@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export interface KojoHostProcessFixture {
+  /** Terminates the Host without running graceful shutdown handlers. */
+  readonly crash: () => Promise<void>;
   readonly diagnosticPath: string;
   readonly socketPath: string;
   readonly stop: () => Promise<void>;
@@ -23,7 +25,7 @@ export const startKojoHostProcess = async (
   const ownsDirectory = options.storePath === undefined;
   const directory = options.storePath ?? (await mkdtemp(join(tmpdir(), "kojo-host-process-")));
   const socketPath = join(directory, "host.sock");
-  const processHandle = Bun.spawn(["bun", "run", join(workspaceRoot, "apps/host/main.ts")], {
+  const processHandle = Bun.spawn([process.execPath, join(workspaceRoot, "apps/host/main.ts")], {
     cwd: workspaceRoot,
     env: { ...process.env, KOJO_HOST_SOCKET: socketPath, KOJO_HOST_STORE: directory },
     stdout: "ignore",
@@ -41,13 +43,20 @@ export const startKojoHostProcess = async (
   }
 
   return {
+    crash: async () => {
+      if (processHandle.exitCode === null) processHandle.kill("SIGKILL");
+      await processHandle.exited;
+      await rm(socketPath, { force: true });
+      await stderr;
+      if (ownsDirectory) await rm(directory, { force: true, recursive: true });
+    },
     diagnosticPath: join(directory, "diagnostics.jsonl"),
     socketPath,
     stop: async () => {
-      processHandle.kill("SIGTERM");
+      if (processHandle.exitCode === null) processHandle.kill("SIGTERM");
       await processHandle.exited;
       await stderr;
-      if (ownsDirectory) await rm(directory, { recursive: true });
+      if (ownsDirectory) await rm(directory, { force: true, recursive: true });
     },
   };
 };

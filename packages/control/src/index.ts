@@ -236,6 +236,38 @@ export const MaskedWorkflowValue = Schema.Struct({
 });
 export type MaskedWorkflowValue = typeof MaskedWorkflowValue.Type;
 
+/** Safe evidence for one real invocation; it never includes an Activity result. */
+export const WorkflowActivityAttempt = Schema.Struct({
+  attemptId: Schema.String,
+  durableOperationKey: Schema.String,
+  activityName: Schema.String,
+  effectRetryNumber: Schema.Number,
+  invocationNumber: Schema.Number,
+  activityIdempotencyKey: Schema.String,
+  state: Schema.Literals(["started", "result-observed", "engine-confirmed"]),
+  outcomeCode: Schema.NullOr(Schema.String),
+  startedAtMs: Schema.Number,
+  resultObservedAtMs: Schema.NullOr(Schema.Number),
+  engineConfirmedAtMs: Schema.NullOr(Schema.Number),
+});
+export type WorkflowActivityAttempt = typeof WorkflowActivityAttempt.Type;
+
+/** Counts are safe for ordinary CLI and visualizer inspection. */
+export const WorkflowActivitySummary = Schema.Struct({
+  invocationAttempts: Schema.Number,
+  incompleteAttempts: Schema.Number,
+  retries: Schema.Number,
+  durableCompletions: Schema.Number,
+  replayReuses: Schema.Number,
+});
+export type WorkflowActivitySummary = typeof WorkflowActivitySummary.Type;
+
+export const WorkflowActivityTrace = Schema.Struct({
+  attempts: Schema.Array(WorkflowActivityAttempt),
+  summary: WorkflowActivitySummary,
+});
+export type WorkflowActivityTrace = typeof WorkflowActivityTrace.Type;
+
 export const WorkflowRunListItem = Schema.Struct({
   runId: WorkflowRunId,
   workflowKey: Schema.String,
@@ -245,6 +277,7 @@ export const WorkflowRunListItem = Schema.Struct({
   engineConfirmedAtMs: Schema.NullOr(Schema.Number),
   updatedAtMs: Schema.Number,
   finalizedAtMs: Schema.NullOr(Schema.Number),
+  activitySummary: WorkflowActivitySummary,
 });
 export type WorkflowRunListItem = typeof WorkflowRunListItem.Type;
 
@@ -260,6 +293,7 @@ export const WorkflowRunSnapshot = Schema.Struct({
     }),
     MaskedWorkflowValue,
   ]),
+  activityTrace: WorkflowActivityTrace,
 });
 export type WorkflowRunSnapshot = typeof WorkflowRunSnapshot.Type;
 

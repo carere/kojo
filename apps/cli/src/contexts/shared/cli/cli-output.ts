@@ -172,6 +172,9 @@ export const writeWorkflowRun = (
   process.stdout.write(
     `Run Identity: ${run.runId}\nWorkflow: ${run.workflowKey}@${run.workflowRevision}\nState: ${run.state}\n`,
   );
+  process.stdout.write(
+    `Activity evidence: ${run.activitySummary.invocationAttempts} attempts, ${run.activitySummary.incompleteAttempts} incomplete, ${run.activitySummary.retries} retries, ${run.activitySummary.durableCompletions} durable completions, ${run.activitySummary.replayReuses} replay reuses\n`,
+  );
   if (requestKey !== undefined) process.stdout.write(`Request Key: ${requestKey}\n`);
   if (alreadyApplied === true) process.stdout.write("Reused an existing Workflow Run.\n");
   for (const warning of warnings) {

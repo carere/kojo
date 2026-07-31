@@ -129,7 +129,7 @@ const recordOutcome = (
       outcome = { kind: "failed", sensitivityPaths: definition.sensitivity?.failure ?? [] };
     }
     yield* repository.recordOutcome(project, runId, outcome, Date.now());
-  });
+  }).pipe(Effect.catchCause(() => Effect.void));
 
 const observeRun = (
   backend: WorkflowBackend["Service"],
@@ -178,6 +178,7 @@ const reconcileRun = (
           workflowRevision: submission.workflowRevision,
           runId: submission.runId,
           input: submission.input,
+          engineGeneration: submission.engineGeneration,
         })
         .pipe(
           Effect.map(Option.some),
@@ -269,8 +270,8 @@ const reconcilePendingWorkflowRuns = (
     yield* runtime.coordinateLifecycle(
       validation.project,
       Effect.gen(function* () {
-        yield* backend.register(validation.project, executable.map(asLocalDefinition));
         const activeRuns = yield* repository.activeRuns(validation.project);
+        yield* backend.register(validation.project, executable.map(asLocalDefinition), repository);
         for (const activeRun of activeRuns) {
           const definition = executable.find(
             (candidate) =>
@@ -301,7 +302,7 @@ const reconcilePendingWorkflowRuns = (
         yield* emitReconciliationDiagnostic(validation.project, activeRun.runId);
       }
     }
-  }).pipe(Effect.catchCause(() => Effect.void));
+  });
 
 export const startWorkflowRun = (input: {
   readonly identity: ProjectIdentity;
@@ -491,7 +492,7 @@ export const startWorkflowRun = (input: {
     const accepted = yield* runtime.coordinateLifecycle(
       validation.project,
       Effect.gen(function* () {
-        yield* backend.register(validation.project, [asLocalDefinition(definition)]);
+        yield* backend.register(validation.project, [asLocalDefinition(definition)], repository);
         return yield* repository.acceptManualStart({
           project: validation.project,
           requestKey: input.requestKey,
