@@ -6,6 +6,12 @@
   "exports": {
     ".": "./src/index.ts",
     "./testing": "./src/testing.ts",
+    "./agents/codex": "./src/agents/codex.ts",
+    "./agents/claude-code": "./src/agents/claude-code.ts",
+    "./agents/pi": "./src/agents/pi.ts",
+    "./agents/cursor": "./src/agents/cursor.ts",
+    "./agents/opencode": "./src/agents/opencode.ts",
+    "./agents/github-copilot": "./src/agents/github-copilot.ts",
     "./sandboxes/docker": "./src/sandboxes/docker.ts",
     "./sandboxes/podman": "./src/sandboxes/podman.ts",
     "./sandboxes/vercel": "./src/sandboxes/vercel.ts",

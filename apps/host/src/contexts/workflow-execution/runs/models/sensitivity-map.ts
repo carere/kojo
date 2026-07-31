@@ -25,6 +25,39 @@ export const prefixedSensitivityMap = (
 ): SensitivityMap =>
   sensitivityMap(paths.map((path) => (path === "$" ? prefix : `${prefix}.${path}`)));
 
+const isAgentSession = (value: unknown): value is { readonly sessionId: string } =>
+  typeof value === "object" &&
+  value !== null &&
+  (value as { readonly _tag?: unknown })._tag === "agent-session" &&
+  typeof (value as { readonly sessionId?: unknown }).sessionId === "string";
+
+/**
+ * Agent Session references are continuation capabilities, so completed
+ * Workflow output must never expose them merely because an author forgot to
+ * list the path in a sensitivity declaration.
+ */
+export const agentSessionSensitivityPaths = (value: unknown): ReadonlyArray<string> => {
+  const paths: Array<string> = [];
+  const visit = (candidate: unknown, path: string): void => {
+    if (isAgentSession(candidate)) {
+      paths.push(path.length === 0 ? "$" : path);
+      return;
+    }
+    if (Array.isArray(candidate)) {
+      candidate.forEach((item, index) => {
+        visit(item, path.length === 0 ? `${index}` : `${path}.${index}`);
+      });
+      return;
+    }
+    if (typeof candidate !== "object" || candidate === null) return;
+    for (const [key, item] of Object.entries(candidate as Record<string, unknown>)) {
+      visit(item, path.length === 0 ? key : `${path}.${key}`);
+    }
+  };
+  visit(value, "");
+  return normalisePaths(paths);
+};
+
 export const encodeSensitivityMap = (map: SensitivityMap) => JSON.stringify(map.paths);
 
 /**

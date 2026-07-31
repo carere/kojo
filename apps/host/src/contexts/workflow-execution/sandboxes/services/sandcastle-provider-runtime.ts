@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import {
   createSandbox,
+  type AgentProvider as SandcastleAgentProvider,
   type SandboxProvider as SandcastleProvider,
   type Sandbox as SandcastleSandbox,
 } from "@ai-hero/sandcastle";
 import type { ProjectSnapshot } from "@kojo/control";
 import type {
   AcquiredWorkflowSandbox,
+  BuiltInAgentProvider,
   BuiltInSandboxProvider,
   Command,
   SandboxProviderFailure,
@@ -82,6 +84,29 @@ const builtinProvider = async (
       const { noSandbox } = await import("@ai-hero/sandcastle/sandboxes/no-sandbox");
       return noSandbox();
     }
+  }
+};
+
+/**
+ * Built-in Agent constructors deliberately receive no credential value. Their
+ * CLI processes resolve credentials from the local environment only when this
+ * invocation starts; nothing credential-bearing reaches project records.
+ */
+const builtinAgent = async (provider: BuiltInAgentProvider): Promise<SandcastleAgentProvider> => {
+  const sandcastle = await import("@ai-hero/sandcastle");
+  switch (provider.kind) {
+    case "codex":
+      return sandcastle.codex(provider.model);
+    case "claude-code":
+      return sandcastle.claudeCode(provider.model);
+    case "pi":
+      return sandcastle.pi(provider.model);
+    case "cursor":
+      return sandcastle.cursor(provider.model);
+    case "opencode":
+      return sandcastle.opencode(provider.model);
+    case "github-copilot":
+      return sandcastle.copilot(provider.model);
   }
 };
 
@@ -168,6 +193,59 @@ export const SandcastleProviderRuntimeLive = Layer.sync(ProviderRuntime, () => {
           ...result,
           ...acquisition,
           durationMs: Math.max(0, Date.now() - startedAtMs),
+        };
+      }),
+    runAgent: (input) =>
+      Effect.gen(function* () {
+        const acquisition = yield* acquire(input);
+        const startedAtMs = Date.now();
+        if (input.agent.kind === "custom") {
+          const result = yield* input.agent
+            .run({
+              idempotencyKey: input.idempotencyKey,
+              prompt: input.prompt,
+              sandbox: input.sandbox,
+              ...(input.session === undefined ? {} : { session: input.session }),
+            })
+            .pipe(Effect.mapError((error) => failure(error.message)));
+          return {
+            ...acquisition,
+            ...result,
+            durationMs: Math.max(0, Date.now() - startedAtMs),
+            sessionContinued: input.session !== undefined,
+          };
+        }
+        const live = sessions.get(sessionKey(input.project, input.runId, input.sandbox.identity));
+        const liveSandbox = live?.sandbox;
+        if (liveSandbox === undefined) {
+          return yield* Effect.fail(failure("Sandbox session was not available."));
+        }
+        const agent = yield* Effect.tryPromise({
+          try: () => builtinAgent(input.agent as BuiltInAgentProvider),
+          catch: (error) =>
+            failure(
+              error instanceof Error ? error.message : "Agent Provider could not be initialized.",
+            ),
+        });
+        const result = yield* Effect.tryPromise({
+          try: () =>
+            liveSandbox.run({
+              agent,
+              prompt: input.prompt,
+              ...(input.session === undefined ? {} : { resumeSession: input.session.sessionId }),
+            }),
+          catch: (error) =>
+            failure(error instanceof Error ? error.message : "Agent execution failed."),
+        });
+        const latest = result.iterations.at(-1);
+        return {
+          ...acquisition,
+          commits: result.commits,
+          durationMs: Math.max(0, Date.now() - startedAtMs),
+          ...(latest?.sessionId === undefined ? {} : { sessionId: latest.sessionId }),
+          ...(latest?.usage === undefined ? {} : { usage: latest.usage }),
+          sessionContinued: input.session !== undefined,
+          text: result.stdout,
         };
       }),
     releaseProject: (project) =>

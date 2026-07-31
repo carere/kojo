@@ -27,7 +27,7 @@ import {
   type WorkflowBackendState,
   workflowBackendReference,
 } from "../../projects/services/workflow-backend";
-import { maskPayload } from "../models/sensitivity-map";
+import { agentSessionSensitivityPaths, maskPayload } from "../models/sensitivity-map";
 import {
   type StoredWorkflowRunSnapshot,
   type WorkflowRunOutcome,
@@ -123,7 +123,10 @@ const recordOutcome = (
         const encoded = Schema.encodeSync(successSchema)(state.result);
         outcome = {
           kind: "completed",
-          sensitivityPaths: definition.sensitivity?.success ?? [],
+          sensitivityPaths: [
+            ...(definition.sensitivity?.success ?? []),
+            ...agentSessionSensitivityPaths(encoded),
+          ],
           value: encoded,
         };
       } catch {

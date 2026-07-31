@@ -1328,6 +1328,7 @@ const toRunListItem = (connection: Database, row: StoredRun): WorkflowRunListIte
           ? ["deferred-complete"]
           : [],
   activitySummary: readActivitySummary(connection, row.run_id),
+  agentTrace: readAgentTrace(connection, row.run_id),
   sandboxTrace: readSandboxTrace(connection, row.run_id),
 });
 
@@ -1410,6 +1411,47 @@ const readSandboxTrace = (connection: Database, runId: string) =>
       artifactIds: [...(payload.artifactIds ?? [])],
       durationMs: payload.durationMs ?? null,
       exitCode: payload.exitCode ?? null,
+      kind: event.kind,
+      operationKey: payload.operationKey,
+      providerKind: payload.providerKind,
+      recordedAtMs: event.recorded_at_ms,
+      sandboxIdentity: payload.sandboxIdentity,
+    };
+  });
+
+const readAgentTrace = (connection: Database, runId: string) =>
+  (
+    connection
+      .query(
+        `SELECT kind, recorded_at_ms, payload_json
+         FROM kojo_execution_events
+         WHERE run_id = ? AND kind IN (
+           'agent.started', 'agent.completed', 'agent.failed',
+           'agent.session-continued', 'agent.replayed'
+         )
+         ORDER BY sequence ASC`,
+      )
+      .all(runId) as ReadonlyArray<{
+      readonly kind:
+        | "agent.started"
+        | "agent.completed"
+        | "agent.failed"
+        | "agent.session-continued"
+        | "agent.replayed";
+      readonly payload_json: string;
+      readonly recorded_at_ms: number;
+    }>
+  ).map((event) => {
+    const payload = JSON.parse(event.payload_json) as {
+      readonly artifactIds?: ReadonlyArray<string>;
+      readonly durationMs?: number | null;
+      readonly operationKey: string;
+      readonly providerKind: string;
+      readonly sandboxIdentity: string;
+    };
+    return {
+      artifactIds: [...(payload.artifactIds ?? [])],
+      durationMs: payload.durationMs ?? null,
       kind: event.kind,
       operationKey: payload.operationKey,
       providerKind: payload.providerKind,
@@ -3038,6 +3080,56 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
               artifactIds: trace.artifactIds,
               durationMs: trace.durationMs,
               exitCode: trace.exitCode,
+              operationKey: trace.operationKey,
+              providerKind: trace.providerKind,
+              sandboxIdentity: trace.sandboxIdentity,
+            },
+            recordedAtMs: trace.recordedAtMs,
+            runId,
+            sequence,
+            sensitivityMap: sensitivityMap([]),
+          });
+          for (const artifact of trace.artifacts) {
+            connection
+              .query(
+                `INSERT INTO kojo_execution_artifacts(
+                  artifact_id, run_id, storage_key, display_name, media_type, byte_size, sha256,
+                  condition, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'available', ?)`,
+              )
+              .run(
+                artifact.artifactId,
+                runId,
+                artifact.storageKey,
+                artifact.displayName,
+                artifact.mediaType,
+                artifact.byteSize,
+                artifact.sha256,
+                trace.recordedAtMs,
+              );
+            connection
+              .query(
+                `INSERT INTO kojo_execution_event_artifacts(run_id, event_id, artifact_id, role)
+                 VALUES (?, ?, ?, 'evidence')`,
+              )
+              .run(runId, eventId, artifact.artifactId);
+          }
+          advanceRunTrace(connection, runId, sequence, trace.recordedAtMs);
+        }),
+      ),
+    ),
+  recordAgentTrace: (project, runId, trace) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) =>
+        transaction(connection, () => {
+          const sequence = nextEventSequence(connection, runId);
+          const eventId = randomUUID();
+          appendEvent(connection, {
+            eventId,
+            kind: trace.kind,
+            payload: {
+              artifactIds: trace.artifactIds,
+              durationMs: trace.durationMs,
               operationKey: trace.operationKey,
               providerKind: trace.providerKind,
               sandboxIdentity: trace.sandboxIdentity,

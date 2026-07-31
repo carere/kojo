@@ -156,6 +156,35 @@ test("shows accepted Workflow Definition snapshots from the Host", async () => {
                         durableCompletions: 1,
                         replayReuses: 0,
                       },
+                      agentTrace: [
+                        {
+                          artifactIds: ["artifact-2"],
+                          durationMs: 3,
+                          kind: "agent.started",
+                          operationKey: "agent",
+                          providerKind: "codex",
+                          recordedAtMs: 2,
+                          sandboxIdentity: "sandbox-1",
+                        },
+                        {
+                          artifactIds: [],
+                          durationMs: null,
+                          kind: "agent.replayed",
+                          operationKey: "agent",
+                          providerKind: "codex",
+                          recordedAtMs: 3,
+                          sandboxIdentity: "sandbox-1",
+                        },
+                        {
+                          artifactIds: [],
+                          durationMs: null,
+                          kind: "agent.session-continued",
+                          operationKey: "agent",
+                          providerKind: "codex",
+                          recordedAtMs: 4,
+                          sandboxIdentity: "sandbox-1",
+                        },
+                      ],
                       sandboxTrace: [
                         {
                           artifactIds: ["artifact-1"],
@@ -185,6 +214,11 @@ test("shows accepted Workflow Definition snapshots from the Host", async () => {
   await expect.element(page.getByText("00000000-0000-7000-8000-000000000010")).toBeVisible();
   await expect.element(page.getByText("completed")).toBeVisible();
   await expect.element(page.getByText("Sandbox: 1 trace entries")).toBeVisible();
+  await expect
+    .element(
+      page.getByText("Agents: 1 attempts, 1 Activity replays, 1 provider-session continuations"),
+    )
+    .toBeVisible();
 });
 
 test("only renders Host-authorized Workflow Run controls", async () => {
@@ -220,6 +254,7 @@ test("only renders Host-authorized Workflow Run controls", async () => {
                 finalizedAtMs: null,
                 allowedActions: [],
                 activitySummary: emptyActivitySummary,
+                agentTrace: [],
                 sandboxTrace: [],
               },
               {
@@ -233,6 +268,7 @@ test("only renders Host-authorized Workflow Run controls", async () => {
                 finalizedAtMs: null,
                 allowedActions: ["resume"],
                 activitySummary: emptyActivitySummary,
+                agentTrace: [],
                 sandboxTrace: [],
               },
               {
@@ -246,6 +282,7 @@ test("only renders Host-authorized Workflow Run controls", async () => {
                 finalizedAtMs: null,
                 allowedActions: ["deferred-complete"],
                 activitySummary: emptyActivitySummary,
+                agentTrace: [],
                 sandboxTrace: [],
               },
             ],
@@ -263,7 +300,7 @@ test("only renders Host-authorized Workflow Run controls", async () => {
   );
 
   expect(document.querySelector(`[aria-label="Value for ${automaticRun}"]`)).toBeNull();
-  await page.getByRole("button", { name: "Resume" }).click();
+  await page.getByRole("button", { name: "Resume Workflow Run" }).click();
   await page.getByLabelText(`Deferred token for ${deferredRun}`).fill("kojo.deferred.v1.token");
   await page.getByRole("button", { name: "Complete Deferred" }).click();
 
@@ -287,7 +324,7 @@ test("navigates between a Schedule Occurrence and its linked resources", async (
           loadOverview={() =>
             Promise.resolve({
               host: {
-                protocol: { major: 1, minor: 5 },
+                protocol: { major: 1, minor: 6 },
                 hostVersion: "0.1.0",
                 capabilities: ["schedules:show", "occurrences:list", "runs:show"],
               },
@@ -357,6 +394,7 @@ test("navigates between a Schedule Occurrence and its linked resources", async (
                       finalizedAtMs: scheduledAtMs,
                       allowedActions: [],
                       activitySummary: emptyActivitySummary,
+                      agentTrace: [],
                       sandboxTrace: [],
                     },
                   ],

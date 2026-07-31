@@ -89,7 +89,7 @@ export function WorkflowRuns(props: WorkflowRunsProps) {
                         }
                       }}
                     >
-                      Resume
+                      Resume Workflow Run
                     </button>
                   </Show>
                   <Show when={run.allowedActions.includes("deferred-complete")}>
@@ -138,6 +138,19 @@ export function WorkflowRuns(props: WorkflowRunsProps) {
                 <Show when={run.sandboxTrace.length > 0}>
                   {" "}
                   · Sandbox: {run.sandboxTrace.length} trace entries
+                </Show>
+                <Show when={run.agentTrace.length > 0}>
+                  {" "}
+                  · Agents:{" "}
+                  {run.agentTrace.filter((entry) => entry.kind === "agent.started").length}{" "}
+                  attempts,{" "}
+                  {run.agentTrace.filter((entry) => entry.kind === "agent.replayed").length}{" "}
+                  Activity replays,{" "}
+                  {
+                    run.agentTrace.filter((entry) => entry.kind === "agent.session-continued")
+                      .length
+                  }{" "}
+                  provider-session continuations
                 </Show>
               </span>
             </li>
