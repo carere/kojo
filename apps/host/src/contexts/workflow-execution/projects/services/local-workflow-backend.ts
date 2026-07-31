@@ -443,6 +443,10 @@ export const makeLocalWorkflowBackendLayer = (
               ),
             );
           }),
+        // Local Effect Workflow executions do not retain a separate Sandbox
+        // session as required recovery state. Providers that do can override
+        // this adapter seam with their durable state observations.
+        inspectSandboxState: () => Effect.succeed([]),
         resume: (project, reference, value) =>
           Effect.suspend(() => {
             const backend = getActiveBackend(active, project);

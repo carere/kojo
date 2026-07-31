@@ -46,6 +46,7 @@ export const startLiveKojoHost = async () => {
   const runtimeDependencies = Layer.mergeAll(
     projectIndex,
     projectLayout,
+    DrizzleProjectRepositoryLive,
     DrizzleWorkflowRunRepositoryLive,
     DrizzleWorkflowScheduleRepositoryLive,
     ScheduleClockLive,

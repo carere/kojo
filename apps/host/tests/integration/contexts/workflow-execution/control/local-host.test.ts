@@ -59,7 +59,7 @@ describe("local Kojo Host control", () => {
           }),
         );
         expect(Schema.decodeUnknownSync(LegacyHostInformation)(legacyHandshake)).toEqual({
-          protocol: { major: 1, minor: 6 },
+          protocol: { major: 1, minor: 7 },
           hostVersion: "0.1.0",
           capabilities: ["projects:list"],
         });
@@ -71,7 +71,7 @@ describe("local Kojo Host control", () => {
 
         expect(overview).toEqual({
           host: {
-            protocol: { major: 1, minor: 6 },
+            protocol: { major: 1, minor: 7 },
             hostVersion: "0.1.0",
             capabilities: [
               "projects:list",
@@ -79,6 +79,9 @@ describe("local Kojo Host control", () => {
               "projects:show",
               "projects:register",
               "projects:forget",
+              "readiness:show",
+              "readiness:refresh",
+              "readiness:repair",
               "workflows:list",
               "workflows:show",
               "schedules:list",
@@ -98,6 +101,7 @@ describe("local Kojo Host control", () => {
             ],
           },
           projects: [],
+          readiness: [],
           projectDefinitions: [],
           workflowSchedules: [],
           workflowOccurrences: [],
@@ -132,7 +136,7 @@ describe("local Kojo Host control", () => {
           hostIdentity: "host:00000000-0000-4000-8000-000000000000",
           hostVersion: "0.1.0",
           protocolMajor: 1,
-          protocolMinor: 6,
+          protocolMinor: 7,
         });
       }),
   );
@@ -248,6 +252,7 @@ const startTestHost = (socketPath: string, diagnosticPath: string) => {
     Layer.provide([
       makeFileProjectIndexRepositoryLayer(join(dirname(socketPath), "projects.json")),
       GitProjectLayoutLive.pipe(Layer.provide(SubprocessProjectDefinitionLoaderLive)),
+      DrizzleProjectRepositoryLive,
       DrizzleWorkflowRunRepositoryLive,
       DrizzleWorkflowScheduleRepositoryLive,
       ScheduleClockLive,

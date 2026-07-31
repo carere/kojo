@@ -7,6 +7,8 @@ import {
   DisableWorkflowScheduleHandler,
   EnableWorkflowScheduleHandler,
   HostOverviewHandler,
+  RefreshProjectReadinessHandler,
+  RepairProjectReadinessHandler,
   ResumeWorkflowRunHandler,
   StopWorkflowRunHandler,
 } from "../../workflow-execution/host/server/handlers";
@@ -21,6 +23,8 @@ const VisualizerApiLive = RpcServer.layerHttp({
   Layer.provide([
     HealthHandler,
     HostOverviewHandler.pipe(Layer.provide(HostControlClientLive)),
+    RefreshProjectReadinessHandler.pipe(Layer.provide(HostControlClientLive)),
+    RepairProjectReadinessHandler.pipe(Layer.provide(HostControlClientLive)),
     EnableWorkflowScheduleHandler.pipe(Layer.provide(HostControlClientLive)),
     DisableWorkflowScheduleHandler.pipe(Layer.provide(HostControlClientLive)),
     ResumeWorkflowRunHandler.pipe(Layer.provide(HostControlClientLive)),

@@ -19,6 +19,9 @@ import {
   type ProjectListResult,
   type ProjectMutationResult,
   type ProjectQueryResult,
+  type ProjectReadinessActionKey,
+  type ProjectReadinessQueryResult,
+  type ProjectReadinessRepairResult,
   type ProjectSelector,
   type ProjectWorkflowQueryResult,
   type RequestKey,
@@ -154,6 +157,25 @@ export const makeLocalClient = (options: LocalClientOptions) => {
 
   const showProject = (identity: ProjectIdentity) =>
     activateAndRetry(request("projects:show", (client) => client.ShowProject({ identity })));
+  const showProjectReadiness = (identity: ProjectIdentity) =>
+    activateAndRetry(
+      request("readiness:show", (client) => client.ShowProjectReadiness({ identity })),
+    );
+  const refreshProjectReadiness = (identity: ProjectIdentity) =>
+    activateAndRetry(
+      request("readiness:refresh", (client) => client.RefreshProjectReadiness({ identity })),
+    );
+  const repairProjectReadiness = (
+    identity: ProjectIdentity,
+    assessmentRevision: string,
+    action: ProjectReadinessActionKey,
+    requestKey: RequestKey,
+  ) =>
+    activateAndRetry(
+      request("readiness:repair", (client) =>
+        client.RepairProjectReadiness({ identity, assessmentRevision, action, requestKey }),
+      ),
+    );
   const listWorkflowDefinitions = (identity: ProjectIdentity) =>
     activateAndRetry(
       request("workflows:list", (client) => client.ListWorkflowDefinitions({ identity })),
@@ -271,6 +293,13 @@ export const makeLocalClient = (options: LocalClientOptions) => {
               { concurrency: "unbounded" },
             )
           : [];
+        const readiness = host.capabilities.includes("readiness:show")
+          ? yield* Effect.forEach(
+              projects,
+              (project) => client.ShowProjectReadiness({ identity: project.identity }),
+              { concurrency: "unbounded" },
+            )
+          : [];
         const runs = host.capabilities.includes("runs:list")
           ? yield* Effect.forEach(
               projects,
@@ -312,6 +341,7 @@ export const makeLocalClient = (options: LocalClientOptions) => {
         return {
           host,
           projects,
+          readiness: readiness.flatMap((result) => (result.ok ? [result.assessment] : [])),
           projectDefinitions: definitions.flatMap((result) => (result.ok ? [result.snapshot] : [])),
           workflowSchedules: schedules.flatMap((result, index) => {
             const project = projects[index];
@@ -357,6 +387,9 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     listProjects,
     listProjectPage,
     showProject,
+    showProjectReadiness,
+    refreshProjectReadiness,
+    repairProjectReadiness,
     listWorkflowDefinitions,
     showWorkflowDefinition,
     listWorkflowSchedules,
@@ -395,6 +428,27 @@ export const makeLocalClient = (options: LocalClientOptions) => {
       identity: ProjectIdentity,
     ) => Effect.Effect<
       ProjectQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly showProjectReadiness: (
+      identity: ProjectIdentity,
+    ) => Effect.Effect<
+      ProjectReadinessQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly refreshProjectReadiness: (
+      identity: ProjectIdentity,
+    ) => Effect.Effect<
+      ProjectReadinessQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly repairProjectReadiness: (
+      identity: ProjectIdentity,
+      assessmentRevision: string,
+      action: ProjectReadinessActionKey,
+      requestKey: RequestKey,
+    ) => Effect.Effect<
+      ProjectReadinessRepairResult,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;
     readonly listWorkflowDefinitions: (

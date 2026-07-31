@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import {
   type ProjectCondition,
   ProjectIdentity as ProjectIdentitySchema,
+  type ProjectReadinessActionKey,
   type ProjectSelector,
   type ProjectSnapshot,
   type RequestKey,
@@ -35,12 +36,14 @@ import {
   projectCursorFailure,
   projectFailure,
   projectQueryFailure,
+  readinessFailure,
   transportFailure,
   workflowRunFailure,
   workflowScheduleFailure,
   workflowScheduleOccurrenceFailure,
   writeFailure,
   writeProject,
+  writeProjectReadiness,
   writeWorkflowRun,
   writeWorkflowSchedule,
   writeWorkflowScheduleOccurrence,
@@ -49,6 +52,108 @@ import {
 export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
   const json = rawArgs.includes("--json");
   const args = rawArgs.filter((argument) => argument !== "--json");
+
+  if (args[0] === "readiness") {
+    const options = parseOptions(args.slice(2));
+    const operation = args[1];
+    const command = `readiness.${operation ?? "unknown"}`;
+    if (options === undefined || !["show", "refresh", "repair"].includes(operation ?? "")) {
+      return writeFailure(invalid("Run: kojo readiness show|refresh|repair"), json, command);
+    }
+    if (
+      options.input !== undefined ||
+      options.value !== undefined ||
+      options.valueFile !== undefined ||
+      options.conditions.length > 0 ||
+      options.outcomes.length > 0 ||
+      options.states.length > 0 ||
+      options.workflowKeys.length > 0 ||
+      options.scheduleKeys.length > 0 ||
+      options.parentRunId !== undefined ||
+      options.cursor !== undefined ||
+      options.limit !== undefined ||
+      options.reveal ||
+      (operation !== "repair" &&
+        (options.args.length !== 0 ||
+          options.requestKey !== undefined ||
+          options.revision !== undefined)) ||
+      (operation === "repair" && (options.args.length !== 1 || options.revision === undefined))
+    ) {
+      return writeFailure(
+        invalid(
+          "Run: kojo readiness show|refresh [--project <path>|--project-id <Project Identity>] or kojo readiness repair <action> --revision <Assessment revision> [--request-key <Request Key>] [--project <path>|--project-id <Project Identity>]",
+        ),
+        json,
+        command,
+      );
+    }
+    let identity: ProjectSnapshot["identity"];
+    if (options.projectId !== undefined) {
+      try {
+        identity = Schema.decodeUnknownSync(ProjectIdentitySchema)(options.projectId);
+      } catch {
+        return writeFailure(invalid("Use a full Project Identity."), json, command);
+      }
+    } else {
+      try {
+        identity = (await resolveInitializedProject(options.projectPath ?? process.cwd())).identity;
+      } catch (error) {
+        return writeFailure(
+          invalid(
+            error instanceof ProjectInitializationError
+              ? error.message
+              : "Choose an initialized Kojo Project.",
+          ),
+          json,
+          command,
+        );
+      }
+    }
+    const client = makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath());
+    if (operation === "show" || operation === "refresh") {
+      const result = await runEffect(
+        operation === "show"
+          ? client.showProjectReadiness(identity)
+          : client.refreshProjectReadiness(identity),
+      );
+      if (!result.succeeded) return writeFailure(transportFailure(result.error), json, command);
+      if (!result.value.ok)
+        return writeFailure(readinessFailure(result.value.error), json, command);
+      writeProjectReadiness(command, result.value.assessment, json);
+      return 0;
+    }
+    const action = options.args[0] as ProjectReadinessActionKey;
+    if (
+      ![
+        "layout.add-ignore-rule",
+        "project.assign-new-identity",
+        "project.replace-missing-data",
+        "store.retry-migration",
+        "readiness.refresh",
+      ].includes(action)
+    ) {
+      return writeFailure(
+        invalid("Use a repair action shown by kojo readiness show."),
+        json,
+        command,
+      );
+    }
+    const requestKey = decodeRequestKey(options.requestKey);
+    if (requestKey === undefined) {
+      return writeFailure(
+        invalid("Use a non-empty Request Key of at most 256 characters."),
+        json,
+        command,
+      );
+    }
+    const result = await runEffect(
+      client.repairProjectReadiness(identity, options.revision as string, action, requestKey),
+    );
+    if (!result.succeeded) return writeFailure(transportFailure(result.error), json, command);
+    if (!result.value.ok) return writeFailure(readinessFailure(result.value.error), json, command);
+    writeProjectReadiness(command, result.value.assessment, json, result.value.requestKey);
+    return 0;
+  }
 
   if (args[0] === "schedule") {
     const options = parseOptions(args.slice(2));

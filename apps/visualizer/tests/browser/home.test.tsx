@@ -92,6 +92,116 @@ test("shows Host connectivity and the authoritative empty Project state", async 
   await expect.element(page.getByText("No Kojo Projects yet.")).toBeVisible();
 });
 
+test("renders Host-produced readiness guidance without exposing hidden diagnostic details", async () => {
+  setLocale("en", { reload: false });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+    "00000000-0000-7000-8000-000000000001",
+  );
+  dispose = render(
+    () => (
+      <ColorModeProvider initialColorMode="light">
+        <HostOverview
+          loadOverview={() =>
+            Promise.resolve({
+              host: {
+                protocol: { major: 1, minor: 7 },
+                hostVersion: "0.1.0",
+                capabilities: ["projects:list", "readiness:show", "readiness:refresh"],
+              },
+              projects: [{ identity, path: "/projects/demo" }],
+              readiness: [
+                {
+                  project: { identity, path: "/projects/demo" },
+                  revision: "readiness-revision",
+                  assessedAtMs: 1,
+                  condition: "needs-attention",
+                  capabilities: [
+                    {
+                      capability: "project:inspect",
+                      available: true,
+                      findingKeys: [],
+                    },
+                    {
+                      capability: "history:inspect",
+                      available: true,
+                      findingKeys: [],
+                    },
+                    {
+                      capability: "runs:control",
+                      available: true,
+                      findingKeys: [],
+                    },
+                    {
+                      capability: "runs:recover",
+                      available: false,
+                      findingKeys: ["layout.ignore-rule-missing"],
+                    },
+                    {
+                      capability: "runs:start",
+                      available: false,
+                      findingKeys: ["layout.ignore-rule-missing"],
+                    },
+                    {
+                      capability: "schedules:process",
+                      available: false,
+                      findingKeys: ["layout.ignore-rule-missing"],
+                    },
+                    {
+                      capability: "repair:safe",
+                      available: true,
+                      findingKeys: [],
+                    },
+                  ],
+                  findings: [
+                    {
+                      key: "layout.ignore-rule-missing:demo",
+                      code: "layout.ignore-rule-missing",
+                      affectedResource: { kind: "layout", path: "/projects/demo" },
+                      blockedCapabilities: ["runs:recover", "runs:start", "schedules:process"],
+                      dependents: [],
+                      summary: "The Project-local /.kojo/ ignore rule is missing.",
+                      relevant: ["internal-diagnostic-token"],
+                      repairClass: "explicit",
+                      actions: [
+                        {
+                          key: "layout.add-ignore-rule",
+                          label: "Add the /.kojo/ ignore rule",
+                        },
+                      ],
+                      firstObservedAtMs: 1,
+                      lastObservedAtMs: 1,
+                    },
+                  ],
+                  repairs: [],
+                },
+              ],
+              projectDefinitions: [],
+              workflowSchedules: [],
+              workflowOccurrences: [],
+              workflowRuns: [],
+            })
+          }
+        />
+      </ColorModeProvider>
+    ),
+    root,
+  );
+
+  await expect
+    .element(page.getByRole("heading", { name: "Project Runtime Readiness" }))
+    .toBeVisible();
+  await expect.element(page.getByText("layout.ignore-rule-missing")).toBeVisible();
+  await expect
+    .element(page.getByText("The Project-local /.kojo/ ignore rule is missing."))
+    .toBeVisible();
+  await expect
+    .element(page.getByRole("button", { name: "Add the /.kojo/ ignore rule" }))
+    .toBeVisible();
+  expect(document.body.textContent).not.toContain("internal-diagnostic-token");
+});
+
 test("shows accepted Workflow Definition snapshots from the Host", async () => {
   setLocale("en", { reload: false });
   const root = document.createElement("div");
