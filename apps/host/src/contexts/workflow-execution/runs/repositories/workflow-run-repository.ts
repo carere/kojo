@@ -65,6 +65,30 @@ export interface WorkflowActivityOperation {
   readonly durableOperationKey: string;
 }
 
+export interface WorkflowSandboxTraceRecord {
+  readonly artifactIds: ReadonlyArray<string>;
+  readonly artifacts: ReadonlyArray<{
+    readonly artifactId: string;
+    readonly byteSize: number;
+    readonly displayName: string;
+    readonly mediaType: string;
+    readonly sha256: Uint8Array;
+    readonly storageKey: string;
+  }>;
+  readonly durationMs: number | null;
+  readonly exitCode: number | null;
+  readonly kind:
+    | "sandbox.acquired"
+    | "sandbox.session-recreated"
+    | "command.completed"
+    | "command.failed"
+    | "command.timed-out";
+  readonly operationKey: string;
+  readonly providerKind: string;
+  readonly recordedAtMs: number;
+  readonly sandboxIdentity: string;
+}
+
 export interface WorkflowActivityAttemptRecord extends WorkflowActivityOperation {
   readonly activityIdempotencyKey: string;
   readonly attemptId: string;
@@ -205,6 +229,11 @@ export interface WorkflowRunRepositoryShape {
     operation: WorkflowActivityOperation,
     confirmedAttemptId: string,
     recordedAtMs: number,
+  ) => Effect.Effect<void>;
+  readonly recordSandboxTrace: (
+    project: ProjectSnapshot,
+    runId: string,
+    trace: WorkflowSandboxTraceRecord,
   ) => Effect.Effect<void>;
 }
 

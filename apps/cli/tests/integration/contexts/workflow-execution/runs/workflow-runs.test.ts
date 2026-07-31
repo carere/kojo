@@ -13,9 +13,16 @@ const workflowPackagePath = fileURLToPath(
 const effectPackagePath = fileURLToPath(
   new URL("../../../../../../../apps/host/node_modules/effect", import.meta.url),
 );
+const dockerTestImage = "kojo-sandbox-test:local";
+const dockerAvailable =
+  Bun.which("docker") !== null &&
+  Bun.spawnSync(["docker", "version", "--format", "{{.Server.Version}}"], {
+    stderr: "ignore",
+    stdout: "ignore",
+  }).exitCode === 0;
 
 afterEach(async () => {
-  await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
 const initializeGit = async (path: string) => {
@@ -23,10 +30,61 @@ const initializeGit = async (path: string) => {
   if ((await child.exited) !== 0) throw new Error(await new Response(child.stderr).text());
 };
 
+const commitInitialGitState = async (path: string) => {
+  const child = Bun.spawn(
+    [
+      "git",
+      "-c",
+      "user.name=Kojo Test",
+      "-c",
+      "user.email=kojo@example.test",
+      "commit",
+      "--allow-empty",
+      "--message",
+      "initial",
+    ],
+    { cwd: path, stdout: "ignore", stderr: "pipe" },
+  );
+  if ((await child.exited) !== 0) throw new Error(await new Response(child.stderr).text());
+};
+
 const installWorkflowDependencies = async (path: string) => {
   await mkdir(join(path, "node_modules", "@kojo"), { recursive: true });
   await symlink(workflowPackagePath, join(path, "node_modules", "@kojo", "workflow"), "dir");
   await symlink(await realpath(effectPackagePath), join(path, "node_modules", "effect"), "dir");
+};
+
+const buildDockerTestImage = async (path: string) => {
+  await writeFile(
+    join(path, "Dockerfile"),
+    `FROM alpine:3.21
+ARG KOJO_UID
+RUN adduser -D -u $KOJO_UID kojo
+USER $KOJO_UID
+CMD ["sh", "-c", "while true; do sleep 3600; done"]
+`,
+  );
+  const child = Bun.spawn(
+    [
+      "docker",
+      "build",
+      "--build-arg",
+      `KOJO_UID=${process.getuid?.() ?? 1000}`,
+      "--tag",
+      dockerTestImage,
+      path,
+    ],
+    { stderr: "pipe", stdout: "ignore" },
+  );
+  if ((await child.exited) !== 0) throw new Error(await new Response(child.stderr).text());
+};
+
+const removeDockerTestImage = async () => {
+  const child = Bun.spawn(["docker", "image", "rm", "--force", dockerTestImage], {
+    stderr: "ignore",
+    stdout: "ignore",
+  });
+  await child.exited;
 };
 
 const configuration = `
@@ -215,6 +273,155 @@ export default defineConfig({
 });
 `;
 
+const sandboxConfiguration = `
+import { Effect, Schema } from "effect";
+import { Command, CommandFailure, CommandResult, Sandbox, defineCommand, defineConfig, defineCustomSandboxProvider, defineSandbox, defineSandboxImage, defineWorkflow } from "@kojo/workflow";
+import { docker } from "@kojo/workflow/sandboxes/docker";
+import { unsafeHost } from "@kojo/workflow/sandboxes/unsafe-host";
+
+const input = Schema.Struct({ message: Schema.String });
+const provider = unsafeHost({ providerKey: "trusted-local", revision: "1" });
+const sandbox = defineSandbox({
+  sandboxKey: "local-command",
+  revision: "1",
+  provider,
+});
+const changedSandbox = defineSandbox({
+  sandboxKey: "local-command",
+  revision: "2",
+  provider,
+});
+const dockerSandbox = defineSandbox({
+  sandboxKey: "isolated-command",
+  revision: "1",
+  provider: docker({ providerKey: "local-docker", revision: "1" }),
+  image: defineSandboxImage({
+    imageKey: "kojo-sandbox-test",
+    revision: "1",
+    source: { kind: "container-image", reference: "kojo-sandbox-test:local" },
+  }),
+});
+const customSandbox = defineSandbox({
+  sandboxKey: "custom-command",
+  revision: "1",
+  provider: defineCustomSandboxProvider({
+    kind: "custom",
+    providerKey: "test-custom",
+    revision: "1",
+    runCommand: ({ command }) =>
+      Effect.succeed({ durationMs: 1, exitCode: 0, stderr: "", stdout: "custom:" + command.commandKey }),
+  }),
+});
+const echo = defineCommand({
+  commandKey: "echo-environment",
+  revision: "1",
+  arguments: ["/bin/sh", "-lc", "printf '%s:%s' \\"$KOJO_SANDBOX_VALUE\\" \\"$PWD\\""],
+  environment: { KOJO_SANDBOX_VALUE: "present" },
+  workingDirectory: ".",
+});
+const nonZero = defineCommand({
+  commandKey: "non-zero",
+  revision: "1",
+  arguments: ["/bin/sh", "-lc", "exit 7"],
+  nonZeroExit: "return",
+});
+const timeout = defineCommand({
+  commandKey: "timeout",
+  revision: "1",
+  arguments: ["/bin/sh", "-lc", "sleep 1"],
+  timeout: "10 millis",
+});
+const recovery = defineCommand({
+  commandKey: "recovery-wait",
+  revision: "1",
+  arguments: ["/bin/sh", "-lc", "sleep 10; printf recovered"],
+});
+
+export default defineConfig({
+  workflows: [
+    defineWorkflow({
+      workflowKey: "sandbox-command",
+      revision: "1",
+      inputSchema: input,
+      successSchema: CommandResult,
+      failureSchema: CommandFailure,
+      handler: () => Effect.gen(function* () {
+        const acquired = yield* Sandbox.acquire({ operationKey: "sandbox", sandbox });
+        return yield* Command.run({ operationKey: "echo", sandbox: acquired, command: echo });
+      }),
+    }),
+    defineWorkflow({
+      workflowKey: "sandbox-non-zero",
+      revision: "1",
+      inputSchema: input,
+      successSchema: CommandResult,
+      failureSchema: CommandFailure,
+      handler: () => Effect.gen(function* () {
+        const acquired = yield* Sandbox.acquire({ operationKey: "sandbox", sandbox });
+        return yield* Command.run({ operationKey: "non-zero", sandbox: acquired, command: nonZero });
+      }),
+    }),
+    defineWorkflow({
+      workflowKey: "sandbox-timeout",
+      revision: "1",
+      inputSchema: input,
+      successSchema: CommandResult,
+      failureSchema: CommandFailure,
+      handler: () => Effect.gen(function* () {
+        const acquired = yield* Sandbox.acquire({ operationKey: "sandbox", sandbox });
+        return yield* Command.run({ operationKey: "timeout", sandbox: acquired, command: timeout });
+      }),
+    }),
+    defineWorkflow({
+      workflowKey: "sandbox-key-conflict",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      handler: () => Effect.gen(function* () {
+        yield* Sandbox.acquire({ operationKey: "sandbox", sandbox });
+        yield* Sandbox.acquire({ operationKey: "sandbox", sandbox: changedSandbox });
+        return "unreachable";
+      }),
+    }),
+    defineWorkflow({
+      workflowKey: "sandbox-docker",
+      revision: "1",
+      inputSchema: input,
+      successSchema: CommandResult,
+      failureSchema: CommandFailure,
+      handler: () => Effect.gen(function* () {
+        const acquired = yield* Sandbox.acquire({ operationKey: "sandbox", sandbox: dockerSandbox });
+        return yield* Command.run({ operationKey: "echo", sandbox: acquired, command: echo });
+      }),
+    }),
+    defineWorkflow({
+      workflowKey: "sandbox-custom",
+      revision: "1",
+      inputSchema: input,
+      successSchema: CommandResult,
+      failureSchema: CommandFailure,
+      handler: () => Effect.gen(function* () {
+        const acquired = yield* Sandbox.acquire({ operationKey: "sandbox", sandbox: customSandbox });
+        return yield* Command.run({ operationKey: "echo", sandbox: acquired, command: echo });
+      }),
+    }),
+    defineWorkflow({
+      workflowKey: "sandbox-recovery",
+      revision: "1",
+      inputSchema: input,
+      successSchema: CommandResult,
+      failureSchema: CommandFailure,
+      handler: () => Effect.gen(function* () {
+        const acquired = yield* Sandbox.acquire({ operationKey: "sandbox", sandbox });
+        yield* Command.run({ operationKey: "before-restart", sandbox: acquired, command: echo });
+        return yield* Command.run({ operationKey: "after-restart", sandbox: acquired, command: recovery });
+      }),
+    }),
+  ],
+});
+`;
+
 const crashWindowConfiguration = (proofPath: string, releasePath: string) => `
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { Effect, Schema } from "effect";
@@ -303,6 +510,7 @@ it("starts, redelivers, lists, and shows one durable Workflow Run", async () => 
   cleanups.push(directory.cleanup);
   const project = join(directory.path, "project");
   await initializeGit(project);
+  await commitInitialGitState(project);
   await installWorkflowDependencies(project);
   await writeFile(join(project, "kojo.config.ts"), configuration);
   const host = await startKojoHostProcess();
@@ -461,6 +669,253 @@ it("starts, redelivers, lists, and shows one durable Workflow Run", async () => 
   expect(shown.exitCode).toBe(0);
   expect(JSON.parse(shown.stdout).result).toMatchObject({ run: { runId: firstResult.run.runId } });
 });
+
+it("runs Commands in a durable logical Sandbox and records safe Artifact-backed trace evidence", async () => {
+  const directory = await makeTemporaryDirectory("kojo-workflow-sandbox-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await commitInitialGitState(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), sandboxConfiguration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "sandbox-command", "--input", '{"message":"hello"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = JSON.parse(started.stdout).result.run.runId as string;
+  const completed = await waitForFinalRun(host.socketPath, project, runId);
+
+  expect(completed).toMatchObject({
+    outcome: {
+      kind: "completed",
+      value: { exitCode: 0, stdout: expect.stringContaining("present:") },
+    },
+    state: "completed",
+  });
+  const trace = completed.sandboxTrace as ReadonlyArray<Record<string, unknown>>;
+  expect(trace).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ kind: "sandbox.acquired", providerKind: "unsafe-host" }),
+      expect.objectContaining({ kind: "command.completed", exitCode: 0 }),
+    ]),
+  );
+  const commandTrace = trace.find((entry) => entry.kind === "command.completed");
+  const artifactId = (commandTrace?.artifactIds as ReadonlyArray<string> | undefined)?.[0];
+  expect(artifactId).toEqual(expect.any(String));
+  expect(
+    await readFile(join(project, ".kojo", "artifacts", runId, `${artifactId}.json`), "utf8"),
+  ).toContain("present");
+
+  const nonZero = await runKojoCli(
+    ["run", "start", "sandbox-non-zero", "--input", '{"message":"hello"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  const nonZeroRun = await waitForFinalRun(
+    host.socketPath,
+    project,
+    JSON.parse(nonZero.stdout).result.run.runId as string,
+  );
+  expect(nonZeroRun).toMatchObject({
+    outcome: { kind: "completed", value: { exitCode: 7 } },
+    state: "completed",
+  });
+
+  const timedOut = await runKojoCli(
+    ["run", "start", "sandbox-timeout", "--input", '{"message":"hello"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  const timedOutRun = await waitForFinalRun(
+    host.socketPath,
+    project,
+    JSON.parse(timedOut.stdout).result.run.runId as string,
+  );
+  expect(timedOutRun).toMatchObject({ state: "failed" });
+  expect(timedOutRun.sandboxTrace).toEqual(
+    expect.arrayContaining([expect.objectContaining({ kind: "command.timed-out" })]),
+  );
+});
+
+it.skipIf(!dockerAvailable)(
+  "runs Commands through the local isolated Docker Provider",
+  async () => {
+    const directory = await makeTemporaryDirectory("kojo-workflow-sandbox-docker-");
+    cleanups.push(directory.cleanup);
+    const imageBuild = await makeTemporaryDirectory("kojo-workflow-sandbox-image-");
+    cleanups.push(imageBuild.cleanup);
+    await buildDockerTestImage(imageBuild.path);
+    cleanups.push(removeDockerTestImage);
+    const project = join(directory.path, "project");
+    await initializeGit(project);
+    await commitInitialGitState(project);
+    await installWorkflowDependencies(project);
+    await writeFile(join(project, "kojo.config.ts"), sandboxConfiguration);
+    const host = await startKojoHostProcess();
+    cleanups.push(host.stop);
+
+    expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+    const started = await runKojoCli(
+      ["run", "start", "sandbox-docker", "--input", '{"message":"hello"}', "--json"],
+      host.socketPath,
+      project,
+    );
+    expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+    const completed = await waitForFinalRun(
+      host.socketPath,
+      project,
+      JSON.parse(started.stdout).result.run.runId as string,
+    );
+    expect(completed).toMatchObject({
+      outcome: {
+        kind: "completed",
+        value: { exitCode: 0, stdout: expect.stringContaining("present:") },
+      },
+      state: "completed",
+    });
+    expect(completed.sandboxTrace).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "sandbox.acquired", providerKind: "docker" }),
+        expect.objectContaining({ kind: "command.completed", providerKind: "docker" }),
+      ]),
+    );
+  },
+  30_000,
+);
+
+it("runs a custom Provider through the same logical Sandbox contract", async () => {
+  const directory = await makeTemporaryDirectory("kojo-workflow-sandbox-custom-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), sandboxConfiguration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "sandbox-custom", "--input", '{"message":"hello"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const completed = await waitForFinalRun(
+    host.socketPath,
+    project,
+    JSON.parse(started.stdout).result.run.runId as string,
+  );
+  expect(completed).toMatchObject({
+    outcome: { kind: "completed", value: { stdout: "custom:echo-environment" } },
+    state: "completed",
+  });
+  expect(completed.sandboxTrace).toEqual(
+    expect.arrayContaining([expect.objectContaining({ providerKind: "custom" })]),
+  );
+});
+
+it("rejects conflicting Sandbox acquisition under one Durable Operation Key", async () => {
+  const directory = await makeTemporaryDirectory("kojo-workflow-sandbox-conflict-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await commitInitialGitState(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), sandboxConfiguration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "sandbox-key-conflict", "--input", '{"message":"hello"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = JSON.parse(started.stdout).result.run.runId as string;
+  const failed = await waitForFinalRun(host.socketPath, project, runId);
+  expect(failed).toMatchObject({ state: "failed" });
+  expect(
+    (failed.sandboxTrace as ReadonlyArray<Record<string, unknown>>).filter(
+      (entry) => entry.kind === "sandbox.acquired",
+    ),
+  ).toHaveLength(1);
+});
+
+it("recreates a provider session after a Host crash while retaining Sandbox worktree and Artifact evidence", async () => {
+  const directory = await makeTemporaryDirectory("kojo-workflow-sandbox-recovery-");
+  cleanups.push(directory.cleanup);
+  const hostStore = await makeTemporaryDirectory("kojo-workflow-sandbox-host-");
+  cleanups.push(hostStore.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await commitInitialGitState(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), sandboxConfiguration);
+  const firstHost = await startKojoHostProcess({ storePath: hostStore.path });
+  cleanups.push(firstHost.stop);
+
+  expect((await runKojoCli(["init", project], firstHost.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "sandbox-recovery", "--input", '{"message":"hello"}', "--json"],
+    firstHost.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = JSON.parse(started.stdout).result.run.runId as string;
+  let interruptedCommandStarted = false;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const shown = await runKojoCli(["run", "show", runId, "--json"], firstHost.socketPath, project);
+    if (shown.exitCode === 0) {
+      const run = JSON.parse(shown.stdout).result.run as {
+        readonly activityTrace: {
+          readonly attempts: ReadonlyArray<{
+            readonly durableOperationKey: string;
+            readonly state: string;
+          }>;
+        };
+      };
+      if (
+        run.activityTrace.attempts.some(
+          (entry) => entry.durableOperationKey === "after-restart" && entry.state === "started",
+        )
+      ) {
+        interruptedCommandStarted = true;
+        break;
+      }
+    }
+    await Bun.sleep(25);
+  }
+  expect(interruptedCommandStarted).toBe(true);
+  await firstHost.crash();
+
+  // Let the abandoned runner lease expire before the replacement Host activates the Project.
+  await Bun.sleep(1_100);
+  const secondHost = await startKojoHostProcess({ storePath: hostStore.path });
+  cleanups.push(secondHost.stop);
+  const initialized = await runKojoCli(["init", project], secondHost.socketPath);
+  expect(initialized.exitCode, `${initialized.stdout}${initialized.stderr}`).toBe(0);
+  const completed = await waitForFinalRun(secondHost.socketPath, project, runId);
+  expect(completed).toMatchObject({ state: "completed" });
+  const trace = completed.sandboxTrace as ReadonlyArray<Record<string, unknown>>;
+  expect(trace).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ kind: "sandbox.acquired" }),
+      expect.objectContaining({ kind: "sandbox.session-recreated" }),
+      expect.objectContaining({ kind: "command.completed" }),
+    ]),
+  );
+  const completedCommand = trace.find((entry) => entry.kind === "command.completed");
+  expect(
+    (completedCommand?.artifactIds as ReadonlyArray<string> | undefined)?.length ?? 0,
+  ).toBeGreaterThan(0);
+}, 30_000);
 
 it("reconciles a non-final Workflow Run after the Host restarts", async () => {
   const directory = await makeTemporaryDirectory("kojo-workflow-runs-restart-");

@@ -494,6 +494,25 @@ export const WorkflowActivityTrace = Schema.Struct({
 });
 export type WorkflowActivityTrace = typeof WorkflowActivityTrace.Type;
 
+/** Safe Sandbox and Command evidence. Artifact contents never appear in this trace. */
+export const WorkflowSandboxTraceEntry = Schema.Struct({
+  artifactIds: Schema.Array(Schema.String),
+  durationMs: Schema.NullOr(Schema.Number),
+  exitCode: Schema.NullOr(Schema.Number),
+  kind: Schema.Literals([
+    "sandbox.acquired",
+    "sandbox.session-recreated",
+    "command.completed",
+    "command.failed",
+    "command.timed-out",
+  ]),
+  operationKey: Schema.String,
+  providerKind: Schema.String,
+  recordedAtMs: Schema.Number,
+  sandboxIdentity: Schema.String,
+});
+export type WorkflowSandboxTraceEntry = typeof WorkflowSandboxTraceEntry.Type;
+
 export const WorkflowRunListItem = Schema.Struct({
   runId: WorkflowRunId,
   workflowKey: Schema.String,
@@ -505,6 +524,7 @@ export const WorkflowRunListItem = Schema.Struct({
   finalizedAtMs: Schema.NullOr(Schema.Number),
   allowedActions: Schema.Array(WorkflowRunAction),
   activitySummary: WorkflowActivitySummary,
+  sandboxTrace: Schema.Array(WorkflowSandboxTraceEntry),
 });
 export type WorkflowRunListItem = typeof WorkflowRunListItem.Type;
 

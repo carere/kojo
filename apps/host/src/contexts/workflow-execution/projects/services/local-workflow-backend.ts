@@ -2,15 +2,29 @@ import { Database } from "bun:sqlite";
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { BunCrypto } from "@effect/platform-bun";
 import { SqliteClient } from "@effect/sql-sqlite-bun";
 import type { ProjectSnapshot } from "@kojo/control";
-import type { WorkflowDeferred } from "@kojo/workflow";
+import type {
+  AcquiredWorkflowSandbox,
+  Command,
+  CommandFailure,
+  CommandResult,
+  WorkflowDeferred,
+  WorkflowSandboxDefinition,
+} from "@kojo/workflow";
 import {
+  AcquiredWorkflowSandbox as AcquiredWorkflowSandboxSchema,
+  CommandFailure as CommandFailureSchema,
+  CommandResult as CommandResultSchema,
+  SandboxProviderFailure as SandboxProviderFailureSchema,
   type WorkflowActivityAttempt,
   type WorkflowActivityOptions,
   WorkflowActivityRuntime,
+  WorkflowCommandRuntime,
+  WorkflowSandboxRuntime,
 } from "@kojo/workflow";
 import { Cause, Context, Duration, Effect, Exit, Layer, Option, Schema, Scope } from "effect";
 import {
@@ -32,6 +46,10 @@ import type {
   WorkflowActivityOperation,
   WorkflowRunRepository,
 } from "../../runs/repositories/workflow-run-repository";
+import {
+  ProviderRuntime,
+  ProviderRuntimeUnavailable,
+} from "../../sandboxes/services/provider-runtime";
 import {
   type AnyLocalWorkflowDefinition,
   type LocalWorkflowOperations,
@@ -95,15 +113,24 @@ const waitForOwnership = (sharding: Sharding.Sharding["Service"]) =>
 export const makeLocalWorkflowBackendLayer = (
   hostIdentity: string,
   definitions: ReadonlyArray<AnyLocalWorkflowDefinition> = [],
+  providerRuntime: ProviderRuntime["Service"] = ProviderRuntimeUnavailable,
 ) => {
-  const defaultEntries = makeEntries(definitions);
-  const registrationLayer = defaultEntries.reduce<
-    Layer.Layer<never, never, WorkflowEngine.WorkflowEngine>
-  >((layer, entry) => Layer.merge(layer, entry.registration), Layer.empty);
-
   return Layer.effect(
     WorkflowBackend,
     Effect.gen(function* () {
+      const selectedProviderRuntime = Option.getOrElse(
+        yield* Effect.serviceOption(ProviderRuntime),
+        () => providerRuntime,
+      );
+      const defaultEntries = makeEntries(
+        definitions,
+        undefined,
+        undefined,
+        selectedProviderRuntime,
+      );
+      const registrationLayer = defaultEntries.reduce<
+        Layer.Layer<never, never, WorkflowEngine.WorkflowEngine>
+      >((layer, entry) => Layer.merge(layer, entry.registration), Layer.empty);
       const parentScope = yield* Effect.scope;
       const active = new Map<string, ActiveBackend>();
       const ownership = new Map<string, Database>();
@@ -265,7 +292,10 @@ export const makeLocalWorkflowBackendLayer = (
         }).pipe(Effect.catchCause(() => Effect.succeed(false)));
 
       const release = (project: ProjectSnapshot) =>
-        quiesce(project.path).pipe(Effect.andThen(releaseOwnership(project.path)));
+        quiesce(project.path).pipe(
+          Effect.andThen(selectedProviderRuntime.releaseProject(project)),
+          Effect.andThen(releaseOwnership(project.path)),
+        );
 
       const register = (
         project: ProjectSnapshot,
@@ -287,7 +317,12 @@ export const makeLocalWorkflowBackendLayer = (
               }
             }
           }
-          for (const entry of makeEntries(definitions, project, activityRepository)) {
+          for (const entry of makeEntries(
+            definitions,
+            project,
+            activityRepository,
+            selectedProviderRuntime,
+          )) {
             if (backend.entries.has(entry.identity)) continue;
             yield* Layer.buildWithScope(
               entry.registration.pipe(
@@ -471,6 +506,7 @@ const makeEntries = (
   definitions: ReadonlyArray<AnyLocalWorkflowDefinition>,
   project?: ProjectSnapshot,
   activityRepository?: WorkflowRunRepository["Service"],
+  providerRuntime: ProviderRuntime["Service"] = ProviderRuntimeUnavailable,
 ): ReadonlyArray<Entry> => {
   const identities = new Set<string>();
   return definitions.map((definition) => {
@@ -496,16 +532,37 @@ const makeEntries = (
     const registration = workflow.toLayer(({ input, runId }) =>
       Schema.decodeUnknownEffect(definition.inputSchema)(input).pipe(
         Effect.orDie,
-        Effect.flatMap((decoded) =>
-          definition
+        Effect.flatMap((decoded) => {
+          const sandboxDefinitions = new Map<string, WorkflowSandboxDefinition>();
+          const activityRuntime = makeWorkflowActivityRuntime(project, runId, activityRepository);
+          return definition
             .execute(decoded as never, operations)
             .pipe(
+              Effect.provideService(WorkflowActivityRuntime, activityRuntime),
               Effect.provideService(
-                WorkflowActivityRuntime,
-                makeWorkflowActivityRuntime(project, runId, activityRepository),
+                WorkflowSandboxRuntime,
+                makeWorkflowSandboxRuntime(
+                  project,
+                  runId,
+                  activityRuntime,
+                  activityRepository,
+                  providerRuntime,
+                  sandboxDefinitions,
+                ),
               ),
-            ),
-        ),
+              Effect.provideService(
+                WorkflowCommandRuntime,
+                makeWorkflowCommandRuntime(
+                  project,
+                  runId,
+                  activityRuntime,
+                  activityRepository,
+                  providerRuntime,
+                  sandboxDefinitions,
+                ),
+              ),
+            );
+        }),
         Effect.flatMap((result) =>
           Schema.encodeUnknownEffect(definition.successSchema)(result).pipe(
             Effect.orDie,
@@ -663,6 +720,7 @@ const activityFingerprint = <Success extends Schema.Top, Failure extends Schema.
     .update(
       JSON.stringify({
         activityName,
+        definitionIdentity: options.definitionIdentity,
         execute: options.execute.toString(),
         failure: schema(options.failureSchema ?? Schema.Never),
         retry: options.retry ?? { idempotency: "stable", maxRetries: 0 },
@@ -671,6 +729,325 @@ const activityFingerprint = <Success extends Schema.Top, Failure extends Schema.
     )
     .digest("hex");
 };
+
+const sandboxDefinitionIdentity = (sandbox: WorkflowSandboxDefinition) =>
+  createHash("sha256")
+    .update(
+      JSON.stringify({
+        image:
+          sandbox.image === undefined
+            ? undefined
+            : {
+                imageKey: sandbox.image.imageKey,
+                revision: sandbox.image.revision,
+                source: sandbox.image.source,
+              },
+        provider: {
+          kind: sandbox.provider.kind,
+          providerKey: sandbox.provider.providerKey,
+          revision: sandbox.provider.revision,
+        },
+        revision: sandbox.revision,
+        sandboxKey: sandbox.sandboxKey,
+      }),
+    )
+    .digest("hex");
+
+const workflowSandboxIdentity = (runId: string, operationKey: string) =>
+  createHash("sha256").update(`${runId}:${operationKey}`).digest("hex");
+
+const acquiredSandbox = (
+  runId: string,
+  operationKey: string,
+  definition: WorkflowSandboxDefinition,
+): AcquiredWorkflowSandbox => ({
+  _tag: "workflow-sandbox",
+  identity: workflowSandboxIdentity(runId, operationKey),
+  operationKey,
+  providerKind: definition.provider.kind,
+  providerKey: definition.provider.providerKey,
+  providerRevision: definition.provider.revision,
+  sandboxKey: definition.sandboxKey,
+  revision: definition.revision,
+  ...(definition.image === undefined
+    ? {}
+    : { imageKey: definition.image.imageKey, imageRevision: definition.image.revision }),
+});
+
+const commandDefinitionIdentity = (command: Command, sandbox: AcquiredWorkflowSandbox) =>
+  createHash("sha256")
+    .update(
+      JSON.stringify({
+        arguments: command.arguments,
+        commandKey: command.commandKey,
+        environment: command.environment,
+        nonZeroExit: command.nonZeroExit ?? "fail",
+        revision: command.revision,
+        sandboxIdentity: sandbox.identity,
+        shell: command.shell ?? "none",
+        timeout: command.timeout,
+        workingDirectory: command.workingDirectory,
+      }),
+    )
+    .digest("hex");
+
+const artifactDirectory = (project: ProjectSnapshot, runId: string) =>
+  join(project.path, ".kojo", "artifacts", runId);
+
+const writeSandboxArtifact = (
+  project: ProjectSnapshot,
+  runId: string,
+  displayName: string,
+  content: unknown,
+) =>
+  Effect.tryPromise({
+    try: async () => {
+      if (!/^[0-9a-f-]{36}$/.test(runId)) throw new Error("Workflow Run Identity is invalid.");
+      const artifactId = randomUUID();
+      const directory = artifactDirectory(project, runId);
+      const storageKey = `${runId}/${artifactId}.json`;
+      const encoded = `${JSON.stringify(content)}\n`;
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      await writeFile(join(directory, `${artifactId}.json`), encoded, { mode: 0o600 });
+      return {
+        artifactId,
+        byteSize: Buffer.byteLength(encoded),
+        displayName,
+        mediaType: "application/json",
+        sha256: createHash("sha256").update(encoded).digest(),
+        storageKey,
+      };
+    },
+    catch: () => ({
+      _tag: "sandbox-provider-failure" as const,
+      message: "Workflow Sandbox Artifact could not be recorded.",
+    }),
+  });
+
+const makeWorkflowSandboxRuntime = (
+  project: ProjectSnapshot | undefined,
+  runId: string,
+  activityRuntime: WorkflowActivityRuntime["Service"],
+  repository: WorkflowRunRepository["Service"] | undefined,
+  providerRuntime: ProviderRuntime["Service"],
+  definitions: Map<string, WorkflowSandboxDefinition>,
+): WorkflowSandboxRuntime["Service"] => ({
+  acquire: ({ operationKey, sandbox }) => {
+    if (project === undefined || repository === undefined || !validOperationKey(operationKey)) {
+      return Effect.fail({
+        _tag: "sandbox-provider-failure" as const,
+        message: "Workflow Sandbox is not configured for durable execution.",
+      });
+    }
+    const logical = acquiredSandbox(runId, operationKey, sandbox);
+    definitions.set(logical.identity, sandbox);
+    return activityRuntime.execute({
+      definitionIdentity: sandboxDefinitionIdentity(sandbox),
+      failureSchema: SandboxProviderFailureSchema,
+      name: `Acquire Sandbox ${sandbox.sandboxKey}@${sandbox.revision}`,
+      operationKey,
+      successSchema: AcquiredWorkflowSandboxSchema,
+      execute: () =>
+        providerRuntime
+          .acquire({
+            definition: sandbox,
+            project,
+            runId,
+            sandbox: logical,
+          })
+          .pipe(
+            Effect.flatMap((acquisition) =>
+              Effect.gen(function* () {
+                const artifact = yield* writeSandboxArtifact(
+                  project,
+                  runId,
+                  "sandbox-worktree.json",
+                  {
+                    providerKind: acquisition.providerKind,
+                    sandboxIdentity: logical.identity,
+                    worktreeBranch: acquisition.worktreeBranch,
+                  },
+                );
+                yield* repository.recordSandboxTrace(project, runId, {
+                  artifactIds: [artifact.artifactId],
+                  artifacts: [artifact],
+                  durationMs: null,
+                  exitCode: null,
+                  kind: "sandbox.acquired",
+                  operationKey,
+                  providerKind: acquisition.providerKind,
+                  recordedAtMs: Date.now(),
+                  sandboxIdentity: logical.identity,
+                });
+                return logical;
+              }),
+            ),
+          ),
+    });
+  },
+});
+
+const commandFailure = (
+  sandboxIdentity: string,
+  message: string,
+  tag: CommandFailure["_tag"],
+  exitCode?: number,
+): CommandFailure => ({
+  _tag: tag,
+  ...(exitCode === undefined ? {} : { exitCode }),
+  message,
+  sandboxIdentity,
+});
+
+const makeWorkflowCommandRuntime = (
+  project: ProjectSnapshot | undefined,
+  runId: string,
+  activityRuntime: WorkflowActivityRuntime["Service"],
+  repository: WorkflowRunRepository["Service"] | undefined,
+  providerRuntime: ProviderRuntime["Service"],
+  definitions: ReadonlyMap<string, WorkflowSandboxDefinition>,
+): WorkflowCommandRuntime["Service"] => ({
+  run: ({ command, operationKey, sandbox }) => {
+    if (project === undefined || repository === undefined || !validOperationKey(operationKey)) {
+      return Effect.fail(
+        commandFailure(
+          sandbox.identity,
+          "Command execution is not configured for durable execution.",
+          "sandbox-provider-failure",
+        ),
+      );
+    }
+    const definition = definitions.get(sandbox.identity);
+    if (definition === undefined) {
+      return Effect.fail(
+        commandFailure(
+          sandbox.identity,
+          "Workflow Sandbox was not acquired in this Workflow Run.",
+          "sandbox-provider-failure",
+        ),
+      );
+    }
+    return activityRuntime.execute({
+      definitionIdentity: commandDefinitionIdentity(command, sandbox),
+      failureSchema: CommandFailureSchema,
+      name: `Run Command ${command.commandKey}@${command.revision}`,
+      operationKey,
+      successSchema: CommandResultSchema,
+      execute: () => {
+        const invocation = providerRuntime
+          .runCommand({
+            command,
+            definition,
+            project,
+            runId,
+            sandbox,
+          })
+          .pipe(
+            Effect.mapError((error) =>
+              commandFailure(sandbox.identity, error.message, "sandbox-provider-failure"),
+            ),
+          );
+        const timed =
+          command.timeout === undefined
+            ? invocation
+            : invocation.pipe(
+                Effect.timeoutOrElse({
+                  duration: command.timeout,
+                  orElse: () =>
+                    Effect.fail(
+                      commandFailure(
+                        sandbox.identity,
+                        "Command execution exceeded its declared timeout.",
+                        "command-timed-out",
+                      ),
+                    ),
+                }),
+              );
+        return timed.pipe(
+          Effect.matchEffect({
+            onFailure: (failure) =>
+              repository
+                .recordSandboxTrace(project, runId, {
+                  artifactIds: [],
+                  artifacts: [],
+                  durationMs: null,
+                  exitCode: failure.exitCode ?? null,
+                  kind:
+                    failure._tag === "command-timed-out" ? "command.timed-out" : "command.failed",
+                  operationKey,
+                  providerKind: sandbox.providerKind,
+                  recordedAtMs: Date.now(),
+                  sandboxIdentity: sandbox.identity,
+                })
+                .pipe(Effect.andThen(Effect.fail(failure))),
+            onSuccess: (result) =>
+              Effect.gen(function* () {
+                if (result.sessionRecreated) {
+                  yield* repository.recordSandboxTrace(project, runId, {
+                    artifactIds: [],
+                    artifacts: [],
+                    durationMs: null,
+                    exitCode: null,
+                    kind: "sandbox.session-recreated",
+                    operationKey: sandbox.operationKey,
+                    providerKind: sandbox.providerKind,
+                    recordedAtMs: Date.now(),
+                    sandboxIdentity: sandbox.identity,
+                  });
+                }
+                const artifact = yield* writeSandboxArtifact(
+                  project,
+                  runId,
+                  "command-output.json",
+                  {
+                    commandKey: command.commandKey,
+                    exitCode: result.exitCode,
+                    stderr: result.stderr,
+                    stdout: result.stdout,
+                  },
+                ).pipe(
+                  Effect.mapError((error) =>
+                    commandFailure(sandbox.identity, error.message, "sandbox-provider-failure"),
+                  ),
+                );
+                const commandResult: CommandResult = {
+                  artifactIds: [artifact.artifactId],
+                  durationMs: result.durationMs,
+                  exitCode: result.exitCode,
+                  sandboxIdentity: sandbox.identity,
+                  stderr: result.stderr,
+                  stdout: result.stdout,
+                };
+                const failed = result.exitCode !== 0 && (command.nonZeroExit ?? "fail") === "fail";
+                yield* repository.recordSandboxTrace(project, runId, {
+                  artifactIds: commandResult.artifactIds,
+                  artifacts: [artifact],
+                  durationMs: commandResult.durationMs,
+                  exitCode: commandResult.exitCode,
+                  kind: failed ? "command.failed" : "command.completed",
+                  operationKey,
+                  providerKind: sandbox.providerKind,
+                  recordedAtMs: Date.now(),
+                  sandboxIdentity: sandbox.identity,
+                });
+                if (failed) {
+                  return yield* Effect.fail(
+                    commandFailure(
+                      sandbox.identity,
+                      `Command exited with code ${result.exitCode}.`,
+                      "command-failed",
+                      result.exitCode,
+                    ),
+                  );
+                }
+                return commandResult;
+              }),
+          }),
+        );
+      },
+    });
+  },
+});
 
 const makeWorkflowActivityRuntime = (
   project: ProjectSnapshot | undefined,
