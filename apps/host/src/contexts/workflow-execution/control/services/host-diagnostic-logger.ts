@@ -111,6 +111,7 @@ export const HostRequestDiagnosticEvent = Schema.Struct({
         "workflow-run-reconciliation-failed",
         "retention-protected-over-limit",
         "retention-missing-retained-content",
+        "retention-cleanup-failed",
       ]),
     ]),
   ),
@@ -375,10 +376,10 @@ export const makeHostDiagnosticLoggerLayer = (options: string | HostDiagnosticLo
                     (candidate) => candidate.identity === identity,
                   );
                   if (project === undefined) return undefined;
-                  const snapshot = await Effect.runPromise(retentionRepository.value.show(project));
+                  const policy = await Effect.runPromise(retentionRepository.value.policy(project));
                   return {
-                    maxAgeMs: snapshot.policy.diagnosticMaxAgeMs,
-                    maxBytes: snapshot.policy.diagnosticMaxBytes,
+                    maxAgeMs: policy.diagnosticMaxAgeMs,
+                    maxBytes: policy.diagnosticMaxBytes,
                   };
                 } catch {
                   return undefined;

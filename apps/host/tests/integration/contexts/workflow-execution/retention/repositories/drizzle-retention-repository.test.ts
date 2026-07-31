@@ -1,15 +1,26 @@
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "@effect/vitest";
 import { ProjectIdentity, type ProjectRetentionSetInput, RequestKey } from "@kojo/control";
-import { Effect, Schema } from "effect";
+import { Effect, Exit, Schema } from "effect";
 import {
   completeProjectRepositoryMigration,
   migrateProjectRepository,
 } from "../../../../../../src/contexts/workflow-execution/projects/repositories/drizzle-project-repository";
+import type { DisposableFileUnlinker } from "../../../../../../src/contexts/workflow-execution/retention/repositories/disposable-file-unlinker";
 import { makeDrizzleRetentionRepository } from "../../../../../../src/contexts/workflow-execution/retention/repositories/drizzle-retention-repository";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -65,7 +76,45 @@ it.effect("removes only final disposable Artifact bytes and preserves authoritat
         .query("SELECT COUNT(*) AS count FROM kojo_execution_events WHERE run_id = ?")
         .get(runId),
     ).toEqual({
-      count: 2,
+      count: 3,
+    });
+    expect(
+      database
+        .query(
+          "SELECT sequence, kind, payload_json FROM kojo_execution_events WHERE run_id = ? ORDER BY sequence",
+        )
+        .all(runId),
+    ).toEqual([
+      expect.objectContaining({ sequence: 1, kind: "run.accepted" }),
+      expect.objectContaining({ sequence: 2, kind: "run.completed" }),
+      {
+        sequence: 3,
+        kind: "artifact.unavailable",
+        payload_json: JSON.stringify({
+          artifactId,
+          condition: "expired",
+          reasonCode: "artifact.expired",
+        }),
+      },
+    ]);
+    expect(
+      database
+        .query(
+          `SELECT role FROM kojo_execution_event_artifacts
+           WHERE run_id = ? AND event_id = (
+             SELECT event_id FROM kojo_execution_events WHERE run_id = ? AND sequence = 3
+           )`,
+        )
+        .get(runId, runId),
+    ).toEqual({
+      role: "unavailable",
+    });
+    expect(
+      database
+        .query("SELECT last_event_sequence FROM kojo_workflow_runs WHERE run_id = ?")
+        .get(runId),
+    ).toEqual({
+      last_event_sequence: 3,
     });
     expect(
       database
@@ -78,6 +127,13 @@ it.effect("removes only final disposable Artifact bytes and preserves authoritat
 
     const repeated = yield* repository.cleanup(fixture.project, 100);
     expect(repeated.usage.expiredArtifactCount).toBe(1);
+    const repeatedDatabase = new Database(fixture.databasePath, { readonly: true, strict: true });
+    expect(
+      repeatedDatabase
+        .query("SELECT COUNT(*) AS count FROM kojo_execution_events WHERE run_id = ?")
+        .get(runId),
+    ).toEqual({ count: 3 });
+    repeatedDatabase.close();
   }),
 );
 
@@ -119,7 +175,227 @@ it.effect("keeps non-final content protected and reports missing retained bytes"
       "missing-retained-content",
     ]);
     expect(yield* Effect.promise(() => Bun.file(runningPath).exists())).toBe(true);
+
+    const database = new Database(fixture.databasePath, { readonly: true, strict: true });
+    expect(
+      database
+        .query(
+          "SELECT sequence, kind, payload_json FROM kojo_execution_events WHERE run_id = ? ORDER BY sequence",
+        )
+        .all(missingRunId),
+    ).toEqual([
+      expect.objectContaining({ sequence: 1, kind: "run.accepted" }),
+      expect.objectContaining({ sequence: 2, kind: "run.completed" }),
+      {
+        sequence: 3,
+        kind: "artifact.unavailable",
+        payload_json: JSON.stringify({
+          artifactId: missingArtifactId,
+          condition: "missing",
+          reasonCode: "artifact.missing",
+        }),
+      },
+    ]);
+    expect(
+      database
+        .query(
+          `SELECT role FROM kojo_execution_event_artifacts
+           WHERE run_id = ? AND event_id = (
+             SELECT event_id FROM kojo_execution_events WHERE run_id = ? AND sequence = 3
+           )`,
+        )
+        .get(missingRunId, missingRunId),
+    ).toEqual({ role: "unavailable" });
+    expect(
+      database
+        .query("SELECT last_event_sequence FROM kojo_workflow_runs WHERE run_id = ?")
+        .get(missingRunId),
+    ).toEqual({ last_event_sequence: 3 });
+    database.close();
   }),
+);
+
+it.effect("retains bytes when the native removal port fails safely", () =>
+  Effect.gen(function* () {
+    const fixture = yield* Effect.promise(() =>
+      initializedProject("kojo-retention-native-failure-"),
+    );
+    const runId = Bun.randomUUIDv7();
+    const artifactId = Bun.randomUUIDv7();
+    const artifactDirectory = join(fixture.project.path, ".kojo", "artifacts", runId);
+    const artifactPath = join(artifactDirectory, `${artifactId}.json`);
+    yield* Effect.promise(() => mkdir(artifactDirectory, { recursive: true }));
+    yield* Effect.promise(() =>
+      writeFile(artifactPath, "must survive native failure", { mode: 0o600 }),
+    );
+    yield* Effect.sync(() => insertCompletedRun(fixture.databasePath, runId, artifactId));
+
+    const unlinker: DisposableFileUnlinker = {
+      unlinkRegularFile: async () => {
+        throw new Error("native unlink is unsupported");
+      },
+    };
+    const repository = makeDrizzleRetentionRepository({ unlinker });
+    yield* repository.set(fixture.project, {
+      identity: fixture.project.identity,
+      requestKey: Schema.decodeUnknownSync(RequestKey)("retention-native-failure"),
+      disposableMaxAgeMs: 1,
+      disposableMaxBytes: 1,
+    });
+
+    const result = yield* Effect.exit(repository.cleanup(fixture.project, 100));
+    expect(Exit.isFailure(result)).toBe(true);
+    expect(yield* Effect.promise(() => Bun.file(artifactPath).exists())).toBe(true);
+
+    const database = new Database(fixture.databasePath, { readonly: true, strict: true });
+    expect(
+      database
+        .query("SELECT condition FROM kojo_execution_artifacts WHERE artifact_id = ?")
+        .get(artifactId),
+    ).toEqual({ condition: "available" });
+    database.close();
+  }),
+);
+
+it.effect("accounts one shared diagnostic store pass for concurrent Project snapshots", () =>
+  Effect.gen(function* () {
+    const first = yield* Effect.promise(() => initializedProject("kojo-retention-diagnostics-a-"));
+    const second = yield* Effect.promise(() => initializedProject("kojo-retention-diagnostics-b-"));
+    let scans = 0;
+    const repository = makeDrizzleRetentionRepository({
+      diagnosticUsage: async () => {
+        scans += 1;
+        return new Map([
+          [first.project.identity, 11],
+          [second.project.identity, 17],
+        ]);
+      },
+    });
+    const snapshots = yield* Effect.all(
+      [repository.show(first.project), repository.show(second.project)],
+      { concurrency: "unbounded" },
+    );
+    expect(scans).toBe(1);
+    expect(snapshots.map((snapshot) => snapshot.usage.diagnosticBytes)).toEqual([11, 17]);
+  }),
+);
+
+it.effect(
+  "keeps external content safe across symlinked roots and an anchored replacement race",
+  () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() => initializedProject("kojo-retention-symlink-"));
+      const finalRunId = Bun.randomUUIDv7();
+      const finalArtifactId = Bun.randomUUIDv7();
+      const leafRunId = Bun.randomUUIDv7();
+      const leafArtifactId = Bun.randomUUIDv7();
+      const symlinkRunId = Bun.randomUUIDv7();
+      const symlinkArtifactId = Bun.randomUUIDv7();
+      const externalRoot = join(fixture.project.path, "..", "external-content");
+      const externalArtifactDirectory = join(externalRoot, "artifact-parent");
+      const externalSandboxDirectory = join(externalRoot, "sandbox-root");
+      const externalArtifact = join(externalArtifactDirectory, `${finalArtifactId}.json`);
+      const externalLeafArtifact = join(externalArtifactDirectory, `${leafArtifactId}.json`);
+      const symlinkedArtifact = join(externalArtifactDirectory, `${symlinkArtifactId}.json`);
+      const externalSandbox = join(externalSandboxDirectory, finalRunId, "state.bin");
+      yield* Effect.promise(() =>
+        mkdir(join(fixture.project.path, ".kojo", "artifacts"), { recursive: true }),
+      );
+      yield* Effect.promise(() => mkdir(externalArtifactDirectory, { recursive: true }));
+      yield* Effect.promise(() =>
+        mkdir(join(externalSandboxDirectory, finalRunId), { recursive: true }),
+      );
+      yield* Effect.promise(() => writeFile(externalArtifact, "external-artifact"));
+      yield* Effect.promise(() => writeFile(externalLeafArtifact, "external-leaf-artifact"));
+      yield* Effect.promise(() => writeFile(symlinkedArtifact, "external-symlinked-artifact"));
+      yield* Effect.promise(() => writeFile(externalSandbox, "external-sandbox"));
+      yield* Effect.sync(() => {
+        insertCompletedRun(fixture.databasePath, finalRunId, finalArtifactId);
+        insertCompletedRun(fixture.databasePath, leafRunId, leafArtifactId, "leaf");
+        insertCompletedRun(fixture.databasePath, symlinkRunId, symlinkArtifactId, "symlink");
+      });
+      const originalRunDirectory = join(fixture.project.path, ".kojo", "artifacts", finalRunId);
+      const leafRunDirectory = join(fixture.project.path, ".kojo", "artifacts", leafRunId);
+      const leafArtifactPath = join(leafRunDirectory, `${leafArtifactId}.json`);
+      const displacedLeafArtifact = `${leafArtifactPath}.displaced`;
+      yield* Effect.promise(() => mkdir(originalRunDirectory, { recursive: true }));
+      yield* Effect.promise(() => mkdir(leafRunDirectory, { recursive: true }));
+      yield* Effect.promise(() =>
+        writeFile(join(originalRunDirectory, `${finalArtifactId}.json`), "inside-artifact"),
+      );
+      yield* Effect.promise(() => writeFile(leafArtifactPath, "inside-leaf-artifact"));
+      yield* Effect.promise(() =>
+        symlink(
+          externalArtifactDirectory,
+          join(fixture.project.path, ".kojo", "artifacts", symlinkRunId),
+          "dir",
+        ),
+      );
+      yield* Effect.promise(() =>
+        symlink(externalSandboxDirectory, join(fixture.project.path, ".kojo", "sandboxes"), "dir"),
+      );
+
+      const displacedRunDirectory = `${originalRunDirectory}.displaced`;
+      const repository = makeDrizzleRetentionRepository({
+        beforeUnlink: async (path) => {
+          if (path.includes(leafRunId)) {
+            await rename(leafArtifactPath, displacedLeafArtifact);
+            await symlink(externalLeafArtifact, leafArtifactPath);
+            return;
+          }
+          await rename(originalRunDirectory, displacedRunDirectory);
+          await symlink(externalArtifactDirectory, originalRunDirectory, "dir");
+        },
+      });
+      yield* repository.set(fixture.project, {
+        identity: fixture.project.identity,
+        requestKey: Schema.decodeUnknownSync(RequestKey)("retention-set-symlink"),
+        disposableMaxAgeMs: 1,
+        disposableMaxBytes: 1,
+      });
+      yield* repository.cleanup(fixture.project, 100);
+
+      expect(yield* Effect.promise(() => readFile(externalArtifact, "utf8"))).toBe(
+        "external-artifact",
+      );
+      expect(yield* Effect.promise(() => readFile(externalLeafArtifact, "utf8"))).toBe(
+        "external-leaf-artifact",
+      );
+      expect(yield* Effect.promise(() => readFile(externalSandbox, "utf8"))).toBe(
+        "external-sandbox",
+      );
+      expect(
+        yield* Effect.promise(() =>
+          Bun.file(join(displacedRunDirectory, `${finalArtifactId}.json`)).exists(),
+        ),
+      ).toBe(false);
+      expect(yield* Effect.promise(() => Bun.file(displacedLeafArtifact).exists())).toBe(true);
+      expect(
+        yield* Effect.promise(() =>
+          lstat(leafArtifactPath).then(
+            () => true,
+            () => false,
+          ),
+        ),
+      ).toBe(false);
+      const database = new Database(fixture.databasePath, { readonly: true, strict: true });
+      expect(
+        database
+          .query("SELECT condition FROM kojo_execution_artifacts WHERE artifact_id = ?")
+          .get(finalArtifactId),
+      ).toEqual({ condition: "expired" });
+      expect(
+        database
+          .query("SELECT condition FROM kojo_execution_artifacts WHERE artifact_id = ?")
+          .get(leafArtifactId),
+      ).toEqual({ condition: "expired" });
+      expect(
+        database
+          .query("SELECT condition FROM kojo_execution_artifacts WHERE artifact_id = ?")
+          .get(symlinkArtifactId),
+      ).toEqual({ condition: "missing" });
+      database.close();
+    }),
 );
 
 it.effect("protects Agent continuation and Sandbox state until Run finality", () =>
@@ -363,7 +639,12 @@ const initializedProject = async (prefix: string) => {
   return { databasePath, project };
 };
 
-const insertCompletedRun = (databasePath: string, runId: string, artifactId: string) => {
+const insertCompletedRun = (
+  databasePath: string,
+  runId: string,
+  artifactId: string,
+  eventPrefix = "",
+) => {
   const database = new Database(databasePath);
   database
     .query(
@@ -376,7 +657,14 @@ const insertCompletedRun = (databasePath: string, runId: string, artifactId: str
          'completed', ?, 2, 1, 0, 2, 0)`,
     )
     .run(runId, `start-${runId}`, `outcome-${runId}`);
-  insertEvent(database, runId, "accepted", 1, "run.accepted", 0);
+  insertEvent(
+    database,
+    runId,
+    eventPrefix === "" ? "accepted" : `accepted-${eventPrefix}`,
+    1,
+    "run.accepted",
+    0,
+  );
   insertEvent(database, runId, `outcome-${runId}`, 2, "run.completed", 0);
   database
     .query(

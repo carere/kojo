@@ -9,7 +9,10 @@ import type {
 } from "@kojo/control";
 import { Effect } from "effect";
 import { ProjectIndexRepository } from "../../../workflow-authoring/projects/repositories/project-index-repository";
+import { HostDiagnosticLogger } from "../../control/services/host-diagnostic-logger";
+import { ProjectRuntime } from "../../projects/services/project-runtime";
 import { RetentionRepository } from "../repositories/retention-repository";
+import { withRetentionCompletionDiagnostic } from "../services/retention-completion";
 
 const error = (
   code: RetentionOperationError["code"],
@@ -66,7 +69,7 @@ export const setProjectRetention = (
 ): Effect.Effect<
   ProjectRetentionMutationResult,
   never,
-  ProjectIndexRepository | RetentionRepository
+  ProjectIndexRepository | ProjectRuntime | RetentionRepository
 > =>
   Effect.gen(function* () {
     const resolved = yield* resolveProject(input.identity);
@@ -94,7 +97,11 @@ export const setProjectRetention = (
         ),
       );
     }
-    const result = yield* (yield* RetentionRepository).set(resolved, input);
+    const runtime = yield* ProjectRuntime;
+    const result = yield* runtime.coordinateRetention(
+      resolved,
+      (yield* RetentionRepository).set(resolved, input),
+    );
     if (result._tag === "request-key-conflict") {
       return mutationFailure(
         input.requestKey,
@@ -121,7 +128,7 @@ export const resetProjectRetention = (
 ): Effect.Effect<
   ProjectRetentionMutationResult,
   never,
-  ProjectIndexRepository | RetentionRepository
+  ProjectIndexRepository | ProjectRuntime | RetentionRepository
 > =>
   Effect.gen(function* () {
     const resolved = yield* resolveProject(identity);
@@ -131,7 +138,11 @@ export const resetProjectRetention = (
         affectedResource: { kind: "project", identity },
       });
     }
-    const result = yield* (yield* RetentionRepository).reset(resolved, requestKey);
+    const runtime = yield* ProjectRuntime;
+    const result = yield* runtime.coordinateRetention(
+      resolved,
+      (yield* RetentionRepository).reset(resolved, requestKey),
+    );
     if (result._tag === "request-key-conflict") {
       return mutationFailure(
         requestKey,
@@ -155,5 +166,17 @@ export const resetProjectRetention = (
 export const cleanupProjectRetention = (
   project: ProjectSnapshot,
   nowMs?: number,
-): Effect.Effect<unknown, never, RetentionRepository> =>
-  Effect.flatMap(RetentionRepository, (repository) => repository.cleanup(project, nowMs));
+): Effect.Effect<unknown, never, ProjectRuntime | RetentionRepository> =>
+  Effect.gen(function* () {
+    const repository = yield* RetentionRepository;
+    const runtime = yield* ProjectRuntime;
+    const logger = yield* Effect.serviceOption(HostDiagnosticLogger);
+    return yield* runtime.coordinateRetention(
+      project,
+      withRetentionCompletionDiagnostic(
+        project,
+        repository.cleanup(project, nowMs),
+        logger._tag === "Some" ? logger.value : undefined,
+      ),
+    );
+  });

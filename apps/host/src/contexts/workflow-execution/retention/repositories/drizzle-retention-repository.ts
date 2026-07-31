@@ -1,7 +1,6 @@
-import type { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { lstat, readdir, readFile, unlink } from "node:fs/promises";
-import { basename, dirname, extname, join } from "node:path";
+import { lstat, readdir, readFile } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type {
   ProjectRetentionPolicy,
   ProjectRetentionSetInput,
@@ -11,11 +10,13 @@ import type {
   RequestKey,
 } from "@kojo/control";
 import { Effect, Layer } from "effect";
+import { recordArtifactUnavailable } from "../../projects/repositories/execution-event-writer";
 import {
+  type ProjectStoreConnection,
   transaction,
   withReadableProjectStore,
   withWritableProjectStore,
-} from "../../projects/repositories/drizzle-project-repository";
+} from "../../projects/repositories/project-store-adapter";
 import {
   DEFAULT_DIAGNOSTIC_MAX_AGE_MS,
   DEFAULT_DIAGNOSTIC_MAX_BYTES,
@@ -28,6 +29,7 @@ import {
   planDisposableCleanup,
   type StoredRetentionPolicyRow,
 } from "../models/retention-policy";
+import type { DisposableFileUnlinker } from "./disposable-file-unlinker";
 import { RetentionRepository, type RetentionRepositoryShape } from "./retention-repository";
 
 interface StoredArtifactRow {
@@ -80,7 +82,9 @@ const digest = (value: unknown) => createHash("sha256").update(stableJson(value)
 const sameBytes = (left: Uint8Array, right: Uint8Array) =>
   left.length === right.length && left.every((value, index) => value === right[index]);
 
-const readPolicyRow = (connection: Database): StoredRetentionPolicyRow | undefined => {
+const readPolicyRow = (
+  connection: ProjectStoreConnection,
+): StoredRetentionPolicyRow | undefined => {
   const row = connection
     .query(
       `SELECT diagnostic_max_age_ms, diagnostic_max_bytes,
@@ -107,7 +111,7 @@ const readPolicyRow = (connection: Database): StoredRetentionPolicyRow | undefin
       };
 };
 
-const readArtifacts = (connection: Database): ReadonlyArray<StoredArtifactRow> =>
+const readArtifacts = (connection: ProjectStoreConnection): ReadonlyArray<StoredArtifactRow> =>
   connection
     .query(
       `SELECT artifact.artifact_id, artifact.run_id, artifact.storage_key,
@@ -119,7 +123,7 @@ const readArtifacts = (connection: Database): ReadonlyArray<StoredArtifactRow> =
     )
     .all() as ReadonlyArray<StoredArtifactRow>;
 
-const readRuns = (connection: Database): ReadonlyArray<StoredRunRow> =>
+const readRuns = (connection: ProjectStoreConnection): ReadonlyArray<StoredRunRow> =>
   connection
     .query("SELECT run_id, state, finalized_at_ms FROM kojo_workflow_runs")
     .all() as ReadonlyArray<StoredRunRow>;
@@ -140,14 +144,59 @@ const isMissing = (error: unknown) => {
   return code === "ENOENT" || code === "ENOTDIR";
 };
 
-const regularFileSize = async (path: string): Promise<number | undefined> => {
+type SafePathKind = "file" | "directory";
+
+/**
+ * Checks every parent with lstat so retention never follows a disposable-path
+ * symlink. This is deliberately repeated immediately before unlinking because
+ * the path may be replaced after discovery.
+ */
+const safePathInformation = async (
+  project: ProjectSnapshot,
+  path: string,
+  kind: SafePathKind,
+): Promise<Awaited<ReturnType<typeof lstat>> | undefined> => {
+  const projectRoot = resolve(project.path);
+  const candidate = resolve(path);
+  const candidateRelative = relative(projectRoot, candidate);
+  if (
+    candidateRelative === "" ||
+    candidateRelative === ".." ||
+    candidateRelative.startsWith(`..${sep}`) ||
+    isAbsolute(candidateRelative)
+  ) {
+    return undefined;
+  }
+  const components = candidateRelative.split(sep).filter(Boolean);
+  let current = projectRoot;
   try {
-    const information = await lstat(path);
-    return information.isFile() && !information.isSymbolicLink() ? information.size : undefined;
+    const projectInformation = await lstat(current);
+    if (projectInformation.isSymbolicLink() || !projectInformation.isDirectory()) return undefined;
+    for (const [index, component] of components.entries()) {
+      current = join(current, component);
+      const information = await lstat(current);
+      if (information.isSymbolicLink()) return undefined;
+      const final = index === components.length - 1;
+      if (!final && !information.isDirectory()) return undefined;
+      if (final) {
+        if (kind === "file" && information.isFile()) return information;
+        if (kind === "directory" && information.isDirectory()) return information;
+        return undefined;
+      }
+    }
+    return undefined;
   } catch (error) {
     if (isMissing(error)) return undefined;
     throw error;
   }
+};
+
+const regularFileSize = async (
+  project: ProjectSnapshot,
+  path: string,
+): Promise<number | undefined> => {
+  const information = await safePathInformation(project, path, "file");
+  return information === undefined ? undefined : Number(information.size);
 };
 
 const walkRegularFiles = async (
@@ -179,6 +228,7 @@ const collectRunDirectoryFiles = async (
   runs: ReadonlyMap<string, RunState>,
 ): Promise<ReadonlyArray<DisposableFile>> => {
   const root = join(project.path, ".kojo", rootName);
+  if ((await safePathInformation(project, root, "directory")) === undefined) return [];
   let entries: ReadonlyArray<string>;
   try {
     entries = await readdir(root);
@@ -226,26 +276,33 @@ const diagnosticFiles = async (path: string) => {
   }
 };
 
-const readDiagnosticBytes = async (path: string | undefined, identity: string) => {
-  if (path === undefined) return 0;
-  let bytes = 0;
+export type DiagnosticUsage = ReadonlyMap<string, number>;
+
+const readDiagnosticUsage = async (path: string | undefined): Promise<DiagnosticUsage> => {
+  if (path === undefined) return new Map();
+  const usage = new Map<string, number>();
   for (const candidate of await diagnosticFiles(path)) {
     for (const line of (await readFile(candidate, "utf8")).split("\n").filter(Boolean)) {
       try {
         const event = JSON.parse(line) as { readonly projectIdentity?: string };
-        if (event.projectIdentity === identity) bytes += Buffer.byteLength(`${line}\n`);
+        if (event.projectIdentity !== undefined) {
+          usage.set(
+            event.projectIdentity,
+            (usage.get(event.projectIdentity) ?? 0) + Buffer.byteLength(`${line}\n`),
+          );
+        }
       } catch {
         // Diagnostics are non-authoritative and malformed lines are omitted from usage.
       }
     }
   }
-  return bytes;
+  return usage;
 };
 
 const readSnapshot = async (
   project: ProjectSnapshot,
   nowMs: number,
-  diagnosticPath?: string,
+  diagnosticBytes: number,
 ): Promise<ProjectRetentionSnapshot> => {
   const { policyRow, artifacts, runs } = withReadableProjectStore(project, (connection) => ({
     policyRow: readPolicyRow(connection),
@@ -274,7 +331,7 @@ const readSnapshot = async (
       missingArtifactCount += 1;
       continue;
     }
-    const bytes = await regularFileSize(path);
+    const bytes = await regularFileSize(project, path);
     if (bytes === undefined) {
       missingArtifactCount += 1;
       continue;
@@ -322,7 +379,7 @@ const readSnapshot = async (
     project,
     policy,
     usage: {
-      diagnosticBytes: await readDiagnosticBytes(diagnosticPath, project.identity),
+      diagnosticBytes,
       disposableBytes: plan.currentBytes,
       protectedDisposableBytes: plan.protectedBytes,
       eligibleDisposableBytes: plan.eligibleBytes,
@@ -354,7 +411,7 @@ const requestPayload = (input: ProjectRetentionSetInput | { readonly requestKey:
   };
 };
 
-const readReceipt = (connection: Database, requestKey: RequestKey) =>
+const readReceipt = (connection: ProjectStoreConnection, requestKey: RequestKey) =>
   connection
     .query(
       `SELECT operation_kind, request_sha256, state, result_json
@@ -368,7 +425,7 @@ const readReceipt = (connection: Database, requestKey: RequestKey) =>
   } | null;
 
 const beginReceipt = (
-  connection: Database,
+  connection: ProjectStoreConnection,
   requestKey: RequestKey,
   operationKind: string,
   requestHash: Uint8Array,
@@ -401,7 +458,7 @@ const beginReceipt = (
 };
 
 const completeReceipt = (
-  connection: Database,
+  connection: ProjectStoreConnection,
   requestKey: RequestKey,
   snapshot: ProjectRetentionSnapshot,
   nowMs: number,
@@ -424,7 +481,7 @@ const applyMutation = async (
   requestKey: RequestKey,
   operationKind: "retention.set" | "retention.reset",
   input: ProjectRetentionSetInput | undefined,
-  diagnosticPath: string | undefined,
+  diagnosticUsage: () => Promise<DiagnosticUsage>,
 ): Promise<
   ReturnType<RetentionRepositoryShape["set"]> extends Effect.Effect<infer A> ? A : never
 > => {
@@ -486,7 +543,8 @@ const applyMutation = async (
         );
     }),
   );
-  const snapshot = await readSnapshot(project, Date.now(), diagnosticPath);
+  const usage = await diagnosticUsage();
+  const snapshot = await readSnapshot(project, Date.now(), usage.get(project.identity) ?? 0);
   withWritableProjectStore(project, (connection) =>
     transaction(connection, () => completeReceipt(connection, requestKey, snapshot, Date.now())),
   );
@@ -496,7 +554,9 @@ const applyMutation = async (
 const cleanupProject = async (
   project: ProjectSnapshot,
   nowMs: number,
-  diagnosticPath: string | undefined,
+  diagnosticUsage: () => Promise<DiagnosticUsage>,
+  unlinker: DisposableFileUnlinker,
+  beforeUnlink?: (path: string) => Promise<void>,
 ) => {
   const {
     policyRow,
@@ -512,17 +572,29 @@ const cleanupProject = async (
     runRows.map((row) => [row.run_id, { state: row.state, finalizedAtMs: row.finalized_at_ms }]),
   );
   const files: Array<DisposableFile> = [];
-  const missingArtifactIds: Array<{ readonly runId: string; readonly artifactId: string }> = [];
+  const unavailableArtifacts: Array<{
+    readonly runId: string;
+    readonly artifactId: string;
+    readonly reasonCode: "artifact.missing" | "artifact.expired";
+  }> = [];
   for (const artifact of artifacts) {
     if (artifact.condition !== "available") continue;
     const path = safeArtifactPath(project, artifact);
     if (path === undefined) {
-      missingArtifactIds.push({ runId: artifact.run_id, artifactId: artifact.artifact_id });
+      unavailableArtifacts.push({
+        runId: artifact.run_id,
+        artifactId: artifact.artifact_id,
+        reasonCode: "artifact.missing",
+      });
       continue;
     }
-    const bytes = await regularFileSize(path);
+    const bytes = await regularFileSize(project, path);
     if (bytes === undefined) {
-      missingArtifactIds.push({ runId: artifact.run_id, artifactId: artifact.artifact_id });
+      unavailableArtifacts.push({
+        runId: artifact.run_id,
+        artifactId: artifact.artifact_id,
+        reasonCode: "artifact.missing",
+      });
       continue;
     }
     files.push({
@@ -540,65 +612,117 @@ const cleanupProject = async (
     files.push(...(await collectRunDirectoryFiles(project, rootName, runStates)));
   }
   const plan = planDisposableCleanup(files, policy, nowMs);
-  const removedArtifacts: Array<{ readonly runId: string; readonly artifactId: string }> = [];
   for (const candidate of plan.remove) {
     try {
-      const information = await lstat(candidate.path);
-      if (!information.isFile() || information.isSymbolicLink()) continue;
-      await unlink(candidate.path);
+      const result = await unlinker.unlinkRegularFile(project, candidate.path, beforeUnlink);
+      if (result !== "removed") {
+        if (candidate.artifactId !== undefined) {
+          unavailableArtifacts.push({
+            runId: candidate.runId,
+            artifactId: candidate.artifactId,
+            reasonCode: "artifact.missing",
+          });
+        }
+        continue;
+      }
       if (candidate.artifactId !== undefined) {
-        removedArtifacts.push({ runId: candidate.runId, artifactId: candidate.artifactId });
+        unavailableArtifacts.push({
+          runId: candidate.runId,
+          artifactId: candidate.artifactId,
+          reasonCode: "artifact.expired",
+        });
       }
     } catch (error) {
-      if (!isMissing(error)) throw error;
+      if (isMissing(error)) {
+        if (candidate.artifactId !== undefined) {
+          unavailableArtifacts.push({
+            runId: candidate.runId,
+            artifactId: candidate.artifactId,
+            reasonCode: "artifact.missing",
+          });
+        }
+        continue;
+      }
+      throw error;
     }
   }
   withWritableProjectStore(project, (connection) =>
     transaction(connection, () => {
-      for (const missing of missingArtifactIds) {
-        connection
-          .query(
-            `UPDATE kojo_execution_artifacts
-             SET condition = 'missing', unavailable_at_ms = ?, unavailable_reason_code = ?
-             WHERE run_id = ? AND artifact_id = ? AND condition = 'available'`,
-          )
-          .run(nowMs, "artifact.missing", missing.runId, missing.artifactId);
-      }
-      for (const expired of removedArtifacts) {
-        connection
-          .query(
-            `UPDATE kojo_execution_artifacts
-             SET condition = 'expired', unavailable_at_ms = ?, unavailable_reason_code = ?
-             WHERE run_id = ? AND artifact_id = ? AND condition = 'available'`,
-          )
-          .run(nowMs, "artifact.expired", expired.runId, expired.artifactId);
+      for (const unavailable of unavailableArtifacts) {
+        recordArtifactUnavailable(
+          connection,
+          unavailable.runId,
+          unavailable.artifactId,
+          unavailable.reasonCode,
+          nowMs,
+        );
       }
     }),
   );
   lastCleanupAt.set(project.identity, nowMs);
-  return readSnapshot(project, nowMs, diagnosticPath);
+  const usage = await diagnosticUsage();
+  return readSnapshot(project, nowMs, usage.get(project.identity) ?? 0);
 };
 
 export interface DrizzleRetentionRepositoryOptions {
   readonly diagnosticPath?: string;
+  readonly diagnosticUsage?: () => Promise<DiagnosticUsage>;
+  readonly unlinker?: DisposableFileUnlinker;
+  readonly beforeUnlink?: (path: string) => Promise<void>;
 }
+
+const defaultUnlinker: DisposableFileUnlinker = {
+  unlinkRegularFile: async (project, path, beforeUnlink) => {
+    const { NoFollowDisposableFileUnlinker } = await import("./no-follow-disposable-file");
+    return NoFollowDisposableFileUnlinker.unlinkRegularFile(project, path, beforeUnlink);
+  },
+};
 
 export const makeDrizzleRetentionRepository = (
   options: DrizzleRetentionRepositoryOptions = {},
-): RetentionRepositoryShape => ({
-  show: (project, observedAtMs = Date.now()) =>
-    Effect.promise(() => readSnapshot(project, observedAtMs, options.diagnosticPath)),
-  set: (project, input) =>
-    Effect.promise(() =>
-      applyMutation(project, input.requestKey, "retention.set", input, options.diagnosticPath),
-    ),
-  reset: (project, requestKey) =>
-    Effect.promise(() =>
-      applyMutation(project, requestKey, "retention.reset", undefined, options.diagnosticPath),
-    ),
-  cleanup: (project, nowMs = Date.now()) =>
-    Effect.promise(() => cleanupProject(project, nowMs, options.diagnosticPath)),
-});
+): RetentionRepositoryShape => {
+  let diagnosticUsageInFlight: Promise<DiagnosticUsage> | undefined;
+  const getDiagnosticUsage = () => {
+    if (diagnosticUsageInFlight !== undefined) return diagnosticUsageInFlight;
+    const scan = Promise.resolve(
+      options.diagnosticUsage === undefined
+        ? readDiagnosticUsage(options.diagnosticPath)
+        : options.diagnosticUsage(),
+    );
+    const settled = scan.finally(() => {
+      if (diagnosticUsageInFlight === settled) diagnosticUsageInFlight = undefined;
+    });
+    diagnosticUsageInFlight = settled;
+    return settled;
+  };
+  return {
+    policy: (project) =>
+      Effect.sync(() => effectiveRetentionPolicy(withReadableProjectStore(project, readPolicyRow))),
+    show: (project, observedAtMs = Date.now()) =>
+      Effect.promise(async () => {
+        const usage = await getDiagnosticUsage();
+        return readSnapshot(project, observedAtMs, usage.get(project.identity) ?? 0);
+      }),
+    set: (project, input) =>
+      Effect.promise(() =>
+        applyMutation(project, input.requestKey, "retention.set", input, getDiagnosticUsage),
+      ),
+    reset: (project, requestKey) =>
+      Effect.promise(() =>
+        applyMutation(project, requestKey, "retention.reset", undefined, getDiagnosticUsage),
+      ),
+    cleanup: (project, nowMs = Date.now()) =>
+      Effect.promise(() =>
+        cleanupProject(
+          project,
+          nowMs,
+          getDiagnosticUsage,
+          options.unlinker ?? defaultUnlinker,
+          options.beforeUnlink,
+        ),
+      ),
+  };
+};
 
 export const DrizzleRetentionRepositoryLive = (options: DrizzleRetentionRepositoryOptions = {}) =>
   Layer.succeed(RetentionRepository, makeDrizzleRetentionRepository(options));

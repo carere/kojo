@@ -1,4 +1,5 @@
 import type {
+  ProjectRetentionPolicy,
   ProjectRetentionSetInput,
   ProjectRetentionSnapshot,
   ProjectSnapshot,
@@ -15,6 +16,7 @@ export type RetentionRepositoryMutation =
   | { readonly _tag: "request-key-conflict" };
 
 export interface RetentionRepositoryShape {
+  readonly policy: (project: ProjectSnapshot) => Effect.Effect<ProjectRetentionPolicy>;
   readonly show: (
     project: ProjectSnapshot,
     observedAtMs?: number,

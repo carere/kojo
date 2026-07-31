@@ -58,6 +58,20 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
   const json = rawArgs.includes("--json");
   const args = rawArgs.filter((argument) => argument !== "--json");
 
+  const retentionFlags = new Set([
+    "--diagnostics-age",
+    "--diagnostics-size",
+    "--disposable-age",
+    "--disposable-size",
+  ]);
+  if (args[0] !== "retention" && args.some((argument) => retentionFlags.has(argument))) {
+    return writeFailure(
+      invalid("Use retention policy flags only with kojo retention set."),
+      json,
+      `${args[0] ?? "unknown"}.${args[1] ?? "unknown"}`,
+    );
+  }
+
   if (args[0] === "trace") return runTraceCliCommand(args, json);
 
   if (
@@ -97,6 +111,7 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       options.parentRunId !== undefined ||
       options.cursor !== undefined ||
       options.limit !== undefined ||
+      options.revision !== undefined ||
       options.reveal ||
       (operation === "show" && (hasPolicyOption || options.requestKey !== undefined)) ||
       (operation === "reset" && hasPolicyOption) ||

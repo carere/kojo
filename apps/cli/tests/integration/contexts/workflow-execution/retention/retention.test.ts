@@ -148,4 +148,25 @@ it("shows, partially sets, and resets durable retention policy through the CLI",
     disposableMaxAgeMs: 30 * 24 * 60 * 60 * 1_000,
     disposableMaxBytes: 5 * 1024 ** 3,
   });
+
+  const unrelatedCommand = await runCli(
+    ["project", "list", "--diagnostics-age", "1d", "--json"],
+    host.socketPath,
+    directory,
+  );
+  expect(unrelatedCommand.exitCode).toBe(2);
+  expect(JSON.parse(unrelatedCommand.stdout).error).toMatchObject({
+    code: "invalid-command",
+  });
+  expect(unrelatedCommand.stderr).toContain("Use retention policy flags only");
+
+  const unrelatedRetentionOption = await runCli(
+    ["retention", "show", "--project-id", identity, "--revision", "one", "--json"],
+    host.socketPath,
+    directory,
+  );
+  expect(unrelatedRetentionOption.exitCode).toBe(2);
+  expect(JSON.parse(unrelatedRetentionOption.stdout).error).toMatchObject({
+    code: "invalid-command",
+  });
 });
