@@ -24,6 +24,7 @@ const temporaryDirectories: Array<() => Promise<void>> = [];
 const workflowPackagePath = fileURLToPath(
   new URL("../../../../packages/workflow", import.meta.url),
 );
+const effectPackagePath = fileURLToPath(new URL("../../node_modules/effect", import.meta.url));
 
 afterEach(async () => {
   if (fixture !== undefined) {
@@ -54,6 +55,7 @@ test("loads the Host-authoritative Project state and reconciles Navigator prefer
     join(directory.path, "node_modules", "@kojo", "workflow"),
     "dir",
   );
+  await symlink(effectPackagePath, join(directory.path, "node_modules", "effect"), "dir");
   const firstPath = join(directory.path, "first-project");
   const secondPath = join(directory.path, "second-project");
   await run(["git", "init", firstPath]);
@@ -63,8 +65,9 @@ test("loads the Host-authoritative Project state and reconciles Navigator prefer
   await writeFile(
     join(firstPath, "kojo.config.ts"),
     `import { defineConfig, defineWorkflow } from "@kojo/workflow";
+import { Schema } from "effect";
 
-const schema = { ast: { _tag: "StringKeyword" } };
+const schema = Schema.String;
 export default defineConfig({
   workflows: [
     defineWorkflow({
