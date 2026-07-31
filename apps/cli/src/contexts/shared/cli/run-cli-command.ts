@@ -476,6 +476,7 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
         options.workflowKeys.length > 0 ||
         options.value !== undefined ||
         options.valueFile !== undefined ||
+        options.parentRunId !== undefined ||
         options.reveal
       ) {
         return writeFailure(
@@ -545,7 +546,7 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       ) {
         return writeFailure(
           invalid(
-            "Run: kojo run list [--workflow <Workflow Key>] [--state <state>] [--limit <1-200>] [--project <path>|--project-id <Project Identity>] [--json]",
+            "Run: kojo run list [--workflow <Workflow Key>] [--parent-run <Run Identity>] [--state <state>] [--limit <1-200>] [--project <path>|--project-id <Project Identity>] [--json]",
           ),
           json,
           "run.list",
@@ -570,9 +571,18 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
           "run.list",
         );
       }
+      let parentRunId: WorkflowRunId | undefined;
+      if (options.parentRunId !== undefined) {
+        try {
+          parentRunId = Schema.decodeUnknownSync(WorkflowRunIdSchema)(options.parentRunId);
+        } catch {
+          return writeFailure(invalid("Use a valid parent Run Identity."), json, "run.list");
+        }
+      }
       const listed = await runEffect(
         client.listWorkflowRuns({
           identity,
+          ...(parentRunId === undefined ? {} : { parentRunId }),
           workflowKeys: options.workflowKeys,
           states: options.states as ReadonlyArray<WorkflowRunState>,
           limit,
@@ -587,7 +597,7 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
         );
       } else {
         process.stdout.write(
-          `${listed.value.runs.length === 0 ? "No Workflow Runs." : listed.value.runs.map((run) => `${run.runId}\t${run.state}\t${run.workflowKey}@${run.workflowRevision}`).join("\n")}\n`,
+          `${listed.value.runs.length === 0 ? "No Workflow Runs." : listed.value.runs.map((run) => `${run.runId}\t${run.state}\t${run.workflowKey}@${run.workflowRevision}${run.parentRunId == null ? "" : `\tparent=${run.parentRunId}\tinvocation=${run.childInvocationKey ?? "-"}`}`).join("\n")}\n`,
         );
       }
       return 0;
@@ -601,6 +611,7 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       options.limit !== undefined ||
       options.states.length > 0 ||
       options.workflowKeys.length > 0 ||
+      options.parentRunId !== undefined ||
       options.value !== undefined ||
       options.valueFile !== undefined
     ) {

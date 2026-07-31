@@ -51,9 +51,22 @@ export class HostControlClient extends Context.Service<HostControlClient, HostCo
 ) {}
 
 export const HostControlClientLive = Layer.succeed(HostControlClient, {
-  getHostOverview: Effect.suspend(
-    () =>
-      makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath()).getHostOverview,
+  getHostOverview: Effect.suspend(() =>
+    makeDefaultLocalClient(
+      process.env.KOJO_HOST_SOCKET ?? defaultSocketPath(),
+    ).getHostOverview.pipe(
+      Effect.map((overview) => ({
+        ...overview,
+        workflowRuns: overview.workflowRuns.map((snapshot) => ({
+          ...snapshot,
+          runs: snapshot.runs.map((run) => ({
+            ...run,
+            parentRunId: run.parentRunId ?? null,
+            childInvocationKey: run.childInvocationKey ?? null,
+          })),
+        })),
+      })),
+    ),
   ),
   enableWorkflowSchedule: (identity, scheduleKey, scheduleRevision, requestKey) =>
     Effect.suspend(() =>

@@ -148,6 +148,8 @@ test("shows accepted Workflow Definition snapshots from the Host", async () => {
                       engineConfirmedAtMs: 1,
                       updatedAtMs: 2,
                       finalizedAtMs: 2,
+                      parentRunId: null,
+                      childInvocationKey: null,
                       allowedActions: [],
                       activitySummary: {
                         invocationAttempts: 1,
@@ -218,6 +220,8 @@ test("only renders Host-authorized Workflow Run controls", async () => {
                 engineConfirmedAtMs: 1,
                 updatedAtMs: 1,
                 finalizedAtMs: null,
+                parentRunId: null,
+                childInvocationKey: null,
                 allowedActions: [],
                 activitySummary: emptyActivitySummary,
                 sandboxTrace: [],
@@ -231,6 +235,8 @@ test("only renders Host-authorized Workflow Run controls", async () => {
                 engineConfirmedAtMs: 1,
                 updatedAtMs: 1,
                 finalizedAtMs: null,
+                parentRunId: null,
+                childInvocationKey: null,
                 allowedActions: ["resume"],
                 activitySummary: emptyActivitySummary,
                 sandboxTrace: [],
@@ -244,6 +250,8 @@ test("only renders Host-authorized Workflow Run controls", async () => {
                 engineConfirmedAtMs: 1,
                 updatedAtMs: 1,
                 finalizedAtMs: null,
+                parentRunId: null,
+                childInvocationKey: null,
                 allowedActions: ["deferred-complete"],
                 activitySummary: emptyActivitySummary,
                 sandboxTrace: [],
@@ -269,6 +277,69 @@ test("only renders Host-authorized Workflow Run controls", async () => {
 
   expect(resumed).toEqual([manualRun]);
   expect(completed).toEqual([{ runId: deferredRun, token: "kojo.deferred.v1.token" }]);
+});
+
+test("renders Child Workflow Runs beneath their parent with the relationship edge", async () => {
+  const root = document.createElement("div");
+  document.body.append(root);
+  const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+    "00000000-0000-7000-8000-000000000001",
+  );
+  const parentRun = Schema.decodeUnknownSync(WorkflowRunId)("00000000-0000-7000-8000-000000000030");
+  const childRun = Schema.decodeUnknownSync(WorkflowRunId)("00000000-0000-7000-8000-000000000031");
+  dispose = render(
+    () => (
+      <WorkflowRuns
+        snapshots={[
+          {
+            project: { identity, path: "/projects/demo" },
+            runs: [
+              {
+                runId: parentRun,
+                workflowKey: "parent",
+                workflowRevision: "1",
+                state: "running",
+                acceptedAtMs: 1,
+                engineConfirmedAtMs: 1,
+                updatedAtMs: 1,
+                finalizedAtMs: null,
+                parentRunId: null,
+                childInvocationKey: null,
+                allowedActions: [],
+                activitySummary: emptyActivitySummary,
+                sandboxTrace: [],
+              },
+              {
+                runId: childRun,
+                workflowKey: "child",
+                workflowRevision: "1",
+                state: "running",
+                acceptedAtMs: 2,
+                engineConfirmedAtMs: 2,
+                updatedAtMs: 2,
+                finalizedAtMs: null,
+                parentRunId: parentRun,
+                childInvocationKey: "send-child",
+                allowedActions: [],
+                activitySummary: emptyActivitySummary,
+                sandboxTrace: [],
+              },
+            ],
+          },
+        ]}
+        onResume={async () => undefined}
+        onCompleteDeferred={async () => undefined}
+      />
+    ),
+    root,
+  );
+
+  await expect.element(page.getByText(`← ${parentRun} (send-child)`)).toBeVisible();
+  const rows = Array.from(document.querySelectorAll("[data-run-id]"));
+  expect(rows.map((row) => row.getAttribute("data-run-id"))).toEqual([parentRun, childRun]);
+  const childRow = document.querySelector(`[data-run-id="${childRun}"]`);
+  expect(childRow?.getAttribute("data-parent-run-id")).toBe(parentRun);
+  expect(childRow?.classList.contains("border-l-2")).toBe(true);
 });
 
 test("navigates between a Schedule Occurrence and its linked resources", async () => {
@@ -355,6 +426,8 @@ test("navigates between a Schedule Occurrence and its linked resources", async (
                       engineConfirmedAtMs: scheduledAtMs,
                       updatedAtMs: scheduledAtMs,
                       finalizedAtMs: scheduledAtMs,
+                      parentRunId: null,
+                      childInvocationKey: null,
                       allowedActions: [],
                       activitySummary: emptyActivitySummary,
                       sandboxTrace: [],

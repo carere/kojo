@@ -191,6 +191,11 @@ export const writeWorkflowRun = (
   process.stdout.write(
     `Run Identity: ${run.runId}\nWorkflow: ${run.workflowKey}@${run.workflowRevision}\nState: ${run.state}\n`,
   );
+  if (run.parentRunId != null) {
+    process.stdout.write(
+      `Parent Run Identity: ${run.parentRunId}\nChild Invocation Key: ${run.childInvocationKey ?? "-"}\n`,
+    );
+  }
   process.stdout.write(
     `Activity evidence: ${run.activitySummary.invocationAttempts} attempts, ${run.activitySummary.incompleteAttempts} incomplete, ${run.activitySummary.retries} retries, ${run.activitySummary.durableCompletions} durable completions, ${run.activitySummary.replayReuses} replay reuses\n`,
   );

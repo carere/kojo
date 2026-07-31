@@ -1,4 +1,4 @@
-import { Context, type Duration, Effect, Schema } from "effect";
+import { Context, Data, type Duration, Effect, Schema } from "effect";
 
 export const ProjectIdentity = Schema.String.check(
   Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, {
@@ -87,6 +87,34 @@ export interface WorkflowOperations {
   }) => Effect.Effect<Success["Type"]>;
 }
 
+/** The durable outcome reported when an invoked Child Workflow Run fails. */
+export class WorkflowChildFailure extends Data.TaggedError("WorkflowChildFailure")<{
+  readonly invocationKey: string;
+  readonly runId: string;
+  readonly workflowKey: string;
+}> {}
+
+export interface WorkflowChildInvocation {
+  /** A developer-chosen, stable identity for this invocation in its parent Run. */
+  readonly invocationKey: string;
+  /** Must be declared by the parent Workflow Definition's childWorkflowKeys. */
+  readonly workflowKey: string;
+  /** The input for the explicitly registered target Workflow Definition. */
+  readonly input: unknown;
+}
+
+export interface WorkflowChildRuntimeShape {
+  readonly invoke: (
+    invocation: WorkflowChildInvocation,
+  ) => Effect.Effect<unknown, WorkflowChildFailure>;
+}
+
+/** Host-provided runtime for durable Child Workflow Runs. */
+export class WorkflowChildRuntime extends Context.Service<
+  WorkflowChildRuntime,
+  WorkflowChildRuntimeShape
+>()("kojo/workflow/WorkflowChildRuntime") {}
+
 const unavailableOperations: WorkflowOperations = {
   sleep: () =>
     Effect.die("Kojo Workflow operations are only available inside a Workflow Definition."),
@@ -128,6 +156,11 @@ export const Workflow = {
     readonly operationKey: string;
     readonly valueSchema: Success;
   }) => Effect.flatMap(WorkflowOperations, (operations) => operations.waitForResume(options)),
+  invokeChild: (invocation: WorkflowChildInvocation) =>
+    Effect.flatMap(WorkflowChildRuntime, (runtime) => runtime.invoke(invocation)),
+  /** Alias for invokeChild, emphasizing that the returned Effect waits for the child outcome. */
+  startChild: (invocation: WorkflowChildInvocation) =>
+    Effect.flatMap(WorkflowChildRuntime, (runtime) => runtime.invoke(invocation)),
 };
 
 /**

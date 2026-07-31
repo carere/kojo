@@ -1,5 +1,5 @@
 import type { ProjectSnapshot } from "@kojo/control";
-import type { WorkflowOperations } from "@kojo/workflow";
+import type { WorkflowOperations, WorkflowSensitivity } from "@kojo/workflow";
 import { Context, type Duration, type Effect, type Schema } from "effect";
 import type { WorkflowRunRepository } from "../../runs/repositories/workflow-run-repository";
 
@@ -74,6 +74,11 @@ export interface LocalWorkflowDefinition<
   readonly inputSchema: Input;
   readonly successSchema: Success;
   readonly failureSchema?: Failure;
+  readonly childWorkflowKeys?: ReadonlyArray<string>;
+  readonly sensitivity?: WorkflowSensitivity;
+  readonly sourceIdentity?: string;
+  readonly inputSchemaFingerprint?: string;
+  readonly definitionSnapshotId?: string;
   readonly execute: (
     input: Input["Type"],
     operations: LocalWorkflowOperations,
@@ -86,6 +91,11 @@ export interface AnyLocalWorkflowDefinition {
   readonly inputSchema: Schema.Top;
   readonly successSchema: Schema.Top;
   readonly failureSchema?: Schema.Top;
+  readonly childWorkflowKeys?: ReadonlyArray<string>;
+  readonly sensitivity?: WorkflowSensitivity;
+  readonly sourceIdentity?: string;
+  readonly inputSchemaFingerprint?: string;
+  readonly definitionSnapshotId?: string;
   readonly execute: (
     input: never,
     operations: LocalWorkflowOperations,

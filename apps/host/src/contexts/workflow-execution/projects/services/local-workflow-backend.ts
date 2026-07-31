@@ -12,6 +12,7 @@ import type {
   Command,
   CommandFailure,
   CommandResult,
+  WorkflowChildInvocation,
   WorkflowDeferred,
   WorkflowSandboxDefinition,
 } from "@kojo/workflow";
@@ -23,6 +24,8 @@ import {
   type WorkflowActivityAttempt,
   type WorkflowActivityOptions,
   WorkflowActivityRuntime,
+  WorkflowChildFailure,
+  WorkflowChildRuntime,
   WorkflowCommandRuntime,
   WorkflowSandboxRuntime,
 } from "@kojo/workflow";
@@ -317,11 +320,23 @@ export const makeLocalWorkflowBackendLayer = (
               }
             }
           }
+          const childDispatcher: ChildRunDispatcher = {
+            invoke: (parentRunId, parent, invocation) =>
+              invokeChildWorkflowRun(
+                backend,
+                project,
+                activityRepository,
+                parentRunId,
+                parent,
+                invocation,
+              ),
+          };
           for (const entry of makeEntries(
             definitions,
             project,
             activityRepository,
             selectedProviderRuntime,
+            childDispatcher,
           )) {
             if (backend.entries.has(entry.identity)) continue;
             yield* Layer.buildWithScope(
@@ -467,6 +482,7 @@ export const makeLocalWorkflowBackendLayer = (
 };
 
 interface Entry {
+  readonly definition: AnyLocalWorkflowDefinition;
   readonly identity: string;
   readonly workflowKey: string;
   readonly workflowRevision: string;
@@ -502,11 +518,20 @@ interface Entry {
   readonly registration: Layer.Layer<never, never, WorkflowEngine.WorkflowEngine>;
 }
 
+interface ChildRunDispatcher {
+  readonly invoke: (
+    parentRunId: string,
+    parent: AnyLocalWorkflowDefinition,
+    invocation: WorkflowChildInvocation,
+  ) => Effect.Effect<unknown, WorkflowChildFailure>;
+}
+
 const makeEntries = (
   definitions: ReadonlyArray<AnyLocalWorkflowDefinition>,
   project?: ProjectSnapshot,
   activityRepository?: WorkflowRunRepository["Service"],
   providerRuntime: ProviderRuntime["Service"] = ProviderRuntimeUnavailable,
+  childDispatcher?: ChildRunDispatcher,
 ): ReadonlyArray<Entry> => {
   const identities = new Set<string>();
   return definitions.map((definition) => {
@@ -517,6 +542,10 @@ const makeEntries = (
     }
     identities.add(identity);
 
+    // An unhandled child failure is still a valid terminal failure for the parent,
+    // even when the parent's declared failure schema does not describe it. Keep the
+    // structured error in the engine so callers may catch it in workflow code; once
+    // it reaches the workflow boundary, the Host records the parent as failed.
     const workflow = Workflow.make(`Kojo/${definition.workflowKey}/${workflowRevision}`, {
       payload: {
         engineGeneration: Schema.Number,
@@ -524,7 +553,15 @@ const makeEntries = (
         input: Schema.Unknown,
       },
       success: definition.successSchema,
-      error: definition.failureSchema ?? Schema.Never,
+      error: Schema.Union([
+        definition.failureSchema ?? Schema.Never,
+        Schema.Struct({
+          _tag: Schema.Literal("WorkflowChildFailure"),
+          invocationKey: Schema.String,
+          runId: Schema.String,
+          workflowKey: Schema.String,
+        }),
+      ]),
       idempotencyKey: ({ runId, engineGeneration }) => `${runId}:${engineGeneration}`,
     });
     const waits = new Map<string, RegisteredWait>();
@@ -561,6 +598,10 @@ const makeEntries = (
                   sandboxDefinitions,
                 ),
               ),
+              Effect.provideService(
+                WorkflowChildRuntime,
+                makeWorkflowChildRuntime(runId, definition, childDispatcher),
+              ),
             );
         }),
         Effect.flatMap((result) =>
@@ -573,6 +614,7 @@ const makeEntries = (
     );
 
     return {
+      definition,
       identity,
       workflowKey: definition.workflowKey,
       workflowRevision,
@@ -1195,6 +1237,189 @@ const makeWorkflowActivityRuntime = (
     ) as Effect.Effect<Success["Type"], Failure["Type"]>;
   },
 });
+
+const childInvocationRequestKey = (
+  parentRunId: string,
+  workflowKey: string,
+  invocationKey: string,
+) =>
+  `child:${createHash("sha256")
+    .update(JSON.stringify({ parentRunId, workflowKey, invocationKey }))
+    .digest("hex")}`;
+
+const childInvocationHash = (
+  parentRunId: string,
+  workflowKey: string,
+  workflowRevision: string,
+  invocationKey: string,
+  input: unknown,
+) =>
+  createHash("sha256")
+    .update(JSON.stringify({ parentRunId, workflowKey, workflowRevision, invocationKey, input }))
+    .digest();
+
+const makeWorkflowChildRuntime = (
+  parentRunId: string,
+  parent: AnyLocalWorkflowDefinition,
+  dispatcher: ChildRunDispatcher | undefined,
+): WorkflowChildRuntime["Service"] => ({
+  invoke: (invocation) =>
+    dispatcher === undefined
+      ? Effect.die("Workflow Child Runs are not configured for durable execution")
+      : dispatcher.invoke(parentRunId, parent, invocation),
+});
+
+const invokeChildWorkflowRun = (
+  backend: ActiveBackend,
+  project: ProjectSnapshot,
+  repository: WorkflowRunRepository["Service"] | undefined,
+  parentRunId: string,
+  parent: AnyLocalWorkflowDefinition,
+  invocation: WorkflowChildInvocation,
+): Effect.Effect<unknown, WorkflowChildFailure> =>
+  Effect.suspend(() => {
+    if (repository === undefined) {
+      return Effect.die("Workflow Child Runs require a durable Workflow Run Repository");
+    }
+    if (
+      invocation.invocationKey.trim().length === 0 ||
+      invocation.invocationKey.length > 200 ||
+      !parent.childWorkflowKeys?.includes(invocation.workflowKey)
+    ) {
+      return Effect.die(
+        "Child Workflow invocation requires a declared target Workflow Key and a Durable Invocation Key.",
+      );
+    }
+    const target = [...backend.entries.values()].find(
+      (entry) => entry.workflowKey === invocation.workflowKey,
+    );
+    if (target === undefined)
+      return Effect.die(`Unknown Child Workflow Key: ${invocation.workflowKey}`);
+    let encodedInput: unknown;
+    try {
+      const inputSchema = target.definition.inputSchema as typeof Schema.Unknown;
+      encodedInput = Schema.encodeSync(inputSchema)(
+        Schema.decodeUnknownSync(inputSchema)(invocation.input),
+      );
+    } catch {
+      return Effect.die(`Child Workflow input is invalid: ${invocation.workflowKey}`);
+    }
+    const requestKey = childInvocationRequestKey(
+      parentRunId,
+      target.workflowKey,
+      invocation.invocationKey,
+    );
+    const acceptedAtMs = Date.now();
+    const start = Activity.make({
+      name: `Kojo/Child/${invocation.invocationKey}/${childInvocationHash(
+        parentRunId,
+        target.workflowKey,
+        target.workflowRevision,
+        invocation.invocationKey,
+        encodedInput,
+      ).toString("hex")}`,
+      success: Schema.Struct({
+        kind: Schema.Literals(["completed", "failed", "stopped"]),
+        runId: Schema.String,
+        value: Schema.optionalKey(Schema.Unknown),
+      }),
+      error: Schema.Never,
+      execute: repository
+        .acceptChildStart({
+          project,
+          parentRunId,
+          invocationKey: invocation.invocationKey,
+          requestKey: requestKey as never,
+          requestHash: childInvocationHash(
+            parentRunId,
+            target.workflowKey,
+            target.workflowRevision,
+            invocation.invocationKey,
+            encodedInput,
+          ),
+          runId: randomUUID(),
+          workflowKey: target.workflowKey,
+          workflowRevision: target.workflowRevision,
+          encodedInput,
+          inputSensitivityPaths: target.definition.sensitivity?.input ?? [],
+          startSnapshot: {
+            workflow: {
+              workflowKey: target.workflowKey,
+              workflowRevision: target.workflowRevision,
+              sourceIdentity: target.definition.sourceIdentity ?? target.identity,
+              inputSchemaFingerprint: target.definition.inputSchemaFingerprint ?? "unavailable",
+            },
+            trigger: {
+              kind: "child" as const,
+              parentRunId: parentRunId as never,
+              invocationKey: invocation.invocationKey,
+            },
+            environment: {
+              projectIdentity: project.identity,
+              definitionSnapshotId: target.definition.definitionSnapshotId ?? "unavailable",
+              runtimeKind: "local-effect-workflow" as const,
+            },
+            input: encodedInput,
+            inputSensitivityPaths: target.definition.sensitivity?.input ?? [],
+          },
+          acceptedAtMs,
+        })
+        .pipe(
+          Effect.flatMap((accepted) => {
+            if (accepted._tag === "invocation-key-conflict") {
+              return Effect.die(`Conflicting Child Invocation Key: ${invocation.invocationKey}`);
+            }
+            if (accepted._tag === "request-key-conflict") {
+              return Effect.die(
+                `Conflicting Child Workflow start request: ${invocation.invocationKey}`,
+              );
+            }
+            const childRunId = accepted.run.run.runId;
+            return Effect.gen(function* () {
+              for (;;) {
+                const stored = yield* repository.show(project, childRunId);
+                if (stored === undefined)
+                  return yield* Effect.die("Child Workflow Run disappeared");
+                if (stored.run.state === "completed") {
+                  return {
+                    kind: "completed" as const,
+                    runId: childRunId,
+                    ...(stored.run.outcome !== null && "value" in stored.run.outcome
+                      ? { value: stored.run.outcome.value }
+                      : {}),
+                  };
+                }
+                if (stored.run.state === "failed" || stored.run.state === "stopped") {
+                  return { kind: stored.run.state, runId: childRunId } as const;
+                }
+                yield* Effect.sleep("25 millis");
+              }
+            });
+          }),
+        ),
+    });
+    return Effect.flatMap(start, (result) => {
+      if (result.kind !== "completed") {
+        return Effect.fail(
+          new WorkflowChildFailure({
+            invocationKey: invocation.invocationKey,
+            runId: result.runId,
+            workflowKey: target.workflowKey,
+          }),
+        );
+      }
+      try {
+        const successSchema = target.definition.successSchema as typeof Schema.Unknown;
+        return Effect.succeed(
+          result.value === undefined
+            ? undefined
+            : Schema.decodeUnknownSync(successSchema)(result.value),
+        );
+      } catch {
+        return Effect.die("Child Workflow outcome is invalid");
+      }
+    });
+  }) as Effect.Effect<unknown, WorkflowChildFailure>;
 
 const makeOperations = (waits: Map<string, RegisteredWait>): LocalWorkflowOperations => ({
   activity: <

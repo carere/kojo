@@ -19,6 +19,9 @@ it.effect("keeps the default external identity stable and makes per-retry work d
     expect(workflowActivityIdempotencyKey("run", "send-message", "per-retry", 1)).not.toBe(
       workflowActivityIdempotencyKey("run", "send-message", "per-retry", 2),
     );
+    expect(workflowActivityIdempotencyKey("parent-run", "send-message", "stable", 1)).not.toBe(
+      workflowActivityIdempotencyKey("child-run", "send-message", "stable", 1),
+    );
   }),
 );
 
