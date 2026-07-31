@@ -9,6 +9,7 @@ import {
   WorkflowRunId as WorkflowRunIdSchema,
   type WorkflowRunState,
   type WorkflowScheduleCondition,
+  type WorkflowScheduleOccurrenceOutcome,
 } from "@kojo/control";
 import {
   defaultSocketPath,
@@ -36,10 +37,12 @@ import {
   transportFailure,
   workflowRunFailure,
   workflowScheduleFailure,
+  workflowScheduleOccurrenceFailure,
   writeFailure,
   writeProject,
   writeWorkflowRun,
   writeWorkflowSchedule,
+  writeWorkflowScheduleOccurrence,
 } from "./cli-output";
 
 export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
@@ -205,6 +208,133 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       result.value.alreadyApplied,
       result.value.acceptedRunsContinue,
     );
+    return 0;
+  }
+
+  if (args[0] === "occurrence") {
+    const options = parseOptions(args.slice(2));
+    const command = `occurrence.${args[1] ?? "unknown"}`;
+    const operation = args[1];
+    if (options === undefined || !["list", "show"].includes(operation ?? "")) {
+      return writeFailure(invalid("Run: kojo occurrence list|show"), json, command);
+    }
+    if (
+      options.input !== undefined ||
+      options.requestKey !== undefined ||
+      options.revision !== undefined ||
+      options.cursor !== undefined ||
+      options.reveal ||
+      options.workflowKeys.length > 0 ||
+      options.conditions.length > 0 ||
+      options.states.length > 0 ||
+      (operation === "list" && options.args.length !== 0) ||
+      (operation === "show" && options.args.length !== 2)
+    ) {
+      return writeFailure(
+        invalid(
+          "Run: kojo occurrence list [--schedule <Schedule Key>] [--outcome <outcome>] [--limit <1-200>] [--project <path>|--project-id <Project Identity>] or kojo occurrence show <Schedule Key> <scheduled UTC instant> [--project <path>|--project-id <Project Identity>]",
+        ),
+        json,
+        command,
+      );
+    }
+    let identity: ProjectSnapshot["identity"];
+    if (options.projectId !== undefined) {
+      try {
+        identity = Schema.decodeUnknownSync(ProjectIdentitySchema)(options.projectId);
+      } catch {
+        return writeFailure(invalid("Use a full Project Identity."), json, command);
+      }
+    } else {
+      try {
+        identity = (await resolveInitializedProject(options.projectPath ?? process.cwd())).identity;
+      } catch (error) {
+        return writeFailure(
+          invalid(
+            error instanceof ProjectInitializationError
+              ? error.message
+              : "Choose an initialized Kojo Project.",
+          ),
+          json,
+          command,
+        );
+      }
+    }
+    const client = makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath());
+    if (operation === "list") {
+      const allowedOutcomes = new Set<WorkflowScheduleOccurrenceOutcome>([
+        "planned",
+        "started",
+        "skipped",
+        "invalidated",
+        "failed",
+      ]);
+      if (options.states.length > 0) {
+        return writeFailure(invalid("Use --outcome, not --state, for occurrences."), json, command);
+      }
+      const outcomes = options.outcomes as ReadonlyArray<WorkflowScheduleOccurrenceOutcome>;
+      if (outcomes.some((outcome) => !allowedOutcomes.has(outcome))) {
+        return writeFailure(
+          invalid("Use a valid Workflow Schedule Occurrence outcome."),
+          json,
+          command,
+        );
+      }
+      const limit = options.limit === undefined ? 100 : Number(options.limit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+        return writeFailure(
+          invalid("Use --limit with a whole number from 1 to 200."),
+          json,
+          command,
+        );
+      }
+      const listed = await runEffect(
+        client.listWorkflowScheduleOccurrences({
+          identity,
+          scheduleKeys: options.scheduleKeys,
+          outcomes,
+          limit,
+        }),
+      );
+      if (!listed.succeeded) return writeFailure(transportFailure(listed.error), json, command);
+      if (!listed.value.ok)
+        return writeFailure(workflowScheduleOccurrenceFailure(listed.value.error), json, command);
+      if (json) {
+        process.stdout.write(
+          `${JSON.stringify({ schemaVersion: 1, command, result: listed.value.occurrences, warnings: [] })}\n`,
+        );
+      } else {
+        process.stdout.write(
+          `${listed.value.occurrences.length === 0 ? "No Workflow Schedule Occurrences." : listed.value.occurrences.map((occurrence) => `${occurrence.scheduleKey}\t${new Date(occurrence.scheduledAtMs).toISOString()}\t${occurrence.outcome}\t${occurrence.linkedRunId ?? "-"}`).join("\n")}\n`,
+        );
+      }
+      return 0;
+    }
+    if (
+      options.scheduleKeys.length > 0 ||
+      options.limit !== undefined ||
+      options.states.length > 0 ||
+      options.outcomes.length > 0
+    ) {
+      return writeFailure(
+        invalid(
+          "Run: kojo occurrence show <Schedule Key> <scheduled UTC instant> [--project <path>|--project-id <Project Identity>]",
+        ),
+        json,
+        command,
+      );
+    }
+    const scheduledAtMs = Date.parse(options.args[1] as string);
+    if (!Number.isFinite(scheduledAtMs) || scheduledAtMs < 0) {
+      return writeFailure(invalid("Use an ISO UTC scheduled instant."), json, command);
+    }
+    const shown = await runEffect(
+      client.showWorkflowScheduleOccurrence(identity, options.args[0] as string, scheduledAtMs),
+    );
+    if (!shown.succeeded) return writeFailure(transportFailure(shown.error), json, command);
+    if (!shown.value.ok)
+      return writeFailure(workflowScheduleOccurrenceFailure(shown.value.error), json, command);
+    writeWorkflowScheduleOccurrence(command, shown.value.occurrence, json);
     return 0;
   }
 

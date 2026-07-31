@@ -11,7 +11,9 @@ export interface ParsedOptions {
   readonly requestKey?: string;
   readonly revision?: string;
   readonly reveal: boolean;
+  readonly scheduleKeys: ReadonlyArray<string>;
   readonly conditions: ReadonlyArray<string>;
+  readonly outcomes: ReadonlyArray<string>;
   readonly cursor?: string;
   readonly input?: string;
   readonly limit?: string;
@@ -27,10 +29,12 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
   let revision: string | undefined;
   let reveal = false;
   const conditions: Array<string> = [];
+  const outcomes: Array<string> = [];
   let cursor: string | undefined;
   let input: string | undefined;
   let limit: string | undefined;
   const states: Array<string> = [];
+  const scheduleKeys: Array<string> = [];
   const workflowKeys: Array<string> = [];
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
@@ -46,10 +50,12 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
         "--request-key",
         "--revision",
         "--condition",
+        "--outcome",
         "--cursor",
         "--input",
         "--limit",
         "--state",
+        "--schedule",
         "--workflow",
       ].includes(argument)
     ) {
@@ -61,10 +67,14 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
     index += 1;
     if (argument === "--condition") {
       conditions.push(value);
+    } else if (argument === "--outcome") {
+      outcomes.push(value);
     } else if (argument === "--state") {
       states.push(value);
     } else if (argument === "--workflow") {
       workflowKeys.push(value);
+    } else if (argument === "--schedule") {
+      scheduleKeys.push(value);
     } else if (argument === "--input") {
       if (input !== undefined) return undefined;
       input = value;
@@ -97,10 +107,12 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
     revision,
     reveal,
     conditions,
+    outcomes,
     cursor,
     input,
     limit,
     states,
+    scheduleKeys,
     workflowKeys,
   };
 };

@@ -24,6 +24,7 @@ import {
   type WorkflowBackendAssessment,
   type WorkflowBackendReference,
   type WorkflowBackendState,
+  type WorkflowScheduleWakeup,
 } from "./workflow-backend";
 
 const databasePath = (project: ProjectSnapshot) => join(project.path, ".kojo", "kojo.sqlite");
@@ -85,7 +86,38 @@ export const makeLocalWorkflowBackendLayer = (
       const parentScope = yield* Effect.scope;
       const active = new Map<string, ActiveBackend>();
       const ownership = new Map<string, Database>();
+      const dueScheduleWakeups = new Map<string, Map<string, WorkflowScheduleWakeup>>();
       const ownerAddress = RunnerAddress.make(hostIdentity, 34_431);
+      const scheduleWakeupWorkflow = Workflow.make("Kojo/ScheduleWakeup/v1", {
+        payload: Schema.Struct({
+          projectIdentity: Schema.String,
+          scheduleKey: Schema.String,
+          scheduledAtMs: Schema.Number,
+          scheduleRevision: Schema.String,
+        }),
+        success: Schema.Void,
+        error: Schema.Never,
+        idempotencyKey: ({ projectIdentity, scheduleKey, scheduledAtMs }) =>
+          `${projectIdentity}:${scheduleKey}:${scheduledAtMs}`,
+      });
+      const scheduleWakeupRegistration = scheduleWakeupWorkflow.toLayer((wakeup) =>
+        Effect.gen(function* () {
+          yield* DurableClock.sleep({
+            name: "wait-for-occurrence",
+            duration: Duration.millis(Math.max(0, wakeup.scheduledAtMs - Date.now())),
+            inMemoryThreshold: Duration.zero,
+          });
+          yield* Effect.sync(() => {
+            const wakeups = dueScheduleWakeups.get(wakeup.projectIdentity) ?? new Map();
+            wakeups.set(`${wakeup.scheduleKey}:${wakeup.scheduledAtMs}`, {
+              scheduleKey: wakeup.scheduleKey,
+              scheduledAtMs: wakeup.scheduledAtMs,
+              scheduleRevision: wakeup.scheduleRevision,
+            });
+            dueScheduleWakeups.set(wakeup.projectIdentity, wakeups);
+          });
+        }),
+      );
 
       const quiesce = (path: string) =>
         Effect.gen(function* () {
@@ -173,7 +205,7 @@ export const makeLocalWorkflowBackendLayer = (
             const sharding = Context.get(context, Sharding.Sharding);
             const engine = Context.get(context, WorkflowEngine.WorkflowEngine);
             yield* Layer.buildWithScope(
-              registrationLayer.pipe(
+              Layer.merge(registrationLayer, scheduleWakeupRegistration).pipe(
                 Layer.provide(Layer.succeed(WorkflowEngine.WorkflowEngine, engine)),
               ),
               scope,
@@ -240,6 +272,34 @@ export const makeLocalWorkflowBackendLayer = (
           }).pipe(Effect.catchCause(() => Effect.succeed("needs-attention" as const))),
         release,
         register,
+        armScheduleWakeup: (project, wakeup) =>
+          Effect.suspend(() => {
+            const backend = getActiveBackend(active, project);
+            const payload = {
+              projectIdentity: project.identity,
+              scheduleKey: wakeup.scheduleKey,
+              scheduledAtMs: wakeup.scheduledAtMs,
+              scheduleRevision: wakeup.scheduleRevision,
+            };
+            return scheduleWakeupWorkflow.executionId(payload).pipe(
+              Effect.flatMap((executionId) =>
+                backend.engine.execute(scheduleWakeupWorkflow, {
+                  executionId,
+                  payload,
+                  discard: true,
+                }),
+              ),
+              Effect.orDie,
+              Effect.asVoid,
+            ) as unknown as Effect.Effect<void>;
+          }),
+        takeDueScheduleWakeups: (project) =>
+          Effect.sync(() => {
+            const wakeups = dueScheduleWakeups.get(project.identity);
+            if (wakeups === undefined) return [];
+            dueScheduleWakeups.delete(project.identity);
+            return [...wakeups.values()];
+          }),
         submit: (project, { workflowKey, workflowRevision, runId, input }) =>
           Effect.suspend(() => {
             const backend = getActiveBackend(active, project);

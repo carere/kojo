@@ -65,7 +65,7 @@ describe("Host overview", () => {
 
           expect(overview).toEqual({
             host: {
-              protocol: { major: 1, minor: 4 },
+              protocol: { major: 1, minor: 5 },
               hostVersion: "0.1.0",
               capabilities: [
                 "projects:list",
@@ -80,6 +80,8 @@ describe("Host overview", () => {
                 "schedules:next",
                 "schedules:enable",
                 "schedules:disable",
+                "occurrences:list",
+                "occurrences:show",
                 "runs:start",
                 "runs:list",
                 "runs:show",
@@ -89,6 +91,7 @@ describe("Host overview", () => {
             projects: [],
             projectDefinitions: [],
             workflowSchedules: [],
+            workflowOccurrences: [],
             workflowRuns: [],
           });
         }),

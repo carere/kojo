@@ -6,6 +6,8 @@ import type {
   RequestKey,
   WorkflowRunOperationError,
   WorkflowRunSnapshot,
+  WorkflowScheduleOccurrenceOperationError,
+  WorkflowScheduleOccurrenceSnapshot,
   WorkflowScheduleOperationError,
   WorkflowScheduleSnapshot,
 } from "@kojo/control";
@@ -19,6 +21,7 @@ export interface CliFailure {
   readonly affectedResource?:
     | ProjectOperationError["affectedResource"]
     | WorkflowScheduleOperationError["affectedResource"]
+    | WorkflowScheduleOccurrenceOperationError["affectedResource"]
     | WorkflowRunOperationError["affectedResource"];
   readonly code: string;
   readonly currentSchedule?: WorkflowScheduleSnapshot;
@@ -93,6 +96,10 @@ export const workflowScheduleFailure = (
   error: WorkflowScheduleOperationError,
   requestKey?: RequestKey,
 ): CliFailure => ({ ...error, requestKey, exitCode: 4 });
+
+export const workflowScheduleOccurrenceFailure = (
+  error: WorkflowScheduleOccurrenceOperationError,
+): CliFailure => ({ ...error, exitCode: 4 });
 
 export const projectCursorFailure = (error: ProjectListCursorError): CliFailure => ({
   ...error,
@@ -238,6 +245,26 @@ export const writeWorkflowSchedule = (
       "Accepted Workflow Runs continue; disabling affects future occurrences only.\n",
     );
   }
+};
+
+export const writeWorkflowScheduleOccurrence = (
+  command: string,
+  occurrence: WorkflowScheduleOccurrenceSnapshot,
+  json: boolean,
+) => {
+  if (json) {
+    process.stdout.write(
+      `${JSON.stringify({ schemaVersion: 1, command, result: { occurrence }, warnings: [] })}\n`,
+    );
+    return;
+  }
+  process.stdout.write(
+    `Schedule Key: ${occurrence.scheduleKey}\n` +
+      `Scheduled UTC: ${new Date(occurrence.scheduledAtMs).toISOString()}\n` +
+      `Applied revision: ${occurrence.appliedRevision}\n` +
+      `Outcome: ${occurrence.outcome}\n` +
+      `Linked Run: ${occurrence.linkedRunId ?? "None"}\n`,
+  );
 };
 
 export const pendingRegistrationWarning = (project: ProjectSnapshot): CliWarning => ({

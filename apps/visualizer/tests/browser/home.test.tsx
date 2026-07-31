@@ -70,6 +70,7 @@ test("shows Host connectivity and the authoritative empty Project state", async 
               projects: [],
               projectDefinitions: [],
               workflowSchedules: [],
+              workflowOccurrences: [],
               workflowRuns: [],
             })
           }
@@ -125,6 +126,7 @@ test("shows accepted Workflow Definition snapshots from the Host", async () => {
                 },
               ],
               workflowSchedules: [],
+              workflowOccurrences: [],
               workflowRuns: [
                 {
                   project: { identity, path: "/projects/demo" },
@@ -154,4 +156,118 @@ test("shows accepted Workflow Definition snapshots from the Host", async () => {
   await expect.element(page.getByText("echo 1")).toBeVisible();
   await expect.element(page.getByText("00000000-0000-7000-8000-000000000010")).toBeVisible();
   await expect.element(page.getByText("completed")).toBeVisible();
+});
+
+test("navigates between a Schedule Occurrence and its linked resources", async () => {
+  setLocale("en", { reload: false });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+    "00000000-0000-7000-8000-000000000001",
+  );
+  const runId = Schema.decodeUnknownSync(WorkflowRunId)("00000000-0000-7000-8000-000000000010");
+  const scheduledAtMs = Date.parse("2026-08-01T07:00:00.000Z");
+  dispose = render(
+    () => (
+      <ColorModeProvider initialColorMode="light">
+        <HostOverview
+          loadOverview={() =>
+            Promise.resolve({
+              host: {
+                protocol: { major: 1, minor: 5 },
+                hostVersion: "0.1.0",
+                capabilities: ["schedules:show", "occurrences:list", "runs:show"],
+              },
+              projects: [{ identity, path: "/projects/demo" }],
+              projectDefinitions: [],
+              workflowSchedules: [
+                {
+                  project: { identity, path: "/projects/demo" },
+                  schedules: [
+                    {
+                      scheduleKey: "morning-report",
+                      definition: {
+                        scheduleKey: "morning-report",
+                        workflowKey: "report",
+                        revision: "schedule-v1",
+                        cron: "0 9 * * *",
+                        timeZone: "Europe/Paris",
+                        overlapPolicy: "skip",
+                        inputRuleRevision: "input-v1",
+                      },
+                      appliedRevision: "schedule-v1",
+                      enabledIntent: true,
+                      condition: "available",
+                      conditionReasonCode: null,
+                      highWaterMarkMs: null,
+                      nextOccurrenceMs: scheduledAtMs,
+                      rowVersion: 1,
+                      allowedActions: ["disable"],
+                    },
+                  ],
+                },
+              ],
+              workflowOccurrences: [
+                {
+                  project: { identity, path: "/projects/demo" },
+                  occurrences: [
+                    {
+                      scheduleKey: "morning-report",
+                      scheduledAtMs,
+                      appliedRevision: "schedule-v1",
+                      input: { kind: "report" },
+                      inputSensitivityPaths: [],
+                      outcome: "started",
+                      reasonCode: null,
+                      deliveryAttemptCount: 1,
+                      plannedAtMs: scheduledAtMs - 10,
+                      firstAttemptedAtMs: scheduledAtMs,
+                      processedAtMs: scheduledAtMs,
+                      linkedRunId: runId,
+                    },
+                  ],
+                },
+              ],
+              workflowRuns: [
+                {
+                  project: { identity, path: "/projects/demo" },
+                  runs: [
+                    {
+                      runId,
+                      workflowKey: "report",
+                      workflowRevision: "1",
+                      state: "completed",
+                      acceptedAtMs: scheduledAtMs,
+                      engineConfirmedAtMs: scheduledAtMs,
+                      updatedAtMs: scheduledAtMs,
+                      finalizedAtMs: scheduledAtMs,
+                    },
+                  ],
+                },
+              ],
+            })
+          }
+        />
+      </ColorModeProvider>
+    ),
+    root,
+  );
+
+  await page.getByRole("button", { name: "View Schedule" }).click();
+  await expect
+    .element(
+      page.getByText(
+        "Navigated to Schedule morning-report in Project 00000000-0000-7000-8000-000000000001",
+      ),
+    )
+    .toBeVisible();
+
+  await page.getByRole("button", { name: "View linked Run" }).click();
+  await expect
+    .element(
+      page.getByText(
+        "Navigated to Workflow Run 00000000-0000-7000-8000-000000000010 in Project 00000000-0000-7000-8000-000000000001",
+      ),
+    )
+    .toBeVisible();
 });

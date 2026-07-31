@@ -3,6 +3,8 @@ import type {
   RequestKey,
   WorkflowScheduleDefinition,
   WorkflowScheduleListInput,
+  WorkflowScheduleOccurrenceListInput,
+  WorkflowScheduleOccurrenceSnapshot,
   WorkflowScheduleSnapshot,
 } from "@kojo/control";
 import type { WorkflowScheduleSnapshot as WorkflowScheduleDefinitionSnapshot } from "@kojo/control/project-definition-validation";
@@ -67,6 +69,33 @@ export interface WorkflowScheduleRepositoryShape {
     readonly requestHash: Uint8Array;
     readonly acceptedAtMs: number;
   }) => Effect.Effect<WorkflowScheduleMutation>;
+  /** Persists the exact validated input for the one future occurrence. */
+  readonly planOccurrence: (input: {
+    readonly project: ProjectSnapshot;
+    readonly scheduleKey: string;
+    readonly scheduledAtMs: number;
+    readonly appliedRevision: string;
+    readonly input: unknown;
+    readonly inputSensitivityPaths: ReadonlyArray<string>;
+    readonly plannedAtMs: number;
+  }) => Effect.Effect<WorkflowScheduleOccurrenceSnapshot | undefined>;
+  readonly advanceAfterStart: (input: {
+    readonly project: ProjectSnapshot;
+    readonly scheduleKey: string;
+    readonly scheduledAtMs: number;
+    readonly appliedRevision: string;
+    readonly nextOccurrenceMs: number;
+    readonly advancedAtMs: number;
+  }) => Effect.Effect<WorkflowScheduleSnapshot | undefined>;
+  readonly listOccurrences: (
+    project: ProjectSnapshot,
+    input: WorkflowScheduleOccurrenceListInput,
+  ) => Effect.Effect<ReadonlyArray<WorkflowScheduleOccurrenceSnapshot>>;
+  readonly showOccurrence: (
+    project: ProjectSnapshot,
+    scheduleKey: string,
+    scheduledAtMs: number,
+  ) => Effect.Effect<WorkflowScheduleOccurrenceSnapshot | undefined>;
 }
 
 export class WorkflowScheduleRepository extends Context.Service<

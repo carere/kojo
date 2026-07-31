@@ -14,6 +14,7 @@ export interface WorkflowSchedulesProps {
     schedule: WorkflowScheduleSnapshot,
     action: WorkflowScheduleAllowedAction,
   ) => Promise<void>;
+  readonly onShowOccurrences?: (identity: ProjectIdentity, scheduleKey: string) => void;
 }
 
 const renderTime = (value: number | null) =>
@@ -41,7 +42,18 @@ export function WorkflowSchedules(props: WorkflowSchedulesProps) {
                     {(schedule) => (
                       <li class="rounded border border-border/60 p-3 text-sm">
                         <div class="flex flex-wrap items-baseline justify-between gap-2">
-                          <span class="font-medium font-mono">{schedule.scheduleKey}</span>
+                          <Button
+                            size="xs"
+                            variant="ghost"
+                            onClick={() =>
+                              props.onShowOccurrences?.(
+                                snapshot.project.identity,
+                                schedule.scheduleKey,
+                              )
+                            }
+                          >
+                            {schedule.scheduleKey}
+                          </Button>
                           <span class="text-muted-foreground">
                             {schedule.enabledIntent ? "Enabled" : "Disabled"} · {schedule.condition}
                           </span>

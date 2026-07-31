@@ -59,6 +59,7 @@ it.effect("negotiates before reading the authoritative Project list", () =>
       projects: [],
       projectDefinitions: [],
       workflowSchedules: [],
+      workflowOccurrences: [],
       workflowRuns: [],
     });
     expect(requests).toEqual(["Negotiate", "ListProjects"]);
