@@ -2,7 +2,7 @@ import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type BrowserContext, chromium, type Download } from "playwright";
+import { type BrowserContext, chromium } from "playwright";
 import { afterEach, expect, test } from "vitest";
 import { makeTemporaryDirectory, runKojoCli } from "../../../../tests/support/cli-process";
 import {
@@ -25,6 +25,7 @@ interface TemporaryDirectory {
 
 const fixtureStartupTimeoutMs = 30_000;
 const browserAssertionTimeoutMs = 30_000;
+const artifactDownloadTimeoutMs = 10_000;
 let fixture: Fixture | undefined;
 const temporaryDirectories: Array<() => Promise<void>> = [];
 const workflowPackagePath = fileURLToPath(
@@ -210,21 +211,32 @@ export default defineConfig({
   expect(await projects.nth(0).getAttribute("aria-current")).toBe("page");
 }, 60_000);
 
-test("force-reclaims a browser that misses its bounded shutdown", async () => {
+test("force-reclaims an owned browser process when bounded shutdown misses its deadline", async () => {
   const profile = await makeTemporaryDirectory("kojo-browser-profile-reclaim-");
-  let browser: BrowserContext | undefined;
+  const browser = Bun.spawn(
+    [
+      chromium.executablePath(),
+      "--headless",
+      "--no-default-browser-check",
+      "--no-first-run",
+      `--user-data-dir=${profile.path}`,
+      "about:blank",
+    ],
+    { stderr: "ignore", stdout: "ignore" },
+  );
   try {
-    browser = await chromium.launchPersistentContext(profile.path, { headless: true });
-    expect(await ownedBrowserPids(profile.path)).not.toHaveLength(0);
+    await waitFor(async () => (await ownedBrowserPids(profile.path)).length > 0, browser);
 
     const neverClosingBrowser: Pick<BrowserContext, "close"> = {
       close: () => new Promise<void>(() => undefined),
     };
     await expect(closeBrowser(neverClosingBrowser, profile.path)).resolves.toBeUndefined();
     expect(await ownedBrowserPids(profile.path)).toEqual([]);
+    expect(await browser.exited).toBeTypeOf("number");
   } finally {
     await terminateOwnedBrowser(profile.path);
-    if (browser !== undefined) await settlesWithin(browser.close());
+    if (browser.exitCode === null) browser.kill("SIGKILL");
+    await settlesWithin(browser.exited);
     await profile.cleanup();
   }
 });
@@ -310,7 +322,9 @@ test("downloads a real Artifact as an inert attachment instead of rendering it",
     .projectIdentity as string;
   const artifactUrl = `${origin}/api/artifacts?artifact=${artifactId}&project=${identity}&run=${runId}`;
 
-  const artifactResponse = await page.request.get(artifactUrl, { timeout: 10_000 });
+  const artifactResponse = await page.request.get(artifactUrl, {
+    timeout: artifactDownloadTimeoutMs,
+  });
   expect(artifactResponse.status()).toBe(200);
   expect(artifactResponse.headers()).toMatchObject({
     "cache-control": "no-store",
@@ -328,15 +342,18 @@ test("downloads a real Artifact as an inert attachment instead of rendering it",
   await runButton.click();
   const artifactLink = page.getByRole("link", { name: `Download Artifact ${artifactId}` });
   await artifactLink.waitFor({ state: "visible", timeout: browserAssertionTimeoutMs });
-  const download = page.waitForEvent("download", { timeout: 10_000 });
-  let artifactDownload: Download | undefined;
-  try {
-    await artifactLink.click();
-    artifactDownload = await download;
-  } finally {
-    await download.catch(() => undefined);
-  }
-  if (artifactDownload === undefined) throw new Error("Artifact download did not settle.");
+  const artifactDownloadControl = await within(
+    "Artifact download control handle",
+    artifactLink.elementHandle(),
+  );
+  if (artifactDownloadControl === null) throw new Error("Artifact download control disappeared.");
+  const [artifactDownload] = await Promise.all([
+    page.waitForEvent("download", { timeout: artifactDownloadTimeoutMs }),
+    artifactDownloadControl.click({
+      noWaitAfter: true,
+      timeout: artifactDownloadTimeoutMs,
+    }),
+  ]);
   const downloadPath = await artifactDownload.path();
   expect(downloadPath).not.toBeNull();
   if (downloadPath !== null) expect(await readFile(downloadPath, "utf8")).toContain("present:");
