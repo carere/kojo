@@ -8,13 +8,16 @@ import {
 
 export { ProjectIdentity } from "@kojo/workflow";
 
-export const PROTOCOL_VERSION = { major: 1, minor: 6 } as const;
+export const PROTOCOL_VERSION = { major: 1, minor: 7 } as const;
 export const CONTROL_CAPABILITIES = [
   "projects:list",
   "projects:list-page",
   "projects:show",
   "projects:register",
   "projects:forget",
+  "readiness:show",
+  "readiness:refresh",
+  "readiness:repair",
   "workflows:list",
   "workflows:show",
   "schedules:list",
@@ -150,6 +153,160 @@ export const ReadinessFindingKey = Schema.Literals([
   "engine.execution-unowned",
 ]);
 export type ReadinessFindingKey = typeof ReadinessFindingKey.Type;
+
+/**
+ * Project Runtime Readiness is deliberately separate from Control Capability:
+ * a Host can support an operation while a particular Project is not proven
+ * safe to perform it.
+ */
+export const ProjectReadinessCapability = Schema.Literals([
+  "project:inspect",
+  "history:inspect",
+  "runs:control",
+  "runs:recover",
+  "runs:start",
+  "schedules:process",
+  "repair:safe",
+]);
+export type ProjectReadinessCapability = typeof ProjectReadinessCapability.Type;
+
+export const ProjectReadinessResource = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("project"), identity: ProjectIdentity }),
+  Schema.Struct({ kind: Schema.Literal("project-path"), path: Schema.String }),
+  Schema.Struct({ kind: Schema.Literal("layout"), path: Schema.String }),
+  Schema.Struct({ kind: Schema.Literal("configuration"), identity: ProjectIdentity }),
+  Schema.Struct({ kind: Schema.Literal("store"), identity: ProjectIdentity }),
+  Schema.Struct({ kind: Schema.Literal("engine"), identity: ProjectIdentity }),
+  Schema.Struct({
+    kind: Schema.Literal("workflow"),
+    identity: ProjectIdentity,
+    workflowKey: Schema.String,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("schedule"),
+    identity: ProjectIdentity,
+    scheduleKey: Schema.String,
+  }),
+  Schema.Struct({ kind: Schema.Literal("run"), identity: ProjectIdentity, runId: Schema.String }),
+  Schema.Struct({
+    kind: Schema.Literal("sandbox"),
+    identity: ProjectIdentity,
+    runId: Schema.String,
+    sandboxKey: Schema.String,
+  }),
+]);
+export type ProjectReadinessResource = typeof ProjectReadinessResource.Type;
+
+export const ProjectReadinessRepairClass = Schema.Literals([
+  "automatic",
+  "explicit",
+  "developer-action",
+  "unavailable",
+]);
+export type ProjectReadinessRepairClass = typeof ProjectReadinessRepairClass.Type;
+
+export const ProjectReadinessActionKey = Schema.Literals([
+  "layout.add-ignore-rule",
+  "project.assign-new-identity",
+  "project.replace-missing-data",
+  "store.retry-migration",
+  "readiness.refresh",
+]);
+export type ProjectReadinessActionKey = typeof ProjectReadinessActionKey.Type;
+
+export const ProjectReadinessAction = Schema.Struct({
+  key: ProjectReadinessActionKey,
+  label: Schema.String,
+});
+export type ProjectReadinessAction = typeof ProjectReadinessAction.Type;
+
+export const ProjectReadinessFinding = Schema.Struct({
+  /** Stable identifier for this code and affected resource in one assessment lineage. */
+  key: Schema.String,
+  code: ReadinessFindingKey,
+  affectedResource: ProjectReadinessResource,
+  blockedCapabilities: Schema.Array(ProjectReadinessCapability),
+  dependents: Schema.Array(ProjectReadinessResource),
+  summary: Schema.String,
+  relevant: Schema.Array(Schema.String),
+  repairClass: ProjectReadinessRepairClass,
+  actions: Schema.Array(ProjectReadinessAction),
+  firstObservedAtMs: Schema.Number,
+  lastObservedAtMs: Schema.Number,
+});
+export type ProjectReadinessFinding = typeof ProjectReadinessFinding.Type;
+
+export const ProjectReadinessCapabilityResult = Schema.Struct({
+  capability: ProjectReadinessCapability,
+  available: Schema.Boolean,
+  findingKeys: Schema.Array(ReadinessFindingKey),
+});
+export type ProjectReadinessCapabilityResult = typeof ProjectReadinessCapabilityResult.Type;
+
+export const ProjectReadinessRepairNoticeCode = Schema.Literals([
+  "project.path-updated",
+  "layout.permissions-tightened",
+  "layout.artifacts-recreated",
+  "layout.empty-sandboxes-recreated",
+  "layout.version-upgraded",
+  "store.migrated",
+]);
+export type ProjectReadinessRepairNoticeCode = typeof ProjectReadinessRepairNoticeCode.Type;
+
+export const ProjectReadinessRepairNotice = Schema.Struct({
+  code: ProjectReadinessRepairNoticeCode,
+  summary: Schema.String,
+  affectedResource: ProjectReadinessResource,
+});
+export type ProjectReadinessRepairNotice = typeof ProjectReadinessRepairNotice.Type;
+
+export const ProjectReadinessAssessment = Schema.Struct({
+  project: ProjectSnapshot,
+  revision: Schema.String,
+  assessedAtMs: Schema.Number,
+  condition: ProjectCondition,
+  capabilities: Schema.Array(ProjectReadinessCapabilityResult),
+  findings: Schema.Array(ProjectReadinessFinding),
+  repairs: Schema.Array(ProjectReadinessRepairNotice),
+});
+export type ProjectReadinessAssessment = typeof ProjectReadinessAssessment.Type;
+
+export const ProjectReadinessOperationErrorCode = Schema.Literals([
+  "project-not-found",
+  "stale-assessment",
+  "repair-not-available",
+  "repair-precondition-failed",
+]);
+export type ProjectReadinessOperationErrorCode = typeof ProjectReadinessOperationErrorCode.Type;
+
+export const ProjectReadinessOperationError = Schema.Struct({
+  code: ProjectReadinessOperationErrorCode,
+  message: Schema.String,
+  next: Schema.String,
+  findingKeys: Schema.Array(ReadinessFindingKey),
+  assessment: Schema.optionalKey(ProjectReadinessAssessment),
+});
+export type ProjectReadinessOperationError = typeof ProjectReadinessOperationError.Type;
+
+export const ProjectReadinessQueryResult = Schema.Union([
+  Schema.Struct({ ok: Schema.Literal(true), assessment: ProjectReadinessAssessment }),
+  Schema.Struct({ ok: Schema.Literal(false), error: ProjectReadinessOperationError }),
+]);
+export type ProjectReadinessQueryResult = typeof ProjectReadinessQueryResult.Type;
+
+export const ProjectReadinessRepairResult = Schema.Union([
+  Schema.Struct({
+    ok: Schema.Literal(true),
+    assessment: ProjectReadinessAssessment,
+    requestKey: RequestKey,
+  }),
+  Schema.Struct({
+    ok: Schema.Literal(false),
+    requestKey: RequestKey,
+    error: ProjectReadinessOperationError,
+  }),
+]);
+export type ProjectReadinessRepairResult = typeof ProjectReadinessRepairResult.Type;
 
 export const ProjectOperationErrorCode = Schema.Literals([
   "project-not-found",
@@ -700,6 +857,8 @@ export type ProjectMutationResult = typeof ProjectMutationResult.Type;
 export const HostOverview = Schema.Struct({
   host: HostInformation,
   projects: Schema.Array(ProjectSnapshot),
+  // Optional so older Hosts remain decodable by a newer visualizer overview.
+  readiness: Schema.optionalKey(Schema.Array(ProjectReadinessAssessment)),
   projectDefinitions: Schema.Array(ProjectWorkflowSnapshot),
   workflowSchedules: Schema.Array(ProjectWorkflowSchedulesSnapshot),
   workflowOccurrences: Schema.Array(ProjectWorkflowScheduleOccurrencesSnapshot),
@@ -727,6 +886,26 @@ export const ListProjectPage = Rpc.make("ListProjectPage", {
 export const ShowProject = Rpc.make("ShowProject", {
   payload: { identity: ProjectIdentity },
   success: ProjectQueryResult,
+});
+
+export const ShowProjectReadiness = Rpc.make("ShowProjectReadiness", {
+  payload: { identity: ProjectIdentity },
+  success: ProjectReadinessQueryResult,
+});
+
+export const RefreshProjectReadiness = Rpc.make("RefreshProjectReadiness", {
+  payload: { identity: ProjectIdentity },
+  success: ProjectReadinessQueryResult,
+});
+
+export const RepairProjectReadiness = Rpc.make("RepairProjectReadiness", {
+  payload: {
+    identity: ProjectIdentity,
+    assessmentRevision: Schema.String,
+    action: ProjectReadinessActionKey,
+    requestKey: RequestKey,
+  },
+  success: ProjectReadinessRepairResult,
 });
 
 export const ListWorkflowDefinitions = Rpc.make("ListWorkflowDefinitions", {
@@ -864,6 +1043,9 @@ export const KojoControl = RpcGroup.make(
   ListProjects,
   ListProjectPage,
   ShowProject,
+  ShowProjectReadiness,
+  RefreshProjectReadiness,
+  RepairProjectReadiness,
   ListWorkflowDefinitions,
   ShowWorkflowDefinition,
   ListWorkflowSchedules,

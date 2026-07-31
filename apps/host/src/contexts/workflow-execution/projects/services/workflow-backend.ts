@@ -125,6 +125,15 @@ export interface WorkflowBackendShape {
   readonly initialize: (project: ProjectSnapshot) => Effect.Effect<boolean>;
   readonly postflight: (project: ProjectSnapshot) => Effect.Effect<boolean>;
   readonly readiness: (project: ProjectSnapshot) => Effect.Effect<WorkflowBackendAssessment>;
+  /** Gives a safe, specific engine failure when the adapter can prove one. */
+  readonly readinessFinding?: (
+    project: ProjectSnapshot,
+  ) => Effect.Effect<
+    | "engine.execution-unowned"
+    | "engine.global-state-invalid"
+    | "engine.ownership-unavailable"
+    | undefined
+  >;
   readonly release: (project: ProjectSnapshot) => Effect.Effect<void>;
   readonly register: (
     project: ProjectSnapshot,
@@ -152,6 +161,15 @@ export interface WorkflowBackendShape {
     project: ProjectSnapshot,
     reference: WorkflowBackendReference,
   ) => Effect.Effect<WorkflowBackendState>;
+  /**
+   * Reports durable Sandbox state required by one non-final Run. An adapter
+   * only returns entries it can prove are required; an empty list means no
+   * Sandbox state is required for recovery.
+   */
+  readonly inspectSandboxState?: (
+    project: ProjectSnapshot,
+    runId: string,
+  ) => Effect.Effect<ReadonlyArray<{ readonly available: boolean; readonly sandboxKey: string }>>;
   readonly resume?: (
     project: ProjectSnapshot,
     reference: WorkflowBackendReference,

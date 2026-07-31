@@ -14,6 +14,7 @@ import { basename, dirname, extname, join } from "node:path";
 import {
   ProjectIdentity,
   ProjectOperationErrorCode,
+  ProjectReadinessOperationErrorCode,
   WorkflowRunOperationErrorCode,
   WorkflowScheduleOccurrenceOperationErrorCode,
   WorkflowScheduleOperationErrorCode,
@@ -55,6 +56,9 @@ export const HostRequestDiagnosticEvent = Schema.Struct({
     "ListProjects",
     "ListProjectPage",
     "ShowProject",
+    "ShowProjectReadiness",
+    "RefreshProjectReadiness",
+    "RepairProjectReadiness",
     "ListWorkflowDefinitions",
     "ShowWorkflowDefinition",
     "ListWorkflowSchedules",
@@ -81,6 +85,7 @@ export const HostRequestDiagnosticEvent = Schema.Struct({
   safeErrorCode: Schema.optionalKey(
     Schema.Union([
       ProjectOperationErrorCode,
+      ProjectReadinessOperationErrorCode,
       WorkflowScheduleOperationErrorCode,
       WorkflowScheduleOccurrenceOperationErrorCode,
       WorkflowRunOperationErrorCode,

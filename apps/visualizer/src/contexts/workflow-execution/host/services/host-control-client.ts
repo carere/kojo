@@ -1,6 +1,9 @@
 import type {
   HostOverview,
   ProjectIdentity,
+  ProjectReadinessActionKey,
+  ProjectReadinessQueryResult,
+  ProjectReadinessRepairResult,
   RequestKey,
   WorkflowRunId,
   WorkflowRunMutationResult,
@@ -25,6 +28,21 @@ export interface HostControlClientShape {
   readonly disableWorkflowSchedule: ReturnType<
     typeof makeDefaultLocalClient
   >["disableWorkflowSchedule"];
+  readonly refreshProjectReadiness?: (
+    identity: ProjectIdentity,
+  ) => Effect.Effect<
+    ProjectReadinessQueryResult,
+    LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+  >;
+  readonly repairProjectReadiness?: (
+    identity: ProjectIdentity,
+    assessmentRevision: string,
+    action: ProjectReadinessActionKey,
+    requestKey: RequestKey,
+  ) => Effect.Effect<
+    ProjectReadinessRepairResult,
+    LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+  >;
   readonly resumeWorkflowRun?: (
     identity: ProjectIdentity,
     runId: WorkflowRunId,
@@ -88,6 +106,24 @@ export const HostControlClientLive = Layer.succeed(HostControlClient, {
         process.env.KOJO_HOST_SOCKET ?? defaultSocketPath(),
       ).disableWorkflowSchedule(identity, scheduleKey, requestKey),
     ),
+  refreshProjectReadiness: (identity) =>
+    Effect.suspend(() =>
+      makeDefaultLocalClient(
+        process.env.KOJO_HOST_SOCKET ?? defaultSocketPath(),
+      ).refreshProjectReadiness(identity),
+    ) as unknown as Effect.Effect<
+      ProjectReadinessQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >,
+  repairProjectReadiness: (identity, assessmentRevision, action, requestKey) =>
+    Effect.suspend(() =>
+      makeDefaultLocalClient(
+        process.env.KOJO_HOST_SOCKET ?? defaultSocketPath(),
+      ).repairProjectReadiness(identity, assessmentRevision, action, requestKey),
+    ) as unknown as Effect.Effect<
+      ProjectReadinessRepairResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >,
   resumeWorkflowRun: (identity, runId, value, requestKey) =>
     Effect.suspend(() =>
       makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath()).resumeWorkflowRun(

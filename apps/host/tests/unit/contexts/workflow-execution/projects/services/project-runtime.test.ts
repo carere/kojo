@@ -131,6 +131,41 @@ it.effect("retains an accepted definition snapshot while a replacement is invali
   }).pipe(Effect.provide(runtimeLayer(store)));
 });
 
+it.effect(
+  "requires current valid source after cold activation before recovery can continue",
+  () => {
+    const store = Layer.succeed(ProjectRepository, {
+      migrate: () => Effect.succeed(true),
+      postflight: () => Effect.succeed(true),
+      completeMigration: () => Effect.succeed(true),
+      readiness: () => Effect.succeed("ready" as const),
+      inspectForgetBlockers: () =>
+        Effect.succeed({
+          assessment: "available" as const,
+          enabledScheduleKeys: [],
+          nonFinalRunIds: [],
+        }),
+    });
+    const rejected = {
+      ok: false as const,
+      findingKey: "configuration.load-failed" as const,
+      message: "Kojo Configuration could not be loaded safely.",
+      findings: [
+        {
+          findingKey: "configuration.load-failed" as const,
+          message: "Kojo Configuration could not be loaded safely.",
+        },
+      ],
+    };
+
+    return Effect.gen(function* () {
+      const runtime = yield* ProjectRuntime;
+      expect(yield* runtime.readiness(project, project, rejected)).toBe("needs-attention");
+      expect(yield* runtime.definitions(project)).toBeUndefined();
+    }).pipe(Effect.provide(runtimeLayer(store)));
+  },
+);
+
 it.effect("holds forget behind an active lifecycle mutation", () => {
   const order: Array<string> = [];
   const store = Layer.succeed(ProjectRepository, {

@@ -15,6 +15,8 @@ export interface ProjectRepositoryShape {
     succeeded: boolean,
   ) => Effect.Effect<boolean>;
   readonly readiness: (project: ProjectSnapshot) => Effect.Effect<ProjectCondition>;
+  /** Clears the once-per-activation guard after an explicit repair request. */
+  readonly retryMigration?: (project: ProjectSnapshot) => Effect.Effect<void>;
   readonly inspectForgetBlockers: (
     project: ProjectSnapshot,
   ) => Effect.Effect<ProjectForgetBlockers>;

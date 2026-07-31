@@ -1,6 +1,7 @@
 import {
   type HostOverview as HostOverviewSnapshot,
   type ProjectIdentity,
+  type ProjectReadinessActionKey,
   RequestKey,
   type WorkflowRunId,
   type WorkflowScheduleAllowedAction,
@@ -11,6 +12,7 @@ import { createResource, createSignal, Show } from "solid-js";
 import { m } from "../../../../i18n/messages";
 import { LanguageToggle } from "../../../preferences/components/language-toggle";
 import { ThemeToggle } from "../../../preferences/components/theme-toggle";
+import { ProjectReadiness } from "../../../readiness/components/project-readiness";
 import { VisualizerApiClient, visualizerApiRuntime } from "../../../shared/services/client";
 import { ProjectNavigator } from "../../../workflow-authoring/projects/components/project-navigator";
 import { WorkflowDefinitionSnapshots } from "../../../workflow-authoring/projects/components/workflow-definition-snapshots";
@@ -62,6 +64,42 @@ export function HostOverview(props: HostOverviewProps) {
       if (result.ok) await refetch();
     } catch {
       // The next overview refresh is the authoritative recovery path for a failed control request.
+    }
+  };
+  const refreshReadiness = async (identity: ProjectIdentity) => {
+    if (props.loadOverview !== undefined) return;
+    try {
+      const result = await visualizerApiRuntime.runPromise(
+        Effect.flatMap(VisualizerApiClient, (client) =>
+          client.RefreshProjectReadiness({ identity }),
+        ),
+      );
+      if (result.ok) await refetch();
+    } catch {
+      // The next overview refresh is authoritative after a failed request.
+    }
+  };
+  const repairReadiness = async (
+    identity: ProjectIdentity,
+    assessmentRevision: string,
+    action: ProjectReadinessActionKey,
+  ) => {
+    if (props.loadOverview !== undefined) return;
+    try {
+      const result = await visualizerApiRuntime.runPromise(
+        Effect.flatMap(VisualizerApiClient, (client) =>
+          client.RepairProjectReadiness({
+            identity,
+            assessmentRevision,
+            action,
+            requestKey: Schema.decodeUnknownSync(RequestKey)(crypto.randomUUID()),
+          }),
+        ),
+      );
+      if (result.ok) await refetch();
+    } catch {
+      // A stale or rejected repair is safe to resolve by reloading the Host assessment.
+      await refetch();
     }
   };
   const resume = async (identity: ProjectIdentity, runId: WorkflowRunId, value: unknown) => {
@@ -128,6 +166,11 @@ export function HostOverview(props: HostOverviewProps) {
                 Connected to Kojo Host {current().host.hostVersion}
               </h2>
               <ProjectNavigator projects={current().projects} />
+              <ProjectReadiness
+                assessments={current().readiness ?? []}
+                onRefresh={refreshReadiness}
+                onRepair={repairReadiness}
+              />
               <WorkflowDefinitionSnapshots snapshots={current().projectDefinitions} />
               <WorkflowSchedules
                 snapshots={current().workflowSchedules}

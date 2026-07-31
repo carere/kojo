@@ -986,6 +986,14 @@ export const DrizzleProjectRepositoryLive = Layer.sync(ProjectRepository, () => 
         }
       }),
     readiness: (project) => Effect.sync(() => inspectReadiness(project)),
+    retryMigration: (project) =>
+      Effect.sync(() => {
+        failedMigrations.delete(failureKey(project));
+        const prefix = `${project.path}:`;
+        for (const attempt of attemptedMigrations) {
+          if (attempt.startsWith(prefix)) attemptedMigrations.delete(attempt);
+        }
+      }),
     inspectForgetBlockers: (project) => Effect.sync(() => inspectBlockers(project)),
   };
 });

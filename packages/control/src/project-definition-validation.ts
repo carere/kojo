@@ -2,6 +2,7 @@ import { Cron, Result, Schema } from "effect";
 
 const ProjectDefinitionFindingKey = Schema.Literals([
   "dependency.workflow-package-missing",
+  "dependency.workflow-package-incompatible",
   "configuration.missing",
   "configuration.load-failed",
   "configuration.invalid",

@@ -2,6 +2,8 @@ import type {
   ProjectListCursorError,
   ProjectMutationResult,
   ProjectOperationError,
+  ProjectReadinessAssessment,
+  ProjectReadinessOperationError,
   ProjectSnapshot,
   RequestKey,
   WorkflowRunOperationError,
@@ -86,6 +88,60 @@ export const projectQueryFailure = (error: ProjectOperationError): CliFailure =>
   ...error,
   exitCode: 4,
 });
+
+export const readinessFailure = (error: ProjectReadinessOperationError): CliFailure => ({
+  ...error,
+  exitCode: error.code === "stale-assessment" ? 4 : 1,
+});
+
+export const writeProjectReadiness = (
+  command: string,
+  assessment: ProjectReadinessAssessment,
+  json: boolean,
+  requestKey?: RequestKey,
+) => {
+  if (json) {
+    process.stdout.write(
+      `${JSON.stringify({
+        schemaVersion: 1,
+        command,
+        ...(requestKey === undefined ? {} : { requestKey }),
+        result: { assessment },
+        warnings: [],
+      })}\n`,
+    );
+    return;
+  }
+  process.stdout.write(
+    `Project Identity: ${assessment.project.identity}\n` +
+      `Path: ${assessment.project.path}\n` +
+      `Condition: ${assessment.condition}\n` +
+      `Assessment revision: ${assessment.revision}\n`,
+  );
+  process.stdout.write(
+    `Capabilities:\n${assessment.capabilities
+      .map(
+        (capability) =>
+          `  ${capability.available ? "available" : "blocked"}\t${capability.capability}${capability.findingKeys.length === 0 ? "" : ` (${capability.findingKeys.join(", ")})`}`,
+      )
+      .join("\n")}\n`,
+  );
+  if (assessment.findings.length === 0) {
+    process.stdout.write("Readiness findings: none\n");
+  } else {
+    process.stdout.write("Readiness findings:\n");
+    for (const finding of assessment.findings) {
+      process.stdout.write(`  ${finding.code}\t${finding.summary}\n`);
+      for (const repair of finding.actions) {
+        process.stdout.write(`    Repair: ${repair.key} — ${repair.label}\n`);
+      }
+    }
+  }
+  for (const repair of assessment.repairs) {
+    process.stdout.write(`Completed repair: ${repair.code}\t${repair.summary}\n`);
+  }
+  if (requestKey !== undefined) process.stdout.write(`Request Key: ${requestKey}\n`);
+};
 
 export const workflowRunFailure = (
   error: WorkflowRunOperationError,

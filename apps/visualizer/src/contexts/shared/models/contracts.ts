@@ -1,6 +1,9 @@
 import {
   HostOverview as HostOverviewSchema,
   ProjectIdentity,
+  ProjectReadinessActionKey,
+  ProjectReadinessQueryResult,
+  ProjectReadinessRepairResult,
   RequestKey,
   WorkflowRunId,
   WorkflowRunMutationResult,
@@ -27,6 +30,23 @@ export class HostOverviewError extends Schema.TaggedErrorClass<HostOverviewError
 
 export const HostOverview = Rpc.make("HostOverview", {
   success: HostOverviewSchema,
+  error: HostOverviewError,
+});
+
+export const RefreshProjectReadiness = Rpc.make("RefreshProjectReadiness", {
+  payload: { identity: ProjectIdentity },
+  success: ProjectReadinessQueryResult,
+  error: HostOverviewError,
+});
+
+export const RepairProjectReadiness = Rpc.make("RepairProjectReadiness", {
+  payload: {
+    identity: ProjectIdentity,
+    assessmentRevision: Schema.String,
+    action: ProjectReadinessActionKey,
+    requestKey: RequestKey,
+  },
+  success: ProjectReadinessRepairResult,
   error: HostOverviewError,
 });
 
@@ -79,6 +99,8 @@ export const StopWorkflowRun = Rpc.make("StopWorkflowRun", {
 export const VisualizerApi = RpcGroup.make(
   Health,
   HostOverview,
+  RefreshProjectReadiness,
+  RepairProjectReadiness,
   EnableWorkflowSchedule,
   DisableWorkflowSchedule,
   ResumeWorkflowRun,

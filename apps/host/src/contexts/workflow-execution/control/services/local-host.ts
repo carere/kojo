@@ -7,6 +7,8 @@ import {
   type ProjectIdentity,
   type ProjectMutationResult,
   type ProjectOperationErrorCode,
+  type ProjectReadinessQueryResult,
+  type ProjectReadinessRepairResult,
   type WorkflowRunListResult,
   type WorkflowRunMutationResult,
   type WorkflowRunQueryResult,
@@ -29,6 +31,10 @@ import {
   showProject,
   showWorkflowDefinition,
 } from "../../../workflow-authoring/projects/use-cases/manage-projects";
+import {
+  assessProjectReadiness,
+  repairProjectReadiness,
+} from "../../readiness/use-cases/project-readiness";
 import {
   completeWorkflowDeferred,
   listWorkflowRuns,
@@ -134,6 +140,13 @@ const queryDiagnostic =
     ...(result.ok || result.error === undefined ? {} : { safeErrorCode: result.error.code }),
   });
 
+const readinessDiagnostic =
+  (identity: ProjectIdentity) =>
+  (result: ProjectReadinessQueryResult | ProjectReadinessRepairResult) => ({
+    projectIdentity: identity,
+    ...(result.ok ? {} : { safeErrorCode: result.error.code }),
+  });
+
 const workflowRunDiagnostic =
   (identity: ProjectIdentity) =>
   (
@@ -199,6 +212,30 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           String(options.requestId),
           showProject(identity),
           queryDiagnostic(identity),
+        ),
+      ShowProjectReadiness: ({ identity }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ShowProjectReadiness",
+          String(options.requestId),
+          assessProjectReadiness(identity),
+          readinessDiagnostic(identity),
+        ),
+      RefreshProjectReadiness: ({ identity }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "RefreshProjectReadiness",
+          String(options.requestId),
+          assessProjectReadiness(identity),
+          readinessDiagnostic(identity),
+        ),
+      RepairProjectReadiness: ({ identity, assessmentRevision, action, requestKey }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "RepairProjectReadiness",
+          String(options.requestId),
+          repairProjectReadiness({ identity, assessmentRevision, action, requestKey }),
+          readinessDiagnostic(identity),
         ),
       ListWorkflowDefinitions: ({ identity }, options) =>
         withHostRequestDiagnostic(

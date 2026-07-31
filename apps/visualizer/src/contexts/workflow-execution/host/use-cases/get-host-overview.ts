@@ -1,4 +1,9 @@
-import type { ProjectIdentity, RequestKey, WorkflowRunId } from "@kojo/control";
+import type {
+  ProjectIdentity,
+  ProjectReadinessActionKey,
+  RequestKey,
+  WorkflowRunId,
+} from "@kojo/control";
 import { Effect } from "effect";
 import { HostOverviewError } from "../../../shared/models/contracts";
 import { HostControlClient } from "../services/host-control-client";
@@ -91,4 +96,37 @@ export const stopWorkflowRun = (
           }),
         )
       : client.stopWorkflowRun(identity, runId, requestKey).pipe(Effect.mapError(hostError)),
+  );
+
+export const refreshProjectReadiness = (identity: ProjectIdentity) =>
+  Effect.flatMap(HostControlClient, (client) =>
+    client.refreshProjectReadiness === undefined
+      ? Effect.fail(
+          new HostOverviewError({
+            code: "host-unavailable",
+            message: "The visualizer Host client cannot refresh Project Runtime Readiness.",
+            next: "Restart the visualizer and try again.",
+          }),
+        )
+      : client.refreshProjectReadiness(identity).pipe(Effect.mapError(hostError)),
+  );
+
+export const repairProjectReadiness = (
+  identity: ProjectIdentity,
+  assessmentRevision: string,
+  action: ProjectReadinessActionKey,
+  requestKey: RequestKey,
+) =>
+  Effect.flatMap(HostControlClient, (client) =>
+    client.repairProjectReadiness === undefined
+      ? Effect.fail(
+          new HostOverviewError({
+            code: "host-unavailable",
+            message: "The visualizer Host client cannot repair Project Runtime Readiness.",
+            next: "Restart the visualizer and try again.",
+          }),
+        )
+      : client
+          .repairProjectReadiness(identity, assessmentRevision, action, requestKey)
+          .pipe(Effect.mapError(hostError)),
   );

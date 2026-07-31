@@ -6,6 +6,8 @@ import {
 import {
   completeWorkflowDeferred,
   getHostOverview,
+  refreshProjectReadiness,
+  repairProjectReadiness,
   resumeWorkflowRun,
   stopWorkflowRun,
 } from "../use-cases/get-host-overview";
@@ -13,6 +15,17 @@ import {
 export const HostOverviewHandler = VisualizerApi.toLayerHandler(
   "HostOverview",
   () => getHostOverview,
+);
+
+export const RefreshProjectReadinessHandler = VisualizerApi.toLayerHandler(
+  "RefreshProjectReadiness",
+  ({ identity }) => refreshProjectReadiness(identity),
+);
+
+export const RepairProjectReadinessHandler = VisualizerApi.toLayerHandler(
+  "RepairProjectReadiness",
+  ({ identity, assessmentRevision, action, requestKey }) =>
+    repairProjectReadiness(identity, assessmentRevision, action, requestKey),
 );
 
 export const EnableWorkflowScheduleHandler = VisualizerApi.toLayerHandler(
