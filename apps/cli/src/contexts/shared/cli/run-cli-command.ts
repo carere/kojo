@@ -41,6 +41,8 @@ import {
   workflowRunFailure,
   workflowScheduleFailure,
   workflowScheduleOccurrenceFailure,
+  writeExecutionTraceEvent,
+  writeExecutionTracePage,
   writeFailure,
   writeProject,
   writeProjectReadiness,
@@ -52,6 +54,144 @@ import {
 export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
   const json = rawArgs.includes("--json");
   const args = rawArgs.filter((argument) => argument !== "--json");
+
+  if (args[0] === "trace") {
+    const options = parseOptions(args.slice(2));
+    const operation = args[1];
+    const command = `trace.${operation ?? "unknown"}`;
+    if (options === undefined || (operation !== "show" && operation !== "follow")) {
+      return writeFailure(invalid("Run: kojo trace show|follow <Run Identity>"), json, command);
+    }
+    if (
+      options.args.length !== 1 ||
+      options.input !== undefined ||
+      options.value !== undefined ||
+      options.valueFile !== undefined ||
+      options.requestKey !== undefined ||
+      options.revision !== undefined ||
+      options.conditions.length > 0 ||
+      options.outcomes.length > 0 ||
+      options.states.length > 0 ||
+      options.workflowKeys.length > 0 ||
+      options.scheduleKeys.length > 0 ||
+      options.parentRunId !== undefined ||
+      options.reveal ||
+      (operation === "follow" && options.cursor !== undefined)
+    ) {
+      return writeFailure(
+        invalid(
+          "Run: kojo trace show <Run Identity> [--limit <1-200>] [--cursor <cursor>] [--project <path>|--project-id <Project Identity>] [--json] or kojo trace follow <Run Identity> [--limit <1-200>] [--project <path>|--project-id <Project Identity>] [--json]",
+        ),
+        json,
+        command,
+      );
+    }
+    const limit = options.limit === undefined ? 100 : Number(options.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      return writeFailure(invalid("Use --limit with a whole number from 1 to 200."), json, command);
+    }
+    let identity: ProjectSnapshot["identity"];
+    if (options.projectId !== undefined) {
+      try {
+        identity = Schema.decodeUnknownSync(ProjectIdentitySchema)(options.projectId);
+      } catch {
+        return writeFailure(invalid("Use a full Project Identity."), json, command);
+      }
+    } else {
+      try {
+        identity = (await resolveInitializedProject(options.projectPath ?? process.cwd())).identity;
+      } catch (error) {
+        return writeFailure(
+          invalid(
+            error instanceof ProjectInitializationError
+              ? error.message
+              : "Choose an initialized Kojo Project.",
+          ),
+          json,
+          command,
+        );
+      }
+    }
+    let runId: WorkflowRunId;
+    try {
+      runId = Schema.decodeUnknownSync(WorkflowRunIdSchema)(options.args[0]);
+    } catch {
+      return writeFailure(invalid("Use a valid Run Identity."), json, command);
+    }
+    const client = makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath());
+    const traceInput = (continuation: {
+      readonly afterSequence?: number;
+      readonly cursor?: string;
+    }) =>
+      client.readExecutionTrace({
+        identity,
+        runId,
+        ...(continuation.afterSequence === undefined
+          ? {}
+          : { afterSequence: continuation.afterSequence }),
+        ...(continuation.cursor === undefined ? {} : { cursor: continuation.cursor }),
+        filters: {
+          activityAttemptIds: [],
+          childRunIds: [],
+          engineOperationIds: [],
+          kinds: [],
+        },
+        limit,
+      });
+    if (operation === "show") {
+      const trace = await runEffect(traceInput({ cursor: options.cursor }));
+      if (!trace.succeeded) return writeFailure(transportFailure(trace.error), json, command);
+      if (!trace.value.ok)
+        return writeFailure(workflowRunFailure(trace.value.error), json, command);
+      writeExecutionTracePage(command, trace.value.page, json);
+      return 0;
+    }
+
+    // History comes first. The only follow checkpoint is the durable sequence,
+    // making reconnects idempotent and keeping client loss separate from Run control.
+    let cursor: string | undefined;
+    let lastSequence = 0;
+    let final = false;
+    do {
+      const trace = await runEffect(traceInput(cursor === undefined ? {} : { cursor }));
+      if (!trace.succeeded) return writeFailure(transportFailure(trace.error), json, command);
+      if (!trace.value.ok)
+        return writeFailure(workflowRunFailure(trace.value.error), json, command);
+      for (const event of trace.value.page.events) {
+        lastSequence = event.sequence;
+        writeExecutionTraceEvent(command, event, json);
+      }
+      cursor = trace.value.page.nextCursor ?? undefined;
+      final = trace.value.page.final;
+    } while (cursor !== undefined);
+    if (final) return 0;
+
+    let detached = false;
+    const detach = () => {
+      detached = true;
+    };
+    process.once("SIGINT", detach);
+    process.once("SIGTERM", detach);
+    try {
+      while (!detached) {
+        const trace = await runEffect(traceInput({ afterSequence: lastSequence }));
+        if (!trace.succeeded) return writeFailure(transportFailure(trace.error), json, command);
+        if (!trace.value.ok)
+          return writeFailure(workflowRunFailure(trace.value.error), json, command);
+        for (const event of trace.value.page.events) {
+          if (event.sequence <= lastSequence) continue;
+          lastSequence = event.sequence;
+          writeExecutionTraceEvent(command, event, json);
+        }
+        if (trace.value.page.final && lastSequence >= trace.value.page.highWaterSequence) return 0;
+        await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 100));
+      }
+      return 0;
+    } finally {
+      process.off("SIGINT", detach);
+      process.off("SIGTERM", detach);
+    }
+  }
 
   if (args[0] === "readiness") {
     const options = parseOptions(args.slice(2));

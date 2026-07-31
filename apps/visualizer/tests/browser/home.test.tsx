@@ -1,4 +1,9 @@
-import { ProjectIdentity, WorkflowRunId } from "@kojo/control";
+import {
+  type ExecutionTracePage,
+  type HostOverview as HostOverviewSnapshot,
+  ProjectIdentity,
+  WorkflowRunId,
+} from "@kojo/control";
 import { Schema } from "effect";
 import { render } from "solid-js/web";
 import { afterEach, expect, test } from "vitest";
@@ -106,7 +111,7 @@ test("renders Host-produced readiness guidance without exposing hidden diagnosti
           loadOverview={() =>
             Promise.resolve({
               host: {
-                protocol: { major: 1, minor: 7 },
+                protocol: { major: 1, minor: 8 },
                 hostVersion: "0.1.0",
                 capabilities: ["projects:list", "readiness:show", "readiness:refresh"],
               },
@@ -516,6 +521,147 @@ test("renders Child Workflow Runs beneath their parent with the relationship edg
   const childRow = document.querySelector(`[data-run-id="${childRun}"]`);
   expect(childRow?.getAttribute("data-parent-run-id")).toBe(parentRun);
   expect(childRow?.classList.contains("border-l-2")).toBe(true);
+});
+
+test("renders live chronological Execution Trace evidence separately from the Workflow Run tree", async () => {
+  setLocale("en", { reload: false });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+    "00000000-0000-7000-8000-000000000001",
+  );
+  const parentRun = Schema.decodeUnknownSync(WorkflowRunId)("00000000-0000-7000-8000-000000000040");
+  const childRun = Schema.decodeUnknownSync(WorkflowRunId)("00000000-0000-7000-8000-000000000041");
+  const overview = {
+    host: {
+      protocol: { major: 1, minor: 8 },
+      hostVersion: "0.1.0",
+      capabilities: ["runs:list", "traces:read"],
+    },
+    projects: [{ identity, path: "/projects/demo" }],
+    projectDefinitions: [],
+    workflowSchedules: [],
+    workflowOccurrences: [],
+    workflowRuns: [
+      {
+        project: { identity, path: "/projects/demo" },
+        runs: [
+          {
+            runId: parentRun,
+            workflowKey: "parent",
+            workflowRevision: "1",
+            state: "running",
+            acceptedAtMs: 1,
+            engineConfirmedAtMs: 1,
+            updatedAtMs: 1,
+            finalizedAtMs: null,
+            parentRunId: null,
+            childInvocationKey: null,
+            allowedActions: [],
+            activitySummary: emptyActivitySummary,
+            agentTrace: [],
+            sandboxTrace: [],
+          },
+          {
+            runId: childRun,
+            workflowKey: "child",
+            workflowRevision: "1",
+            state: "running",
+            acceptedAtMs: 2,
+            engineConfirmedAtMs: 2,
+            updatedAtMs: 2,
+            finalizedAtMs: null,
+            parentRunId: parentRun,
+            childInvocationKey: "deliver-child",
+            allowedActions: [],
+            activitySummary: emptyActivitySummary,
+            agentTrace: [],
+            sandboxTrace: [],
+          },
+        ],
+      },
+    ],
+  } satisfies HostOverviewSnapshot;
+  const firstPage: ExecutionTracePage = {
+    events: [
+      {
+        eventId: "event-one",
+        runId: parentRun,
+        sequence: 1,
+        envelopeVersion: 1,
+        kind: "run.accepted",
+        kindVersion: 1,
+        recordedAtMs: 1,
+        observedAtMs: null,
+        engineOperationId: null,
+        activityAttemptId: null,
+        boundaryId: null,
+        childRunId: null,
+        compatibility: "supported",
+        payload: {},
+      },
+    ],
+    nextCursor: null,
+    highWaterSequence: 1,
+    runState: "running",
+    final: false,
+  };
+  const livePage: ExecutionTracePage = {
+    ...firstPage,
+    events: [
+      ...firstPage.events,
+      {
+        eventId: "event-two",
+        runId: parentRun,
+        sequence: 2,
+        envelopeVersion: 1,
+        kind: "child.requested",
+        kindVersion: 1,
+        recordedAtMs: 2,
+        observedAtMs: null,
+        engineOperationId: null,
+        activityAttemptId: null,
+        boundaryId: null,
+        childRunId: childRun,
+        compatibility: "supported",
+        payload: {},
+      },
+    ],
+    highWaterSequence: 2,
+  };
+  let traceReads = 0;
+  dispose = render(
+    () => (
+      <ColorModeProvider initialColorMode="light">
+        <HostOverview
+          loadOverview={() => Promise.resolve(overview)}
+          loadTrace={() => Promise.resolve(traceReads++ === 0 ? firstPage : livePage)}
+          traceRefreshIntervalMs={10}
+        />
+      </ColorModeProvider>
+    ),
+    root,
+  );
+
+  await page.getByRole("button", { name: parentRun }).click();
+  await expect.element(page.getByRole("heading", { name: "Execution Trace" })).toBeVisible();
+  await expect
+    .element(
+      page.getByText(
+        "The Workflow Run tree above shows ownership and child relationships; it is not this Event order.",
+      ),
+    )
+    .toBeVisible();
+  expect(
+    document.querySelector(`[data-run-id="${childRun}"]`)?.getAttribute("data-parent-run-id"),
+  ).toBe(parentRun);
+  await expect.poll(() => document.querySelectorAll("[data-event-sequence]").length).toBe(2);
+  expect(
+    Array.from(document.querySelectorAll("[data-event-sequence]")).map((event) =>
+      event.getAttribute("data-event-sequence"),
+    ),
+  ).toEqual(["1", "2"]);
+  await expect.element(page.getByText("child.requested@1")).toBeVisible();
 });
 
 test("navigates between a Schedule Occurrence and its linked resources", async () => {

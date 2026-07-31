@@ -1,8 +1,8 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "@effect/vitest";
-import { Effect, Schema } from "effect";
-import { ProjectIdentity, RequestKey } from "../../src";
+import { Effect, Schema, Stream } from "effect";
+import { ProjectIdentity, RequestKey, WorkflowRunId } from "../../src";
 import {
   defaultSocketPath,
   IncompatibleProtocolError,
@@ -195,6 +195,87 @@ it.effect("activates once and retries discovery within a bound", () =>
   }),
 );
 
+it.effect("reads durable traces and opens explicitly scoped control subscriptions", () =>
+  Effect.gen(function* () {
+    const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+      "00000000-0000-7000-8000-000000000001",
+    );
+    const runId = Schema.decodeUnknownSync(WorkflowRunId)("00000000-0000-7000-8000-000000000002");
+    const requests: Array<string> = [];
+    const host = {
+      protocol: { major: 1, minor: 8 },
+      hostVersion: "0.1.0",
+      capabilities: ["traces:read", "control:subscribe"],
+    } as const;
+    const transport = {
+      Negotiate: () => {
+        requests.push("Negotiate");
+        return Effect.succeed(host);
+      },
+      NegotiateCapabilities: () => {
+        requests.push("NegotiateCapabilities");
+        return Effect.succeed(host);
+      },
+      ReadExecutionTrace: () => {
+        requests.push("ReadExecutionTrace");
+        return Effect.succeed({
+          ok: true as const,
+          page: {
+            events: [],
+            final: false,
+            highWaterSequence: 0,
+            nextCursor: null,
+            runState: "running" as const,
+          },
+        });
+      },
+      SubscribeControl: () => {
+        requests.push("SubscribeControl");
+        return Stream.succeed({
+          kind: "resync-required" as const,
+          identity,
+          runId,
+          highWaterSequence: 0,
+        });
+      },
+    } as unknown as KojoControlClient;
+    const client = makeLocalClient({ connect: Effect.succeed(transport) });
+
+    expect(
+      yield* client.readExecutionTrace({
+        identity,
+        runId,
+        filters: {
+          activityAttemptIds: [],
+          childRunIds: [],
+          engineOperationIds: [],
+          kinds: [],
+        },
+        limit: 100,
+      }),
+    ).toMatchObject({ ok: true, page: { highWaterSequence: 0 } });
+    expect(
+      Array.from(
+        yield* client
+          .subscribeControl({
+            projects: [identity],
+            topics: ["traces"],
+            traces: [{ identity, runId, afterSequence: 0 }],
+          })
+          .pipe(Stream.runCollect),
+      ),
+    ).toEqual([{ kind: "resync-required", identity, runId, highWaterSequence: 0 }]);
+    expect(requests).toEqual([
+      "Negotiate",
+      "NegotiateCapabilities",
+      "ReadExecutionTrace",
+      "Negotiate",
+      "NegotiateCapabilities",
+      "SubscribeControl",
+    ]);
+  }),
+);
+
 it.effect("returns a safe error when discovery remains unavailable", () =>
   Effect.gen(function* () {
     const client = makeLocalClient({
@@ -225,6 +306,25 @@ it.effect("asks launchd to activate the per-user Host on macOS", () =>
     expect(commands).toEqual([["launchctl", "kickstart", "gui/501/dev.kojo.host"]]);
   }),
 );
+
+it("bounds a stalled operating-system Host activation", async () => {
+  let calls = 0;
+  await Effect.runPromise(
+    makeOperatingSystemHostActivation({
+      platform: "darwin",
+      userId: 501,
+      activationTimeout: "1 millis",
+      run: (_command, signal) => {
+        calls += 1;
+        return new Promise<number>((resolve) => {
+          signal.addEventListener("abort", () => resolve(1), { once: true });
+        });
+      },
+    }),
+  );
+
+  expect(calls).toBe(1);
+}, 1_000);
 
 it.effect("asks systemd to activate the per-user Host on Linux", () =>
   Effect.gen(function* () {

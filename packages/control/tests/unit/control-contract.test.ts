@@ -2,7 +2,13 @@ import { expect, it } from "@effect/vitest";
 import { defineConfig, defineWorkflow } from "@kojo/workflow";
 import { executeWorkflow } from "@kojo/workflow/testing";
 import { Effect, Schema } from "effect";
-import { HostInformation, ProjectIdentity, RequestKey } from "../../src";
+import {
+  EXECUTION_EVENT_KINDS_V1,
+  ExecutionEventKindV1,
+  HostInformation,
+  ProjectIdentity,
+  RequestKey,
+} from "../../src";
 
 const LegacyHostInformation = Schema.Struct({
   protocol: Schema.Struct({ major: Schema.Number, minor: Schema.Number }),
@@ -49,6 +55,15 @@ it("accepts bounded opaque Request Keys", () => {
   expect(Schema.decodeUnknownSync(RequestKey)("settled-client-key")).toBe("settled-client-key");
   expect(() => Schema.decodeUnknownSync(RequestKey)("")).toThrow();
   expect(() => Schema.decodeUnknownSync(RequestKey)("x".repeat(257))).toThrow();
+});
+
+it("publishes one closed v1 Execution Event catalog", () => {
+  expect(EXECUTION_EVENT_KINDS_V1).toContain("run.accepted");
+  expect(EXECUTION_EVENT_KINDS_V1).toContain("run.late-engine-outcome");
+  expect(Schema.decodeUnknownSync(ExecutionEventKindV1)("activity.result-observed")).toBe(
+    "activity.result-observed",
+  );
+  expect(() => Schema.decodeUnknownSync(ExecutionEventKindV1)("activity.unversioned")).toThrow();
 });
 
 it.effect(

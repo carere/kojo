@@ -1,4 +1,6 @@
 import {
+  ExecutionTraceQueryResult,
+  ExecutionTraceReadInput,
   HostOverview as HostOverviewSchema,
   ProjectIdentity,
   ProjectReadinessActionKey,
@@ -96,6 +98,13 @@ export const StopWorkflowRun = Rpc.make("StopWorkflowRun", {
   error: HostOverviewError,
 });
 
+/** Same-origin proxy for the Host-owned chronological Execution Trace. */
+export const ReadExecutionTrace = Rpc.make("ReadExecutionTrace", {
+  payload: ExecutionTraceReadInput.fields,
+  success: ExecutionTraceQueryResult,
+  error: HostOverviewError,
+});
+
 export const VisualizerApi = RpcGroup.make(
   Health,
   HostOverview,
@@ -106,4 +115,5 @@ export const VisualizerApi = RpcGroup.make(
   ResumeWorkflowRun,
   CompleteWorkflowDeferred,
   StopWorkflowRun,
+  ReadExecutionTrace,
 );

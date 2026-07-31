@@ -6,6 +6,7 @@ import {
 import {
   completeWorkflowDeferred,
   getHostOverview,
+  readExecutionTrace,
   refreshProjectReadiness,
   repairProjectReadiness,
   resumeWorkflowRun,
@@ -52,4 +53,9 @@ export const CompleteWorkflowDeferredHandler = VisualizerApi.toLayerHandler(
 export const StopWorkflowRunHandler = VisualizerApi.toLayerHandler(
   "StopWorkflowRun",
   ({ identity, runId, requestKey }) => stopWorkflowRun(identity, runId, requestKey),
+);
+
+export const ReadExecutionTraceHandler = VisualizerApi.toLayerHandler(
+  "ReadExecutionTrace",
+  (input) => readExecutionTrace(input),
 );

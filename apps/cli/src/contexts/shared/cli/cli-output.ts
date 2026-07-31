@@ -1,4 +1,6 @@
 import type {
+  ExecutionTraceEvent,
+  ExecutionTracePage,
   ProjectListCursorError,
   ProjectMutationResult,
   ProjectOperationError,
@@ -147,6 +149,41 @@ export const workflowRunFailure = (
   error: WorkflowRunOperationError,
   requestKey?: RequestKey,
 ): CliFailure => ({ ...error, requestKey, exitCode: 4 });
+
+export const writeExecutionTracePage = (
+  command: string,
+  page: ExecutionTracePage,
+  json: boolean,
+) => {
+  if (json) {
+    process.stdout.write(
+      `${JSON.stringify({ schemaVersion: 1, command, result: { page }, warnings: [] })}\n`,
+    );
+    return;
+  }
+  process.stdout.write(
+    `Run State: ${page.runState}\nHigh-water sequence: ${page.highWaterSequence}\n` +
+      `${page.events.length === 0 ? "No Execution Events.\n" : `${page.events.map(renderExecutionTraceEvent).join("\n")}\n`}`,
+  );
+  if (page.nextCursor !== null) process.stdout.write(`Next cursor: ${page.nextCursor}\n`);
+};
+
+export const writeExecutionTraceEvent = (
+  command: string,
+  event: ExecutionTraceEvent,
+  json: boolean,
+) => {
+  if (json) {
+    process.stdout.write(
+      `${JSON.stringify({ schemaVersion: 1, command, result: { event }, warnings: [] })}\n`,
+    );
+    return;
+  }
+  process.stdout.write(`${renderExecutionTraceEvent(event)}\n`);
+};
+
+const renderExecutionTraceEvent = (event: ExecutionTraceEvent) =>
+  `${event.sequence}\t${event.kind}@${event.kindVersion}\t${new Date(event.recordedAtMs).toISOString()}\t${event.compatibility}`;
 
 export const workflowScheduleFailure = (
   error: WorkflowScheduleOperationError,

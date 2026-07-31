@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { mkdir, readFile, realpath, symlink, writeFile } from "node:fs/promises";
+import { createConnection, createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, it } from "vitest";
@@ -12,6 +13,9 @@ const workflowPackagePath = fileURLToPath(
 );
 const effectPackagePath = fileURLToPath(
   new URL("../../../../../../../apps/host/node_modules/effect", import.meta.url),
+);
+const cliMainPath = fileURLToPath(
+  new URL("../../../../../../../apps/cli/main.ts", import.meta.url),
 );
 const dockerTestImage = "kojo-sandbox-test:local";
 const dockerAvailable =
@@ -794,7 +798,117 @@ const waitForFinalRun = async (
   throw new Error(`Timed out waiting for Workflow Run ${runId}.`);
 };
 
-it("starts, redelivers, lists, and shows one durable Workflow Run", async () => {
+const startKojoCli = (args: ReadonlyArray<string>, socketPath: string, cwd: string) => {
+  const child = Bun.spawn(["bun", "run", cliMainPath, ...args], {
+    cwd,
+    env: { ...process.env, KOJO_HOST_SOCKET: socketPath },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  let stdout = "";
+  let stderr = "";
+  const drain = async (stream: ReadableStream<Uint8Array>, append: (chunk: string) => void) => {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      append(decoder.decode(value, { stream: true }));
+    }
+    append(decoder.decode());
+  };
+  const result = Promise.all([
+    child.exited,
+    drain(child.stdout as ReadableStream<Uint8Array>, (chunk) => {
+      stdout += chunk;
+    }),
+    drain(child.stderr as ReadableStream<Uint8Array>, (chunk) => {
+      stderr += chunk;
+    }),
+  ]).then(([exitCode]) => ({ exitCode, stderr, stdout }));
+  return {
+    child,
+    result,
+    waitForStdout: async (fragment: string) => {
+      for (let attempt = 0; attempt < 500; attempt += 1) {
+        if (stdout.includes(fragment)) return;
+        await Bun.sleep(10);
+      }
+      throw new Error(
+        `Timed out waiting for CLI output containing ${fragment}. Current output: ${stdout}`,
+      );
+    },
+  };
+};
+
+const finishKojoCliWithin = async (
+  running: ReturnType<typeof startKojoCli>,
+  timeoutMs: number,
+  label: string,
+) => {
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    running.child.kill("SIGKILL");
+  }, timeoutMs);
+  const result = await running.result;
+  clearTimeout(timeout);
+  if (timedOut) {
+    throw new Error(
+      `${label} exceeded ${timeoutMs}ms. stdout: ${result.stdout}\nstderr: ${result.stderr}`,
+    );
+  }
+  return result;
+};
+
+const startTraceProxy = async (
+  socketPath: string,
+  upstreamSocketPath: string,
+  droppedConnectionNumbers: ReadonlySet<number>,
+) => {
+  let connections = 0;
+  let droppedConnections = 0;
+  const sockets = new Set<Socket>();
+  const server = createServer((downstream) => {
+    connections += 1;
+    sockets.add(downstream);
+    downstream.once("close", () => sockets.delete(downstream));
+    if (droppedConnectionNumbers.has(connections)) {
+      droppedConnections += 1;
+      downstream.destroy();
+      return;
+    }
+    const upstream = createConnection(upstreamSocketPath);
+    sockets.add(upstream);
+    upstream.once("close", () => sockets.delete(upstream));
+    upstream.once("error", () => downstream.destroy());
+    downstream.once("error", () => upstream.destroy());
+    downstream.pipe(upstream).pipe(downstream);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  return {
+    get connections() {
+      return connections;
+    },
+    get droppedConnections() {
+      return droppedConnections;
+    },
+    stop: async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    },
+  };
+};
+
+it("starts, redelivers, lists, shows, and follows finalized Execution Trace history once", async () => {
   const directory = await makeTemporaryDirectory("kojo-workflow-runs-");
   cleanups.push(directory.cleanup);
   const project = join(directory.path, "project");
@@ -932,6 +1046,7 @@ it("starts, redelivers, lists, and shows one durable Workflow Run", async () => 
   expect(second.exitCode).toBe(0);
   expect(JSON.parse(second.stdout).result.run.runId).not.toBe(firstResult.run.runId);
 
+  const failedRunIds: Array<string> = [];
   for (const workflowKey of ["declared-failure", "defect", "invalid-result", "retry-exhausted"]) {
     const failed = await runKojoCli(
       ["run", "start", workflowKey, "--input", '{"message":"hello"}', "--json"],
@@ -939,7 +1054,12 @@ it("starts, redelivers, lists, and shows one durable Workflow Run", async () => 
       project,
     );
     expect(failed.exitCode, `${workflowKey}: ${failed.stdout}${failed.stderr}`).toBe(0);
-    expect(JSON.parse(failed.stdout).result.run.state, workflowKey).toBe("failed");
+    const failedRun = JSON.parse(failed.stdout).result.run as {
+      readonly runId: string;
+      readonly state: string;
+    };
+    expect(failedRun.state, workflowKey).toBe("failed");
+    failedRunIds.push(failedRun.runId);
   }
 
   const listed = await runKojoCli(
@@ -957,7 +1077,147 @@ it("starts, redelivers, lists, and shows one durable Workflow Run", async () => 
   );
   expect(shown.exitCode).toBe(0);
   expect(JSON.parse(shown.stdout).result).toMatchObject({ run: { runId: firstResult.run.runId } });
+
+  const firstTracePage = await runKojoCli(
+    ["trace", "show", firstResult.run.runId, "--limit", "1", "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(firstTracePage.exitCode, `${firstTracePage.stdout}${firstTracePage.stderr}`).toBe(0);
+  const firstTracePageResult = JSON.parse(firstTracePage.stdout).result.page as {
+    readonly events: ReadonlyArray<{ readonly kind: string; readonly sequence: number }>;
+    readonly nextCursor: string | null;
+  };
+  expect(firstTracePageResult.events).toEqual([
+    expect.objectContaining({ kind: "run.accepted", sequence: 1 }),
+  ]);
+  expect(firstTracePageResult.nextCursor).toEqual(expect.any(String));
+
+  const continuedTracePage = await runKojoCli(
+    [
+      "trace",
+      "show",
+      firstResult.run.runId,
+      "--cursor",
+      firstTracePageResult.nextCursor as string,
+      "--json",
+    ],
+    host.socketPath,
+    project,
+  );
+  expect(
+    continuedTracePage.exitCode,
+    `${continuedTracePage.stdout}${continuedTracePage.stderr}`,
+  ).toBe(0);
+  expect(
+    (
+      JSON.parse(continuedTracePage.stdout).result.page.events as ReadonlyArray<{
+        readonly sequence: number;
+      }>
+    )[0],
+  ).toMatchObject({ sequence: 2 });
+
+  const followedTrace = await runKojoCli(
+    ["trace", "follow", firstResult.run.runId, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(followedTrace.exitCode, `${followedTrace.stdout}${followedTrace.stderr}`).toBe(0);
+  const followedEvents = followedTrace.stdout
+    .trim()
+    .split("\n")
+    .map(
+      (line) =>
+        JSON.parse(line).result.event as { readonly kind: string; readonly sequence: number },
+    );
+  expect(followedEvents.map((event) => event.kind)).toContain("run.accepted");
+  expect(followedEvents.map((event) => event.kind)).toContain("run.completed");
+  expect(new Set(followedEvents.map((event) => event.sequence)).size).toBe(followedEvents.length);
+
+  const failedTrace = await runKojoCli(
+    ["trace", "show", failedRunIds[0] as string, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(failedTrace.exitCode, `${failedTrace.stdout}${failedTrace.stderr}`).toBe(0);
+  expect(JSON.parse(failedTrace.stdout).result.page).toMatchObject({
+    final: true,
+    runState: "failed",
+    events: expect.arrayContaining([expect.objectContaining({ kind: "run.failed" })]),
+  });
 });
+
+it("bounds trace follow transport retries and reports an unavailable Host", async () => {
+  const directory = await makeTemporaryDirectory("kojo-trace-follow-retry-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), configuration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+  const proxy = await startTraceProxy(
+    join(directory.path, "trace-proxy.sock"),
+    host.socketPath,
+    new Set([1, 2, 3, 4, 5]),
+  );
+  cleanups.push(proxy.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const followed = await runKojoCli(
+    ["trace", "follow", Bun.randomUUIDv7(), "--json"],
+    join(directory.path, "trace-proxy.sock"),
+    project,
+  );
+
+  expect(followed.exitCode).toBe(3);
+  expect(JSON.parse(followed.stdout).error.code).toBe("host-unavailable");
+  expect(proxy.connections).toBe(5);
+  expect(proxy.droppedConnections).toBe(5);
+});
+
+it("follows history first, resumes after one lost transport request, and never duplicates evidence", async () => {
+  const directory = await makeTemporaryDirectory("kojo-trace-follow-resume-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), configuration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+  const proxyPath = join(directory.path, "trace-proxy.sock");
+  const proxy = await startTraceProxy(proxyPath, host.socketPath, new Set([2]));
+  cleanups.push(proxy.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "slow", "--input", '{"message":"follow"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = JSON.parse(started.stdout).result.run.runId as string;
+  const followed = startKojoCli(["trace", "follow", runId, "--json"], proxyPath, project);
+  await followed.waitForStdout('"sequence":1');
+  const result = await finishKojoCliWithin(followed, 6_000, "trace follow after a lost request");
+
+  expect(result.exitCode, `${result.stdout}${result.stderr}`).toBe(0);
+  expect(proxy.droppedConnections).toBe(1);
+  expect(proxy.connections).toBeGreaterThanOrEqual(3);
+  const events = result.stdout
+    .trim()
+    .split("\n")
+    .map(
+      (line) =>
+        JSON.parse(line).result.event as { readonly kind: string; readonly sequence: number },
+    );
+  expect(events.map((event) => event.kind)).toContain("run.accepted");
+  expect(events.map((event) => event.kind)).toContain("run.completed");
+  expect(new Set(events.map((event) => event.sequence)).size).toBe(events.length);
+  expect(events.map((event) => event.sequence)).toEqual(
+    [...events].map((event) => event.sequence).sort((a, b) => a - b),
+  );
+}, 10_000);
 
 it("runs Commands in a durable logical Sandbox and records safe Artifact-backed trace evidence", async () => {
   const directory = await makeTemporaryDirectory("kojo-workflow-sandbox-");
@@ -1491,7 +1751,7 @@ it("isolates Child Workflow Run identities and reuses the same invocation", asyn
     }>;
     expect(childEvents.map((event) => event.kind)).toContain("run.accepted");
     expect(childEvents.map((event) => event.kind)).toContain("run.completed");
-    expect(parentEvents).toContainEqual({ kind: "child.started", child_run_id: firstChildId });
+    expect(parentEvents).toContainEqual({ kind: "child.requested", child_run_id: firstChildId });
   } finally {
     database.close();
   }
@@ -2346,7 +2606,7 @@ it("stops a suspended Run without requiring a resume value", async () => {
   });
 });
 
-it("does not stop a Run when the CLI transport is interrupted", async () => {
+it("detaches a trace-follow client on SIGTERM without stopping the Host Run", async () => {
   const directory = await makeTemporaryDirectory("kojo-stop-interrupted-cli-");
   cleanups.push(directory.cleanup);
   const project = join(directory.path, "project");
@@ -2364,25 +2624,15 @@ it("does not stop a Run when the CLI transport is interrupted", async () => {
   );
   expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
   const runId = JSON.parse(started.stdout).result.run.runId as string;
-  const interruptedClient = Bun.spawn(
-    [
-      "bun",
-      "run",
-      fileURLToPath(new URL("../../../../../../../apps/cli/main.ts", import.meta.url)),
-      "run",
-      "show",
-      runId,
-      "--json",
-    ],
-    {
-      cwd: project,
-      env: { ...process.env, KOJO_HOST_SOCKET: host.socketPath },
-      stderr: "ignore",
-      stdout: "ignore",
-    },
+  const followingClient = startKojoCli(
+    ["trace", "follow", runId, "--json"],
+    host.socketPath,
+    project,
   );
-  interruptedClient.kill("SIGTERM");
-  await interruptedClient.exited;
+  await followingClient.waitForStdout('"sequence":1');
+  followingClient.child.kill("SIGTERM");
+  const detached = await followingClient.result;
+  expect(detached.exitCode, `${detached.stdout}${detached.stderr}`).toBe(0);
 
   const shown = await runKojoCli(["run", "show", runId, "--json"], host.socketPath, project);
   expect(shown.exitCode, `${shown.stdout}${shown.stderr}`).toBe(0);

@@ -1,4 +1,6 @@
 import type {
+  ExecutionTraceQueryResult,
+  ExecutionTraceReadInput,
   ProjectIdentity,
   ProjectReadinessActionKey,
   RequestKey,
@@ -26,6 +28,22 @@ export const getHostOverview = Effect.flatMap(
         }),
   ),
 );
+
+export const readExecutionTrace = (input: ExecutionTraceReadInput) =>
+  Effect.flatMap(HostControlClient, (client) =>
+    client.readExecutionTrace === undefined
+      ? Effect.fail(
+          new HostOverviewError({
+            code: "host-unavailable",
+            message: "The visualizer Host client cannot read Execution Traces.",
+            next: "Restart the visualizer and try again.",
+          }),
+        )
+      : (client.readExecutionTrace(input).pipe(Effect.mapError(hostError)) as Effect.Effect<
+          ExecutionTraceQueryResult,
+          HostOverviewError
+        >),
+  );
 
 const hostError = (error: { readonly _tag: string; readonly message: string }) =>
   error._tag === "IncompatibleProtocolError"

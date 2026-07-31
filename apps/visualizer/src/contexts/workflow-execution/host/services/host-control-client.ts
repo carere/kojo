@@ -1,4 +1,6 @@
 import type {
+  ExecutionTraceQueryResult,
+  ExecutionTraceReadInput,
   HostOverview,
   ProjectIdentity,
   ProjectReadinessActionKey,
@@ -20,6 +22,12 @@ import { Context, Effect, Layer } from "effect";
 export interface HostControlClientShape {
   readonly getHostOverview: Effect.Effect<
     HostOverview,
+    LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+  >;
+  readonly readExecutionTrace?: (
+    input: ExecutionTraceReadInput,
+  ) => Effect.Effect<
+    ExecutionTraceQueryResult,
     LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
   >;
   readonly enableWorkflowSchedule: ReturnType<
@@ -94,6 +102,15 @@ export const HostControlClientLive = Layer.succeed(HostControlClient, {
       })),
     ),
   ),
+  readExecutionTrace: (input) =>
+    Effect.suspend(() =>
+      makeDefaultLocalClient(
+        process.env.KOJO_HOST_SOCKET ?? defaultSocketPath(),
+      ).readExecutionTrace(input),
+    ) as unknown as Effect.Effect<
+      ExecutionTraceQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >,
   enableWorkflowSchedule: (identity, scheduleKey, scheduleRevision, requestKey) =>
     Effect.suspend(() =>
       makeDefaultLocalClient(

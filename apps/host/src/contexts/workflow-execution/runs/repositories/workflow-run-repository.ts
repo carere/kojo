@@ -1,4 +1,5 @@
 import type {
+  ExecutionTraceFilters,
   ProjectSnapshot,
   RequestKey,
   WorkflowRunListInput,
@@ -14,6 +15,38 @@ export interface StoredWorkflowRunSnapshot {
   readonly outcomeSensitivityMap: StoredSensitivityMap;
   readonly run: WorkflowRunSnapshot;
   readonly startSnapshotSensitivityMap: StoredSensitivityMap;
+}
+
+/** The adapter returns the durable payload and its map; the use case masks it. */
+export interface StoredExecutionTraceEvent {
+  readonly activityAttemptId: string | null;
+  readonly boundaryId: string | null;
+  readonly childRunId: string | null;
+  readonly engineOperationId: string | null;
+  readonly envelopeVersion: number;
+  readonly eventId: string;
+  readonly kind: string;
+  readonly kindVersion: number;
+  readonly observedAtMs: number | null;
+  readonly payload: unknown;
+  readonly payloadSensitivityMap: StoredSensitivityMap;
+  readonly recordedAtMs: number;
+  readonly runId: string;
+  readonly sequence: number;
+}
+
+export interface StoredExecutionTracePage {
+  readonly events: ReadonlyArray<StoredExecutionTraceEvent>;
+  readonly hasMore: boolean;
+  readonly highWaterSequence: number;
+  readonly runState: "running" | "suspended" | "stopping" | "stopped" | "failed" | "completed";
+}
+
+export interface ExecutionTraceRead {
+  readonly afterSequence?: number;
+  readonly beforeSequence?: number;
+  readonly filters: ExecutionTraceFilters;
+  readonly limit: number;
 }
 
 export interface WorkflowRunStartRecord {
@@ -186,6 +219,15 @@ export interface WorkflowRunRepositoryShape {
     project: ProjectSnapshot,
     runId: string,
   ) => Effect.Effect<StoredWorkflowRunSnapshot | undefined>;
+  /**
+   * Reads the append-only trace in one Run's sequence order. It deliberately
+   * does not project current state from Events.
+   */
+  readonly readTrace: (
+    project: ProjectSnapshot,
+    runId: string,
+    input: ExecutionTraceRead,
+  ) => Effect.Effect<StoredExecutionTracePage | undefined>;
   readonly pendingSubmissions: (
     project: ProjectSnapshot,
     runId?: string,

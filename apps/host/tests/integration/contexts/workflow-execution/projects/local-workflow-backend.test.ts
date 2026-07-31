@@ -666,11 +666,11 @@ describe("Local Workflow backend ownership", () => {
             expect(kinds).toEqual(
               expect.arrayContaining([
                 "run.stop-requested",
-                "run.engine-late-outcome",
+                "run.late-engine-outcome",
                 "run.stopped",
               ]),
             );
-            expect(kinds.filter((kind) => kind === "run.engine-late-outcome")).toHaveLength(2);
+            expect(kinds.filter((kind) => kind === "run.late-engine-outcome")).toHaveLength(2);
           } finally {
             database.close();
           }

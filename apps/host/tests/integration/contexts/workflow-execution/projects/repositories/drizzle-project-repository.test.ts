@@ -9,10 +9,12 @@ import { Effect, Schema } from "effect";
 import {
   completeProjectRepositoryMigration,
   DrizzleProjectRepositoryLive,
+  DrizzleWorkflowRunRepositoryLive,
   DrizzleWorkflowScheduleRepositoryLive,
   migrateProjectRepository,
 } from "../../../../../../src/contexts/workflow-execution/projects/repositories/drizzle-project-repository";
 import { ProjectRepository } from "../../../../../../src/contexts/workflow-execution/projects/repositories/project-repository";
+import { WorkflowRunRepository } from "../../../../../../src/contexts/workflow-execution/runs/repositories/workflow-run-repository";
 import { WorkflowScheduleRepository } from "../../../../../../src/contexts/workflow-execution/schedules/repositories/workflow-schedule-repository";
 import { nextWorkflowScheduleOccurrence } from "../../../../../../src/contexts/workflow-execution/schedules/services/schedule-timing";
 
@@ -317,6 +319,205 @@ describe("Drizzle Project store recovery", () => {
       database.close();
     }
   });
+});
+
+describe("Drizzle Execution Trace reads", () => {
+  it("keeps Event identifiers global and immutable after append", async () => {
+    const fixture = await initializedProject("kojo-execution-trace-immutable-");
+    const database = new Database(fixture.databasePath);
+    try {
+      insertCompletedRun(database);
+      database.exec(
+        "INSERT INTO kojo_workflow_runs(run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision, engine_reference_version, engine_reference_json, engine_reference_sha256, trigger_kind, state, last_event_sequence, row_version, accepted_at_ms, updated_at_ms) VALUES ('second', 'second-start', zeroblob(32), 'workflow', 'revision', 1, '{\"execution\":\"second\"}', randomblob(32), 'manual', 'running', 0, 1, 1, 1)",
+      );
+
+      expect(() =>
+        database
+          .query(
+            "INSERT INTO kojo_execution_events(event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms, payload_encoding_version, payload_schema_identity, payload_json, payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256) VALUES ('accepted', 'second', 1, 1, 'run.accepted', 1, 1, 1, 'schema', '{}', 1, '{}', zeroblob(32))",
+          )
+          .run(),
+      ).toThrow();
+      expect(() =>
+        database
+          .query("UPDATE kojo_execution_events SET kind = 'run.failed' WHERE event_id = 'accepted'")
+          .run(),
+      ).toThrow();
+    } finally {
+      database.close();
+    }
+  });
+
+  it.effect("keeps concurrent Runs independently sequenced and pages indexed evidence", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() => initializedProject("kojo-execution-trace-"));
+      const repository = yield* WorkflowRunRepository;
+      const accepted = (runId: string, key: string) =>
+        repository.acceptManualStart({
+          project: fixture.project,
+          requestKey: requestKey(key),
+          requestHash: new Uint8Array(32),
+          runId,
+          workflowKey: "workflow",
+          workflowRevision: "revision",
+          encodedInput: { runId },
+          inputSensitivityPaths: [],
+          startSnapshot: {
+            workflow: {
+              workflowKey: "workflow",
+              workflowRevision: "revision",
+              sourceIdentity: "test",
+              inputSchemaFingerprint: "test",
+            },
+            trigger: { kind: "manual", requestKey: requestKey(key) },
+            environment: {
+              projectIdentity: fixture.project.identity,
+              definitionSnapshotId: "test",
+              runtimeKind: "local-effect-workflow",
+            },
+            input: { runId },
+            inputSensitivityPaths: [],
+          },
+          acceptedAtMs: 1,
+        });
+
+      yield* Effect.all([accepted("run-one", "start-one"), accepted("run-two", "start-two")], {
+        concurrency: "unbounded",
+      });
+      const operation = {
+        activityName: "publish",
+        definitionFingerprint: "publish-v1",
+        durableOperationKey: "publish",
+      };
+      expect(yield* repository.prepareActivity(fixture.project, "run-one", operation, 2)).toEqual({
+        _tag: "ready",
+        executionGeneration: 1,
+      });
+      const attempt = yield* repository.startActivityAttempt(
+        fixture.project,
+        "run-one",
+        operation,
+        { activityIdempotencyKey: "publish:one", effectRetryNumber: 0, executionGeneration: 1 },
+        3,
+      );
+      yield* repository.observeActivityAttempt(
+        fixture.project,
+        "run-one",
+        attempt.attemptId,
+        "success",
+        4,
+      );
+
+      const first = yield* repository.readTrace(fixture.project, "run-one", {
+        filters: {
+          activityAttemptIds: [],
+          childRunIds: [],
+          engineOperationIds: [],
+          kinds: ["activity.result-observed"],
+        },
+        limit: 1,
+      });
+      const continued = yield* repository.readTrace(fixture.project, "run-one", {
+        afterSequence: first?.events[0]?.sequence,
+        filters: {
+          activityAttemptIds: [],
+          childRunIds: [],
+          engineOperationIds: [],
+          kinds: [],
+        },
+        limit: 10,
+      });
+      const secondRun = yield* repository.readTrace(fixture.project, "run-two", {
+        filters: {
+          activityAttemptIds: [],
+          childRunIds: [],
+          engineOperationIds: [],
+          kinds: [],
+        },
+        limit: 10,
+      });
+
+      expect(first).toMatchObject({
+        highWaterSequence: 3,
+        hasMore: false,
+        events: [{ kind: "activity.result-observed", sequence: 3 }],
+      });
+      expect(continued?.events.map((event) => event.sequence)).toEqual([]);
+      expect(secondRun).toMatchObject({
+        highWaterSequence: 1,
+        events: [{ kind: "run.accepted", sequence: 1 }],
+      });
+      yield* Effect.sync(() => {
+        const database = new Database(fixture.databasePath);
+        database.exec(
+          "CREATE TRIGGER reject_run_two_outcome BEFORE UPDATE ON kojo_workflow_runs WHEN NEW.run_id = 'run-two' BEGIN SELECT RAISE(ABORT, 'reject run state update'); END",
+        );
+        database.close();
+      });
+      yield* repository
+        .recordOutcome(
+          fixture.project,
+          "run-two",
+          { kind: "completed", sensitivityPaths: [], value: "must roll back" },
+          5,
+        )
+        .pipe(Effect.catchCause(() => Effect.void));
+      const rolledBack = yield* repository.readTrace(fixture.project, "run-two", {
+        filters: {
+          activityAttemptIds: [],
+          childRunIds: [],
+          engineOperationIds: [],
+          kinds: [],
+        },
+        limit: 10,
+      });
+      expect(yield* repository.show(fixture.project, "run-two")).toMatchObject({
+        run: { state: "running", outcome: null },
+      });
+      expect(rolledBack).toMatchObject({
+        highWaterSequence: 1,
+        events: [expect.objectContaining({ sequence: 1, kind: "run.accepted" })],
+      });
+      const firstRun = yield* repository.readTrace(fixture.project, "run-one", {
+        filters: {
+          activityAttemptIds: [],
+          childRunIds: [],
+          engineOperationIds: [],
+          kinds: [],
+        },
+        limit: 10,
+      });
+      const allEvents = [...(firstRun?.events ?? []), ...(secondRun?.events ?? [])];
+      expect(firstRun?.events.map((event) => event.sequence)).toEqual([1, 2, 3]);
+      expect(new Set(allEvents.map((event) => event.eventId)).size).toBe(allEvents.length);
+
+      yield* repository.recordOutcome(
+        fixture.project,
+        "run-one",
+        { kind: "completed", sensitivityPaths: [], value: "done" },
+        5,
+      );
+      const completed = yield* repository.readTrace(fixture.project, "run-one", {
+        filters: {
+          activityAttemptIds: [],
+          childRunIds: [],
+          engineOperationIds: [],
+          kinds: [],
+        },
+        limit: 10,
+      });
+      expect(yield* repository.show(fixture.project, "run-one")).toMatchObject({
+        run: { state: "completed", outcome: { kind: "completed", value: "done" } },
+      });
+      expect(completed).toMatchObject({
+        highWaterSequence: 4,
+        runState: "completed",
+        events: expect.arrayContaining([
+          expect.objectContaining({ sequence: 4, kind: "run.completed" }),
+        ]),
+      });
+    }).pipe(Effect.provide(DrizzleWorkflowRunRepositoryLive)),
+  );
 });
 
 describe("Drizzle Workflow Schedule reconciliation", () => {

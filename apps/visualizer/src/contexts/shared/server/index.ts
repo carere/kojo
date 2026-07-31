@@ -7,6 +7,7 @@ import {
   DisableWorkflowScheduleHandler,
   EnableWorkflowScheduleHandler,
   HostOverviewHandler,
+  ReadExecutionTraceHandler,
   RefreshProjectReadinessHandler,
   RepairProjectReadinessHandler,
   ResumeWorkflowRunHandler,
@@ -30,6 +31,7 @@ const VisualizerApiLive = RpcServer.layerHttp({
     ResumeWorkflowRunHandler.pipe(Layer.provide(HostControlClientLive)),
     CompleteWorkflowDeferredHandler.pipe(Layer.provide(HostControlClientLive)),
     StopWorkflowRunHandler.pipe(Layer.provide(HostControlClientLive)),
+    ReadExecutionTraceHandler.pipe(Layer.provide(HostControlClientLive)),
     RpcSerialization.layerNdjson,
   ]),
 );

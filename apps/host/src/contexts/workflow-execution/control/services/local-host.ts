@@ -3,6 +3,10 @@ import { chmod, open, readFile, unlink } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname } from "node:path";
 import {
+  type ControlSubscriptionInput,
+  type ControlSubscriptionUpdate,
+  type ExecutionTraceQueryResult,
+  type ExecutionTraceReadInput,
   KojoControl,
   type ProjectIdentity,
   type ProjectMutationResult,
@@ -19,7 +23,7 @@ import {
   type WorkflowScheduleOccurrenceQueryResult,
   type WorkflowScheduleQueryResult,
 } from "@kojo/control";
-import { Effect, Exit, Layer, Scope } from "effect";
+import { Effect, Exit, Layer, Schedule, Scope, Stream } from "effect";
 import { RpcServer } from "effect/unstable/rpc";
 import {
   forgetProject,
@@ -38,6 +42,7 @@ import {
 import {
   completeWorkflowDeferred,
   listWorkflowRuns,
+  readExecutionTrace,
   resumeWorkflowRun,
   revealWorkflowRun,
   showWorkflowRun,
@@ -154,7 +159,8 @@ const workflowRunDiagnostic =
       | WorkflowRunStartResult
       | WorkflowRunListResult
       | WorkflowRunMutationResult
-      | WorkflowRunQueryResult,
+      | WorkflowRunQueryResult
+      | ExecutionTraceQueryResult,
   ) => ({
     projectIdentity: identity,
     ...(result.ok ? {} : { safeErrorCode: result.error.code }),
@@ -173,6 +179,73 @@ const workflowScheduleDiagnostic =
     projectIdentity: identity,
     ...(result.ok ? {} : { safeErrorCode: result.error.code }),
   });
+
+/**
+ * This is intentionally an advisory stream. Every poll reads committed Events
+ * by durable sequence, so a blocked or disconnected client cannot delay the
+ * Project Runtime that appends them. A burst larger than the bounded delivery
+ * page produces one explicit resync request instead of unbounded buffering.
+ */
+export const makeControlSubscription =
+  <R>(
+    readTrace: (
+      input: ExecutionTraceReadInput,
+    ) => Effect.Effect<ExecutionTraceQueryResult, never, R>,
+  ) =>
+  (input: ControlSubscriptionInput) => {
+    const selectedProjects = new Set(input.projects);
+    const sequences = new Map<string, number>();
+    const traces = input.topics.includes("traces")
+      ? input.traces.filter((trace) => selectedProjects.has(trace.identity))
+      : [];
+    for (const trace of traces)
+      sequences.set(`${trace.identity}:${trace.runId}`, trace.afterSequence);
+    const poll = Effect.gen(function* () {
+      const updates: Array<ControlSubscriptionUpdate> = [];
+      for (const trace of traces) {
+        const key = `${trace.identity}:${trace.runId}`;
+        const afterSequence = sequences.get(key) ?? trace.afterSequence;
+        const result = yield* readTrace({
+          identity: trace.identity,
+          runId: trace.runId,
+          afterSequence,
+          filters: {
+            activityAttemptIds: [],
+            childRunIds: [],
+            engineOperationIds: [],
+            kinds: [],
+          },
+          limit: 100,
+        });
+        if (!result.ok) continue;
+        if (result.page.nextCursor !== null) {
+          sequences.set(key, result.page.highWaterSequence);
+          updates.push({
+            kind: "resync-required",
+            identity: trace.identity,
+            runId: trace.runId,
+            highWaterSequence: result.page.highWaterSequence,
+          });
+          continue;
+        }
+        for (const event of result.page.events) {
+          sequences.set(key, event.sequence);
+          updates.push({
+            kind: "trace-event",
+            identity: trace.identity,
+            runId: trace.runId,
+            sequence: event.sequence,
+            event,
+          });
+        }
+      }
+      return updates;
+    });
+    return Stream.fromEffect(poll).pipe(
+      Stream.repeat(Schedule.spaced("100 millis")),
+      Stream.flatMap((updates) => Stream.fromIterable(updates)),
+    );
+  };
 
 const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
   KojoControl.toLayer(
@@ -341,6 +414,15 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           revealWorkflowRun(identity, runId),
           workflowRunDiagnostic(identity),
         ),
+      ReadExecutionTrace: (input, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ReadExecutionTrace",
+          String(options.requestId),
+          readExecutionTrace(input),
+          workflowRunDiagnostic(input.identity),
+        ),
+      SubscribeControl: (input) => makeControlSubscription(readExecutionTrace)(input),
       ResumeWorkflowRun: ({ identity, runId, value, requestKey }, options) =>
         withHostRequestDiagnostic(
           hostIdentity,

@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { BunSocket } from "@effect/platform-bun";
-import { Data, Effect } from "effect";
+import { Data, Effect, Stream } from "effect";
 import type * as Duration from "effect/Duration";
 import type { Scope } from "effect/Scope";
 import type { RpcGroup } from "effect/unstable/rpc";
@@ -10,6 +10,10 @@ import type { RpcClientError } from "effect/unstable/rpc/RpcClientError";
 import { Socket } from "effect/unstable/socket";
 import {
   type ControlCapability,
+  type ControlSubscriptionInput,
+  type ControlSubscriptionUpdate,
+  type ExecutionTraceQueryResult,
+  type ExecutionTraceReadInput,
   type HostOverview,
   KojoControl,
   PROTOCOL_VERSION,
@@ -77,8 +81,9 @@ export interface LocalClientOptions {
 }
 
 export interface OperatingSystemHostActivationOptions {
+  readonly activationTimeout?: Duration.Input;
   readonly platform: NodeJS.Platform;
-  readonly run: (command: ReadonlyArray<string>) => Promise<number>;
+  readonly run: (command: ReadonlyArray<string>, signal: AbortSignal) => Promise<number>;
   readonly userId: number;
 }
 
@@ -251,6 +256,40 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     activateAndRetry(
       request("runs:reveal", (client) => client.RevealWorkflowRun({ identity, runId })),
     );
+  const readExecutionTrace = (input: ExecutionTraceReadInput) =>
+    activateAndRetry(request("traces:read", (client) => client.ReadExecutionTrace(input)));
+  const subscribeControl = (input: ControlSubscriptionInput) =>
+    Stream.unwrap(
+      Effect.gen(function* () {
+        const client = yield* options.connect;
+        const legacyHost = yield* client.Negotiate().pipe(Effect.mapError(safeUnavailable));
+        if (legacyHost.protocol.major !== PROTOCOL_VERSION.major) {
+          return yield* Effect.fail(
+            new IncompatibleProtocolError({
+              clientMajor: PROTOCOL_VERSION.major,
+              hostMajor: legacyHost.protocol.major,
+              message: `Kojo Host protocol ${legacyHost.protocol.major} is incompatible with client protocol ${PROTOCOL_VERSION.major}.`,
+            }),
+          );
+        }
+        const host =
+          legacyHost.protocol.minor >= 1
+            ? yield* client.NegotiateCapabilities().pipe(Effect.mapError(safeUnavailable))
+            : legacyHost;
+        if (!host.capabilities.includes("control:subscribe")) {
+          return yield* Effect.fail(
+            new UnsupportedControlCapabilityError({
+              capability: "control:subscribe",
+              hostVersion: host.hostVersion,
+              message: `Kojo Host ${host.hostVersion} does not support control subscriptions. Upgrade the Host or use trace polling.`,
+            }),
+          );
+        }
+        return client
+          .SubscribeControl(input, { streamBufferSize: 32 })
+          .pipe(Stream.mapError(safeUnavailable));
+      }),
+    );
   const resumeWorkflowRun = (
     identity: ProjectIdentity,
     runId: WorkflowRunId,
@@ -403,6 +442,8 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     listWorkflowRuns,
     showWorkflowRun,
     revealWorkflowRun,
+    readExecutionTrace,
+    subscribeControl,
     resumeWorkflowRun,
     completeWorkflowDeferred,
     stopWorkflowRun,
@@ -544,6 +585,18 @@ export const makeLocalClient = (options: LocalClientOptions) => {
       WorkflowRunQueryResult,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;
+    readonly readExecutionTrace: (
+      input: ExecutionTraceReadInput,
+    ) => Effect.Effect<
+      ExecutionTraceQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly subscribeControl: (
+      input: ControlSubscriptionInput,
+    ) => Stream.Stream<
+      ControlSubscriptionUpdate,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
     readonly resumeWorkflowRun: (
       identity: ProjectIdentity,
       runId: WorkflowRunId,
@@ -631,7 +684,7 @@ export const makeOperatingSystemHostActivation = (
   options: OperatingSystemHostActivationOptions,
 ): Effect.Effect<void, LocalTransportError> =>
   Effect.tryPromise({
-    try: async () => {
+    try: async (signal) => {
       const command = activationCommand(options.platform, options.userId);
       if (command === undefined) {
         throw new LocalTransportError({
@@ -639,19 +692,31 @@ export const makeOperatingSystemHostActivation = (
         });
       }
       try {
-        await options.run(command);
+        await options.run(command, signal);
       } catch {
         // Activation is a best-effort wake-up. Discovery still performs its bounded retries.
       }
     },
     catch: (error) => (error instanceof LocalTransportError ? error : safeUnavailable()),
-  });
+  }).pipe(
+    Effect.timeoutOrElse({
+      duration: options.activationTimeout ?? "1 second",
+      orElse: () => Effect.void,
+    }),
+  );
 
 export const activateKojoHost = makeOperatingSystemHostActivation({
   platform: process.platform,
   userId: process.getuid?.() ?? 0,
-  run: async (command) => {
+  run: async (command, signal) => {
     const processHandle = Bun.spawn([...command], { stdout: "ignore", stderr: "ignore" });
+    signal.addEventListener(
+      "abort",
+      () => {
+        if (processHandle.exitCode === null) processHandle.kill("SIGTERM");
+      },
+      { once: true },
+    );
     return processHandle.exited;
   },
 });

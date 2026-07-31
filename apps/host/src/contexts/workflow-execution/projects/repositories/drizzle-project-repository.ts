@@ -15,14 +15,16 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type {
-  RequestKey,
-  WorkflowRunListItem,
-  WorkflowRunSnapshot,
-  WorkflowRunSuspension,
-  WorkflowScheduleDefinition,
-  WorkflowScheduleOccurrenceSnapshot,
-  WorkflowScheduleSnapshot,
+import {
+  EXECUTION_EVENT_KINDS_V1,
+  type ExecutionTraceFilters,
+  type RequestKey,
+  type WorkflowRunListItem,
+  type WorkflowRunSnapshot,
+  type WorkflowRunSuspension,
+  type WorkflowScheduleDefinition,
+  type WorkflowScheduleOccurrenceSnapshot,
+  type WorkflowScheduleSnapshot,
 } from "@kojo/control";
 import type { WorkflowScheduleSnapshot as WorkflowScheduleDefinitionSnapshot } from "@kojo/control/project-definition-validation";
 import { and, asc, eq, inArray } from "drizzle-orm";
@@ -39,8 +41,12 @@ import {
 } from "../../runs/models/sensitivity-map";
 import { decideWorkflowActivityReplay } from "../../runs/models/workflow-activity";
 import { preservesStoppedOutcome } from "../../runs/models/workflow-run-stop";
-import type { StoredWorkflowRunSnapshot } from "../../runs/repositories/workflow-run-repository";
+import type {
+  StoredExecutionTraceEvent,
+  StoredWorkflowRunSnapshot,
+} from "../../runs/repositories/workflow-run-repository";
 import {
+  type ExecutionTraceRead,
   type WorkflowActivityAttemptRecord,
   type WorkflowRunChildStartRecord,
   WorkflowRunRepository,
@@ -1540,6 +1546,111 @@ const readRunSnapshot = (
   };
 };
 
+const traceFilterSql = (filters: ExecutionTraceFilters, values: Array<string | number>) => {
+  const clauses: Array<string> = [];
+  const addIn = (column: string, entries: ReadonlyArray<string>) => {
+    if (entries.length === 0) return;
+    clauses.push(`${column} IN (${entries.map(() => "?").join(", ")})`);
+    values.push(...entries);
+  };
+  addIn("kind", filters.kinds);
+  addIn("engine_operation_id", filters.engineOperationIds);
+  addIn("activity_attempt_id", filters.activityAttemptIds);
+  addIn("child_run_id", filters.childRunIds);
+  return clauses;
+};
+
+/**
+ * The database is authoritative for the per-Run sequence. This reader applies
+ * only indexed, settled metadata filters; it never parses payload JSON in SQL.
+ */
+const readStoredExecutionTrace = (
+  connection: Database,
+  runId: string,
+  input: ExecutionTraceRead,
+) => {
+  const run =
+    (connection
+      .query("SELECT state, last_event_sequence FROM kojo_workflow_runs WHERE run_id = ?")
+      .get(runId) as {
+      readonly last_event_sequence: number;
+      readonly state: "running" | "suspended" | "stopping" | "stopped" | "failed" | "completed";
+    } | null) ?? undefined;
+  if (run === undefined) return undefined;
+
+  const values: Array<string | number> = [runId];
+  const clauses = ["run_id = ?", ...traceFilterSql(input.filters, values)];
+  if (input.afterSequence !== undefined) {
+    clauses.push("sequence > ?");
+    values.push(input.afterSequence);
+  }
+  if (input.beforeSequence !== undefined) {
+    clauses.push("sequence < ?");
+    values.push(input.beforeSequence);
+  }
+  const descending = input.beforeSequence !== undefined;
+  values.push(input.limit + 1);
+  const rows = connection
+    .query(
+      `SELECT event_id, run_id, sequence, envelope_version, kind, kind_version,
+              recorded_at_ms, observed_at_ms, engine_operation_id, activity_attempt_id,
+              boundary_id, child_run_id, payload_json, payload_sensitivity_map_version,
+              payload_sensitivity_map_json
+       FROM kojo_execution_events
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY sequence ${descending ? "DESC" : "ASC"}
+       LIMIT ?`,
+    )
+    .all(...values) as ReadonlyArray<{
+    readonly activity_attempt_id: string | null;
+    readonly boundary_id: string | null;
+    readonly child_run_id: string | null;
+    readonly engine_operation_id: string | null;
+    readonly envelope_version: number;
+    readonly event_id: string;
+    readonly kind: string;
+    readonly kind_version: number;
+    readonly observed_at_ms: number | null;
+    readonly payload_json: string;
+    readonly payload_sensitivity_map_json: string;
+    readonly payload_sensitivity_map_version: number;
+    readonly recorded_at_ms: number;
+    readonly run_id: string;
+    readonly sequence: number;
+  }>;
+  const hasMore = rows.length > input.limit;
+  const bounded = rows.slice(0, input.limit);
+  const ordered = descending ? [...bounded].reverse() : bounded;
+  const events: ReadonlyArray<StoredExecutionTraceEvent> = ordered.map((row) => ({
+    activityAttemptId: row.activity_attempt_id,
+    boundaryId: row.boundary_id,
+    childRunId: row.child_run_id,
+    engineOperationId: row.engine_operation_id,
+    envelopeVersion: row.envelope_version,
+    eventId: row.event_id,
+    kind: row.kind,
+    kindVersion: row.kind_version,
+    observedAtMs: row.observed_at_ms,
+    payload: JSON.parse(row.payload_json),
+    payloadSensitivityMap: decodeSensitivityMap(
+      row.payload_sensitivity_map_version,
+      row.payload_sensitivity_map_json,
+    ),
+    recordedAtMs: row.recorded_at_ms,
+    runId: row.run_id,
+    sequence: row.sequence,
+  }));
+  return {
+    events,
+    hasMore,
+    highWaterSequence: run.last_event_sequence,
+    runState: run.state,
+  };
+};
+
+/** Keep writes on the same closed v1 catalog that readers advertise. */
+const executionEventKindsV1 = new Set<string>(EXECUTION_EVENT_KINDS_V1);
+
 const appendEvent = (
   connection: Database,
   options: {
@@ -1555,6 +1666,9 @@ const appendEvent = (
     readonly sequence: number;
   },
 ) => {
+  if (!executionEventKindsV1.has(options.kind)) {
+    throw new Error(`Unsupported Execution Event v1 kind: ${options.kind}`);
+  }
   const payloadJson = JSON.stringify(options.payload);
   connection
     .query(
@@ -2579,7 +2693,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           const parentSequence = nextEventSequence(connection, start.parentRunId);
           appendEvent(connection, {
             eventId: parentEventId,
-            kind: "child.started",
+            kind: "child.requested",
             childRunId: start.runId,
             payload: {
               invocationKey: start.invocationKey,
@@ -2632,6 +2746,12 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
   show: (project, runId) =>
     Effect.sync(() =>
       withWritableProjectStore(project, (connection) => readRunSnapshot(connection, runId)),
+    ),
+  readTrace: (project, runId, input) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) =>
+        readStoredExecutionTrace(connection, runId, input),
+      ),
     ),
   pendingSubmissions: (project, runId) =>
     Effect.sync(() =>
@@ -3094,8 +3214,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
             .query("SELECT last_event_sequence FROM kojo_workflow_runs WHERE run_id = ?")
             .get(options.runId) as { readonly last_event_sequence: number };
           const eventId = randomUUID();
-          const eventKind =
-            options.kind === "run.resume" ? "run.resumed" : "workflow-deferred.completed";
+          const eventKind = options.kind === "run.resume" ? "run.resumed" : "deferred.completed";
           appendEvent(connection, {
             eventId,
             kind: eventKind,
@@ -3570,7 +3689,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           const sequence = nextEventSequence(connection, runId);
           appendEvent(connection, {
             eventId: randomUUID(),
-            kind: "run.engine-recovery-queued",
+            kind: "run.recovery-queued",
             payload: { runId },
             recordedAtMs: hostStartedAtMs,
             runId,
@@ -3611,7 +3730,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
               .get(runId) as { readonly last_event_sequence: number };
             appendEvent(connection, {
               eventId: randomUUID(),
-              kind: "run.engine-late-outcome",
+              kind: "run.late-engine-outcome",
               payload: {
                 kind: outcome.kind,
                 ...(outcome.value === undefined ? {} : { value: outcome.value }),
