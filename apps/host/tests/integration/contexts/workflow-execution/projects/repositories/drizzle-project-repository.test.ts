@@ -564,6 +564,44 @@ describe("Drizzle Execution Trace reads", () => {
         );
       }).pipe(Effect.provide(DrizzleWorkflowRunRepositoryLive)),
   );
+
+  it.effect("makes unsupported persisted Event versions visible through Trace reads", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() =>
+        initializedProject("kojo-execution-trace-unsupported-"),
+      );
+      yield* Effect.sync(() => {
+        const database = new Database(fixture.databasePath);
+        database.exec(
+          "INSERT INTO kojo_workflow_runs(run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision, engine_reference_version, engine_reference_json, engine_reference_sha256, trigger_kind, state, last_event_sequence, row_version, accepted_at_ms, updated_at_ms) VALUES ('unsupported-run', 'unsupported-start', zeroblob(32), 'workflow', 'revision', 1, '{\"execution\":\"unsupported\"}', randomblob(32), 'manual', 'running', 2, 1, 1, 1); INSERT INTO kojo_execution_events(event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms, payload_encoding_version, payload_schema_identity, payload_json, payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256) VALUES ('unsupported-envelope', 'unsupported-run', 1, 2, 'run.accepted', 1, 1, 1, 'schema', '{\"secret\":\"value\"}', 1, '{}', zeroblob(32)); INSERT INTO kojo_execution_events(event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms, payload_encoding_version, payload_schema_identity, payload_json, payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256) VALUES ('unsupported-kind', 'unsupported-run', 2, 1, 'run.accepted', 2, 2, 1, 'schema', '{\"secret\":\"value\"}', 1, '{}', zeroblob(32))",
+        );
+        database.close();
+      });
+      const repository = yield* WorkflowRunRepository;
+      const trace = yield* repository.readTrace(fixture.project, "unsupported-run", {
+        filters: {
+          activityAttemptIds: [],
+          childRunIds: [],
+          engineOperationIds: [],
+          kinds: [],
+        },
+        limit: 100,
+      });
+
+      expect(trace?.events.map(toExecutionTraceEvent)).toEqual([
+        expect.objectContaining({
+          compatibility: "envelope-version-unsupported",
+          payload: { _tag: "sensitive-value-masked" },
+          sequence: 1,
+        }),
+        expect.objectContaining({
+          compatibility: "kind-version-unsupported",
+          payload: { _tag: "sensitive-value-masked" },
+          sequence: 2,
+        }),
+      ]);
+    }).pipe(Effect.provide(DrizzleWorkflowRunRepositoryLive)),
+  );
 });
 
 describe("Drizzle Workflow Schedule reconciliation", () => {
