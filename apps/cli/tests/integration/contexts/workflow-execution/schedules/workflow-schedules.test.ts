@@ -173,7 +173,6 @@ it("reconciles and controls durable Workflow Schedules without starting an occur
     code: "schedule-revision-conflict",
     currentSchedule: { definition: { revision: changedSchedule.definition.revision } },
   });
-
   const [racedEnable, racedDisable] = await Promise.all([
     runKojoCli(
       [
@@ -217,19 +216,11 @@ it("reconciles and controls durable Workflow Schedules without starting an occur
   expect(JSON.parse(replayedDisable.stdout).result.alreadyApplied).toBe(true);
 
   const databasePath = join(project, ".kojo", "kojo.sqlite");
-  await waitFor(() => invalidatedOccurrenceCount(databasePath) === 1);
   const database = new Database(databasePath, {
     readonly: true,
     strict: true,
   });
   try {
-    expect(
-      database
-        .query(
-          "SELECT outcome, reason_code AS reasonCode, count(*) AS count FROM kojo_workflow_schedule_occurrences GROUP BY outcome, reason_code",
-        )
-        .all(),
-    ).toEqual([{ outcome: "invalidated", reasonCode: "schedule.disabled", count: 1 }]);
     expect(database.query("SELECT count(*) AS count FROM kojo_workflow_runs").get()).toEqual({
       count: 0,
     });
@@ -413,21 +404,6 @@ const occurrenceCount = (databasePath: string) => {
       database.query("SELECT count(*) AS count FROM kojo_workflow_schedule_occurrences").get() as {
         readonly count: number;
       }
-    ).count;
-  } finally {
-    database.close();
-  }
-};
-
-const invalidatedOccurrenceCount = (databasePath: string) => {
-  const database = new Database(databasePath, { readonly: true, strict: true });
-  try {
-    return (
-      database
-        .query(
-          "SELECT count(*) AS count FROM kojo_workflow_schedule_occurrences WHERE outcome = 'invalidated' AND reason_code = 'schedule.disabled'",
-        )
-        .get() as { readonly count: number }
     ).count;
   } finally {
     database.close();

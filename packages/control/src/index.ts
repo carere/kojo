@@ -327,6 +327,18 @@ export const WorkflowScheduleOccurrenceSnapshot = Schema.Struct({
   firstAttemptedAtMs: Schema.NullOr(Schema.Number),
   processedAtMs: Schema.NullOr(Schema.Number),
   linkedRunId: Schema.NullOr(Schema.String),
+  /**
+   * A compact record for consecutive older instants skipped during Host
+   * downtime. It is present only on a `skipped` occurrence with the
+   * `schedule.missed-range` reason.
+   */
+  missedRange: Schema.NullOr(
+    Schema.Struct({
+      count: Schema.Int,
+      firstScheduledAtMs: Schema.Number,
+      lastScheduledAtMs: Schema.Number,
+    }),
+  ),
 });
 export type WorkflowScheduleOccurrenceSnapshot = typeof WorkflowScheduleOccurrenceSnapshot.Type;
 

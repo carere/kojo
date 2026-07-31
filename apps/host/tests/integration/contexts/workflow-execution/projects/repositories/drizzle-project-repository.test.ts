@@ -4,14 +4,17 @@ import { chmod, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "@effect/vitest";
-import { ProjectIdentity } from "@kojo/control";
+import { ProjectIdentity, RequestKey, type WorkflowScheduleDefinition } from "@kojo/control";
 import { Effect, Schema } from "effect";
 import {
   completeProjectRepositoryMigration,
   DrizzleProjectRepositoryLive,
+  DrizzleWorkflowScheduleRepositoryLive,
   migrateProjectRepository,
 } from "../../../../../../src/contexts/workflow-execution/projects/repositories/drizzle-project-repository";
 import { ProjectRepository } from "../../../../../../src/contexts/workflow-execution/projects/repositories/project-repository";
+import { WorkflowScheduleRepository } from "../../../../../../src/contexts/workflow-execution/schedules/repositories/workflow-schedule-repository";
+import { nextWorkflowScheduleOccurrence } from "../../../../../../src/contexts/workflow-execution/schedules/services/schedule-timing";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -315,6 +318,353 @@ describe("Drizzle Project store recovery", () => {
     }
   });
 });
+
+describe("Drizzle Workflow Schedule reconciliation", () => {
+  it.effect("collapses long downtime to one started instant and ignores a backward clock", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() => initializedProject("kojo-schedule-downtime-"));
+      const schedules = yield* WorkflowScheduleRepository;
+      const definition = workflowSchedule("schedule-v1", "allow");
+      yield* schedules.reconcile(fixture.project, [definition], 0, nextWorkflowScheduleOccurrence);
+      yield* schedules.enable({
+        project: fixture.project,
+        scheduleKey: definition.scheduleKey,
+        scheduleRevision: definition.revision,
+        requestKey: requestKey("enable-schedule"),
+        requestHash: new Uint8Array(32),
+        acceptedAtMs: 0,
+        nextOccurrence: nextWorkflowScheduleOccurrence,
+      });
+
+      const reconciled = yield* schedules.reconcileDueOccurrence({
+        project: fixture.project,
+        scheduleKey: definition.scheduleKey,
+        observedAtMs: 4 * 60_000,
+        nextOccurrence: nextWorkflowScheduleOccurrence,
+      });
+      expect(reconciled).toMatchObject({
+        highWaterMarkMs: 3 * 60_000,
+        nextOccurrenceMs: 4 * 60_000,
+      });
+      const missed = yield* schedules.showOccurrence(
+        fixture.project,
+        definition.scheduleKey,
+        60_000,
+      );
+      expect(missed).toMatchObject({
+        appliedRevision: "schedule-v1",
+        outcome: "skipped",
+        reasonCode: "schedule.missed-range",
+        missedRange: {
+          count: 3,
+          firstScheduledAtMs: 60_000,
+          lastScheduledAtMs: 3 * 60_000,
+        },
+      });
+
+      yield* schedules.planOccurrence({
+        project: fixture.project,
+        scheduleKey: definition.scheduleKey,
+        scheduledAtMs: 4 * 60_000,
+        appliedRevision: definition.revision,
+        input: { source: "schedule" },
+        inputSensitivityPaths: [],
+        plannedAtMs: 4 * 60_000,
+      });
+      yield* schedules.advanceAfterStart({
+        project: fixture.project,
+        scheduleKey: definition.scheduleKey,
+        scheduledAtMs: 4 * 60_000,
+        appliedRevision: definition.revision,
+        nextOccurrenceMs: 5 * 60_000,
+        advancedAtMs: 4 * 60_000,
+      });
+      const backward = yield* schedules.reconcileDueOccurrence({
+        project: fixture.project,
+        scheduleKey: definition.scheduleKey,
+        observedAtMs: 2 * 60_000,
+        nextOccurrence: nextWorkflowScheduleOccurrence,
+      });
+      expect(backward).toMatchObject({
+        highWaterMarkMs: 4 * 60_000,
+        nextOccurrenceMs: 5 * 60_000,
+      });
+    }).pipe(Effect.provide(DrizzleWorkflowScheduleRepositoryLive)),
+  );
+
+  it.effect(
+    "invalidates changed work, preserves removal history, and repairs only through a new revision",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() => initializedProject("kojo-schedule-lifecycle-"));
+        const schedules = yield* WorkflowScheduleRepository;
+        const first = workflowSchedule("schedule-v1", "skip");
+        yield* schedules.reconcile(fixture.project, [first], 0, nextWorkflowScheduleOccurrence);
+        yield* schedules.enable({
+          project: fixture.project,
+          scheduleKey: first.scheduleKey,
+          scheduleRevision: first.revision,
+          requestKey: requestKey("enable-schedule"),
+          requestHash: new Uint8Array(32),
+          acceptedAtMs: 0,
+          nextOccurrence: nextWorkflowScheduleOccurrence,
+        });
+        yield* schedules.planOccurrence({
+          project: fixture.project,
+          scheduleKey: first.scheduleKey,
+          scheduledAtMs: 60_000,
+          appliedRevision: first.revision,
+          input: { source: "first" },
+          inputSensitivityPaths: [],
+          plannedAtMs: 1,
+        });
+
+        const second = workflowSchedule("schedule-v2", "skip");
+        const changed = yield* schedules.reconcile(
+          fixture.project,
+          [second],
+          90_000,
+          nextWorkflowScheduleOccurrence,
+        );
+        expect(changed[0]).toMatchObject({
+          enabledIntent: true,
+          condition: "available",
+          appliedRevision: second.revision,
+          nextOccurrenceMs: 120_000,
+        });
+        expect(
+          yield* schedules.showOccurrence(fixture.project, second.scheduleKey, 60_000),
+        ).toMatchObject({ outcome: "invalidated", reasonCode: "schedule.definition-changed" });
+        expect(
+          yield* schedules.planOccurrence({
+            project: fixture.project,
+            scheduleKey: first.scheduleKey,
+            scheduledAtMs: 60_000,
+            appliedRevision: first.revision,
+            input: { source: "stale-wake-up" },
+            inputSensitivityPaths: [],
+            plannedAtMs: 90_000,
+          }),
+        ).toBeUndefined();
+
+        const removed = yield* schedules.reconcile(
+          fixture.project,
+          [],
+          100_000,
+          nextWorkflowScheduleOccurrence,
+        );
+        expect(removed[0]).toMatchObject({
+          enabledIntent: true,
+          condition: "unavailable",
+          nextOccurrenceMs: null,
+        });
+        const returned = yield* schedules.reconcile(
+          fixture.project,
+          [second],
+          200_000,
+          nextWorkflowScheduleOccurrence,
+        );
+        expect(returned[0]?.nextOccurrenceMs).toBe(240_000);
+
+        yield* schedules.failOccurrence({
+          project: fixture.project,
+          scheduleKey: second.scheduleKey,
+          scheduledAtMs: 240_000,
+          appliedRevision: second.revision,
+          processedAtMs: 240_000,
+          reasonCode: "schedule.input-invalid",
+        });
+        expect(yield* schedules.show(fixture.project, second.scheduleKey)).toMatchObject({
+          condition: "needs-attention",
+          conditionReasonCode: "schedule.input-invalid",
+          highWaterMarkMs: 240_000,
+          nextOccurrenceMs: null,
+        });
+        yield* schedules.reconcile(
+          fixture.project,
+          [second],
+          250_000,
+          nextWorkflowScheduleOccurrence,
+        );
+        expect(yield* schedules.show(fixture.project, second.scheduleKey)).toMatchObject({
+          condition: "needs-attention",
+          nextOccurrenceMs: null,
+        });
+
+        const repaired = workflowSchedule("schedule-v3", "skip");
+        yield* schedules.reconcile(
+          fixture.project,
+          [repaired],
+          260_000,
+          nextWorkflowScheduleOccurrence,
+        );
+        expect(yield* schedules.show(fixture.project, repaired.scheduleKey)).toMatchObject({
+          condition: "available",
+          appliedRevision: repaired.revision,
+          nextOccurrenceMs: 300_000,
+        });
+        expect(
+          yield* schedules.showOccurrence(fixture.project, repaired.scheduleKey, 240_000),
+        ).toMatchObject({ outcome: "failed", reasonCode: "schedule.input-invalid" });
+      }).pipe(Effect.provide(DrizzleWorkflowScheduleRepositoryLive)),
+  );
+
+  it.effect("skips only for non-final work from a skip Schedule", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() => initializedProject("kojo-schedule-overlap-"));
+      const schedules = yield* WorkflowScheduleRepository;
+      const skip = workflowSchedule("schedule-v1", "skip");
+      yield* schedules.reconcile(fixture.project, [skip], 0, nextWorkflowScheduleOccurrence);
+      yield* schedules.enable({
+        project: fixture.project,
+        scheduleKey: skip.scheduleKey,
+        scheduleRevision: skip.revision,
+        requestKey: requestKey("enable-schedule"),
+        requestHash: new Uint8Array(32),
+        acceptedAtMs: 0,
+        nextOccurrence: nextWorkflowScheduleOccurrence,
+      });
+      yield* schedules.planOccurrence({
+        project: fixture.project,
+        scheduleKey: skip.scheduleKey,
+        scheduledAtMs: 60_000,
+        appliedRevision: skip.revision,
+        input: { source: "skip" },
+        inputSensitivityPaths: [],
+        plannedAtMs: 1,
+      });
+      insertActiveScheduledRun(fixture.databasePath, skip.scheduleKey, 1);
+      const skipped = yield* schedules.skipOccurrenceIfOverlapping({
+        project: fixture.project,
+        scheduleKey: skip.scheduleKey,
+        scheduledAtMs: 60_000,
+        appliedRevision: skip.revision,
+        nextOccurrenceMs: 120_000,
+        processedAtMs: 60_000,
+      });
+      expect(skipped?.nextOccurrenceMs).toBe(120_000);
+      expect(
+        yield* schedules.showOccurrence(fixture.project, skip.scheduleKey, 60_000),
+      ).toMatchObject({ outcome: "skipped", reasonCode: "schedule.overlap" });
+
+      removeRun(fixture.databasePath, "active-scheduled-run");
+      insertActiveManualRun(fixture.databasePath);
+      yield* schedules.planOccurrence({
+        project: fixture.project,
+        scheduleKey: skip.scheduleKey,
+        scheduledAtMs: 120_000,
+        appliedRevision: skip.revision,
+        input: { source: "manual-does-not-block" },
+        inputSensitivityPaths: [],
+        plannedAtMs: 60_000,
+      });
+      expect(
+        yield* schedules.skipOccurrenceIfOverlapping({
+          project: fixture.project,
+          scheduleKey: skip.scheduleKey,
+          scheduledAtMs: 120_000,
+          appliedRevision: skip.revision,
+          nextOccurrenceMs: 180_000,
+          processedAtMs: 120_000,
+        }),
+      ).toBeUndefined();
+
+      const allow = workflowSchedule("schedule-v2", "allow");
+      yield* schedules.reconcile(fixture.project, [allow], 90_000, nextWorkflowScheduleOccurrence);
+      expect(yield* schedules.show(fixture.project, allow.scheduleKey)).toMatchObject({
+        nextOccurrenceMs: 180_000,
+      });
+      yield* schedules.planOccurrence({
+        project: fixture.project,
+        scheduleKey: allow.scheduleKey,
+        scheduledAtMs: 180_000,
+        appliedRevision: allow.revision,
+        input: { source: "allow" },
+        inputSensitivityPaths: [],
+        plannedAtMs: 90_000,
+      });
+      expect(
+        yield* schedules.skipOccurrenceIfOverlapping({
+          project: fixture.project,
+          scheduleKey: allow.scheduleKey,
+          scheduledAtMs: 180_000,
+          appliedRevision: allow.revision,
+          nextOccurrenceMs: 240_000,
+          processedAtMs: 180_000,
+        }),
+      ).toBeUndefined();
+      expect(
+        yield* schedules.showOccurrence(fixture.project, allow.scheduleKey, 180_000),
+      ).toMatchObject({ outcome: "planned" });
+    }).pipe(Effect.provide(DrizzleWorkflowScheduleRepositoryLive)),
+  );
+});
+
+const workflowSchedule = (
+  revision: string,
+  overlapPolicy: "allow" | "skip",
+): WorkflowScheduleDefinition => ({
+  scheduleKey: "minute-report",
+  workflowKey: "report",
+  revision,
+  cron: "* * * * *",
+  timeZone: "UTC",
+  overlapPolicy,
+  inputRuleRevision: "input-v1",
+});
+
+const requestKey = (value: string) => Schema.decodeUnknownSync(RequestKey)(value);
+
+const insertActiveScheduledRun = (
+  databasePath: string,
+  scheduleKey: string,
+  scheduledAtMs: number,
+) => {
+  const database = new Database(databasePath, { strict: true });
+  try {
+    database
+      .query(
+        `INSERT INTO kojo_workflow_runs(
+          run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision,
+          engine_reference_version, engine_reference_json, engine_reference_sha256,
+          trigger_kind, schedule_key, scheduled_at_ms, schedule_revision, state,
+          last_event_sequence, row_version, accepted_at_ms, updated_at_ms
+        ) VALUES ('active-scheduled-run', 'active-scheduled-start', zeroblob(32), 'report', '1',
+          1, '{"execution":"active"}', randomblob(32), 'schedule', ?, ?, 'schedule-v1',
+          'running', 0, 1, 1, 1)`,
+      )
+      .run(scheduleKey, scheduledAtMs);
+  } finally {
+    database.close();
+  }
+};
+
+const insertActiveManualRun = (databasePath: string) => {
+  const database = new Database(databasePath, { strict: true });
+  try {
+    database
+      .query(
+        `INSERT INTO kojo_workflow_runs(
+          run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision,
+          engine_reference_version, engine_reference_json, engine_reference_sha256,
+          trigger_kind, state, last_event_sequence, row_version, accepted_at_ms, updated_at_ms
+        ) VALUES ('active-manual-run', 'active-manual-start', zeroblob(32), 'report', '1',
+          1, '{"execution":"manual"}', randomblob(32), 'manual', 'running', 0, 1, 1, 1)`,
+      )
+      .run();
+  } finally {
+    database.close();
+  }
+};
+
+const removeRun = (databasePath: string, runId: string) => {
+  const database = new Database(databasePath, { strict: true });
+  try {
+    database.query("DELETE FROM kojo_workflow_runs WHERE run_id = ?").run(runId);
+  } finally {
+    database.close();
+  }
+};
 
 const initializedProject = async (prefix: string) => {
   const directory = await mkdtemp(join(tmpdir(), prefix));

@@ -306,7 +306,7 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
         );
       } else {
         process.stdout.write(
-          `${listed.value.occurrences.length === 0 ? "No Workflow Schedule Occurrences." : listed.value.occurrences.map((occurrence) => `${occurrence.scheduleKey}\t${new Date(occurrence.scheduledAtMs).toISOString()}\t${occurrence.outcome}\t${occurrence.linkedRunId ?? "-"}`).join("\n")}\n`,
+          `${listed.value.occurrences.length === 0 ? "No Workflow Schedule Occurrences." : listed.value.occurrences.map((occurrence) => `${occurrence.scheduleKey}\t${new Date(occurrence.scheduledAtMs).toISOString()}\t${occurrence.outcome}${occurrence.missedRange === null ? "" : ` (${occurrence.missedRange.count} missed)`}\t${occurrence.linkedRunId ?? "-"}`).join("\n")}\n`,
         );
       }
       return 0;

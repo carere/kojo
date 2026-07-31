@@ -258,11 +258,17 @@ export const writeWorkflowScheduleOccurrence = (
     );
     return;
   }
+  const missedRange =
+    occurrence.missedRange === null
+      ? ""
+      : `Missed range: ${occurrence.missedRange.count} instants from ${new Date(occurrence.missedRange.firstScheduledAtMs).toISOString()} through ${new Date(occurrence.missedRange.lastScheduledAtMs).toISOString()}\n`;
   process.stdout.write(
     `Schedule Key: ${occurrence.scheduleKey}\n` +
       `Scheduled UTC: ${new Date(occurrence.scheduledAtMs).toISOString()}\n` +
       `Applied revision: ${occurrence.appliedRevision}\n` +
       `Outcome: ${occurrence.outcome}\n` +
+      `Reason: ${occurrence.reasonCode ?? "None"}\n` +
+      missedRange +
       `Linked Run: ${occurrence.linkedRunId ?? "None"}\n`,
   );
 };

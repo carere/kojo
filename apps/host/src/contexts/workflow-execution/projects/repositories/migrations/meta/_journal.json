@@ -8,6 +8,13 @@
       "when": 1753747200000,
       "tag": "0001_project_lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1785456000000,
+      "tag": "0002_schedule_reconciliation",
+      "breakpoints": true
     }
   ]
 }

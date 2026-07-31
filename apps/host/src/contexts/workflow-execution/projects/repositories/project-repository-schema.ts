@@ -295,6 +295,8 @@ export const workflowScheduleOccurrences = sqliteTable(
     linkedRunId: text("linked_run_id").references(() => workflowRuns.runId, {
       onDelete: "set null",
     }),
+    missedRangeCount: integer("missed_range_count"),
+    missedRangeLastScheduledAtMs: integer("missed_range_last_scheduled_at_ms"),
     deletedRunId: text("deleted_run_id"),
     deletedRunAtMs: integer("deleted_run_at_ms"),
     rowVersion: integer("row_version").notNull(),
@@ -319,6 +321,10 @@ export const workflowScheduleOccurrences = sqliteTable(
     check(
       "schedule_occurrence_times_non_negative",
       sql`${table.scheduledAtMs} >= 0 AND ${table.deliveryAttemptCount} >= 0 AND ${table.plannedAtMs} >= 0 AND (${table.firstAttemptedAtMs} IS NULL OR ${table.firstAttemptedAtMs} >= ${table.plannedAtMs}) AND (${table.processedAtMs} IS NULL OR ${table.processedAtMs} >= ${table.plannedAtMs}) AND (${table.deletedRunAtMs} IS NULL OR ${table.deletedRunAtMs} >= 0)`,
+    ),
+    check(
+      "schedule_occurrence_missed_range_valid",
+      sql`(${table.missedRangeCount} IS NULL AND ${table.missedRangeLastScheduledAtMs} IS NULL) OR (${table.outcome} = 'skipped' AND ${table.reasonCode} = 'schedule.missed-range' AND ${table.missedRangeCount} > 0 AND ${table.missedRangeLastScheduledAtMs} >= ${table.scheduledAtMs})`,
     ),
     index("kojo_schedule_occurrences_history_idx").on(table.scheduleKey, desc(table.scheduledAtMs)),
     index("kojo_schedule_occurrences_outcome_idx").on(table.outcome, desc(table.scheduledAtMs)),
