@@ -57,6 +57,10 @@ import type {
   WorkflowRunRepository,
 } from "../../runs/repositories/workflow-run-repository";
 import {
+  makeRunWorkInterrupter,
+  type RunWorkInterrupter,
+} from "../../runs/services/run-work-interrupter";
+import {
   ProviderRuntime,
   ProviderRuntimeUnavailable,
 } from "../../sandboxes/services/provider-runtime";
@@ -132,11 +136,14 @@ export const makeLocalWorkflowBackendLayer = (
         yield* Effect.serviceOption(ProviderRuntime),
         () => providerRuntime,
       );
+      const runWorkInterrupter = makeRunWorkInterrupter();
       const defaultEntries = makeEntries(
         definitions,
         undefined,
         undefined,
         selectedProviderRuntime,
+        undefined,
+        runWorkInterrupter,
       );
       const registrationLayer = defaultEntries.reduce<
         Layer.Layer<never, never, WorkflowEngine.WorkflowEngine>
@@ -344,6 +351,7 @@ export const makeLocalWorkflowBackendLayer = (
             activityRepository,
             selectedProviderRuntime,
             childDispatcher,
+            runWorkInterrupter,
           )) {
             if (backend.entries.has(entry.identity)) continue;
             yield* Layer.buildWithScope(
@@ -469,6 +477,48 @@ export const makeLocalWorkflowBackendLayer = (
               ),
             );
           }),
+        interrupt: (project, reference) =>
+          Effect.suspend(() => {
+            const backend = getActiveBackend(active, project);
+            const entry = getEntry(
+              backend.entries,
+              reference.workflowKey,
+              reference.workflowRevision,
+            );
+            return Effect.gen(function* () {
+              const provider = yield* selectedProviderRuntime
+                .interruptRun(project, reference.runId)
+                .pipe(
+                  Effect.timeout("5 seconds"),
+                  Effect.as({ _tag: "interrupted" } as const),
+                  Effect.catchCause((cause) =>
+                    Effect.succeed({
+                      _tag: "needs-attention" as const,
+                      message: `Provider interruption did not finish safely: ${cause.toString()}`,
+                    }),
+                  ),
+                );
+              const activeWork = yield* runWorkInterrupter.interrupt(project, reference.runId);
+              const concerns = [provider, activeWork].filter(
+                (
+                  result,
+                ): result is { readonly _tag: "needs-attention"; readonly message: string } =>
+                  result._tag === "needs-attention",
+              );
+              if (concerns.length > 0) {
+                return {
+                  _tag: "needs-attention" as const,
+                  message: concerns.map((result) => result.message).join(" "),
+                };
+              }
+              const engineGeneration = yield* currentEngineGeneration(
+                backend,
+                project,
+                reference.runId,
+              );
+              return yield* entry.interrupt(backend.engine, reference.runId, engineGeneration);
+            });
+          }),
         rehydrate: (project, reference) =>
           Effect.suspend(() => {
             const backend = getActiveBackend(active, project);
@@ -517,6 +567,14 @@ interface Entry {
     token: string,
     value: unknown,
   ) => Effect.Effect<WorkflowBackendDeferredCompletionResult>;
+  readonly interrupt: (
+    engine: WorkflowEngine.WorkflowEngine["Service"],
+    runId: string,
+    engineGeneration: number,
+  ) => Effect.Effect<
+    | { readonly _tag: "interrupted" }
+    | { readonly _tag: "needs-attention"; readonly message: string }
+  >;
   readonly rehydrate: (
     engine: WorkflowEngine.WorkflowEngine["Service"],
     runId: string,
@@ -539,6 +597,7 @@ const makeEntries = (
   activityRepository?: WorkflowRunRepository["Service"],
   providerRuntime: ProviderRuntime["Service"] = ProviderRuntimeUnavailable,
   childDispatcher?: ChildRunDispatcher,
+  runWorkInterrupter: RunWorkInterrupter = makeRunWorkInterrupter(),
 ): ReadonlyArray<Entry> => {
   const identities = new Set<string>();
   return definitions.map((definition) => {
@@ -584,6 +643,7 @@ const makeEntries = (
             runId,
             activityRepository,
             agentOperations,
+            runWorkInterrupter,
           );
           return definition
             .execute(decoded as never, operations)
@@ -702,6 +762,14 @@ const makeEntries = (
             },
           ),
         ) as unknown as Effect.Effect<WorkflowBackendDeferredCompletionResult>,
+      interrupt: (engine, runId, engineGeneration) =>
+        workflow.executionId({ engineGeneration, runId, input: undefined }).pipe(
+          Effect.flatMap((executionId) => engine.interrupt(workflow, executionId)),
+          Effect.as({ _tag: "interrupted" } as const),
+          Effect.catchCause((cause) =>
+            Effect.succeed({ _tag: "needs-attention" as const, message: cause.toString() }),
+          ),
+        ),
       rehydrate: (engine, runId, engineGeneration) =>
         workflow.executionId({ engineGeneration, runId, input: undefined }).pipe(
           Effect.flatMap((executionId) =>
@@ -1378,6 +1446,7 @@ const makeWorkflowActivityRuntime = (
   runId: string,
   repository: WorkflowRunRepository["Service"] | undefined,
   agentOperations: ReadonlyMap<string, AgentOperation> = new Map(),
+  runWorkInterrupter: RunWorkInterrupter = makeRunWorkInterrupter(),
 ): WorkflowActivityRuntime["Service"] => ({
   execute: <Success extends Schema.Top, Failure extends Schema.Top = typeof Schema.Never>(
     options: WorkflowActivityOptions<Success, Failure>,
@@ -1475,15 +1544,34 @@ const makeWorkflowActivityRuntime = (
               idempotencyKey: attempt.activityIdempotencyKey,
               invocationNumber: attempt.invocationNumber,
             };
-            return yield* options.execute(externalAttempt).pipe(
-              Effect.onExit((exit) => {
-                if (Exit.isSuccess(exit)) {
+            return yield* runWorkInterrupter
+              .interruptible(project, runId, options.execute(externalAttempt))
+              .pipe(
+                Effect.onExit((exit) => {
+                  if (Exit.isSuccess(exit)) {
+                    return repository
+                      .observeActivityAttempt(
+                        project,
+                        runId,
+                        attempt.attemptId,
+                        "success",
+                        Date.now(),
+                      )
+                      .pipe(
+                        Effect.tap(() =>
+                          Effect.sync(() => {
+                            observed = true;
+                          }),
+                        ),
+                      );
+                  }
+                  if (Cause.hasInterrupts(exit.cause)) return Effect.void;
                   return repository
                     .observeActivityAttempt(
                       project,
                       runId,
                       attempt.attemptId,
-                      "success",
+                      "failure",
                       Date.now(),
                     )
                     .pipe(
@@ -1493,19 +1581,8 @@ const makeWorkflowActivityRuntime = (
                         }),
                       ),
                     );
-                }
-                if (Cause.hasInterrupts(exit.cause)) return Effect.void;
-                return repository
-                  .observeActivityAttempt(project, runId, attempt.attemptId, "failure", Date.now())
-                  .pipe(
-                    Effect.tap(() =>
-                      Effect.sync(() => {
-                        observed = true;
-                      }),
-                    ),
-                  );
-              }),
-            );
+                }),
+              );
           }),
         );
         const execute =

@@ -15,6 +15,7 @@ export interface WorkflowRunsProps {
     runId: WorkflowRunId,
     value: unknown,
   ) => Promise<void>;
+  readonly onStop?: (identity: ProjectIdentity, runId: WorkflowRunId) => Promise<void>;
   readonly onShowRun?: (identity: ProjectIdentity, runId: string) => void;
 }
 
@@ -95,18 +96,25 @@ export function WorkflowRuns(props: WorkflowRunsProps) {
               </Show>
               <Show when={run.allowedActions.length > 0}>
                 <div class="mt-2 flex flex-wrap items-center gap-2 font-sans">
-                  <input
-                    aria-label={`Value for ${run.runId}`}
-                    class="rounded border bg-transparent px-2 py-1 text-xs"
-                    placeholder="Optional JSON value"
-                    value={values()[run.runId] ?? ""}
-                    onInput={(event) =>
-                      setValues((current) => ({
-                        ...current,
-                        [run.runId]: event.currentTarget.value,
-                      }))
+                  <Show
+                    when={
+                      run.allowedActions.includes("resume") ||
+                      run.allowedActions.includes("deferred-complete")
                     }
-                  />
+                  >
+                    <input
+                      aria-label={`Value for ${run.runId}`}
+                      class="rounded border bg-transparent px-2 py-1 text-xs"
+                      placeholder="Optional JSON value"
+                      value={values()[run.runId] ?? ""}
+                      onInput={(event) =>
+                        setValues((current) => ({
+                          ...current,
+                          [run.runId]: event.currentTarget.value,
+                        }))
+                      }
+                    />
+                  </Show>
                   <Show when={run.allowedActions.includes("resume")}>
                     <button
                       class="rounded border px-2 py-1 text-xs"
@@ -158,6 +166,22 @@ export function WorkflowRuns(props: WorkflowRunsProps) {
                       }}
                     >
                       Complete Deferred
+                    </button>
+                  </Show>
+                  <Show when={props.onStop !== undefined && run.allowedActions.includes("stop")}>
+                    <button
+                      class="rounded border px-2 py-1 text-xs"
+                      type="button"
+                      onClick={async () => {
+                        setError(undefined);
+                        try {
+                          await props.onStop?.(project.identity, run.runId);
+                        } catch {
+                          setError("Kojo Host could not stop this Workflow Run.");
+                        }
+                      }}
+                    >
+                      Stop Workflow Run
                     </button>
                   </Show>
                 </div>

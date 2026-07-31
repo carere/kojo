@@ -88,6 +88,7 @@ describe("Host overview", () => {
                 "runs:reveal",
                 "runs:resume",
                 "runs:deferred-complete",
+                "runs:stop",
               ],
             },
             projects: [],

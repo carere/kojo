@@ -36,6 +36,7 @@ import {
   revealWorkflowRun,
   showWorkflowRun,
   startWorkflowRun,
+  stopWorkflowRun,
 } from "../../runs/use-cases/manage-workflow-runs";
 import {
   listWorkflowScheduleOccurrences,
@@ -317,6 +318,14 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           "CompleteWorkflowDeferred",
           String(options.requestId),
           completeWorkflowDeferred({ identity, runId, token, value, requestKey }),
+          workflowRunDiagnostic(identity),
+        ),
+      StopWorkflowRun: ({ identity, runId, requestKey }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "StopWorkflowRun",
+          String(options.requestId),
+          stopWorkflowRun({ identity, runId, requestKey }),
           workflowRunDiagnostic(identity),
         ),
       RegisterProject: ({ path, requestKey }, options) =>

@@ -345,10 +345,10 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
     const command = deferredComplete ? "run.deferred.complete" : `run.${args[1] ?? "unknown"}`;
     if (
       options === undefined ||
-      (!["start", "list", "show", "resume"].includes(args[1] ?? "") && !deferredComplete)
+      (!["start", "list", "show", "resume", "stop"].includes(args[1] ?? "") && !deferredComplete)
     ) {
       return writeFailure(
-        invalid("Run: kojo run start|list|show|resume|deferred complete"),
+        invalid("Run: kojo run start|list|show|resume|stop|deferred complete"),
         json,
         command,
       );
@@ -395,6 +395,59 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
         return { ok: false as const };
       }
     };
+    if (args[1] === "stop") {
+      if (
+        options.args.length !== 1 ||
+        options.input !== undefined ||
+        options.value !== undefined ||
+        options.valueFile !== undefined ||
+        options.conditions.length > 0 ||
+        options.cursor !== undefined ||
+        options.limit !== undefined ||
+        options.states.length > 0 ||
+        options.workflowKeys.length > 0 ||
+        options.reveal
+      ) {
+        return writeFailure(
+          invalid(
+            "Run: kojo run stop <Run Identity> [--request-key <Request Key>] [--project <path>|--project-id <Project Identity>] [--json]",
+          ),
+          json,
+          command,
+        );
+      }
+      const requestKey = decodeRequestKey(options.requestKey);
+      if (requestKey === undefined) {
+        return writeFailure(
+          invalid("Use a non-empty Request Key of at most 256 characters."),
+          json,
+          command,
+        );
+      }
+      let runId: WorkflowRunId;
+      try {
+        runId = Schema.decodeUnknownSync(WorkflowRunIdSchema)(options.args[0]);
+      } catch {
+        return writeFailure(invalid("Use a valid Run Identity."), json, command);
+      }
+      const stopped = await runEffect(client.stopWorkflowRun(identity, runId, requestKey));
+      if (!stopped.succeeded) return writeFailure(transportFailure(stopped.error), json, command);
+      if (!stopped.value.ok) {
+        return writeFailure(
+          workflowRunFailure(stopped.value.error, stopped.value.requestKey),
+          json,
+          command,
+        );
+      }
+      writeWorkflowRun(
+        command,
+        stopped.value.run,
+        json,
+        stopped.value.requestKey,
+        stopped.value.alreadyApplied,
+      );
+      return 0;
+    }
     if (args[1] === "resume" || deferredComplete) {
       const expectedArguments = deferredComplete ? 3 : 1;
       const controlArguments = deferredComplete ? options.args.slice(1) : options.args;

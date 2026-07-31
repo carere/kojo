@@ -7,6 +7,7 @@ import {
   completeWorkflowDeferred,
   getHostOverview,
   resumeWorkflowRun,
+  stopWorkflowRun,
 } from "../use-cases/get-host-overview";
 
 export const HostOverviewHandler = VisualizerApi.toLayerHandler(
@@ -33,4 +34,9 @@ export const CompleteWorkflowDeferredHandler = VisualizerApi.toLayerHandler(
   "CompleteWorkflowDeferred",
   ({ identity, runId, token, value, requestKey }) =>
     completeWorkflowDeferred(identity, runId, token, value, requestKey),
+);
+
+export const StopWorkflowRunHandler = VisualizerApi.toLayerHandler(
+  "StopWorkflowRun",
+  ({ identity, runId, requestKey }) => stopWorkflowRun(identity, runId, requestKey),
 );

@@ -44,6 +44,10 @@ export type WorkflowBackendDeferredCompletionResult =
   | { readonly _tag: "not-deferred" }
   | { readonly _tag: "invalid-value" };
 
+export type WorkflowBackendInterruptResult =
+  | { readonly _tag: "interrupted" }
+  | { readonly _tag: "needs-attention"; readonly message: string };
+
 export interface LocalWorkflowOperations extends WorkflowOperations {
   readonly activity: <
     Success extends Schema.Top,
@@ -159,6 +163,11 @@ export interface WorkflowBackendShape {
     token: string,
     value: unknown,
   ) => Effect.Effect<WorkflowBackendDeferredCompletionResult>;
+  /** Interrupts the active execution and any provider work owned by this Run. */
+  readonly interrupt?: (
+    project: ProjectSnapshot,
+    reference: WorkflowBackendReference,
+  ) => Effect.Effect<WorkflowBackendInterruptResult>;
   /** Replays a suspended execution only to rebuild private wait registrations after restart. */
   readonly rehydrate?: (
     project: ProjectSnapshot,

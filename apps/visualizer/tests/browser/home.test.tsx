@@ -236,8 +236,12 @@ test("only renders Host-authorized Workflow Run controls", async () => {
   const deferredRun = Schema.decodeUnknownSync(WorkflowRunId)(
     "00000000-0000-7000-8000-000000000022",
   );
+  const stoppableRun = Schema.decodeUnknownSync(WorkflowRunId)(
+    "00000000-0000-7000-8000-000000000023",
+  );
   const resumed: Array<string> = [];
   const completed: Array<{ readonly runId: string; readonly token: string }> = [];
+  const stopped: Array<string> = [];
   dispose = render(
     () => (
       <WorkflowRuns
@@ -293,6 +297,22 @@ test("only renders Host-authorized Workflow Run controls", async () => {
                 agentTrace: [],
                 sandboxTrace: [],
               },
+              {
+                runId: stoppableRun,
+                workflowKey: "stoppable",
+                workflowRevision: "1",
+                state: "running",
+                acceptedAtMs: 1,
+                engineConfirmedAtMs: 1,
+                updatedAtMs: 1,
+                finalizedAtMs: null,
+                parentRunId: null,
+                childInvocationKey: null,
+                allowedActions: ["stop"],
+                activitySummary: emptyActivitySummary,
+                agentTrace: [],
+                sandboxTrace: [],
+              },
             ],
           },
         ]}
@@ -302,18 +322,25 @@ test("only renders Host-authorized Workflow Run controls", async () => {
         onCompleteDeferred={async (_identity, runId, token) => {
           completed.push({ runId, token });
         }}
+        onStop={async (_identity, runId) => {
+          stopped.push(runId);
+        }}
       />
     ),
     root,
   );
 
   expect(document.querySelector(`[aria-label="Value for ${automaticRun}"]`)).toBeNull();
+  window.dispatchEvent(new Event("pagehide"));
+  expect(stopped).toEqual([]);
   await page.getByRole("button", { name: "Resume Workflow Run" }).click();
   await page.getByLabelText(`Deferred token for ${deferredRun}`).fill("kojo.deferred.v1.token");
   await page.getByRole("button", { name: "Complete Deferred" }).click();
+  await page.getByRole("button", { name: "Stop Workflow Run" }).click();
 
   expect(resumed).toEqual([manualRun]);
   expect(completed).toEqual([{ runId: deferredRun, token: "kojo.deferred.v1.token" }]);
+  expect(stopped).toEqual([stoppableRun]);
 });
 
 test("renders Child Workflow Runs beneath their parent with the relationship edge", async () => {

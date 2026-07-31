@@ -206,6 +206,63 @@ export const reconcileWorkflowRun = (
     }
   });
 
+const childFirstStoppingRuns = <
+  Run extends {
+    readonly parentRunId: string | null;
+    readonly runId: string;
+  },
+>(
+  runs: ReadonlyArray<Run>,
+): Array<Run> => {
+  const byRunId = new Map(runs.map((run) => [run.runId, run]));
+  const depth = (runId: string): number => {
+    let value = 0;
+    let parent = byRunId.get(runId)?.parentRunId;
+    while (parent !== null && parent !== undefined) {
+      value += 1;
+      parent = byRunId.get(parent)?.parentRunId;
+    }
+    return value;
+  };
+  return [...runs].sort((left, right) => depth(right.runId) - depth(left.runId));
+};
+
+/** Re-applies durable stop intent after a Host restart or interrupted control request. */
+export const reconcileStoppingWorkflowRuns = (
+  backend: WorkflowBackend["Service"],
+  repository: WorkflowRunRepository["Service"],
+  project: ProjectSnapshot,
+) =>
+  Effect.gen(function* () {
+    const stopping = childFirstStoppingRuns(
+      (yield* repository.activeRuns(project)).filter((run) => run.state === "stopping"),
+    );
+    for (const run of stopping) {
+      const reference = workflowBackendReference(run.workflowKey, run.workflowRevision, run.runId);
+      if (backend.interrupt === undefined) {
+        yield* repository.recordStopAttention(
+          project,
+          run.runId,
+          "Kojo Project Runtime cannot interrupt this Workflow Run.",
+          Date.now(),
+        );
+        continue;
+      }
+      const interrupted = yield* backend
+        .interrupt(project, reference)
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.succeed({ _tag: "needs-attention" as const, message: cause.toString() }),
+          ),
+        );
+      if (interrupted._tag === "needs-attention") {
+        yield* repository.recordStopAttention(project, run.runId, interrupted.message, Date.now());
+        continue;
+      }
+      yield* repository.recordStopped(project, run.runId, Date.now());
+    }
+  });
+
 const emitReconciliationDiagnostic = (project: ProjectSnapshot, runId: string) =>
   Effect.gen(function* () {
     const logger = yield* HostDiagnosticLogger;
@@ -308,6 +365,7 @@ const reconcilePendingWorkflowRuns = (
             );
           }
         }
+        yield* reconcileStoppingWorkflowRuns(backend, repository, validation.project);
         // Submit every durable child before probing parents. A parent may be
         // waiting inside its Workflow engine for that child, so observing it
         // first can delay ordinary Run inspection behind the child's submit.
@@ -689,6 +747,8 @@ const runControlError = (
     WorkflowRunOperationError["code"],
     | "run-not-suspended"
     | "run-resume-not-allowed"
+    | "run-stop-not-allowed"
+    | "run-stop-needs-attention"
     | "workflow-deferred-not-found"
     | "workflow-deferred-value-invalid"
     | "project-runtime-not-ready"
@@ -1012,6 +1072,156 @@ export const completeWorkflowDeferred = (input: {
       ok: true,
       run: maskedWorkflowRun(completed),
       alreadyApplied: false,
+      requestKey: input.requestKey,
+    };
+  });
+
+export const stopWorkflowRun = (input: {
+  readonly identity: ProjectIdentity;
+  readonly requestKey: RequestKey;
+  readonly runId: string;
+}): Effect.Effect<
+  WorkflowRunMutationResult,
+  never,
+  | ProjectIndexRepository
+  | ProjectLayout
+  | ProjectRuntime
+  | WorkflowBackend
+  | WorkflowRunRepository
+  | HostDiagnosticLogger
+> =>
+  Effect.gen(function* () {
+    const resolved = yield* resolveProject(input.identity);
+    if ("code" in resolved) return { ok: false, requestKey: input.requestKey, error: resolved };
+    const repository = yield* WorkflowRunRepository;
+    const accepted = yield* repository.acceptStop(resolved.project, {
+      requestHash: hash(stableJson({ kind: "run.stop", runId: input.runId })),
+      requestKey: input.requestKey,
+      requestedAtMs: Date.now(),
+      runId: input.runId,
+    });
+    if (accepted._tag === "request-key-conflict") {
+      return {
+        ok: false,
+        requestKey: input.requestKey,
+        error: error(
+          "request-key-conflict",
+          "This Request Key was already used for a different Workflow Run control request.",
+          "Retry with the original request contents or use a new Request Key.",
+          { kind: "request-key", requestKey: input.requestKey },
+        ),
+      };
+    }
+    if (accepted._tag === "not-found") {
+      return {
+        ok: false,
+        requestKey: input.requestKey,
+        error: error(
+          "run-not-found",
+          "Workflow Run was not found in this Project.",
+          "List Workflow Runs and choose a Run Identity from that Project.",
+          { kind: "run", identity: input.identity, runId: input.runId as never },
+        ),
+      };
+    }
+    if (accepted._tag === "not-stoppable") {
+      return {
+        ok: false,
+        requestKey: input.requestKey,
+        error: runControlError(
+          input.identity,
+          input.runId,
+          "run-stop-not-allowed",
+          "Only a running or suspended Workflow Run can accept a stop request.",
+          "Refresh the Run and use one of its allowed actions.",
+        ),
+      };
+    }
+    if (accepted.alreadyApplied && accepted.runs.length === 0) {
+      return {
+        ok: true,
+        run: maskedWorkflowRun(accepted.run),
+        alreadyApplied: true,
+        requestKey: input.requestKey,
+      };
+    }
+    const backend = yield* WorkflowBackend;
+    const stopping = [...accepted.runs];
+    const byRunId = new Map(stopping.map((run) => [run.runId, run]));
+    const depth = (runId: string): number => {
+      let value = 0;
+      let parent = byRunId.get(runId)?.parentRunId;
+      while (parent !== null && parent !== undefined) {
+        value += 1;
+        parent = byRunId.get(parent)?.parentRunId;
+      }
+      return value;
+    };
+    stopping.sort((left, right) => depth(right.runId) - depth(left.runId));
+    let needsAttention = false;
+    for (const run of stopping) {
+      if (backend.interrupt === undefined) {
+        needsAttention = true;
+        yield* repository.recordStopAttention(
+          resolved.project,
+          run.runId,
+          "Kojo Project Runtime cannot interrupt this Workflow Run.",
+          Date.now(),
+        );
+        continue;
+      }
+      const interrupted = yield* backend
+        .interrupt(
+          resolved.project,
+          workflowBackendReference(run.workflowKey, run.workflowRevision, run.runId),
+        )
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.succeed({ _tag: "needs-attention" as const, message: cause.toString() }),
+          ),
+        );
+      if (interrupted._tag === "needs-attention") {
+        needsAttention = true;
+        yield* repository.recordStopAttention(
+          resolved.project,
+          run.runId,
+          interrupted.message,
+          Date.now(),
+        );
+        continue;
+      }
+      yield* repository.recordStopped(resolved.project, run.runId, Date.now());
+    }
+    const current = yield* repository.show(resolved.project, input.runId);
+    if (current === undefined) {
+      return {
+        ok: false,
+        requestKey: input.requestKey,
+        error: error(
+          "run-not-found",
+          "Workflow Run disappeared while stopping.",
+          "Inspect the Project Runtime diagnostic log and retry after it is ready.",
+          { kind: "run", identity: input.identity, runId: input.runId as never },
+        ),
+      };
+    }
+    if (needsAttention) {
+      return {
+        ok: false,
+        requestKey: input.requestKey,
+        error: runControlError(
+          input.identity,
+          input.runId,
+          "run-stop-needs-attention",
+          "Stop intent is durable, but one or more Run cleanup steps need attention.",
+          "Inspect this stopping Run's execution trace and repair the provider or cleanup failure.",
+        ),
+      };
+    }
+    return {
+      ok: true,
+      run: maskedWorkflowRun(current),
+      alreadyApplied: accepted.alreadyApplied,
       requestKey: input.requestKey,
     };
   });

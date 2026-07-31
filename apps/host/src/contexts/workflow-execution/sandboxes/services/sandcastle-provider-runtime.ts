@@ -117,6 +117,16 @@ const builtinAgent = async (provider: BuiltInAgentProvider): Promise<SandcastleA
 export const SandcastleProviderRuntimeLive = Layer.sync(ProviderRuntime, () => {
   const sessions = new Map<string, LiveSandbox>();
 
+  const releaseRun = async (project: ProjectSnapshot, runId: string) => {
+    const owned = [...sessions.entries()].filter(([key]) =>
+      key.startsWith(`${project.identity}:${runId}:`),
+    );
+    for (const [key, session] of owned) {
+      await session.sandbox?.close();
+      sessions.delete(key);
+    }
+  };
+
   const acquire = (input: {
     readonly project: ProjectSnapshot;
     readonly runId: string;
@@ -248,15 +258,15 @@ export const SandcastleProviderRuntimeLive = Layer.sync(ProviderRuntime, () => {
           text: result.stdout,
         };
       }),
+    interruptRun: (project, runId) => Effect.promise(() => releaseRun(project, runId)),
     releaseProject: (project) =>
       Effect.promise(async () => {
-        const owned = [...sessions.entries()].filter(([key]) =>
-          key.startsWith(`${project.identity}:`),
+        const runIds = new Set(
+          [...sessions.keys()]
+            .filter((key) => key.startsWith(`${project.identity}:`))
+            .map((key) => key.split(":")[1]),
         );
-        for (const [key, session] of owned) {
-          sessions.delete(key);
-          await session.sandbox?.close().catch(() => undefined);
-        }
+        for (const runId of runIds) await releaseRun(project, runId);
       }),
   };
 });

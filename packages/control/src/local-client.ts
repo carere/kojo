@@ -252,6 +252,14 @@ export const makeLocalClient = (options: LocalClientOptions) => {
         client.CompleteWorkflowDeferred({ identity, runId, token, value, requestKey }),
       ),
     );
+  const stopWorkflowRun = (
+    identity: ProjectIdentity,
+    runId: WorkflowRunId,
+    requestKey: RequestKey,
+  ) =>
+    activateAndRetry(
+      request("runs:stop", (client) => client.StopWorkflowRun({ identity, runId, requestKey })),
+    );
   const getHostOverview = activateAndRetry(
     request("projects:list", (client, host) =>
       Effect.gen(function* () {
@@ -364,6 +372,7 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     revealWorkflowRun,
     resumeWorkflowRun,
     completeWorkflowDeferred,
+    stopWorkflowRun,
     registerProject,
     forgetProject,
     replayForgetProject,
@@ -495,6 +504,14 @@ export const makeLocalClient = (options: LocalClientOptions) => {
       runId: WorkflowRunId,
       token: string,
       value: unknown,
+      requestKey: RequestKey,
+    ) => Effect.Effect<
+      WorkflowRunMutationResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly stopWorkflowRun: (
+      identity: ProjectIdentity,
+      runId: WorkflowRunId,
       requestKey: RequestKey,
     ) => Effect.Effect<
       WorkflowRunMutationResult,

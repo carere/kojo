@@ -70,6 +70,12 @@ export const CompleteWorkflowDeferred = Rpc.make("CompleteWorkflowDeferred", {
   error: HostOverviewError,
 });
 
+export const StopWorkflowRun = Rpc.make("StopWorkflowRun", {
+  payload: { identity: ProjectIdentity, runId: WorkflowRunId, requestKey: RequestKey },
+  success: WorkflowRunMutationResult,
+  error: HostOverviewError,
+});
+
 export const VisualizerApi = RpcGroup.make(
   Health,
   HostOverview,
@@ -77,4 +83,5 @@ export const VisualizerApi = RpcGroup.make(
   DisableWorkflowSchedule,
   ResumeWorkflowRun,
   CompleteWorkflowDeferred,
+  StopWorkflowRun,
 );

@@ -8,6 +8,7 @@ import {
   EnableWorkflowScheduleHandler,
   HostOverviewHandler,
   ResumeWorkflowRunHandler,
+  StopWorkflowRunHandler,
 } from "../../workflow-execution/host/server/handlers";
 import { HostControlClientLive } from "../../workflow-execution/host/services/host-control-client";
 import { VisualizerApi } from "../models/contracts";
@@ -24,6 +25,7 @@ const VisualizerApiLive = RpcServer.layerHttp({
     DisableWorkflowScheduleHandler.pipe(Layer.provide(HostControlClientLive)),
     ResumeWorkflowRunHandler.pipe(Layer.provide(HostControlClientLive)),
     CompleteWorkflowDeferredHandler.pipe(Layer.provide(HostControlClientLive)),
+    StopWorkflowRunHandler.pipe(Layer.provide(HostControlClientLive)),
     RpcSerialization.layerNdjson,
   ]),
 );
