@@ -5,6 +5,7 @@ interface ExecutionTraceCursor {
   readonly checksum: string;
   readonly direction: "after" | "before";
   readonly filters: string;
+  readonly resourceKind: "execution-trace";
   readonly runId: string;
   readonly sequence: number;
   readonly version: 1;
@@ -42,6 +43,7 @@ export const encodeExecutionTraceCursor = (
 ) => {
   const contents = {
     version: 1 as const,
+    resourceKind: "execution-trace" as const,
     runId,
     direction,
     sequence,
@@ -77,12 +79,14 @@ export const decodeExecutionTraceCursor = (
     };
   }
   const parsedRunId = parsed.runId;
+  const parsedResourceKind = parsed.resourceKind;
   const parsedDirection = parsed.direction;
   const parsedSequence = parsed.sequence;
   const parsedFilters = parsed.filters;
   const parsedChecksum = parsed.checksum;
   if (
     typeof parsedRunId !== "string" ||
+    parsedResourceKind !== "execution-trace" ||
     (parsedDirection !== "after" && parsedDirection !== "before") ||
     typeof parsedSequence !== "number" ||
     !Number.isInteger(parsedSequence) ||
@@ -98,6 +102,7 @@ export const decodeExecutionTraceCursor = (
   }
   const contents = {
     version: parsed.version,
+    resourceKind: parsedResourceKind,
     runId: parsedRunId,
     direction: parsedDirection,
     sequence: parsedSequence,

@@ -4,6 +4,7 @@ import {
   enableWorkflowSchedule,
 } from "../use-cases/control-workflow-schedule";
 import {
+  acknowledgeControlSubscription,
   completeWorkflowDeferred,
   getHostOverview,
   readExecutionTrace,
@@ -11,6 +12,7 @@ import {
   repairProjectReadiness,
   resumeWorkflowRun,
   stopWorkflowRun,
+  subscribeControl,
 } from "../use-cases/get-host-overview";
 
 export const HostOverviewHandler = VisualizerApi.toLayerHandler(
@@ -58,4 +60,13 @@ export const StopWorkflowRunHandler = VisualizerApi.toLayerHandler(
 export const ReadExecutionTraceHandler = VisualizerApi.toLayerHandler(
   "ReadExecutionTrace",
   (input) => readExecutionTrace(input),
+);
+
+export const SubscribeControlHandler = VisualizerApi.toLayerHandler("SubscribeControl", (input) =>
+  subscribeControl(input),
+);
+
+export const AcknowledgeControlSubscriptionHandler = VisualizerApi.toLayerHandler(
+  "AcknowledgeControlSubscription",
+  (delivery) => acknowledgeControlSubscription(delivery),
 );

@@ -58,12 +58,38 @@ it("accepts bounded opaque Request Keys", () => {
 });
 
 it("publishes one closed v1 Execution Event catalog", () => {
-  expect(EXECUTION_EVENT_KINDS_V1).toContain("run.accepted");
-  expect(EXECUTION_EVENT_KINDS_V1).toContain("run.late-engine-outcome");
+  expect(EXECUTION_EVENT_KINDS_V1).toEqual([
+    "run.accepted",
+    "run.engine-confirmed",
+    "run.suspended",
+    "run.resumed",
+    "run.stop-requested",
+    "run.stopped",
+    "run.completed",
+    "run.failed",
+    "run.late-engine-outcome",
+    "child.requested",
+    "child.linked",
+    "child.finished",
+    "activity.attempt-started",
+    "activity.result-observed",
+    "activity.result-confirmed",
+    "activity.result-reused",
+    "deferred.created",
+    "deferred.completed",
+    "clock.scheduled",
+    "clock.fired",
+    "boundary.started",
+    "boundary.completed",
+    "artifact.recorded",
+    "artifact.unavailable",
+    "reconciliation.observation-restored",
+  ]);
   expect(Schema.decodeUnknownSync(ExecutionEventKindV1)("activity.result-observed")).toBe(
     "activity.result-observed",
   );
   expect(() => Schema.decodeUnknownSync(ExecutionEventKindV1)("activity.unversioned")).toThrow();
+  expect(() => Schema.decodeUnknownSync(ExecutionEventKindV1)("child.started")).toThrow();
 });
 
 it.effect(

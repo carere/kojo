@@ -1,15 +1,26 @@
+import type { Socket as NetSocket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "@effect/vitest";
-import { Effect, Schema, Stream } from "effect";
-import { ProjectIdentity, RequestKey, WorkflowRunId } from "../../src";
+import { Effect, Exit, Schema, Scope, Stream } from "effect";
+import { RequestId } from "effect/unstable/rpc/RpcMessage";
+import {
+  type ControlSubscriptionDelivery,
+  ProjectIdentity,
+  RequestKey,
+  WorkflowRunId,
+} from "../../src";
 import {
   defaultSocketPath,
+  disconnectUnixControlConnection,
   IncompatibleProtocolError,
   type KojoControlClient,
   LocalTransportError,
   makeLocalClient,
   makeOperatingSystemHostActivation,
+  makeUnixControlRequestRegistry,
+  registerUnixControlDisconnectFinalizer,
+  trackUnixControlProtocol,
   UnsupportedControlCapabilityError,
 } from "../../src/local-client";
 
@@ -205,7 +216,7 @@ it.effect("reads durable traces and opens explicitly scoped control subscription
     const host = {
       protocol: { major: 1, minor: 8 },
       hostVersion: "0.1.0",
-      capabilities: ["traces:read", "control:subscribe"],
+      capabilities: ["traces:read", "control:subscribe", "control:acknowledge"],
     } as const;
     const transport = {
       Negotiate: () => {
@@ -232,11 +243,17 @@ it.effect("reads durable traces and opens explicitly scoped control subscription
       SubscribeControl: () => {
         requests.push("SubscribeControl");
         return Stream.succeed({
+          deliverySequence: 1,
           kind: "resync-required" as const,
           identity,
           runId,
           highWaterSequence: 0,
+          subscriptionId: "subscription" as never,
         });
+      },
+      AcknowledgeControlSubscription: (delivery: ControlSubscriptionDelivery) => {
+        requests.push(`AcknowledgeControlSubscription:${delivery.deliverySequence}`);
+        return Effect.succeed({ acknowledged: true as const });
       },
     } as unknown as KojoControlClient;
     const client = makeLocalClient({ connect: Effect.succeed(transport) });
@@ -264,7 +281,22 @@ it.effect("reads durable traces and opens explicitly scoped control subscription
           })
           .pipe(Stream.runCollect),
       ),
-    ).toEqual([{ kind: "resync-required", identity, runId, highWaterSequence: 0 }]);
+    ).toEqual([
+      {
+        deliverySequence: 1,
+        kind: "resync-required",
+        identity,
+        runId,
+        highWaterSequence: 0,
+        subscriptionId: "subscription",
+      },
+    ]);
+    expect(
+      yield* client.acknowledgeControlSubscription({
+        deliverySequence: 1,
+        subscriptionId: "subscription" as never,
+      }),
+    ).toEqual({ acknowledged: true });
     expect(requests).toEqual([
       "Negotiate",
       "NegotiateCapabilities",
@@ -272,7 +304,300 @@ it.effect("reads durable traces and opens explicitly scoped control subscription
       "Negotiate",
       "NegotiateCapabilities",
       "SubscribeControl",
+      "Negotiate",
+      "NegotiateCapabilities",
+      "AcknowledgeControlSubscription:1",
     ]);
+  }),
+);
+
+it.effect("releases a subscription connection after both terminal delivery and caller abort", () =>
+  Effect.gen(function* () {
+    const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+      "00000000-0000-7000-8000-000000000010",
+    );
+    const runId = Schema.decodeUnknownSync(WorkflowRunId)("00000000-0000-7000-8000-000000000011");
+    const releases: Array<string> = [];
+    const host = {
+      protocol: { major: 1, minor: 10 },
+      hostVersion: "0.1.0",
+      capabilities: ["control:subscribe"],
+    } as const;
+    const update = {
+      deliverySequence: 1,
+      kind: "resync-required" as const,
+      identity,
+      runId,
+      highWaterSequence: 0,
+      subscriptionId: "subscription" as never,
+    };
+    const connection = (stream: Stream.Stream<typeof update>) =>
+      Effect.acquireRelease(
+        Effect.succeed({
+          Negotiate: () => Effect.succeed(host),
+          NegotiateCapabilities: () => Effect.succeed(host),
+          SubscribeControl: () => stream,
+        } as unknown as KojoControlClient),
+        () => Effect.sync(() => releases.push("released")),
+      );
+
+    yield* makeLocalClient({ connect: connection(Stream.succeed(update)) })
+      .subscribeControl({
+        projects: [identity],
+        topics: ["traces"],
+        traces: [{ identity, runId, afterSequence: 0 }],
+      })
+      .pipe(Stream.runDrain);
+    yield* makeLocalClient({
+      connect: connection(Stream.concat(Stream.succeed(update), Stream.never)),
+    })
+      .subscribeControl({
+        projects: [identity],
+        topics: ["traces"],
+        traces: [{ identity, runId, afterSequence: 0 }],
+      })
+      .pipe(Stream.take(1), Stream.runDrain);
+
+    expect(releases).toEqual(["released", "released"]);
+  }),
+);
+
+it.effect("runs an explicit connector disconnect after terminal delivery and caller abort", () =>
+  Effect.gen(function* () {
+    const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+      "00000000-0000-7000-8000-000000000012",
+    );
+    const runId = Schema.decodeUnknownSync(WorkflowRunId)("00000000-0000-7000-8000-000000000013");
+    const disconnects: Array<string> = [];
+    const host = {
+      protocol: { major: 1, minor: 10 },
+      hostVersion: "0.1.0",
+      capabilities: ["control:subscribe"],
+    } as const;
+    const update = {
+      deliverySequence: 1,
+      kind: "resync-required" as const,
+      identity,
+      runId,
+      highWaterSequence: 0,
+      subscriptionId: "subscription" as never,
+    };
+    const clientWith = (stream: Stream.Stream<typeof update>) =>
+      makeLocalClient({
+        connect: Effect.succeed({
+          client: {
+            Negotiate: () => Effect.succeed(host),
+            NegotiateCapabilities: () => Effect.succeed(host),
+            SubscribeControl: () => stream,
+          } as unknown as KojoControlClient,
+          disconnect: Effect.sync(() => disconnects.push("disconnect")),
+        }),
+      });
+    const input = {
+      projects: [identity],
+      topics: ["traces" as const],
+      traces: [{ identity, runId, afterSequence: 0 }],
+    };
+
+    yield* clientWith(Stream.succeed(update)).subscribeControl(input).pipe(Stream.runDrain);
+    yield* clientWith(Stream.concat(Stream.succeed(update), Stream.never))
+      .subscribeControl(input)
+      .pipe(Stream.take(1), Stream.runDrain);
+
+    expect(disconnects).toEqual(["disconnect", "disconnect"]);
+  }),
+);
+
+it.effect("disconnects the Unix transport before older protocol finalizers", () =>
+  Effect.gen(function* () {
+    const events: Array<string> = [];
+    const scope = yield* Scope.make();
+    let destroyed = false;
+    const connection = {
+      get destroyed() {
+        return destroyed;
+      },
+      destroy: () => {
+        events.push("disconnect");
+        destroyed = true;
+        return connection;
+      },
+    } as unknown as Pick<NetSocket, "destroy" | "destroyed">;
+
+    yield* Effect.addFinalizer(() => Effect.sync(() => events.push("protocol"))).pipe(
+      Effect.provideService(Scope.Scope, scope),
+    );
+    yield* registerUnixControlDisconnectFinalizer(connection).pipe(
+      Effect.provideService(Scope.Scope, scope),
+    );
+    yield* Scope.close(scope, Exit.void);
+
+    expect(events).toEqual(["disconnect", "protocol"]);
+  }),
+);
+
+it.effect(
+  "sends Eof then bounds Unix disconnect when a peer does not honor its graceful close",
+  () =>
+    Effect.gen(function* () {
+      const makeSocket = (honorClose: boolean) => {
+        const events: Array<string> = [];
+        let onClose: (() => void) | undefined;
+        let destroyed = false;
+        const socket = {
+          get destroyed() {
+            return destroyed;
+          },
+          destroy: () => {
+            events.push("destroy");
+            destroyed = true;
+            return socket;
+          },
+          end: () => {
+            events.push("end");
+            if (honorClose) onClose?.();
+            return socket;
+          },
+          off: () => socket,
+          once: (_event: string, listener: () => void) => {
+            onClose = listener;
+            return socket;
+          },
+        } as unknown as Pick<NetSocket, "destroy" | "destroyed" | "end" | "off" | "once">;
+        return { events, socket };
+      };
+
+      const sent: Array<string> = [];
+      const protocol = (requestRegistry: ReturnType<typeof makeUnixControlRequestRegistry>) =>
+        ({
+          send: (
+            _clientId: number,
+            message: { readonly _tag: string; readonly requestId?: number },
+          ) =>
+            Effect.sync(() => {
+              sent.push(message._tag);
+              if (message._tag === "Interrupt" && message.requestId !== undefined) {
+                requestRegistry.terminal(RequestId(message.requestId));
+              }
+            }),
+        }) as never;
+
+      const honoringPeer = makeSocket(true);
+      const honoringRequests = makeUnixControlRequestRegistry();
+      honoringRequests.add(RequestId(37));
+      yield* disconnectUnixControlConnection(
+        honoringPeer.socket as NetSocket,
+        protocol(honoringRequests),
+        honoringRequests,
+      );
+      expect(honoringPeer.events).toEqual(["end"]);
+      expect(sent).toEqual(["Interrupt", "Eof"]);
+
+      sent.length = 0;
+      const nonHonoringPeer = makeSocket(false);
+      const nonHonoringRequests = makeUnixControlRequestRegistry();
+      nonHonoringRequests.add(RequestId(37));
+      yield* disconnectUnixControlConnection(
+        nonHonoringPeer.socket as NetSocket,
+        protocol(nonHonoringRequests),
+        nonHonoringRequests,
+      );
+      expect(nonHonoringPeer.events).toEqual(["end", "destroy"]);
+      expect(sent).toEqual(["Interrupt", "Eof"]);
+    }),
+);
+
+it.effect("waits for delayed terminal Exit before ending a Unix connection", () =>
+  Effect.gen(function* () {
+    const events: Array<string> = [];
+    let receive: ((response: never) => Effect.Effect<void>) | undefined;
+    const socket = {
+      destroyed: false,
+      destroy: () => socket,
+      end: () => {
+        events.push("end");
+        closeListener?.();
+        return socket;
+      },
+      off: () => socket,
+      once: (_event: string, listener: () => void) => {
+        closeListener = listener;
+        return socket;
+      },
+    } as unknown as Pick<NetSocket, "destroy" | "destroyed" | "end" | "off" | "once">;
+    let closeListener: (() => void) | undefined;
+    const requestRegistry = makeUnixControlRequestRegistry();
+    const protocol = {
+      run: (_clientId: number, onResponse: (response: never) => Effect.Effect<void>) =>
+        Effect.sync(() => {
+          receive = onResponse;
+        }).pipe(Effect.andThen(Effect.never)),
+      send: (_clientId: number, message: { readonly _tag: string; readonly requestId?: number }) =>
+        Effect.sync(() => {
+          if (message._tag !== "Request") events.push(message._tag);
+          if (message._tag === "Interrupt" && message.requestId !== undefined) {
+            setTimeout(() => {
+              const deliver = receive;
+              if (deliver !== undefined) {
+                void Effect.runPromise(
+                  deliver({ _tag: "Exit", requestId: message.requestId } as never),
+                );
+              }
+            }, 1);
+          }
+        }),
+      supportsAck: true,
+      supportsTransferables: false,
+    } as never;
+    const tracked = trackUnixControlProtocol(protocol, requestRegistry);
+    const request = { _tag: "Request", headers: [], id: 37, payload: null, tag: "Test" } as never;
+
+    yield* tracked
+      .run(0, (response) => Effect.sync(() => events.push(response._tag)))
+      .pipe(Effect.forkScoped);
+    yield* Effect.yieldNow;
+    yield* tracked.send(0, request);
+    yield* disconnectUnixControlConnection(socket as NetSocket, tracked, requestRegistry);
+
+    expect(events).toEqual(["Interrupt", "Exit", "Eof", "end"]);
+  }),
+);
+
+it.effect("tracks only active Unix RPC requests for disconnect", () =>
+  Effect.gen(function* () {
+    const requestRegistry = makeUnixControlRequestRegistry();
+    requestRegistry.add(RequestId(99));
+    let receive: ((response: never) => Effect.Effect<void>) | undefined;
+    const protocol = {
+      run: (_clientId: number, onResponse: (response: never) => Effect.Effect<void>) =>
+        Effect.sync(() => {
+          receive = onResponse;
+        }).pipe(Effect.andThen(Effect.never)),
+      send: () => Effect.void,
+      supportsAck: true,
+      supportsTransferables: false,
+    } as never;
+    const tracked = trackUnixControlProtocol(protocol, requestRegistry);
+    const request = (id: number) =>
+      ({ _tag: "Request", headers: [], id, payload: null, tag: "Test" }) as never;
+
+    yield* tracked.run(0, () => Effect.void).pipe(Effect.forkScoped);
+    yield* Effect.yieldNow;
+    const deliver = receive;
+    if (deliver === undefined) return yield* Effect.die("Protocol did not start its receive loop.");
+
+    yield* tracked.send(0, request(1));
+    expect([...requestRegistry.active]).toEqual([99, 1]);
+    yield* deliver({ _tag: "Exit", requestId: 1 } as never);
+    expect([...requestRegistry.active]).toEqual([99]);
+
+    yield* tracked.send(0, request(2));
+    yield* tracked.send(0, { _tag: "Interrupt", requestId: 2 });
+    expect([...requestRegistry.active]).toEqual([99]);
+
+    yield* tracked.send(0, request(3));
+    yield* deliver({ _tag: "Defect" } as never);
+    expect(requestRegistry.active).toEqual(new Set());
   }),
 );
 

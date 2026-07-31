@@ -5,6 +5,7 @@ import {
   type ExecutionTraceEvent,
   type ExecutionTraceQueryResult,
   type ExecutionTraceReadInput,
+  LEGACY_PERSISTED_EXECUTION_EVENT_KINDS_V1,
   type ProjectIdentity,
   type ProjectSnapshot,
   type RequestKey,
@@ -743,6 +744,9 @@ export const revealWorkflowRun = (
   });
 
 const executionEventKindsV1 = new Set<string>(EXECUTION_EVENT_KINDS_V1);
+const legacyPersistedExecutionEventKindsV1 = new Set<string>(
+  LEGACY_PERSISTED_EXECUTION_EVENT_KINDS_V1,
+);
 
 export const toExecutionTraceEvent = (event: {
   readonly activityAttemptId: string | null;
@@ -763,7 +767,9 @@ export const toExecutionTraceEvent = (event: {
   const compatibility =
     event.envelopeVersion !== 1
       ? "envelope-version-unsupported"
-      : event.kindVersion !== 1 || !executionEventKindsV1.has(event.kind)
+      : event.kindVersion !== 1 ||
+          (!executionEventKindsV1.has(event.kind) &&
+            !legacyPersistedExecutionEventKindsV1.has(event.kind))
         ? "kind-version-unsupported"
         : "supported";
   return {
@@ -894,7 +900,10 @@ export const readExecutionTrace = (
       page: {
         events,
         final: ["completed", "failed", "stopped"].includes(page.runState),
+        firstSequence: events[0]?.sequence ?? null,
+        hasMore: page.hasMore,
         highWaterSequence: page.highWaterSequence,
+        lastSequence: events.at(-1)?.sequence ?? null,
         nextCursor,
         runState: page.runState,
       },

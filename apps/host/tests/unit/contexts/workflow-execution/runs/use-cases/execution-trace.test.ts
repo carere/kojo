@@ -1,6 +1,5 @@
 import { expect, it } from "@effect/vitest";
-import { Effect, Option, Stream } from "effect";
-import { makeControlSubscription } from "../../../../../../src/contexts/workflow-execution/control/services/local-host";
+import { Effect } from "effect";
 import {
   decodeExecutionTraceCursor,
   encodeExecutionTraceCursor,
@@ -61,85 +60,12 @@ it.effect("masks sensitive evidence and makes unsupported Event versions visible
       compatibility: "envelope-version-unsupported",
       payload: { _tag: "sensitive-value-masked" },
     });
-  }),
-);
-
-it.effect("selects trace topics by Project and asks slow consumers to resync", () =>
-  Effect.gen(function* () {
-    const seen: Array<string> = [];
-    const update = yield* makeControlSubscription((input) => {
-      seen.push(`${input.identity}:${input.runId}`);
-      return Effect.succeed({
-        ok: true as const,
-        page: {
-          events: [],
-          final: false,
-          highWaterSequence: 201,
-          nextCursor: "more-than-the-bounded-live-page",
-          runState: "running" as const,
-        },
-      });
-    })({
-      projects: ["project-one" as never],
-      topics: ["traces"],
-      traces: [
-        { identity: "project-one" as never, runId: "run-one" as never, afterSequence: 0 },
-        { identity: "project-two" as never, runId: "run-two" as never, afterSequence: 0 },
-      ],
-    }).pipe(Stream.runHead);
-
-    expect(Option.getOrThrow(update)).toEqual({
-      kind: "resync-required",
-      identity: "project-one",
-      runId: "run-one",
-      highWaterSequence: 201,
+    expect(toExecutionTraceEvent({ ...event, kind: "child.started" })).toMatchObject({
+      compatibility: "supported",
     });
-    expect(seen).toEqual(["project-one:run-one"]);
-  }),
-);
-
-it.effect("streams a selected durable trace sequence without deriving new state", () =>
-  Effect.gen(function* () {
-    const update = yield* makeControlSubscription((input) =>
-      Effect.succeed({
-        ok: true as const,
-        page: {
-          events: [
-            {
-              activityAttemptId: null,
-              boundaryId: null,
-              childRunId: null,
-              compatibility: "supported" as const,
-              engineOperationId: null,
-              envelopeVersion: 1,
-              eventId: "event-seven",
-              kind: "run.engine-confirmed",
-              kindVersion: 1,
-              observedAtMs: null,
-              payload: {},
-              recordedAtMs: 7,
-              runId: input.runId,
-              sequence: 7,
-            },
-          ],
-          final: false,
-          highWaterSequence: 7,
-          nextCursor: null,
-          runState: "running" as const,
-        },
-      }),
-    )({
-      projects: ["project-one" as never],
-      topics: ["traces"],
-      traces: [{ identity: "project-one" as never, runId: "run-one" as never, afterSequence: 6 }],
-    }).pipe(Stream.runHead);
-
-    expect(Option.getOrThrow(update)).toMatchObject({
-      kind: "trace-event",
-      identity: "project-one",
-      runId: "run-one",
-      sequence: 7,
-      event: { kind: "run.engine-confirmed", sequence: 7 },
+    expect(toExecutionTraceEvent({ ...event, kind: "run.recovery-queued" })).toMatchObject({
+      compatibility: "kind-version-unsupported",
+      payload: { _tag: "sensitive-value-masked" },
     });
   }),
 );

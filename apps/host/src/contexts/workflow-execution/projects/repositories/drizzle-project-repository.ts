@@ -3108,31 +3108,22 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
         }),
       ),
     ),
-  recordStopAttention: (project, runId, message, recordedAtMs) =>
+  recordStopAttention: (project, runId, _message, recordedAtMs) =>
     Effect.sync(() =>
       withWritableProjectStore(project, (connection) =>
         transaction(connection, () => {
           const run = readStoredRun(connection, runId);
           if (run === undefined || run.state !== "stopping") return;
-          const sequence = connection
-            .query("SELECT last_event_sequence FROM kojo_workflow_runs WHERE run_id = ?")
-            .get(runId) as { readonly last_event_sequence: number };
-          appendEvent(connection, {
-            eventId: randomUUID(),
-            kind: "run.stop-needs-attention",
-            payload: { message },
-            recordedAtMs,
-            runId,
-            sequence: sequence.last_event_sequence + 1,
-            sensitivityMap: sensitivityMap([]),
-          });
+          // ADR 0011 deliberately keeps routine stop diagnostics out of the
+          // immutable user-visible trace. The durable Run state remains the
+          // authority and Host diagnostics retain the operational detail.
           connection
             .query(
               `UPDATE kojo_workflow_runs
-               SET last_event_sequence = ?, row_version = row_version + 1, updated_at_ms = ?
+               SET row_version = row_version + 1, updated_at_ms = ?
                WHERE run_id = ?`,
             )
-            .run(sequence.last_event_sequence + 1, recordedAtMs, runId);
+            .run(recordedAtMs, runId);
         }),
       ),
     ),
@@ -3571,7 +3562,12 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           const eventId = randomUUID();
           appendEvent(connection, {
             eventId,
-            kind: trace.kind,
+            kind:
+              trace.artifactIds.length > 0
+                ? "artifact.recorded"
+                : trace.kind === "sandbox.acquired" || trace.kind === "sandbox.session-recreated"
+                  ? "boundary.started"
+                  : "boundary.completed",
             payload: {
               artifactIds: trace.artifactIds,
               durationMs: trace.durationMs,
@@ -3622,7 +3618,12 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           const eventId = randomUUID();
           appendEvent(connection, {
             eventId,
-            kind: trace.kind,
+            kind:
+              trace.artifactIds.length > 0
+                ? "artifact.recorded"
+                : trace.kind === "agent.started"
+                  ? "boundary.started"
+                  : "boundary.completed",
             payload: {
               artifactIds: trace.artifactIds,
               durationMs: trace.durationMs,
@@ -3686,17 +3687,6 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
             )
             .run(hostStartedAtMs, hostStartedAtMs, runId, hostStartedAtMs);
           if (updated.changes === 0) return false;
-          const sequence = nextEventSequence(connection, runId);
-          appendEvent(connection, {
-            eventId: randomUUID(),
-            kind: "run.recovery-queued",
-            payload: { runId },
-            recordedAtMs: hostStartedAtMs,
-            runId,
-            sequence,
-            sensitivityMap: sensitivityMap([]),
-          });
-          advanceRunTrace(connection, runId, sequence, hostStartedAtMs);
           return true;
         }),
       ),

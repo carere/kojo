@@ -1,4 +1,8 @@
 import type {
+  ControlSubscriptionAcknowledgement,
+  ControlSubscriptionDelivery,
+  ControlSubscriptionInput,
+  ControlSubscriptionUpdate,
   ExecutionTraceQueryResult,
   ExecutionTraceReadInput,
   ProjectIdentity,
@@ -6,7 +10,7 @@ import type {
   RequestKey,
   WorkflowRunId,
 } from "@kojo/control";
-import { Effect } from "effect";
+import { Effect, Stream } from "effect";
 import { HostOverviewError } from "../../../shared/models/contracts";
 import { HostControlClient } from "../services/host-control-client";
 
@@ -44,6 +48,18 @@ export const readExecutionTrace = (input: ExecutionTraceReadInput) =>
           HostOverviewError
         >),
   );
+
+export const subscribeControl = (input: ControlSubscriptionInput) =>
+  Stream.unwrap(
+    Effect.map(HostControlClient, (client) =>
+      client.subscribeControl(input).pipe(Stream.mapError(hostError)),
+    ),
+  ) as Stream.Stream<ControlSubscriptionUpdate, HostOverviewError>;
+
+export const acknowledgeControlSubscription = (delivery: ControlSubscriptionDelivery) =>
+  Effect.flatMap(HostControlClient, (client) =>
+    client.acknowledgeControlSubscription(delivery).pipe(Effect.mapError(hostError)),
+  ) as Effect.Effect<ControlSubscriptionAcknowledgement, HostOverviewError>;
 
 const hostError = (error: { readonly _tag: string; readonly message: string }) =>
   error._tag === "IncompatibleProtocolError"

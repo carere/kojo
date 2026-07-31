@@ -3,14 +3,19 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { BunSocketServer } from "@effect/platform-bun";
 import { afterEach, describe, expect, it } from "@effect/vitest";
-import { ProjectIdentity, RequestKey } from "@kojo/control";
-import { connectUnixControlClient, makeLocalClient } from "@kojo/control/local-client";
-import { Effect, Exit, Layer, Schema } from "effect";
+import { type ControlSubscriptionDelivery, ProjectIdentity, RequestKey } from "@kojo/control";
+import {
+  connectUnixControlClient,
+  connectUnixControlConnection,
+  makeLocalClient,
+} from "@kojo/control/local-client";
+import { Effect, Exit, Fiber, Layer, Option, Schema, Stream } from "effect";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import { makeFileProjectIndexRepositoryLayer } from "../../../../../src/contexts/workflow-authoring/projects/repositories/file-project-index-repository";
 import { GitProjectLayoutLive } from "../../../../../src/contexts/workflow-authoring/projects/services/git-project-layout";
 import { SubprocessProjectDefinitionLoaderLive } from "../../../../../src/contexts/workflow-authoring/projects/services/subprocess-project-definition-loader";
 import { HostIdentity } from "../../../../../src/contexts/workflow-execution/control/models/host-identity";
+import { ControlSubscriptionReader } from "../../../../../src/contexts/workflow-execution/control/services/control-subscription-reader";
 import { makeHostDiagnosticLoggerLayer } from "../../../../../src/contexts/workflow-execution/control/services/host-diagnostic-logger";
 import {
   type KojoHostServer,
@@ -59,7 +64,7 @@ describe("local Kojo Host control", () => {
           }),
         );
         expect(Schema.decodeUnknownSync(LegacyHostInformation)(legacyHandshake)).toEqual({
-          protocol: { major: 1, minor: 8 },
+          protocol: { major: 1, minor: 10 },
           hostVersion: "0.1.0",
           capabilities: ["projects:list"],
         });
@@ -71,7 +76,7 @@ describe("local Kojo Host control", () => {
 
         expect(overview).toEqual({
           host: {
-            protocol: { major: 1, minor: 8 },
+            protocol: { major: 1, minor: 10 },
             hostVersion: "0.1.0",
             capabilities: [
               "projects:list",
@@ -100,6 +105,7 @@ describe("local Kojo Host control", () => {
               "runs:stop",
               "traces:read",
               "control:subscribe",
+              "control:acknowledge",
             ],
           },
           projects: [],
@@ -138,7 +144,7 @@ describe("local Kojo Host control", () => {
           hostIdentity: "host:00000000-0000-4000-8000-000000000000",
           hostVersion: "0.1.0",
           protocolMajor: 1,
-          protocolMinor: 8,
+          protocolMinor: 10,
         });
       }),
   );
@@ -236,9 +242,175 @@ describe("local Kojo Host control", () => {
       expect(error).toBeInstanceOf(UnsafeHostStoreError);
     }),
   );
+
+  it.effect(
+    "bounds one unacknowledged Unix-RPC subscriber without delaying controls or another subscriber",
+    () =>
+      Effect.gen(function* () {
+        const directory = yield* Effect.promise(() =>
+          mkdtemp(join(tmpdir(), "kojo-host-subscription-window-")),
+        );
+        const socketPath = join(directory, "host.sock");
+        const server = yield* Effect.promise(() =>
+          startTestHost(
+            socketPath,
+            join(directory, "diagnostics.jsonl"),
+            Layer.succeed(ControlSubscriptionReader, {
+              readResourceFingerprint: () => Effect.succeed("unchanged"),
+              readTrace: (input) => {
+                const sequence = (input.afterSequence ?? 0) + 1;
+                // A real asynchronous source leaves the test runner's Effect
+                // clock alone while the Host owns the live polling loop.
+                return Effect.promise(
+                  () =>
+                    new Promise((resolve) => {
+                      setTimeout(
+                        () =>
+                          resolve({
+                            ok: true as const,
+                            page: {
+                              events: [
+                                {
+                                  activityAttemptId: null,
+                                  boundaryId: null,
+                                  childRunId: null,
+                                  compatibility: "supported" as const,
+                                  engineOperationId: null,
+                                  envelopeVersion: 1,
+                                  eventId: `event-${sequence}`,
+                                  kind: "run.engine-confirmed" as const,
+                                  kindVersion: 1,
+                                  observedAtMs: null,
+                                  payload: {},
+                                  recordedAtMs: sequence,
+                                  runId: input.runId,
+                                  sequence,
+                                },
+                              ],
+                              final: false,
+                              firstSequence: sequence,
+                              hasMore: false,
+                              highWaterSequence: sequence,
+                              lastSequence: sequence,
+                              nextCursor: null,
+                              runState: "running" as const,
+                            },
+                          }),
+                        10,
+                      );
+                    }),
+                );
+              },
+            }),
+          ),
+        );
+        cleanups.push(() => close(server, directory));
+        const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+          "00000000-0000-7000-8000-000000000037",
+        );
+        const runId = "00000000-0000-7000-8000-000000000038" as never;
+        const input = {
+          projects: [identity],
+          topics: ["traces"] as const,
+          traces: [{ identity, runId, afterSequence: 0 }],
+        };
+        const client = makeLocalClient({
+          connect: connectUnixControlConnection(socketPath),
+          maxAttempts: 1,
+        });
+
+        // This real Unix-RPC client reads every update but deliberately sends
+        // no acknowledgement. The test therefore observes receiver lag at the
+        // application delivery boundary rather than a socket queue heuristic.
+        const slowFiber = yield* Effect.forkScoped(
+          client.subscribeControl(input).pipe(Stream.runCollect),
+        );
+        const acknowledgedUpdates: Array<{
+          readonly deliverySequence: number;
+          readonly kind: string;
+          readonly subscriptionId: ControlSubscriptionDelivery["subscriptionId"];
+        }> = [];
+        const acknowledgedFiber = yield* Effect.forkScoped(
+          client.subscribeControl(input).pipe(
+            Stream.take(20),
+            Stream.runForEach((update) =>
+              client
+                .acknowledgeControlSubscription(update)
+                .pipe(Effect.tap(() => Effect.sync(() => acknowledgedUpdates.push(update)))),
+            ),
+          ),
+        );
+
+        // This test runs under Effect's virtual test clock; native time is
+        // intentional here because the Unix socket adapter is external to it.
+        yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 150)));
+        // A separate control request must stay responsive while the first
+        // transport consumes updates without ever acknowledging them.
+        expect(yield* client.listProjects).toEqual({ projects: [] });
+
+        const slowResult = yield* Fiber.join(slowFiber).pipe(Effect.timeoutOption("3 seconds"));
+        expect(Option.isSome(slowResult)).toBe(true);
+        const slowUpdates = Array.from(Option.getOrThrow(slowResult));
+        const acknowledgedResult = yield* Fiber.join(acknowledgedFiber).pipe(
+          Effect.timeoutOption("3 seconds"),
+        );
+        expect(Option.isSome(acknowledgedResult)).toBe(true);
+        const resync = slowUpdates.find((update) => update.kind === "resync-required");
+        expect(resync).toMatchObject({ kind: "resync-required", highWaterSequence: 17 });
+        expect(slowUpdates.filter((update) => update.kind === "trace-event")).toHaveLength(16);
+        expect(acknowledgedUpdates).toHaveLength(20);
+        expect(acknowledgedUpdates.every((update) => update.kind === "trace-event")).toBe(true);
+        expect(new Set(acknowledgedUpdates.map((update) => update.subscriptionId)).size).toBe(1);
+        expect(acknowledgedUpdates[0]?.subscriptionId).not.toBe(resync?.subscriptionId);
+        // `take(20)` aborts the source before its Host window overflows. Its
+        // session must be gone just as promptly as the naturally completed
+        // slow stream, proving abort-driven Unix client detachment.
+        const lastAcknowledgedUpdate = acknowledgedUpdates.at(-1);
+        expect(
+          yield* client.acknowledgeControlSubscription({
+            deliverySequence: lastAcknowledgedUpdate?.deliverySequence ?? 1,
+            subscriptionId: lastAcknowledgedUpdate?.subscriptionId ?? ("missing" as never),
+          }),
+        ).toEqual({ acknowledged: false });
+
+        // The terminal stream finalizer removes the Host registry entry. A
+        // delayed acknowledgement is a safe typed no-op, not an error.
+        expect(
+          yield* client.acknowledgeControlSubscription({
+            deliverySequence: resync?.deliverySequence ?? 1,
+            subscriptionId: resync?.subscriptionId ?? ("missing" as never),
+          }),
+        ).toEqual({ acknowledged: false });
+
+        // A new subscription has a distinct ephemeral sequence but resumes
+        // through the durable per-Run sequence, with no duplicate event.
+        const lastTraceSequence = slowUpdates
+          .filter((update) => update.kind === "trace-event")
+          .at(-1)?.sequence;
+        const resumed = yield* client
+          .subscribeControl({
+            ...input,
+            traces: [{ identity, runId, afterSequence: lastTraceSequence ?? 0 }],
+          })
+          .pipe(Stream.runHead);
+        expect(Option.getOrThrow(resumed)).toMatchObject({
+          kind: "trace-event",
+          sequence: (lastTraceSequence ?? 0) + 1,
+        });
+        const resumedUpdate = Option.getOrThrow(resumed);
+        expect(yield* client.acknowledgeControlSubscription(resumedUpdate)).toEqual({
+          acknowledged: false,
+        });
+      }),
+    8_000,
+  );
 });
 
-const startTestHost = (socketPath: string, diagnosticPath: string) => {
+const startTestHost = (
+  socketPath: string,
+  diagnosticPath: string,
+  subscriptionReader?: Layer.Layer<ControlSubscriptionReader>,
+) => {
   const protocol = RpcServer.layerProtocolSocketServer.pipe(
     Layer.provide([BunSocketServer.layer({ path: socketPath }), RpcSerialization.layerNdjson]),
   );
@@ -250,6 +422,7 @@ const startTestHost = (socketPath: string, diagnosticPath: string) => {
     protocol,
     makeHostDiagnosticLoggerLayer(diagnosticPath),
     TEST_HOST_IDENTITY,
+    subscriptionReader,
   ).pipe(
     Layer.provide([
       makeFileProjectIndexRepositoryLayer(join(dirname(socketPath), "projects.json")),

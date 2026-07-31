@@ -1,4 +1,8 @@
 import {
+  ControlSubscriptionAcknowledgement,
+  ControlSubscriptionDelivery,
+  ControlSubscriptionInput,
+  ControlSubscriptionUpdate,
   ExecutionTraceQueryResult,
   ExecutionTraceReadInput,
   HostOverview as HostOverviewSchema,
@@ -105,6 +109,21 @@ export const ReadExecutionTrace = Rpc.make("ReadExecutionTrace", {
   error: HostOverviewError,
 });
 
+/** Same-origin stream; browsers never receive the Host socket directly. */
+export const SubscribeControl = Rpc.make("SubscribeControl", {
+  payload: ControlSubscriptionInput.fields,
+  success: ControlSubscriptionUpdate,
+  error: HostOverviewError,
+  stream: true,
+});
+
+/** Browser acknowledgement remains same-origin; it never exposes the Host socket. */
+export const AcknowledgeControlSubscription = Rpc.make("AcknowledgeControlSubscription", {
+  payload: ControlSubscriptionDelivery.fields,
+  success: ControlSubscriptionAcknowledgement,
+  error: HostOverviewError,
+});
+
 export const VisualizerApi = RpcGroup.make(
   Health,
   HostOverview,
@@ -116,4 +135,6 @@ export const VisualizerApi = RpcGroup.make(
   CompleteWorkflowDeferred,
   StopWorkflowRun,
   ReadExecutionTrace,
+  SubscribeControl,
+  AcknowledgeControlSubscription,
 );

@@ -1,4 +1,6 @@
 import {
+  type ControlSubscriptionDelivery,
+  type ControlSubscriptionUpdate,
   type ExecutionTracePage,
   type HostOverview as HostOverviewSnapshot,
   type ProjectIdentity,
@@ -8,6 +10,7 @@ import {
   type WorkflowScheduleAllowedAction,
   type WorkflowScheduleSnapshot,
 } from "@kojo/control";
+import type { Stream } from "effect";
 import { Effect, Schema } from "effect";
 import { createResource, createSignal, Show } from "solid-js";
 import { m } from "../../../../i18n/messages";
@@ -26,6 +29,11 @@ import {
 } from "../../traces/components/execution-trace";
 
 export interface HostOverviewProps {
+  readonly acknowledgeTrace?: (delivery: ControlSubscriptionDelivery) => Effect.Effect<void>;
+  readonly followTrace?: (
+    selection: ExecutionTraceSelection,
+    afterSequence: number,
+  ) => Stream.Stream<ControlSubscriptionUpdate>;
   readonly loadOverview?: () => Promise<HostOverviewSnapshot | undefined>;
   readonly loadTrace?: (
     selection: ExecutionTraceSelection,
@@ -214,6 +222,10 @@ export function HostOverview(props: HostOverviewProps) {
                 }}
               />
               <ExecutionTrace
+                {...(props.acknowledgeTrace === undefined
+                  ? {}
+                  : { acknowledgeTrace: props.acknowledgeTrace })}
+                {...(props.followTrace === undefined ? {} : { followTrace: props.followTrace })}
                 {...(props.loadTrace === undefined ? {} : { loadTrace: props.loadTrace })}
                 {...(props.traceRefreshIntervalMs === undefined
                   ? {}

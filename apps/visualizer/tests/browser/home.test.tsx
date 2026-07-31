@@ -4,13 +4,14 @@ import {
   ProjectIdentity,
   WorkflowRunId,
 } from "@kojo/control";
-import { Schema } from "effect";
+import { Effect, Schema, Stream } from "effect";
 import { render } from "solid-js/web";
 import { afterEach, expect, test } from "vitest";
 import { page } from "vitest/browser";
 import { ColorModeProvider } from "../../src/contexts/preferences/services/color-mode";
 import { HostOverview } from "../../src/contexts/workflow-execution/host/components/host-overview";
 import { WorkflowRuns } from "../../src/contexts/workflow-execution/runs/components/workflow-runs";
+import { ExecutionTrace } from "../../src/contexts/workflow-execution/traces/components/execution-trace";
 import { setLocale } from "../../src/i18n/runtime";
 
 let dispose: VoidFunction | undefined;
@@ -601,42 +602,62 @@ test("renders live chronological Execution Trace evidence separately from the Wo
         payload: {},
       },
     ],
+    firstSequence: 1,
+    hasMore: false,
+    lastSequence: 1,
     nextCursor: null,
     highWaterSequence: 1,
     runState: "running",
     final: false,
   };
-  const livePage: ExecutionTracePage = {
-    ...firstPage,
-    events: [
-      ...firstPage.events,
-      {
-        eventId: "event-two",
-        runId: parentRun,
-        sequence: 2,
-        envelopeVersion: 1,
-        kind: "child.requested",
-        kindVersion: 1,
-        recordedAtMs: 2,
-        observedAtMs: null,
-        engineOperationId: null,
-        activityAttemptId: null,
-        boundaryId: null,
-        childRunId: childRun,
-        compatibility: "supported",
-        payload: {},
-      },
-    ],
-    highWaterSequence: 2,
+  const liveEvent = {
+    eventId: "event-two",
+    runId: parentRun,
+    sequence: 2,
+    envelopeVersion: 1,
+    kind: "child.requested" as const,
+    kindVersion: 1,
+    recordedAtMs: 2,
+    observedAtMs: null,
+    engineOperationId: null,
+    activityAttemptId: null,
+    boundaryId: null,
+    childRunId: childRun,
+    compatibility: "supported" as const,
+    payload: {},
   };
   let traceReads = 0;
+  const acknowledged: Array<{
+    readonly deliverySequence: number;
+    readonly subscriptionId: string;
+  }> = [];
   dispose = render(
     () => (
       <ColorModeProvider initialColorMode="light">
         <HostOverview
           loadOverview={() => Promise.resolve(overview)}
-          loadTrace={() => Promise.resolve(traceReads++ === 0 ? firstPage : livePage)}
-          traceRefreshIntervalMs={10}
+          loadTrace={() => Promise.resolve(traceReads++ === 0 ? firstPage : undefined)}
+          acknowledgeTrace={(delivery) =>
+            Effect.sync(() => {
+              acknowledged.push({
+                deliverySequence: delivery.deliverySequence,
+                subscriptionId: delivery.subscriptionId,
+              });
+            })
+          }
+          followTrace={(selection, afterSequence) => {
+            expect(selection).toEqual({ identity, runId: parentRun });
+            expect(afterSequence).toBe(1);
+            return Stream.make({
+              kind: "trace-event",
+              deliverySequence: 1,
+              identity,
+              runId: parentRun,
+              sequence: 2,
+              subscriptionId: "browser-subscription" as never,
+              event: liveEvent,
+            });
+          }}
         />
       </ColorModeProvider>
     ),
@@ -656,12 +677,139 @@ test("renders live chronological Execution Trace evidence separately from the Wo
     document.querySelector(`[data-run-id="${childRun}"]`)?.getAttribute("data-parent-run-id"),
   ).toBe(parentRun);
   await expect.poll(() => document.querySelectorAll("[data-event-sequence]").length).toBe(2);
+  expect(traceReads).toBe(1);
   expect(
     Array.from(document.querySelectorAll("[data-event-sequence]")).map((event) =>
       event.getAttribute("data-event-sequence"),
     ),
   ).toEqual(["1", "2"]);
   await expect.element(page.getByText("child.requested@1")).toBeVisible();
+  await expect
+    .poll(() => acknowledged)
+    .toEqual([{ deliverySequence: 1, subscriptionId: "browser-subscription" }]);
+});
+
+test("acknowledges a trace resync only after its authoritative reload succeeds", async () => {
+  setLocale("en", { reload: false });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+    "00000000-0000-7000-8000-000000000021",
+  );
+  const runId = Schema.decodeUnknownSync(WorkflowRunId)("00000000-0000-7000-8000-000000000022");
+  const page: ExecutionTracePage = {
+    events: [],
+    final: false,
+    firstSequence: null,
+    hasMore: false,
+    highWaterSequence: 0,
+    lastSequence: null,
+    nextCursor: null,
+    runState: "running",
+  };
+  let loads = 0;
+  let resolveReload: ((value: ExecutionTracePage | undefined) => void) | undefined;
+  let follows = 0;
+  const acknowledgements: Array<number> = [];
+  dispose = render(
+    () => (
+      <ColorModeProvider initialColorMode="light">
+        <ExecutionTrace
+          selection={{ identity, runId }}
+          loadTrace={() => {
+            loads += 1;
+            if (loads === 1) return Promise.resolve(page);
+            return new Promise((resolve) => {
+              resolveReload = resolve;
+            });
+          }}
+          followTrace={() => {
+            follows += 1;
+            return follows === 1
+              ? Stream.make({
+                  deliverySequence: 1,
+                  kind: "resync-required" as const,
+                  highWaterSequence: 4,
+                  identity,
+                  runId,
+                  subscriptionId: "resync-success" as never,
+                })
+              : Stream.empty;
+          }}
+          acknowledgeTrace={(delivery) =>
+            Effect.sync(() => {
+              acknowledgements.push(delivery.deliverySequence);
+            })
+          }
+        />
+      </ColorModeProvider>
+    ),
+    root,
+  );
+
+  await expect.poll(() => loads).toBe(2);
+  expect(acknowledgements).toEqual([]);
+  resolveReload?.(page);
+  await expect.poll(() => acknowledgements).toEqual([1]);
+});
+
+test("does not acknowledge a trace resync whose authoritative reload fails", async () => {
+  setLocale("en", { reload: false });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+    "00000000-0000-7000-8000-000000000023",
+  );
+  const runId = Schema.decodeUnknownSync(WorkflowRunId)("00000000-0000-7000-8000-000000000024");
+  const page: ExecutionTracePage = {
+    events: [],
+    final: false,
+    firstSequence: null,
+    hasMore: false,
+    highWaterSequence: 0,
+    lastSequence: null,
+    nextCursor: null,
+    runState: "running",
+  };
+  let loads = 0;
+  let follows = 0;
+  const acknowledgements: Array<number> = [];
+  dispose = render(
+    () => (
+      <ColorModeProvider initialColorMode="light">
+        <ExecutionTrace
+          selection={{ identity, runId }}
+          loadTrace={() => {
+            loads += 1;
+            return loads === 1 ? Promise.resolve(page) : Promise.reject(new Error("reload failed"));
+          }}
+          followTrace={() => {
+            follows += 1;
+            return follows === 1
+              ? Stream.make({
+                  deliverySequence: 1,
+                  kind: "resync-required" as const,
+                  highWaterSequence: 4,
+                  identity,
+                  runId,
+                  subscriptionId: "resync-failure" as never,
+                })
+              : Stream.empty;
+          }}
+          acknowledgeTrace={(delivery) =>
+            Effect.sync(() => {
+              acknowledgements.push(delivery.deliverySequence);
+            })
+          }
+        />
+      </ColorModeProvider>
+    ),
+    root,
+  );
+
+  await expect.poll(() => loads).toBe(2);
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  expect(acknowledgements).toEqual([]);
 });
 
 test("navigates between a Schedule Occurrence and its linked resources", async () => {

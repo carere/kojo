@@ -71,7 +71,10 @@ export default defineConfig({
           browser: {
             enabled: true,
             headless: true,
-            provider: playwright(),
+            // Bun materializes the provider's exact Vitest peer as a second
+            // virtual package. Both are 4.1.10 at runtime; erase only that
+            // duplicate-private-type identity at this configuration boundary.
+            provider: playwright() as never,
             instances: [{ browser: "chromium" }],
           },
         },

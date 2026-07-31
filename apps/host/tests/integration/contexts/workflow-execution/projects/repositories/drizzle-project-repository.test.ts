@@ -15,6 +15,7 @@ import {
 } from "../../../../../../src/contexts/workflow-execution/projects/repositories/drizzle-project-repository";
 import { ProjectRepository } from "../../../../../../src/contexts/workflow-execution/projects/repositories/project-repository";
 import { WorkflowRunRepository } from "../../../../../../src/contexts/workflow-execution/runs/repositories/workflow-run-repository";
+import { toExecutionTraceEvent } from "../../../../../../src/contexts/workflow-execution/runs/use-cases/manage-workflow-runs";
 import { WorkflowScheduleRepository } from "../../../../../../src/contexts/workflow-execution/schedules/repositories/workflow-schedule-repository";
 import { nextWorkflowScheduleOccurrence } from "../../../../../../src/contexts/workflow-execution/schedules/services/schedule-timing";
 
@@ -517,6 +518,51 @@ describe("Drizzle Execution Trace reads", () => {
         ]),
       });
     }).pipe(Effect.provide(DrizzleWorkflowRunRepositoryLive)),
+  );
+
+  it.effect(
+    "keeps pre-catalog persisted v1 Event identities readable as compatibility aliases",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() =>
+          initializedProject("kojo-execution-trace-legacy-"),
+        );
+        yield* Effect.sync(() => {
+          const database = new Database(fixture.databasePath);
+          database.exec(
+            "INSERT INTO kojo_workflow_runs(run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision, engine_reference_version, engine_reference_json, engine_reference_sha256, trigger_kind, state, last_event_sequence, row_version, accepted_at_ms, updated_at_ms) VALUES ('legacy-run', 'legacy-start', zeroblob(32), 'workflow', 'revision', 1, '{\"execution\":\"legacy\"}', randomblob(32), 'manual', 'running', 5, 1, 1, 1); INSERT INTO kojo_execution_events(event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms, payload_encoding_version, payload_schema_identity, payload_json, payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256) VALUES ('legacy-accepted', 'legacy-run', 1, 1, 'run.accepted', 1, 1, 1, 'schema', '{}', 1, '{}', zeroblob(32)); INSERT INTO kojo_execution_events(event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms, payload_encoding_version, payload_schema_identity, payload_json, payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256) VALUES ('legacy-child', 'legacy-run', 2, 1, 'child.started', 1, 2, 1, 'schema', '{}', 1, '{}', zeroblob(32)); INSERT INTO kojo_execution_events(event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms, payload_encoding_version, payload_schema_identity, payload_json, payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256) VALUES ('legacy-deferred', 'legacy-run', 3, 1, 'workflow-deferred.completed', 1, 3, 1, 'schema', '{}', 1, '{}', zeroblob(32)); INSERT INTO kojo_execution_events(event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms, payload_encoding_version, payload_schema_identity, payload_json, payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256) VALUES ('legacy-recovery', 'legacy-run', 4, 1, 'run.engine-recovery-queued', 1, 4, 1, 'schema', '{}', 1, '{}', zeroblob(32)); INSERT INTO kojo_execution_events(event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms, payload_encoding_version, payload_schema_identity, payload_json, payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256) VALUES ('legacy-late', 'legacy-run', 5, 1, 'run.engine-late-outcome', 1, 5, 1, 'schema', '{}', 1, '{}', zeroblob(32))",
+          );
+          database.close();
+        });
+        const repository = yield* WorkflowRunRepository;
+        const trace = yield* repository.readTrace(fixture.project, "legacy-run", {
+          filters: {
+            activityAttemptIds: [],
+            childRunIds: [],
+            engineOperationIds: [],
+            kinds: [],
+          },
+          limit: 100,
+        });
+
+        expect(trace?.events.map(toExecutionTraceEvent)).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ kind: "child.started", compatibility: "supported" }),
+            expect.objectContaining({
+              kind: "workflow-deferred.completed",
+              compatibility: "supported",
+            }),
+            expect.objectContaining({
+              kind: "run.engine-recovery-queued",
+              compatibility: "supported",
+            }),
+            expect.objectContaining({
+              kind: "run.engine-late-outcome",
+              compatibility: "supported",
+            }),
+          ]),
+        );
+      }).pipe(Effect.provide(DrizzleWorkflowRunRepositoryLive)),
   );
 });
 

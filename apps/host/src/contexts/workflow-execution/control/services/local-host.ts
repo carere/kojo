@@ -3,10 +3,7 @@ import { chmod, open, readFile, unlink } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname } from "node:path";
 import {
-  type ControlSubscriptionInput,
-  type ControlSubscriptionUpdate,
   type ExecutionTraceQueryResult,
-  type ExecutionTraceReadInput,
   KojoControl,
   type ProjectIdentity,
   type ProjectMutationResult,
@@ -23,7 +20,7 @@ import {
   type WorkflowScheduleOccurrenceQueryResult,
   type WorkflowScheduleQueryResult,
 } from "@kojo/control";
-import { Effect, Exit, Layer, Schedule, Scope, Stream } from "effect";
+import { Effect, Exit, Layer, Scope, Stream } from "effect";
 import { RpcServer } from "effect/unstable/rpc";
 import {
   forgetProject,
@@ -62,7 +59,17 @@ import {
 } from "../../schedules/use-cases/manage-workflow-schedules";
 import type { HostIdentity } from "../models/host-identity";
 import { HOST_INFORMATION } from "../models/host-information";
+import { followControlSubscription } from "../use-cases/follow-control-subscription";
 import { getHostCapabilities, getHostInformation } from "../use-cases/get-host-information";
+import {
+  ControlSubscriptionDeliveryWindow,
+  type ControlSubscriptionDeliveryWindowShape,
+  makeControlSubscriptionDeliveryWindow,
+} from "./control-subscription-delivery-window";
+import {
+  ControlSubscriptionReader,
+  type ControlSubscriptionReaderShape,
+} from "./control-subscription-reader";
 import { HostDiagnosticLogger, type HostRequestDiagnosticEvent } from "./host-diagnostic-logger";
 import { prepareHostStoreDirectory } from "./host-store";
 
@@ -78,7 +85,7 @@ export interface KojoHostServer {
 export interface KojoHostOptions {
   readonly diagnosticPath: string;
   readonly lockPath?: string;
-  readonly serverLayer: Layer.Layer<never, unknown>;
+  readonly serverLayer: Layer.Layer<never, unknown, ControlSubscriptionDeliveryWindow>;
   readonly socketPath: string;
 }
 
@@ -180,72 +187,36 @@ const workflowScheduleDiagnostic =
     ...(result.ok ? {} : { safeErrorCode: result.error.code }),
   });
 
-/**
- * This is intentionally an advisory stream. Every poll reads committed Events
- * by durable sequence, so a blocked or disconnected client cannot delay the
- * Project Runtime that appends them. A burst larger than the bounded delivery
- * page produces one explicit resync request instead of unbounded buffering.
- */
-export const makeControlSubscription =
-  <R>(
-    readTrace: (
-      input: ExecutionTraceReadInput,
-    ) => Effect.Effect<ExecutionTraceQueryResult, never, R>,
-  ) =>
-  (input: ControlSubscriptionInput) => {
-    const selectedProjects = new Set(input.projects);
-    const sequences = new Map<string, number>();
-    const traces = input.topics.includes("traces")
-      ? input.traces.filter((trace) => selectedProjects.has(trace.identity))
-      : [];
-    for (const trace of traces)
-      sequences.set(`${trace.identity}:${trace.runId}`, trace.afterSequence);
-    const poll = Effect.gen(function* () {
-      const updates: Array<ControlSubscriptionUpdate> = [];
-      for (const trace of traces) {
-        const key = `${trace.identity}:${trace.runId}`;
-        const afterSequence = sequences.get(key) ?? trace.afterSequence;
-        const result = yield* readTrace({
-          identity: trace.identity,
-          runId: trace.runId,
-          afterSequence,
-          filters: {
-            activityAttemptIds: [],
-            childRunIds: [],
-            engineOperationIds: [],
-            kinds: [],
-          },
-          limit: 100,
-        });
-        if (!result.ok) continue;
-        if (result.page.nextCursor !== null) {
-          sequences.set(key, result.page.highWaterSequence);
-          updates.push({
-            kind: "resync-required",
-            identity: trace.identity,
-            runId: trace.runId,
-            highWaterSequence: result.page.highWaterSequence,
-          });
-          continue;
-        }
-        for (const event of result.page.events) {
-          sequences.set(key, event.sequence);
-          updates.push({
-            kind: "trace-event",
-            identity: trace.identity,
-            runId: trace.runId,
-            sequence: event.sequence,
-            event,
-          });
-        }
-      }
-      return updates;
-    });
-    return Stream.fromEffect(poll).pipe(
-      Stream.repeat(Schedule.spaced("100 millis")),
-      Stream.flatMap((updates) => Stream.fromIterable(updates)),
-    );
-  };
+const controlResourceFingerprint = (
+  identity: ProjectIdentity,
+  topic: "readiness" | "schedules" | "runs",
+) => {
+  switch (topic) {
+    case "readiness":
+      return Effect.map(assessProjectReadiness(identity), JSON.stringify);
+    case "schedules":
+      return Effect.map(
+        listWorkflowSchedules({ conditions: [], identity, workflowKeys: [] }),
+        JSON.stringify,
+      );
+    case "runs":
+      return Effect.map(
+        listWorkflowRuns({ identity, states: [], workflowKeys: [], limit: 200 }),
+        JSON.stringify,
+      );
+  }
+};
+
+/** Transport-neutral subscription policy lives in the workflow-execution use case. */
+export const makeControlSubscription = (
+  reader: ControlSubscriptionReaderShape<unknown>,
+  deliveryWindow: ControlSubscriptionDeliveryWindowShape,
+) => followControlSubscription<unknown>(reader, deliveryWindow);
+
+const ControlSubscriptionReaderLive = Layer.succeed(ControlSubscriptionReader, {
+  readResourceFingerprint: controlResourceFingerprint,
+  readTrace: readExecutionTrace,
+});
 
 const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
   KojoControl.toLayer(
@@ -422,7 +393,28 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           readExecutionTrace(input),
           workflowRunDiagnostic(input.identity),
         ),
-      SubscribeControl: (input) => makeControlSubscription(readExecutionTrace)(input),
+      SubscribeControl: (input, options) =>
+        Stream.unwrap(
+          withHostRequestDiagnostic(
+            hostIdentity,
+            "SubscribeControl",
+            String(options.requestId),
+            Effect.all([ControlSubscriptionReader, ControlSubscriptionDeliveryWindow]).pipe(
+              Effect.map(([reader, deliveryWindow]) =>
+                makeControlSubscription(reader, deliveryWindow)(input),
+              ),
+            ),
+          ),
+        ),
+      AcknowledgeControlSubscription: (delivery, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "AcknowledgeControlSubscription",
+          String(options.requestId),
+          Effect.flatMap(ControlSubscriptionDeliveryWindow, (window) =>
+            window.acknowledge(delivery),
+          ),
+        ),
       ResumeWorkflowRun: ({ identity, runId, value, requestKey }, options) =>
         withHostRequestDiagnostic(
           hostIdentity,
@@ -541,10 +533,13 @@ export const makeKojoControlServerLayer = <ProtocolError, ProtocolRequirements>(
   protocol: Layer.Layer<RpcServer.Protocol, ProtocolError, ProtocolRequirements>,
   diagnosticLogger: Layer.Layer<HostDiagnosticLogger>,
   hostIdentity: HostIdentity,
+  subscriptionReader: Layer.Layer<ControlSubscriptionReader> = ControlSubscriptionReaderLive,
 ) =>
   RpcServer.layer(KojoControl).pipe(
     Layer.provide([
-      makeKojoControlHandlers(hostIdentity).pipe(Layer.provide(diagnosticLogger)),
+      makeKojoControlHandlers(hostIdentity).pipe(
+        Layer.provide([diagnosticLogger, subscriptionReader]),
+      ),
       protocol,
     ]),
   );
@@ -556,6 +551,7 @@ export const startKojoHost = async (options: KojoHostOptions): Promise<KojoHostS
   if (dirname(lockPath) !== socketDirectory) await prepareHostStoreDirectory(dirname(lockPath));
   const releaseLock = await acquireHostLock(lockPath);
   let scope: Scope.Closeable | undefined;
+  const deliveryWindow = makeControlSubscriptionDeliveryWindow();
   let mayOwnSocket = false;
   try {
     if (await socketAcceptsConnections(options.socketPath)) {
@@ -566,7 +562,14 @@ export const startKojoHost = async (options: KojoHostOptions): Promise<KojoHostS
     scope = Effect.runSync(Scope.make());
     const previousUmask = process.umask(0o077);
     try {
-      await Effect.runPromise(Layer.buildWithScope(options.serverLayer, scope));
+      await Effect.runPromise(
+        Layer.buildWithScope(
+          options.serverLayer.pipe(
+            Layer.provide(Layer.succeed(ControlSubscriptionDeliveryWindow, deliveryWindow)),
+          ),
+          scope,
+        ),
+      );
     } finally {
       process.umask(previousUmask);
     }
@@ -579,6 +582,7 @@ export const startKojoHost = async (options: KojoHostOptions): Promise<KojoHostS
       socketPath: options.socketPath,
       stop: async () => {
         try {
+          await Effect.runPromise(deliveryWindow.shutdown);
           await Effect.runPromise(Scope.close(serverScope, Exit.void));
         } finally {
           try {

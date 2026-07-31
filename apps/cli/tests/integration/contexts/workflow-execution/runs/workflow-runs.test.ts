@@ -864,16 +864,26 @@ const finishKojoCliWithin = async (
 const startTraceProxy = async (
   socketPath: string,
   upstreamSocketPath: string,
-  droppedConnectionNumbers: ReadonlySet<number>,
+  options: {
+    /** Drop after the Host starts the selected live stream, never by socket number. */
+    readonly dropAfterSubscriptionChunk?: ReadonlySet<number>;
+    /** Drop only an acknowledgement RPC response after the Host has processed it. */
+    readonly dropAcknowledgementResponse?: ReadonlySet<number>;
+    readonly dropImmediately?: ReadonlySet<number>;
+  },
 ) => {
   let connections = 0;
   let droppedConnections = 0;
+  let droppedAcknowledgementResponses = 0;
+  let droppedSubscriptionChunks = 0;
+  let acknowledgementRequests = 0;
+  let subscriptionRequests = 0;
   const sockets = new Set<Socket>();
   const server = createServer((downstream) => {
     connections += 1;
     sockets.add(downstream);
     downstream.once("close", () => sockets.delete(downstream));
-    if (droppedConnectionNumbers.has(connections)) {
+    if (options.dropImmediately?.has(connections)) {
       droppedConnections += 1;
       downstream.destroy();
       return;
@@ -883,7 +893,94 @@ const startTraceProxy = async (
     upstream.once("close", () => sockets.delete(upstream));
     upstream.once("error", () => downstream.destroy());
     downstream.once("error", () => upstream.destroy());
-    downstream.pipe(upstream).pipe(downstream);
+    const requests = new Map<
+      string | number,
+      { readonly operation: "acknowledgement" | "subscription"; readonly ordinal: number }
+    >();
+    let downstreamBuffer = "";
+    const requestFrames = (chunk: Buffer) => {
+      downstreamBuffer += chunk.toString("utf8");
+      const frames = downstreamBuffer.split("\n");
+      downstreamBuffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        try {
+          const request = JSON.parse(frame) as {
+            _tag?: string;
+            id?: string | number;
+            tag?: string;
+          };
+          if (request._tag !== "Request" || request.id === undefined) continue;
+          if (request.tag === "SubscribeControl") {
+            requests.set(request.id, {
+              operation: "subscription",
+              ordinal: ++subscriptionRequests,
+            });
+          }
+          if (request.tag === "AcknowledgeControlSubscription") {
+            requests.set(request.id, {
+              operation: "acknowledgement",
+              ordinal: ++acknowledgementRequests,
+            });
+          }
+        } catch {
+          // The proxy only recognizes complete NDJSON request frames; it never
+          // changes or invents protocol data when an unrelated frame is split.
+        }
+      }
+    };
+    downstream.on("data", requestFrames);
+    let upstreamBuffer = "";
+    upstream.on("data", (chunk) => {
+      upstreamBuffer += chunk.toString("utf8");
+      const frames = upstreamBuffer.split("\n");
+      upstreamBuffer = frames.pop() ?? "";
+      let dropBeforeForward = false;
+      let dropAfterForward = false;
+      for (const frame of frames) {
+        try {
+          const response = JSON.parse(frame) as {
+            _tag?: string;
+            requestId?: string | number;
+          };
+          const request =
+            response.requestId === undefined ? undefined : requests.get(response.requestId);
+          if (request === undefined) continue;
+          if (
+            request.operation === "acknowledgement" &&
+            response._tag === "Exit" &&
+            options.dropAcknowledgementResponse?.has(request.ordinal)
+          ) {
+            droppedAcknowledgementResponses += 1;
+            dropBeforeForward = true;
+          }
+          if (
+            request.operation === "subscription" &&
+            response._tag === "Chunk" &&
+            options.dropAfterSubscriptionChunk?.has(request.ordinal)
+          ) {
+            droppedSubscriptionChunks += 1;
+            dropAfterForward = true;
+          }
+        } catch {
+          // Forward unknown protocol frames unchanged.
+        }
+      }
+      if (dropBeforeForward) {
+        droppedConnections += 1;
+        upstream.destroy();
+        downstream.destroy();
+        return;
+      }
+      downstream.write(chunk);
+      if (dropAfterForward) {
+        droppedConnections += 1;
+        queueMicrotask(() => {
+          upstream.destroy();
+          downstream.destroy();
+        });
+      }
+    });
+    downstream.pipe(upstream);
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -898,6 +995,12 @@ const startTraceProxy = async (
     },
     get droppedConnections() {
       return droppedConnections;
+    },
+    get droppedAcknowledgementResponses() {
+      return droppedAcknowledgementResponses;
+    },
+    get droppedSubscriptionChunks() {
+      return droppedSubscriptionChunks;
     },
     stop: async () => {
       for (const socket of sockets) socket.destroy();
@@ -1044,7 +1147,8 @@ it("starts, redelivers, lists, shows, and follows finalized Execution Trace hist
     project,
   );
   expect(second.exitCode).toBe(0);
-  expect(JSON.parse(second.stdout).result.run.runId).not.toBe(firstResult.run.runId);
+  const secondRunId = JSON.parse(second.stdout).result.run.runId as string;
+  expect(secondRunId).not.toBe(firstResult.run.runId);
 
   const failedRunIds: Array<string> = [];
   for (const workflowKey of ["declared-failure", "defect", "invalid-result", "retry-exhausted"]) {
@@ -1086,12 +1190,25 @@ it("starts, redelivers, lists, shows, and follows finalized Execution Trace hist
   expect(firstTracePage.exitCode, `${firstTracePage.stdout}${firstTracePage.stderr}`).toBe(0);
   const firstTracePageResult = JSON.parse(firstTracePage.stdout).result.page as {
     readonly events: ReadonlyArray<{ readonly kind: string; readonly sequence: number }>;
+    readonly firstSequence: number | null;
+    readonly hasMore: boolean;
+    readonly lastSequence: number | null;
     readonly nextCursor: string | null;
   };
   expect(firstTracePageResult.events).toEqual([
     expect.objectContaining({ kind: "run.accepted", sequence: 1 }),
   ]);
+  expect(firstTracePageResult).toMatchObject({
+    firstSequence: 1,
+    hasMore: true,
+    lastSequence: 1,
+  });
   expect(firstTracePageResult.nextCursor).toEqual(expect.any(String));
+  expect(
+    JSON.parse(
+      Buffer.from(firstTracePageResult.nextCursor as string, "base64url").toString("utf8"),
+    ),
+  ).toMatchObject({ resourceKind: "execution-trace" });
 
   const continuedTracePage = await runKojoCli(
     [
@@ -1116,6 +1233,14 @@ it("starts, redelivers, lists, shows, and follows finalized Execution Trace hist
       }>
     )[0],
   ).toMatchObject({ sequence: 2 });
+
+  const wrongRunCursor = await runKojoCli(
+    ["trace", "show", secondRunId, "--cursor", firstTracePageResult.nextCursor as string, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(wrongRunCursor.exitCode).toBe(4);
+  expect(JSON.parse(wrongRunCursor.stdout).error.code).toBe("execution-trace-cursor-run-mismatch");
 
   const followedTrace = await runKojoCli(
     ["trace", "follow", firstResult.run.runId, "--json"],
@@ -1156,11 +1281,9 @@ it("bounds trace follow transport retries and reports an unavailable Host", asyn
   await writeFile(join(project, "kojo.config.ts"), configuration);
   const host = await startKojoHostProcess();
   cleanups.push(host.stop);
-  const proxy = await startTraceProxy(
-    join(directory.path, "trace-proxy.sock"),
-    host.socketPath,
-    new Set([1, 2, 3, 4, 5]),
-  );
+  const proxy = await startTraceProxy(join(directory.path, "trace-proxy.sock"), host.socketPath, {
+    dropImmediately: new Set([1, 2, 3, 4, 5]),
+  });
   cleanups.push(proxy.stop);
 
   expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
@@ -1186,7 +1309,9 @@ it("follows history first, resumes after one lost transport request, and never d
   const host = await startKojoHostProcess();
   cleanups.push(host.stop);
   const proxyPath = join(directory.path, "trace-proxy.sock");
-  const proxy = await startTraceProxy(proxyPath, host.socketPath, new Set([2]));
+  const proxy = await startTraceProxy(proxyPath, host.socketPath, {
+    dropAfterSubscriptionChunk: new Set([1]),
+  });
   cleanups.push(proxy.stop);
 
   expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
@@ -1203,7 +1328,7 @@ it("follows history first, resumes after one lost transport request, and never d
 
   expect(result.exitCode, `${result.stdout}${result.stderr}`).toBe(0);
   expect(proxy.droppedConnections).toBe(1);
-  expect(proxy.connections).toBeGreaterThanOrEqual(3);
+  expect(proxy.droppedSubscriptionChunks).toBe(1);
   const events = result.stdout
     .trim()
     .split("\n")
@@ -1217,6 +1342,50 @@ it("follows history first, resumes after one lost transport request, and never d
   expect(events.map((event) => event.sequence)).toEqual(
     [...events].map((event) => event.sequence).sort((a, b) => a - b),
   );
+}, 10_000);
+
+it("retries a lost acknowledgement response without falsely advancing trace progress", async () => {
+  const directory = await makeTemporaryDirectory("kojo-trace-follow-ack-loss-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), configuration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+  const proxyPath = join(directory.path, "trace-proxy.sock");
+  const proxy = await startTraceProxy(proxyPath, host.socketPath, {
+    dropAcknowledgementResponse: new Set([1]),
+  });
+  cleanups.push(proxy.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "slow", "--input", '{"message":"acknowledge"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = JSON.parse(started.stdout).result.run.runId as string;
+  const followed = startKojoCli(["trace", "follow", runId, "--json"], proxyPath, project);
+  await followed.waitForStdout('"sequence":1');
+  const result = await finishKojoCliWithin(
+    followed,
+    6_000,
+    "trace follow after a lost acknowledgement response",
+  );
+
+  expect(result.exitCode, `${result.stdout}${result.stderr}`).toBe(0);
+  expect(proxy.droppedAcknowledgementResponses).toBe(1);
+  const events = result.stdout
+    .trim()
+    .split("\n")
+    .map(
+      (line) =>
+        JSON.parse(line).result.event as { readonly kind: string; readonly sequence: number },
+    );
+  expect(events.map((event) => event.kind)).toContain("run.completed");
+  expect(new Set(events.map((event) => event.sequence)).size).toBe(events.length);
 }, 10_000);
 
 it("runs Commands in a durable logical Sandbox and records safe Artifact-backed trace evidence", async () => {

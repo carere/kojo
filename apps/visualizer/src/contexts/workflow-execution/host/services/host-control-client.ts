@@ -1,4 +1,6 @@
 import type {
+  ControlSubscriptionInput,
+  ControlSubscriptionUpdate,
   ExecutionTraceQueryResult,
   ExecutionTraceReadInput,
   HostOverview,
@@ -17,7 +19,7 @@ import {
   makeDefaultLocalClient,
   type UnsupportedControlCapabilityError,
 } from "@kojo/control/local-client";
-import { Context, Effect, Layer } from "effect";
+import { Context, Effect, Layer, type Stream } from "effect";
 
 export interface HostControlClientShape {
   readonly getHostOverview: Effect.Effect<
@@ -30,6 +32,15 @@ export interface HostControlClientShape {
     ExecutionTraceQueryResult,
     LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
   >;
+  readonly subscribeControl: (
+    input: ControlSubscriptionInput,
+  ) => Stream.Stream<
+    ControlSubscriptionUpdate,
+    LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+  >;
+  readonly acknowledgeControlSubscription: ReturnType<
+    typeof makeDefaultLocalClient
+  >["acknowledgeControlSubscription"];
   readonly enableWorkflowSchedule: ReturnType<
     typeof makeDefaultLocalClient
   >["enableWorkflowSchedule"];
@@ -111,6 +122,19 @@ export const HostControlClientLive = Layer.succeed(HostControlClient, {
       ExecutionTraceQueryResult,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >,
+  subscribeControl: (input) =>
+    makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath()).subscribeControl(
+      input,
+    ) as Stream.Stream<
+      ControlSubscriptionUpdate,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >,
+  acknowledgeControlSubscription: (delivery) =>
+    Effect.suspend(() =>
+      makeDefaultLocalClient(
+        process.env.KOJO_HOST_SOCKET ?? defaultSocketPath(),
+      ).acknowledgeControlSubscription(delivery),
+    ),
   enableWorkflowSchedule: (identity, scheduleKey, scheduleRevision, requestKey) =>
     Effect.suspend(() =>
       makeDefaultLocalClient(

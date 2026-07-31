@@ -483,15 +483,10 @@ describe("Local Workflow backend ownership", () => {
           });
           try {
             expect(
-              database
-                .query("SELECT kind, payload_json FROM kojo_execution_events WHERE run_id = ?")
-                .all(runId),
-            ).toEqual(
+              database.query("SELECT kind FROM kojo_execution_events WHERE run_id = ?").all(runId),
+            ).not.toEqual(
               expect.arrayContaining([
-                expect.objectContaining({
-                  kind: "run.stop-needs-attention",
-                  payload_json: expect.stringContaining("controlled provider cleanup failed"),
-                }),
+                expect.objectContaining({ kind: "run.stop-needs-attention" }),
               ]),
             );
           } finally {
