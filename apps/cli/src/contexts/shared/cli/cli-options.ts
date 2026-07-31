@@ -12,6 +12,9 @@ export interface ParsedOptions {
   readonly requestKey?: string;
   readonly revision?: string;
   readonly reveal: boolean;
+  readonly includeArtifacts: boolean;
+  readonly acknowledgeSensitiveExport: boolean;
+  readonly output?: string;
   readonly scheduleKeys: ReadonlyArray<string>;
   readonly conditions: ReadonlyArray<string>;
   readonly outcomes: ReadonlyArray<string>;
@@ -32,6 +35,8 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
   let requestKey: string | undefined;
   let revision: string | undefined;
   let reveal = false;
+  let includeArtifacts = false;
+  let acknowledgeSensitiveExport = false;
   const conditions: Array<string> = [];
   const outcomes: Array<string> = [];
   let cursor: string | undefined;
@@ -39,6 +44,7 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
   let value: string | undefined;
   let valueFile: string | undefined;
   let limit: string | undefined;
+  let output: string | undefined;
   const states: Array<string> = [];
   const scheduleKeys: Array<string> = [];
   const workflowKeys: Array<string> = [];
@@ -47,6 +53,16 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
     if (argument === "--reveal") {
       if (reveal) return undefined;
       reveal = true;
+      continue;
+    }
+    if (argument === "--include-artifacts") {
+      if (includeArtifacts) return undefined;
+      includeArtifacts = true;
+      continue;
+    }
+    if (argument === "--acknowledge-sensitive-export") {
+      if (acknowledgeSensitiveExport) return undefined;
+      acknowledgeSensitiveExport = true;
       continue;
     }
     if (
@@ -63,6 +79,7 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
         "--value",
         "--value-file",
         "--limit",
+        "--output",
         "--state",
         "--schedule",
         "--workflow",
@@ -99,6 +116,9 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
     } else if (argument === "--limit") {
       if (limit !== undefined) return undefined;
       limit = optionValue;
+    } else if (argument === "--output") {
+      if (output !== undefined) return undefined;
+      output = optionValue;
     } else if (argument === "--revision") {
       if (revision !== undefined) return undefined;
       revision = optionValue;
@@ -125,6 +145,9 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
     requestKey,
     revision,
     reveal,
+    includeArtifacts,
+    acknowledgeSensitiveExport,
+    output,
     conditions,
     outcomes,
     cursor,

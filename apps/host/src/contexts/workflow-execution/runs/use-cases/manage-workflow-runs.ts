@@ -2,7 +2,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
   EXECUTION_EVENT_KINDS_V1,
+  type ExecutionArtifact,
+  type ExecutionArtifactDownloadInput,
+  type ExecutionArtifactDownloadResult,
   type ExecutionTraceEvent,
+  type ExecutionTraceExportInput,
+  type ExecutionTraceExportResult,
   type ExecutionTraceQueryResult,
   type ExecutionTraceReadInput,
   LEGACY_PERSISTED_EXECUTION_EVENT_KINDS_V1,
@@ -34,10 +39,12 @@ import {
 } from "../../projects/services/workflow-backend";
 import { agentSessionSensitivityPaths, maskPayload } from "../models/sensitivity-map";
 import {
+  type StoredExecutionArtifact,
   type StoredWorkflowRunSnapshot,
   type WorkflowRunOutcome,
   WorkflowRunRepository,
 } from "../repositories/workflow-run-repository";
+import { ExecutionArtifactStore } from "../services/execution-artifact-store";
 import { decodeExecutionTraceCursor, encodeExecutionTraceCursor } from "./execution-trace-cursor";
 
 const stableJson = (value: unknown): string => {
@@ -759,22 +766,25 @@ const legacyPersistedExecutionEventKindsV1 = new Set<string>(
   LEGACY_PERSISTED_EXECUTION_EVENT_KINDS_V1,
 );
 
-export const toExecutionTraceEvent = (event: {
-  readonly activityAttemptId: string | null;
-  readonly boundaryId: string | null;
-  readonly childRunId: string | null;
-  readonly engineOperationId: string | null;
-  readonly envelopeVersion: number;
-  readonly eventId: string;
-  readonly kind: string;
-  readonly kindVersion: number;
-  readonly observedAtMs: number | null;
-  readonly payload: unknown;
-  readonly payloadSensitivityMap: Parameters<typeof maskPayload>[1];
-  readonly recordedAtMs: number;
-  readonly runId: string;
-  readonly sequence: number;
-}): ExecutionTraceEvent => {
+const toExecutionTraceEventWithPayloads = (
+  event: {
+    readonly activityAttemptId: string | null;
+    readonly boundaryId: string | null;
+    readonly childRunId: string | null;
+    readonly engineOperationId: string | null;
+    readonly envelopeVersion: number;
+    readonly eventId: string;
+    readonly kind: string;
+    readonly kindVersion: number;
+    readonly observedAtMs: number | null;
+    readonly payload: unknown;
+    readonly payloadSensitivityMap: Parameters<typeof maskPayload>[1];
+    readonly recordedAtMs: number;
+    readonly runId: string;
+    readonly sequence: number;
+  },
+  revealPayloads: boolean,
+): ExecutionTraceEvent => {
   const compatibility =
     event.envelopeVersion !== 1
       ? "envelope-version-unsupported"
@@ -795,15 +805,20 @@ export const toExecutionTraceEvent = (event: {
     kindVersion: event.kindVersion,
     observedAtMs: event.observedAtMs,
     // Unknown schema versions fail closed even if a stale map happened to decode.
-    payload:
-      compatibility === "supported"
-        ? maskPayload(event.payload, event.payloadSensitivityMap)
-        : { _tag: "sensitive-value-masked" },
+    payload: revealPayloads
+      ? event.payload
+      : compatibility !== "supported"
+        ? { _tag: "sensitive-value-masked" }
+        : maskPayload(event.payload, event.payloadSensitivityMap),
     recordedAtMs: event.recordedAtMs,
     runId: event.runId as never,
     sequence: event.sequence,
   };
 };
+
+export const toExecutionTraceEvent = (
+  event: Parameters<typeof toExecutionTraceEventWithPayloads>[0],
+) => toExecutionTraceEventWithPayloads(event, false);
 
 const traceError = (
   identity: ProjectIdentity,
@@ -917,6 +932,210 @@ export const readExecutionTrace = (
         lastSequence: events.at(-1)?.sequence ?? null,
         nextCursor,
         runState: page.runState,
+      },
+    };
+  });
+
+const toExecutionArtifact = (artifact: StoredExecutionArtifact): ExecutionArtifact => ({
+  artifactId: artifact.artifactId,
+  byteSize: artifact.byteSize,
+  condition: artifact.condition,
+  createdAtMs: artifact.createdAtMs,
+  displayName: artifact.displayName,
+  mediaType: artifact.mediaType,
+  sha256: Buffer.from(artifact.sha256).toString("hex"),
+  unavailableAtMs: artifact.unavailableAtMs,
+  unavailableReasonCode: artifact.unavailableReasonCode,
+});
+
+const artifactError = (
+  identity: ProjectIdentity,
+  runId: string,
+  artifactId: string,
+  code: Extract<
+    WorkflowRunOperationError["code"],
+    "execution-artifact-not-found" | "execution-artifact-unavailable"
+  >,
+  message: string,
+  next: string,
+): WorkflowRunOperationError =>
+  error(code, message, next, {
+    kind: "artifact",
+    identity,
+    runId: runId as never,
+    artifactId,
+  });
+
+const artifactUnavailableReason = (
+  failure: "artifact-content-changed" | "artifact-content-missing" | "artifact-content-unsafe",
+) =>
+  failure === "artifact-content-changed"
+    ? "artifact.changed"
+    : failure === "artifact-content-missing"
+      ? "artifact.missing"
+      : "artifact.unsafe-path";
+
+/**
+ * Resolves content after the durable identity lookup. A bad file becomes new
+ * `artifact.unavailable` evidence; it never mutates a prior Event or outcome.
+ */
+const readRecordedArtifact = (
+  project: ProjectSnapshot,
+  runId: string,
+  artifact: StoredExecutionArtifact,
+) =>
+  Effect.gen(function* () {
+    const repository = yield* WorkflowRunRepository;
+    if (artifact.condition !== "available") {
+      return { artifact: toExecutionArtifact(artifact), contentBase64: null } as const;
+    }
+    const store = yield* ExecutionArtifactStore;
+    return yield* store.read(project, runId, artifact).pipe(
+      Effect.matchEffect({
+        onSuccess: (content) =>
+          Effect.succeed({
+            artifact: toExecutionArtifact(artifact),
+            contentBase64: Buffer.from(content).toString("base64"),
+          }),
+        onFailure: (failure) => {
+          const reasonCode = artifactUnavailableReason(failure._tag);
+          const unavailableAtMs = Date.now();
+          return repository
+            .recordArtifactUnavailable(
+              project,
+              runId,
+              artifact.artifactId,
+              reasonCode,
+              unavailableAtMs,
+            )
+            .pipe(
+              Effect.as({
+                artifact: {
+                  ...toExecutionArtifact(artifact),
+                  condition: "missing" as const,
+                  unavailableAtMs,
+                  unavailableReasonCode: reasonCode,
+                },
+                contentBase64: null,
+              }),
+            );
+        },
+      }),
+    );
+  });
+
+/** Captures an immutable high-water Trace snapshot for a portable client export. */
+export const exportExecutionTrace = (
+  input: ExecutionTraceExportInput,
+): Effect.Effect<
+  ExecutionTraceExportResult,
+  never,
+  | ProjectIndexRepository
+  | ProjectLayout
+  | ProjectRuntime
+  | WorkflowBackend
+  | WorkflowRunRepository
+  | ExecutionArtifactStore
+  | HostDiagnosticLogger
+> =>
+  Effect.gen(function* () {
+    const resolved = yield* resolveProject(input.identity);
+    if ("code" in resolved) return { ok: false, error: resolved };
+    yield* reconcilePendingWorkflowRuns(resolved);
+    const repository = yield* WorkflowRunRepository;
+    const snapshot = yield* repository.exportTrace(resolved.project, input.runId);
+    if (snapshot === undefined) {
+      return {
+        ok: false,
+        error: traceError(
+          input.identity,
+          input.runId,
+          "run-not-found",
+          "Workflow Run was not found in this Project.",
+          "List Workflow Runs and choose a Run Identity from that Project.",
+        ),
+      };
+    }
+    const artifacts = yield* Effect.forEach(snapshot.artifacts, (artifact) =>
+      input.includeArtifacts
+        ? readRecordedArtifact(resolved.project, input.runId, artifact)
+        : Effect.succeed({ artifact: toExecutionArtifact(artifact), contentBase64: null }),
+    );
+    const events = snapshot.events.map((event) =>
+      toExecutionTraceEventWithPayloads(event, input.revealPayloads),
+    );
+    return {
+      ok: true,
+      trace: {
+        artifacts,
+        compatibilityWarnings: events
+          .filter((event) => event.compatibility !== "supported")
+          .map((event) => ({
+            compatibility: event.compatibility,
+            eventId: event.eventId,
+            sequence: event.sequence,
+          })),
+        events,
+        exportedAtMs: Date.now(),
+        final: ["completed", "failed", "stopped"].includes(snapshot.runState),
+        formatVersion: 1,
+        highWaterSequence: snapshot.highWaterSequence,
+        projectIdentity: input.identity,
+        runId: input.runId,
+        runState: snapshot.runState,
+      },
+    };
+  });
+
+/** Returns opaque bytes only after the Project, Run, Artifact, path, and hash checks succeed. */
+export const downloadExecutionArtifact = (
+  input: ExecutionArtifactDownloadInput,
+): Effect.Effect<
+  ExecutionArtifactDownloadResult,
+  never,
+  ProjectIndexRepository | ProjectLayout | WorkflowRunRepository | ExecutionArtifactStore
+> =>
+  Effect.gen(function* () {
+    const resolved = yield* resolveProject(input.identity);
+    if ("code" in resolved) return { ok: false, error: resolved };
+    const repository = yield* WorkflowRunRepository;
+    const artifact = yield* repository.findArtifact(
+      resolved.project,
+      input.runId,
+      input.artifactId,
+    );
+    if (artifact === undefined) {
+      return {
+        ok: false,
+        error: artifactError(
+          input.identity,
+          input.runId,
+          input.artifactId,
+          "execution-artifact-not-found",
+          "Execution Artifact was not found in this Workflow Run.",
+          "Choose an Artifact recorded by this Run.",
+        ),
+      };
+    }
+    const resolvedArtifact = yield* readRecordedArtifact(resolved.project, input.runId, artifact);
+    if (resolvedArtifact.contentBase64 === null) {
+      return {
+        ok: false,
+        error: artifactError(
+          input.identity,
+          input.runId,
+          input.artifactId,
+          "execution-artifact-unavailable",
+          "Execution Artifact content is unavailable or no longer matches its recorded identity.",
+          "Inspect the later Artifact evidence in the Execution Trace.",
+        ),
+      };
+    }
+    return {
+      ok: true,
+      download: {
+        artifact: resolvedArtifact.artifact,
+        contentBase64: resolvedArtifact.contentBase64,
       },
     };
   });

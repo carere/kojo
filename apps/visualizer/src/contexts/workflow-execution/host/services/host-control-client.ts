@@ -1,6 +1,8 @@
 import type {
   ControlSubscriptionInput,
   ControlSubscriptionUpdate,
+  ExecutionArtifactDownloadInput,
+  ExecutionArtifactDownloadResult,
   ExecutionTraceQueryResult,
   ExecutionTraceReadInput,
   HostOverview,
@@ -30,6 +32,12 @@ export interface HostControlClientShape {
     input: ExecutionTraceReadInput,
   ) => Effect.Effect<
     ExecutionTraceQueryResult,
+    LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+  >;
+  readonly downloadExecutionArtifact?: (
+    input: ExecutionArtifactDownloadInput,
+  ) => Effect.Effect<
+    ExecutionArtifactDownloadResult,
     LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
   >;
   readonly subscribeControl: (
@@ -120,6 +128,15 @@ export const HostControlClientLive = Layer.succeed(HostControlClient, {
       ).readExecutionTrace(input),
     ) as unknown as Effect.Effect<
       ExecutionTraceQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >,
+  downloadExecutionArtifact: (input) =>
+    Effect.suspend(() =>
+      makeDefaultLocalClient(
+        process.env.KOJO_HOST_SOCKET ?? defaultSocketPath(),
+      ).downloadExecutionArtifact(input),
+    ) as Effect.Effect<
+      ExecutionArtifactDownloadResult,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >,
   subscribeControl: (input) =>

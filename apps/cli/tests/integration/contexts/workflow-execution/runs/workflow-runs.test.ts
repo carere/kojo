@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { mkdir, readFile, realpath, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, symlink, unlink, writeFile } from "node:fs/promises";
 import { createConnection, createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1854,6 +1854,50 @@ it("reloads and resumes a running Trace after the Host requires resync without d
   );
 }, 15_000);
 
+it("exports only the captured high-water Trace while a Run continues recording evidence", async () => {
+  const directory = await makeTemporaryDirectory("kojo-trace-export-high-water-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await commitInitialGitState(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), configuration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "slow", "--input", '{"message":"later"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = JSON.parse(started.stdout).result.run.runId as string;
+  await waitForCondition("initial durable Execution Trace evidence", async () => {
+    const trace = await runKojoCli(["trace", "show", runId, "--json"], host.socketPath, project);
+    return trace.exitCode === 0 && JSON.parse(trace.stdout).result.page.highWaterSequence > 0;
+  });
+
+  const destination = join(directory.path, "running-trace.zip");
+  const exported = await runKojoCli(
+    ["trace", "export", runId, "--output", destination, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(exported.exitCode, `${exported.stdout}${exported.stderr}`).toBe(0);
+  const highWaterSequence = JSON.parse(exported.stdout).result.highWaterSequence as number;
+  const finalRun = await waitForFinalRun(host.socketPath, project, runId);
+  expect(finalRun).toMatchObject({ state: "completed" });
+  const afterFinal = await runKojoCli(["trace", "show", runId, "--json"], host.socketPath, project);
+  expect(afterFinal.exitCode).toBe(0);
+  expect(JSON.parse(afterFinal.stdout).result.page.highWaterSequence).toBeGreaterThan(
+    highWaterSequence,
+  );
+  const archive = await readFile(destination, "utf8");
+  expect(archive).toContain(`"highWaterSequence":${highWaterSequence}`);
+  expect(archive).not.toContain('"kind":"run.completed"');
+});
+
 it("runs Commands in a durable logical Sandbox and records safe Artifact-backed trace evidence", async () => {
   const directory = await makeTemporaryDirectory("kojo-workflow-sandbox-");
   cleanups.push(directory.cleanup);
@@ -1892,15 +1936,85 @@ it("runs Commands in a durable logical Sandbox and records safe Artifact-backed 
   const commandTrace = trace.find((entry) => entry.kind === "command.completed");
   const artifactId = (commandTrace?.artifactIds as ReadonlyArray<string> | undefined)?.[0];
   expect(artifactId).toEqual(expect.any(String));
-  expect(
-    await readFile(join(project, ".kojo", "artifacts", runId, `${artifactId}.json`), "utf8"),
-  ).toContain("present");
+  const commandArtifactPath = join(project, ".kojo", "artifacts", runId, `${artifactId}.json`);
+  expect(await readFile(commandArtifactPath, "utf8")).toContain("present");
+  if (typeof artifactId !== "string")
+    throw new Error("The sandbox fixture did not record an Artifact.");
+
+  const redactedExport = join(directory.path, "trace-redacted.zip");
+  const redacted = await runKojoCli(
+    ["trace", "export", runId, "--output", redactedExport, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(redacted.exitCode, `${redacted.stdout}${redacted.stderr}`).toBe(0);
+  expect(JSON.parse(redacted.stdout)).toMatchObject({
+    result: { artifactCount: 0, payloadsRevealed: false },
+  });
+  const redactedArchive = await readFile(redactedExport, "utf8");
+  expect(redactedArchive).toContain("manifest.json");
+  expect(redactedArchive).toContain("events.ndjson");
+  expect(redactedArchive).toContain("artifacts.json");
+  expect(redactedArchive).toContain('"redactionMode":"redacted"');
+  expect(redactedArchive).not.toContain(`artifacts/${artifactId}`);
+
+  const originalArchive = await readFile(redactedExport);
+  const overwritten = await runKojoCli(
+    ["trace", "export", runId, "--output", redactedExport],
+    host.socketPath,
+    project,
+  );
+  expect(overwritten.exitCode).not.toBe(0);
+  expect(await readFile(redactedExport)).toEqual(originalArchive);
+
+  const unacknowledged = await runKojoCli(
+    [
+      "trace",
+      "export",
+      runId,
+      "--output",
+      join(directory.path, "trace-unacknowledged.zip"),
+      "--reveal",
+    ],
+    host.socketPath,
+    project,
+  );
+  expect(unacknowledged.exitCode).not.toBe(0);
+
+  const revealedExport = join(directory.path, "trace-revealed.zip");
+  const revealed = await runKojoCli(
+    [
+      "trace",
+      "export",
+      runId,
+      "--output",
+      revealedExport,
+      "--reveal",
+      "--acknowledge-sensitive-export",
+    ],
+    host.socketPath,
+    project,
+  );
+  expect(revealed.exitCode, `${revealed.stdout}${revealed.stderr}`).toBe(0);
+  const revealedArchive = await readFile(revealedExport, "utf8");
+  expect(revealedArchive).toContain('"redactionMode":"unredacted"');
+  expect(revealedArchive).not.toContain(`artifacts/${artifactId}`);
+
+  const includedExport = join(directory.path, "trace-with-artifacts.zip");
+  const included = await runKojoCli(
+    ["trace", "export", runId, "--output", includedExport, "--include-artifacts"],
+    host.socketPath,
+    project,
+  );
+  expect(included.exitCode, `${included.stdout}${included.stderr}`).toBe(0);
+  expect(await readFile(includedExport, "utf8")).toContain(`artifacts/${artifactId}`);
 
   const nonZero = await runKojoCli(
     ["run", "start", "sandbox-non-zero", "--input", '{"message":"hello"}', "--json"],
     host.socketPath,
     project,
   );
+  expect(nonZero.exitCode, `${nonZero.stdout}${nonZero.stderr}`).toBe(0);
   const nonZeroRun = await waitForFinalRun(
     host.socketPath,
     project,
@@ -1925,6 +2039,121 @@ it("runs Commands in a durable logical Sandbox and records safe Artifact-backed 
   expect(timedOutRun.sandboxTrace).toEqual(
     expect.arrayContaining([expect.objectContaining({ kind: "command.timed-out" })]),
   );
+});
+
+it("records later unavailable evidence when Artifact paths are traversed or symbolic links", async () => {
+  const directory = await makeTemporaryDirectory("kojo-workflow-artifact-access-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await commitInitialGitState(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), sandboxConfiguration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "sandbox-command", "--input", '{"message":"hello"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = JSON.parse(started.stdout).result.run.runId as string;
+  const completed = await waitForFinalRun(host.socketPath, project, runId);
+  const trace = completed.sandboxTrace as ReadonlyArray<Record<string, unknown>>;
+  const acquisitionArtifactId = (
+    trace.find((entry) => entry.kind === "sandbox.acquired")?.artifactIds as
+      | ReadonlyArray<string>
+      | undefined
+  )?.[0];
+  const commandArtifactId = (
+    trace.find((entry) => entry.kind === "command.completed")?.artifactIds as
+      | ReadonlyArray<string>
+      | undefined
+  )?.[0];
+  if (typeof acquisitionArtifactId !== "string" || typeof commandArtifactId !== "string") {
+    throw new Error("The sandbox fixture did not record both expected Artifacts.");
+  }
+
+  const missingStarted = await runKojoCli(
+    ["run", "start", "sandbox-command", "--input", '{"message":"missing"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(missingStarted.exitCode, `${missingStarted.stdout}${missingStarted.stderr}`).toBe(0);
+  const missingRunId = JSON.parse(missingStarted.stdout).result.run.runId as string;
+  const missingCompleted = await waitForFinalRun(host.socketPath, project, missingRunId);
+  const missingArtifactId = (
+    (missingCompleted.sandboxTrace as ReadonlyArray<Record<string, unknown>>).find(
+      (entry) => entry.kind === "command.completed",
+    )?.artifactIds as ReadonlyArray<string> | undefined
+  )?.[0];
+  if (typeof missingArtifactId !== "string") {
+    throw new Error("The sandbox fixture did not record its expected missing Artifact.");
+  }
+
+  const database = new Database(join(project, ".kojo", "kojo.sqlite"));
+  database
+    .query(
+      "UPDATE kojo_execution_artifacts SET storage_key = ? WHERE run_id = ? AND artifact_id = ?",
+    )
+    .run("../outside.json", runId, acquisitionArtifactId);
+  database.close();
+  const traversalArchive = join(directory.path, "traversal.zip");
+  const traversal = await runKojoCli(
+    ["trace", "export", runId, "--output", traversalArchive, "--include-artifacts"],
+    host.socketPath,
+    project,
+  );
+  expect(traversal.exitCode, `${traversal.stdout}${traversal.stderr}`).toBe(0);
+  expect(await readFile(traversalArchive, "utf8")).toContain("artifact.unsafe-path");
+
+  const commandArtifactPath = join(
+    project,
+    ".kojo",
+    "artifacts",
+    runId,
+    `${commandArtifactId}.json`,
+  );
+  await unlink(commandArtifactPath);
+  await symlink(join(project, "kojo.config.ts"), commandArtifactPath);
+  const symlinkArchive = join(directory.path, "symlink.zip");
+  const symlinked = await runKojoCli(
+    ["trace", "export", runId, "--output", symlinkArchive, "--include-artifacts"],
+    host.socketPath,
+    project,
+  );
+  expect(symlinked.exitCode, `${symlinked.stdout}${symlinked.stderr}`).toBe(0);
+  expect(await readFile(symlinkArchive, "utf8")).toContain("artifact.unsafe-path");
+
+  await unlink(join(project, ".kojo", "artifacts", missingRunId, `${missingArtifactId}.json`));
+  const missingArchive = join(directory.path, "missing.zip");
+  const missing = await runKojoCli(
+    ["trace", "export", missingRunId, "--output", missingArchive, "--include-artifacts"],
+    host.socketPath,
+    project,
+  );
+  expect(missing.exitCode, `${missing.stdout}${missing.stderr}`).toBe(0);
+  expect(await readFile(missingArchive, "utf8")).toContain("artifact.missing");
+
+  const afterArtifactChecks = await runKojoCli(
+    ["trace", "show", runId, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(afterArtifactChecks.exitCode).toBe(0);
+  expect(JSON.parse(afterArtifactChecks.stdout).result.page.events).toEqual(
+    expect.arrayContaining([expect.objectContaining({ kind: "artifact.unavailable" })]),
+  );
+  expect(await waitForFinalRun(host.socketPath, project, runId)).toMatchObject({
+    outcome: { kind: "completed" },
+    state: "completed",
+  });
+  expect(await waitForFinalRun(host.socketPath, project, missingRunId)).toMatchObject({
+    outcome: { kind: "completed" },
+    state: "completed",
+  });
 });
 
 it.skipIf(!dockerAvailable)(

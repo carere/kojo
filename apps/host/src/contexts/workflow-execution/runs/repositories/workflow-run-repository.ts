@@ -42,6 +42,28 @@ export interface StoredExecutionTracePage {
   readonly runState: "running" | "suspended" | "stopping" | "stopped" | "failed" | "completed";
 }
 
+/** The durable Artifact record, including the storage identity the Host verifies. */
+export interface StoredExecutionArtifact {
+  readonly artifactId: string;
+  readonly byteSize: number;
+  readonly condition: "available" | "missing" | "expired";
+  readonly createdAtMs: number;
+  readonly displayName: string;
+  readonly mediaType: string;
+  readonly sha256: Uint8Array;
+  readonly storageKey: string;
+  readonly unavailableAtMs: number | null;
+  readonly unavailableReasonCode: string | null;
+}
+
+/** A single database snapshot used to create a portable Trace export. */
+export interface StoredExecutionTraceExport {
+  readonly artifacts: ReadonlyArray<StoredExecutionArtifact>;
+  readonly events: ReadonlyArray<StoredExecutionTraceEvent>;
+  readonly highWaterSequence: number;
+  readonly runState: "running" | "suspended" | "stopping" | "stopped" | "failed" | "completed";
+}
+
 export interface ExecutionTraceRead {
   readonly afterSequence?: number;
   readonly beforeSequence?: number;
@@ -235,6 +257,28 @@ export interface WorkflowRunRepositoryShape {
     runId: string,
     input: ExecutionTraceRead,
   ) => Effect.Effect<StoredExecutionTracePage | undefined>;
+  /**
+   * Reads all durable Event evidence and its referenced Artifact metadata at
+   * one per-Run high-water mark. Later writes never enter this snapshot.
+   */
+  readonly exportTrace: (
+    project: ProjectSnapshot,
+    runId: string,
+  ) => Effect.Effect<StoredExecutionTraceExport | undefined>;
+  /** Resolves exactly one Artifact identity under one Run. */
+  readonly findArtifact: (
+    project: ProjectSnapshot,
+    runId: string,
+    artifactId: string,
+  ) => Effect.Effect<StoredExecutionArtifact | undefined>;
+  /** Records newly observed unavailable content as later, immutable evidence. */
+  readonly recordArtifactUnavailable: (
+    project: ProjectSnapshot,
+    runId: string,
+    artifactId: string,
+    reasonCode: string,
+    recordedAtMs: number,
+  ) => Effect.Effect<void>;
   readonly pendingSubmissions: (
     project: ProjectSnapshot,
     runId?: string,

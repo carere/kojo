@@ -8,7 +8,7 @@ import {
 
 export { ProjectIdentity } from "@kojo/workflow";
 
-export const PROTOCOL_VERSION = { major: 1, minor: 10 } as const;
+export const PROTOCOL_VERSION = { major: 1, minor: 11 } as const;
 export const CONTROL_CAPABILITIES = [
   "projects:list",
   "projects:list-page",
@@ -35,6 +35,8 @@ export const CONTROL_CAPABILITIES = [
   "runs:deferred-complete",
   "runs:stop",
   "traces:read",
+  "traces:export",
+  "artifacts:read",
   "control:subscribe",
   "control:acknowledge",
 ] as const;
@@ -755,6 +757,8 @@ export const WorkflowRunOperationErrorCode = Schema.Literals([
   "execution-trace-cursor-filter-mismatch",
   "execution-trace-cursor-run-mismatch",
   "execution-trace-query-invalid",
+  "execution-artifact-not-found",
+  "execution-artifact-unavailable",
 ]);
 export type WorkflowRunOperationErrorCode = typeof WorkflowRunOperationErrorCode.Type;
 
@@ -770,6 +774,12 @@ export const WorkflowRunOperationError = Schema.Struct({
       workflowKey: Schema.String,
     }),
     Schema.Struct({ kind: Schema.Literal("run"), identity: ProjectIdentity, runId: WorkflowRunId }),
+    Schema.Struct({
+      kind: Schema.Literal("artifact"),
+      identity: ProjectIdentity,
+      runId: WorkflowRunId,
+      artifactId: Schema.String,
+    }),
     Schema.Struct({ kind: Schema.Literal("request-key"), requestKey: RequestKey }),
   ]),
   findingKeys: Schema.Array(ReadinessFindingKey),
@@ -1018,6 +1028,90 @@ export const ExecutionTraceQueryResult = Schema.Union([
   Schema.Struct({ ok: Schema.Literal(false), error: WorkflowRunOperationError }),
 ]);
 export type ExecutionTraceQueryResult = typeof ExecutionTraceQueryResult.Type;
+
+/** Safe, recorded metadata for an Artifact. Content is never part of a Trace Event. */
+export const ExecutionArtifact = Schema.Struct({
+  artifactId: Schema.String,
+  byteSize: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  condition: ExecutionTraceArtifactCondition,
+  createdAtMs: Schema.Number,
+  displayName: Schema.String,
+  mediaType: Schema.String,
+  sha256: Schema.String,
+  unavailableAtMs: Schema.NullOr(Schema.Number),
+  unavailableReasonCode: Schema.NullOr(Schema.String),
+});
+export type ExecutionArtifact = typeof ExecutionArtifact.Type;
+
+/**
+ * Explicitly selects the two independent sensitive export actions. Revealing
+ * Event payloads never opts a caller into Artifact bytes.
+ */
+export const ExecutionTraceExportInput = Schema.Struct({
+  identity: ProjectIdentity,
+  includeArtifacts: Schema.Boolean,
+  revealPayloads: Schema.Boolean,
+  runId: WorkflowRunId,
+});
+export type ExecutionTraceExportInput = typeof ExecutionTraceExportInput.Type;
+
+export const ExecutionTraceExportArtifact = Schema.Struct({
+  artifact: ExecutionArtifact,
+  /** Present only when the caller explicitly asked to include this safe Artifact. */
+  contentBase64: Schema.NullOr(Schema.String),
+});
+export type ExecutionTraceExportArtifact = typeof ExecutionTraceExportArtifact.Type;
+
+/**
+ * A point-in-time durable Trace snapshot. `highWaterSequence` bounds every
+ * Event in `events`, even if a live Run records more evidence while the caller
+ * writes its ZIP.
+ */
+export const ExecutionTraceExport = Schema.Struct({
+  artifacts: Schema.Array(ExecutionTraceExportArtifact),
+  compatibilityWarnings: Schema.Array(
+    Schema.Struct({
+      compatibility: ExecutionTraceCompatibility,
+      eventId: Schema.String,
+      sequence: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+    }),
+  ),
+  events: Schema.Array(ExecutionTraceEvent),
+  exportedAtMs: Schema.Number,
+  final: Schema.Boolean,
+  formatVersion: Schema.Literal(1),
+  highWaterSequence: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  projectIdentity: ProjectIdentity,
+  runId: WorkflowRunId,
+  runState: WorkflowRunState,
+});
+export type ExecutionTraceExport = typeof ExecutionTraceExport.Type;
+
+export const ExecutionTraceExportResult = Schema.Union([
+  Schema.Struct({ ok: Schema.Literal(true), trace: ExecutionTraceExport }),
+  Schema.Struct({ ok: Schema.Literal(false), error: WorkflowRunOperationError }),
+]);
+export type ExecutionTraceExportResult = typeof ExecutionTraceExportResult.Type;
+
+/** The Host returns bytes only after validating Project, Run, and Artifact identity. */
+export const ExecutionArtifactDownloadInput = Schema.Struct({
+  artifactId: Schema.String,
+  identity: ProjectIdentity,
+  runId: WorkflowRunId,
+});
+export type ExecutionArtifactDownloadInput = typeof ExecutionArtifactDownloadInput.Type;
+
+export const ExecutionArtifactDownload = Schema.Struct({
+  artifact: ExecutionArtifact,
+  contentBase64: Schema.String,
+});
+export type ExecutionArtifactDownload = typeof ExecutionArtifactDownload.Type;
+
+export const ExecutionArtifactDownloadResult = Schema.Union([
+  Schema.Struct({ ok: Schema.Literal(true), download: ExecutionArtifactDownload }),
+  Schema.Struct({ ok: Schema.Literal(false), error: WorkflowRunOperationError }),
+]);
+export type ExecutionArtifactDownloadResult = typeof ExecutionArtifactDownloadResult.Type;
 
 export const ControlSubscriptionTopic = Schema.Literals([
   "readiness",
@@ -1280,6 +1374,18 @@ export const ReadExecutionTrace = Rpc.make("ReadExecutionTrace", {
   success: ExecutionTraceQueryResult,
 });
 
+/** Captures one bounded Trace snapshot for a caller-owned portable export. */
+export const ExportExecutionTrace = Rpc.make("ExportExecutionTrace", {
+  payload: ExecutionTraceExportInput.fields,
+  success: ExecutionTraceExportResult,
+});
+
+/** Reads one validated Artifact as opaque bytes; consumers must deliver it as an attachment. */
+export const DownloadExecutionArtifact = Rpc.make("DownloadExecutionArtifact", {
+  payload: ExecutionArtifactDownloadInput.fields,
+  success: ExecutionArtifactDownloadResult,
+});
+
 /**
  * A bounded, advisory stream. Consumers resume trace delivery from the durable
  * per-Run sequence after reconnecting or receiving `resync-required`.
@@ -1371,6 +1477,8 @@ export const KojoControl = RpcGroup.make(
   ShowWorkflowRun,
   RevealWorkflowRun,
   ReadExecutionTrace,
+  ExportExecutionTrace,
+  DownloadExecutionArtifact,
   SubscribeControl,
   AcknowledgeControlSubscription,
   ResumeWorkflowRun,

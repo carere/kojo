@@ -3,6 +3,8 @@ import { chmod, open, readFile, unlink } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname } from "node:path";
 import {
+  type ExecutionArtifactDownloadResult,
+  type ExecutionTraceExportResult,
   type ExecutionTraceQueryResult,
   KojoControl,
   type ProjectIdentity,
@@ -36,8 +38,11 @@ import {
   assessProjectReadiness,
   repairProjectReadiness,
 } from "../../readiness/use-cases/project-readiness";
+import { LocalExecutionArtifactStoreLive } from "../../runs/services/execution-artifact-store";
 import {
   completeWorkflowDeferred,
+  downloadExecutionArtifact,
+  exportExecutionTrace,
   listWorkflowRuns,
   readExecutionTrace,
   readWorkflowRunsRevision,
@@ -168,7 +173,9 @@ const workflowRunDiagnostic =
       | WorkflowRunListResult
       | WorkflowRunMutationResult
       | WorkflowRunQueryResult
-      | ExecutionTraceQueryResult,
+      | ExecutionTraceQueryResult
+      | ExecutionTraceExportResult
+      | ExecutionArtifactDownloadResult,
   ) => ({
     projectIdentity: identity,
     ...(result.ok ? {} : { safeErrorCode: result.error.code }),
@@ -391,6 +398,22 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           readExecutionTrace(input),
           workflowRunDiagnostic(input.identity),
         ),
+      ExportExecutionTrace: (input, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ExportExecutionTrace",
+          String(options.requestId),
+          exportExecutionTrace(input),
+          workflowRunDiagnostic(input.identity),
+        ),
+      DownloadExecutionArtifact: (input, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "DownloadExecutionArtifact",
+          String(options.requestId),
+          downloadExecutionArtifact(input),
+          workflowRunDiagnostic(input.identity),
+        ),
       SubscribeControl: (input, options) =>
         Stream.unwrap(
           withHostRequestDiagnostic(
@@ -536,7 +559,7 @@ export const makeKojoControlServerLayer = <ProtocolError, ProtocolRequirements>(
   RpcServer.layer(KojoControl).pipe(
     Layer.provide([
       makeKojoControlHandlers(hostIdentity).pipe(
-        Layer.provide([diagnosticLogger, subscriptionReader]),
+        Layer.provide([diagnosticLogger, subscriptionReader, LocalExecutionArtifactStoreLive]),
       ),
       protocol,
     ]),

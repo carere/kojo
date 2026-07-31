@@ -319,7 +319,7 @@ it.effect("releases a subscription connection after both terminal delivery and c
     const runId = Schema.decodeUnknownSync(WorkflowRunId)("00000000-0000-7000-8000-000000000011");
     const releases: Array<string> = [];
     const host = {
-      protocol: { major: 1, minor: 10 },
+      protocol: { major: 1, minor: 11 },
       hostVersion: "0.1.0",
       capabilities: ["control:subscribe"],
     } as const;
@@ -370,7 +370,7 @@ it.effect("runs an explicit connector disconnect after terminal delivery and cal
     const runId = Schema.decodeUnknownSync(WorkflowRunId)("00000000-0000-7000-8000-000000000013");
     const disconnects: Array<string> = [];
     const host = {
-      protocol: { major: 1, minor: 10 },
+      protocol: { major: 1, minor: 11 },
       hostVersion: "0.1.0",
       capabilities: ["control:subscribe"],
     } as const;

@@ -5,7 +5,11 @@ import { Effect, Schema, Stream } from "effect";
 import { FetchHttpClient } from "effect/unstable/http";
 import { startKojoHostProcess } from "../../../../../../../tests/support/host-process";
 import { HostOverviewError } from "../../../../../src/contexts/shared/models/contracts";
-import { disposeApi, handleApiRequest } from "../../../../../src/contexts/shared/server";
+import {
+  disposeApi,
+  handleApiRequest,
+  handleArtifactAttachment,
+} from "../../../../../src/contexts/shared/server";
 import {
   makeVisualizerApiClientLayer,
   VisualizerApiClient,
@@ -58,6 +62,41 @@ const withHost = <A>(
   );
 
 describe("Host overview", () => {
+  it("delivers Artifact bytes only as a nosniff attachment", async () => {
+    const request = new Request(
+      "http://kojo.test/api/artifacts?project=00000000-0000-7000-8000-000000000001&run=00000000-0000-7000-8000-000000000002&artifact=artifact-1",
+    );
+    const response = await handleArtifactAttachment(request, async (input) => {
+      expect(input).toMatchObject({ artifactId: "artifact-1" });
+      return {
+        ok: true,
+        download: {
+          artifact: {
+            artifactId: "artifact-1",
+            byteSize: 25,
+            condition: "available",
+            createdAtMs: 1,
+            displayName: "untrusted.html",
+            mediaType: "text/html",
+            sha256: "a".repeat(64),
+            unavailableAtMs: null,
+            unavailableReasonCode: null,
+          },
+          contentBase64: Buffer.from("<script>window.pwned = true</script>").toString("base64"),
+        },
+      };
+    });
+    expect(response).toBeDefined();
+    expect(response?.status).toBe(200);
+    expect(response?.headers.get("cache-control")).toBe("no-store");
+    expect(response?.headers.get("content-disposition")).toBe(
+      'attachment; filename="artifact-artifact-1.json"',
+    );
+    expect(response?.headers.get("content-type")).toBe("application/octet-stream");
+    expect(response?.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(await response?.text()).toBe("<script>window.pwned = true</script>");
+  });
+
   it.effect(
     "proxies a Host-owned Trace query through the real same-origin and Unix-socket boundaries",
     () =>
@@ -112,9 +151,11 @@ describe("Host overview", () => {
         const client = yield* VisualizerApiClient;
         const overview = yield* client.HostOverview();
         expect(overview.host).toMatchObject({
-          protocol: { major: 1, minor: 10 },
+          protocol: { major: 1, minor: 11 },
           capabilities: expect.arrayContaining([
             "traces:read",
+            "traces:export",
+            "artifacts:read",
             "control:subscribe",
             "control:acknowledge",
           ]),

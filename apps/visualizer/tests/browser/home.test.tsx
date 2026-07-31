@@ -624,7 +624,7 @@ test("renders live chronological Execution Trace evidence separately from the Wo
     boundaryId: null,
     childRunId: childRun,
     compatibility: "supported" as const,
-    payload: {},
+    payload: { artifactIds: ["artifact-one"] },
   };
   let traceReads = 0;
   const acknowledged: Array<{
@@ -684,6 +684,12 @@ test("renders live chronological Execution Trace evidence separately from the Wo
     ),
   ).toEqual(["1", "2"]);
   await expect.element(page.getByText("child.requested@1")).toBeVisible();
+  const artifactDownload = page.getByRole("link", { name: "Download Artifact artifact-one" });
+  await expect.element(artifactDownload).toBeVisible();
+  await expect(artifactDownload).toHaveAttribute(
+    "href",
+    `/api/artifacts?artifact=artifact-one&project=${identity}&run=${parentRun}`,
+  );
   await expect
     .poll(() => acknowledged)
     .toEqual([{ deliverySequence: 1, subscriptionId: "browser-subscription" }]);

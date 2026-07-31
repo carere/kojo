@@ -56,6 +56,18 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
 
   if (args[0] === "trace") return runTraceCliCommand(args, json);
 
+  if (
+    args.includes("--include-artifacts") ||
+    args.includes("--acknowledge-sensitive-export") ||
+    args.includes("--output")
+  ) {
+    return writeFailure(
+      invalid("Use export options only with kojo trace export."),
+      json,
+      `${args[0] ?? "unknown"}.unknown`,
+    );
+  }
+
   if (args[0] === "readiness") {
     const options = parseOptions(args.slice(2));
     const operation = args[1];
