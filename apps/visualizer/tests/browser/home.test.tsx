@@ -9,6 +9,13 @@ import { WorkflowRuns } from "../../src/contexts/workflow-execution/runs/compone
 import { setLocale } from "../../src/i18n/runtime";
 
 let dispose: VoidFunction | undefined;
+const emptyActivitySummary = {
+  invocationAttempts: 0,
+  incompleteAttempts: 0,
+  retries: 0,
+  durableCompletions: 0,
+  replayReuses: 0,
+};
 
 afterEach(() => {
   dispose?.();
@@ -142,6 +149,13 @@ test("shows accepted Workflow Definition snapshots from the Host", async () => {
                       updatedAtMs: 2,
                       finalizedAtMs: 2,
                       allowedActions: [],
+                      activitySummary: {
+                        invocationAttempts: 1,
+                        incompleteAttempts: 0,
+                        retries: 0,
+                        durableCompletions: 1,
+                        replayReuses: 0,
+                      },
                     },
                   ],
                 },
@@ -192,6 +206,7 @@ test("only renders Host-authorized Workflow Run controls", async () => {
                 updatedAtMs: 1,
                 finalizedAtMs: null,
                 allowedActions: [],
+                activitySummary: emptyActivitySummary,
               },
               {
                 runId: manualRun,
@@ -203,6 +218,7 @@ test("only renders Host-authorized Workflow Run controls", async () => {
                 updatedAtMs: 1,
                 finalizedAtMs: null,
                 allowedActions: ["resume"],
+                activitySummary: emptyActivitySummary,
               },
               {
                 runId: deferredRun,
@@ -214,6 +230,7 @@ test("only renders Host-authorized Workflow Run controls", async () => {
                 updatedAtMs: 1,
                 finalizedAtMs: null,
                 allowedActions: ["deferred-complete"],
+                activitySummary: emptyActivitySummary,
               },
             ],
           },
@@ -323,6 +340,7 @@ test("navigates between a Schedule Occurrence and its linked resources", async (
                       updatedAtMs: scheduledAtMs,
                       finalizedAtMs: scheduledAtMs,
                       allowedActions: [],
+                      activitySummary: emptyActivitySummary,
                     },
                   ],
                 },

@@ -389,6 +389,37 @@ export const engineOperations = sqliteTable(
   ],
 );
 
+/**
+ * The replay contract for each developer-chosen Durable Operation Key. It is
+ * separate from invocation attempts so a completed Activity can be checked for
+ * conflicting reuse before Effect is asked to replay it.
+ */
+export const workflowActivityOperations = sqliteTable(
+  "kojo_workflow_activity_operations",
+  {
+    runId: text("run_id")
+      .notNull()
+      .references(() => workflowRuns.runId, { onDelete: "cascade" }),
+    durableOperationKey: text("durable_operation_key").notNull(),
+    activityName: text("activity_name").notNull(),
+    definitionFingerprint: text("definition_fingerprint").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
+    confirmedAttemptId: text("confirmed_attempt_id").unique(),
+    resultJson: text("result_json"),
+    preparedAtMs: integer("prepared_at_ms").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.runId, table.durableOperationKey] }),
+    check("workflow_activity_operation_generation_positive", sql`${table.executionGeneration} > 0`),
+    check(
+      "workflow_activity_operation_result_json_valid",
+      sql`${table.resultJson} IS NULL OR json_valid(${table.resultJson})`,
+    ),
+    check("workflow_activity_operation_prepared_non_negative", sql`${table.preparedAtMs} >= 0`),
+    index("kojo_activity_operations_run_idx").on(table.runId, table.preparedAtMs),
+  ],
+);
+
 export const workflowActivityAttempts = sqliteTable(
   "kojo_workflow_activity_attempts",
   {
@@ -398,6 +429,7 @@ export const workflowActivityAttempts = sqliteTable(
       .references(() => workflowRuns.runId, { onDelete: "cascade" }),
     durableOperationKey: text("durable_operation_key").notNull(),
     activityName: text("activity_name").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
     effectRetryNumber: integer("effect_retry_number").notNull(),
     invocationNumber: integer("invocation_number").notNull(),
     activityIdempotencyKey: text("activity_idempotency_key").notNull(),
@@ -429,7 +461,7 @@ export const workflowActivityAttempts = sqliteTable(
     ),
     check(
       "workflow_activity_times_non_negative",
-      sql`${table.effectRetryNumber} >= 0 AND ${table.invocationNumber} >= 0 AND ${table.startedAtMs} >= 0 AND (${table.resultObservedAtMs} IS NULL OR ${table.resultObservedAtMs} >= ${table.startedAtMs}) AND (${table.engineConfirmedAtMs} IS NULL OR ${table.engineConfirmedAtMs} >= ${table.startedAtMs})`,
+      sql`${table.executionGeneration} > 0 AND ${table.effectRetryNumber} >= 0 AND ${table.invocationNumber} >= 0 AND ${table.startedAtMs} >= 0 AND (${table.resultObservedAtMs} IS NULL OR ${table.resultObservedAtMs} >= ${table.startedAtMs}) AND (${table.engineConfirmedAtMs} IS NULL OR ${table.engineConfirmedAtMs} >= ${table.startedAtMs})`,
     ),
     index("kojo_activity_attempts_run_idx").on(
       table.runId,

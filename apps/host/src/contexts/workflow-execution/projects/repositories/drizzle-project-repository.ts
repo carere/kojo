@@ -25,7 +25,7 @@ import type {
   WorkflowScheduleSnapshot,
 } from "@kojo/control";
 import type { WorkflowScheduleSnapshot as WorkflowScheduleDefinitionSnapshot } from "@kojo/control/project-definition-validation";
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { Effect, Layer, Schema } from "effect";
@@ -37,8 +37,10 @@ import {
   type SensitivityMap,
   sensitivityMap,
 } from "../../runs/models/sensitivity-map";
+import { decideWorkflowActivityReplay } from "../../runs/models/workflow-activity";
 import type { StoredWorkflowRunSnapshot } from "../../runs/repositories/workflow-run-repository";
 import {
+  type WorkflowActivityAttemptRecord,
   WorkflowRunRepository,
   type WorkflowRunScheduleStartRecord,
   type WorkflowRunStartRecord,
@@ -112,6 +114,8 @@ const REQUIRED_OBJECTS = [
   "kojo_engine_operations",
   "kojo_engine_operations_run_idx",
   "kojo_engine_operations_pending_idx",
+  "kojo_workflow_activity_operations",
+  "kojo_activity_operations_run_idx",
   "kojo_workflow_activity_attempts",
   "kojo_activity_attempts_run_idx",
   "kojo_activity_attempts_idempotency_idx",
@@ -143,11 +147,17 @@ const REQUIRED_OBJECTS = [
 
 const migrationFolder = fileURLToPath(new URL("./migrations", import.meta.url));
 
-const migration = readFileSync(
-  fileURLToPath(new URL("./migrations/0002_schedule_reconciliation.sql", import.meta.url)),
-  "utf8",
+const migrationChecksums = [
+  "0001_project_lifecycle.sql",
+  "0002_schedule_reconciliation.sql",
+  "0003_workflow_activity_operations.sql",
+  "0004_workflow_activity_execution_generations.sql",
+  "0005_workflow_activity_results.sql",
+].map((file) =>
+  createHash("sha256")
+    .update(readFileSync(fileURLToPath(new URL(`./migrations/${file}`, import.meta.url)), "utf8"))
+    .digest("hex"),
 );
-const migrationChecksum = createHash("sha256").update(migration).digest("hex");
 
 const databasePath = (projectPath: string) => join(projectPath, ".kojo", "kojo.sqlite");
 
@@ -327,15 +337,17 @@ const assertVersionZero = (connection: Database, project: { readonly identity: s
 
 const assertCurrentSchema = (connection: Database, project: { readonly identity: string }) => {
   if (version(connection) !== CURRENT_VERSION) throw new Error("unsupported Project store version");
-  const migrationRow = Schema.decodeUnknownSync(MigrationRows)(
+  const migrationRows = Schema.decodeUnknownSync(MigrationRows)(
     drizzle(connection)
       .select({ hash: schemaMigrations.hash })
       .from(schemaMigrations)
-      .orderBy(desc(schemaMigrations.createdAt))
-      .limit(1)
+      .orderBy(schemaMigrations.id)
       .all(),
-  )[0];
-  if (migrationRow?.hash !== migrationChecksum) {
+  );
+  if (
+    migrationRows.length !== migrationChecksums.length ||
+    migrationRows.some((migration, index) => migration.hash !== migrationChecksums[index])
+  ) {
     throw new Error("Project store migration checksum mismatch");
   }
   assertStoreMetadata(connection, project, CURRENT_VERSION);
@@ -356,6 +368,22 @@ const assertCurrentSchema = (connection: Database, project: { readonly identity:
     if (!/\bSTRICT\s*$/i.test(table.sql.trim())) {
       throw new Error("Project store table is not STRICT");
     }
+  }
+};
+
+const assertKnownMigrationPrefix = (connection: Database) => {
+  const migrationRows = Schema.decodeUnknownSync(MigrationRows)(
+    drizzle(connection)
+      .select({ hash: schemaMigrations.hash })
+      .from(schemaMigrations)
+      .orderBy(schemaMigrations.id)
+      .all(),
+  );
+  if (
+    migrationRows.length > migrationChecksums.length ||
+    migrationRows.some((migration, index) => migration.hash !== migrationChecksums[index])
+  ) {
+    throw new Error("Project store migration checksum mismatch");
   }
 };
 
@@ -415,7 +443,9 @@ const assertFastActivationSemantics = (connection: Database) => {
     }
     engineMappings.add(mapping);
     if (!["running", "suspended", "stopping"].includes(run.state)) continue;
-    const runEvents = events.filter((event) => event.runId === run.runId);
+    const runEvents = events
+      .filter((event) => event.runId === run.runId)
+      .sort((left, right) => left.sequence - right.sequence);
     if (run.lastEventSequence < 1) {
       throw new Error("Project non-final Workflow Run Event invariants are invalid");
     }
@@ -481,6 +511,16 @@ const assertDeepPostflightSemantics = (connection: Database) => {
     .query("SELECT attempt_id, run_id FROM kojo_workflow_activity_attempts")
     .all() as ReadonlyArray<{
     readonly attempt_id: string;
+    readonly run_id: string;
+  }>;
+  const activityOperations = connection
+    .query(
+      `SELECT run_id, durable_operation_key, confirmed_attempt_id
+       FROM kojo_workflow_activity_operations`,
+    )
+    .all() as ReadonlyArray<{
+    readonly confirmed_attempt_id: string | null;
+    readonly durable_operation_key: string;
     readonly run_id: string;
   }>;
   const artifacts = connection
@@ -567,6 +607,20 @@ const assertDeepPostflightSemantics = (connection: Database) => {
     operations.map((operation) => [operation.operation_id, operation]),
   );
   const attemptsById = new Map(attempts.map((attempt) => [attempt.attempt_id, attempt]));
+  for (const operation of activityOperations) {
+    if (operation.confirmed_attempt_id === null) continue;
+    const attempt = attemptsById.get(operation.confirmed_attempt_id);
+    if (
+      attempt?.run_id !== operation.run_id ||
+      (
+        connection
+          .query("SELECT state FROM kojo_workflow_activity_attempts WHERE attempt_id = ?")
+          .get(operation.confirmed_attempt_id) as { readonly state: string } | null
+      )?.state !== "engine-confirmed"
+    ) {
+      throw new Error("Project Workflow Activity Operation confirmation is invalid");
+    }
+  }
   for (const event of events) {
     if (event.engine_operation_id !== null) {
       const operation = operationsById.get(event.engine_operation_id);
@@ -630,8 +684,10 @@ const verifyBackup = (path: string, project: { readonly identity: string }) => {
     const backupVersion = version(backup);
     if (backupVersion > CURRENT_VERSION) throw new Error("unsupported Project store version");
     if (backupVersion === 0) assertVersionZero(backup, project);
-    else assertStoreMetadata(backup, project, backupVersion);
-    if (backupVersion === CURRENT_VERSION) assertCurrentSchema(backup, project);
+    else {
+      assertStoreMetadata(backup, project, backupVersion);
+      assertKnownMigrationPrefix(backup);
+    }
   } finally {
     backup.close();
   }
@@ -669,10 +725,9 @@ export const migrateProjectRepository = (project: {
     if (current > CURRENT_VERSION) throw new Error("unsupported Project store version");
     const versionZeroDatabaseId =
       current === 0 ? assertVersionZero(connection, project) : undefined;
-    if (current !== 0) assertStoreMetadata(connection, project, current);
-    if (current === CURRENT_VERSION) {
-      assertCurrentSchema(connection, project);
-      assertFastActivationSemantics(connection);
+    if (current !== 0) {
+      assertStoreMetadata(connection, project, current);
+      assertKnownMigrationPrefix(connection);
     }
 
     if (!existsSync(backupPath)) {
@@ -687,12 +742,12 @@ export const migrateProjectRepository = (project: {
       fsyncDirectory(backupPath);
       verifyBackup(backupPath, project);
     }
+    const projectStore = drizzle(connection);
+    migrate(projectStore, {
+      migrationsFolder: migrationFolder,
+      migrationsTable: "kojo_schema_migrations",
+    });
     if (current < CURRENT_VERSION) {
-      const projectStore = drizzle(connection);
-      migrate(projectStore, {
-        migrationsFolder: migrationFolder,
-        migrationsTable: "kojo_schema_migrations",
-      });
       const migratedAt = Date.now();
       if (current === 0) {
         if (versionZeroDatabaseId === undefined) {
@@ -1212,7 +1267,50 @@ const readStoredRun = (connection: Database, runId: string): StoredRun | undefin
     )
     .get(runId) as StoredRun | null) ?? undefined;
 
-const toRunListItem = (row: StoredRun): WorkflowRunListItem => ({
+const emptyActivitySummary = (): WorkflowRunListItem["activitySummary"] => ({
+  invocationAttempts: 0,
+  incompleteAttempts: 0,
+  retries: 0,
+  durableCompletions: 0,
+  replayReuses: 0,
+});
+
+const readActivitySummary = (
+  connection: Database,
+  runId: string,
+): WorkflowRunListItem["activitySummary"] => {
+  const counts = connection
+    .query(
+      `SELECT
+        COUNT(*) AS invocation_attempts,
+        COALESCE(SUM(CASE WHEN state != 'engine-confirmed' THEN 1 ELSE 0 END), 0) AS incomplete_attempts,
+        COALESCE(SUM(CASE WHEN invocation_number > 1 THEN 1 ELSE 0 END), 0) AS retries,
+        COALESCE(SUM(CASE WHEN state = 'engine-confirmed' THEN 1 ELSE 0 END), 0) AS durable_completions
+       FROM kojo_workflow_activity_attempts
+       WHERE run_id = ?`,
+    )
+    .get(runId) as {
+    readonly durable_completions: number;
+    readonly incomplete_attempts: number;
+    readonly invocation_attempts: number;
+    readonly retries: number;
+  } | null;
+  if (counts === null) return emptyActivitySummary();
+  const replay = connection
+    .query(
+      "SELECT COUNT(*) AS replay_reuses FROM kojo_execution_events WHERE run_id = ? AND kind = 'activity.result-reused'",
+    )
+    .get(runId) as { readonly replay_reuses: number } | null;
+  return {
+    invocationAttempts: counts.invocation_attempts,
+    incompleteAttempts: counts.incomplete_attempts,
+    retries: counts.retries,
+    durableCompletions: counts.durable_completions,
+    replayReuses: replay?.replay_reuses ?? 0,
+  };
+};
+
+const toRunListItem = (connection: Database, row: StoredRun): WorkflowRunListItem => ({
   runId: row.run_id as WorkflowRunListItem["runId"],
   workflowKey: row.workflow_key,
   workflowRevision: row.workflow_revision,
@@ -1229,7 +1327,52 @@ const toRunListItem = (row: StoredRun): WorkflowRunListItem => ({
         : row.suspension_kind === "deferred"
           ? ["deferred-complete"]
           : [],
+  activitySummary: readActivitySummary(connection, row.run_id),
 });
+
+const readActivityTrace = (
+  connection: Database,
+  runId: string,
+): WorkflowRunSnapshot["activityTrace"] => {
+  const attempts = connection
+    .query(
+      `SELECT attempt_id, durable_operation_key, activity_name, effect_retry_number,
+        invocation_number, activity_idempotency_key, state, outcome_code, started_at_ms,
+        result_observed_at_ms, engine_confirmed_at_ms
+       FROM kojo_workflow_activity_attempts
+       WHERE run_id = ?
+       ORDER BY started_at_ms ASC, attempt_id ASC`,
+    )
+    .all(runId) as ReadonlyArray<{
+    readonly activity_idempotency_key: string;
+    readonly activity_name: string;
+    readonly attempt_id: string;
+    readonly durable_operation_key: string;
+    readonly effect_retry_number: number;
+    readonly engine_confirmed_at_ms: number | null;
+    readonly invocation_number: number;
+    readonly outcome_code: string | null;
+    readonly result_observed_at_ms: number | null;
+    readonly started_at_ms: number;
+    readonly state: "started" | "result-observed" | "engine-confirmed";
+  }>;
+  return {
+    attempts: attempts.map((attempt) => ({
+      attemptId: attempt.attempt_id,
+      durableOperationKey: attempt.durable_operation_key,
+      activityName: attempt.activity_name,
+      effectRetryNumber: attempt.effect_retry_number,
+      invocationNumber: attempt.invocation_number,
+      activityIdempotencyKey: attempt.activity_idempotency_key,
+      state: attempt.state,
+      outcomeCode: attempt.outcome_code,
+      startedAtMs: attempt.started_at_ms,
+      resultObservedAtMs: attempt.result_observed_at_ms,
+      engineConfirmedAtMs: attempt.engine_confirmed_at_ms,
+    })),
+    summary: readActivitySummary(connection, runId),
+  };
+};
 
 const readRunSnapshot = (
   connection: Database,
@@ -1263,7 +1406,7 @@ const readRunSnapshot = (
         } | null) ?? undefined);
   return {
     run: {
-      ...toRunListItem(row),
+      ...toRunListItem(connection, row),
       startRequestKey: row.start_request_key as RequestKey,
       startSnapshot: JSON.parse(accepted.payload_json) as WorkflowRunSnapshot["startSnapshot"],
       suspension:
@@ -1274,6 +1417,7 @@ const readRunSnapshot = (
         row.outcome_summary_json === null
           ? null
           : (JSON.parse(row.outcome_summary_json) as WorkflowRunSnapshot["outcome"]),
+      activityTrace: readActivityTrace(connection, runId),
     },
     startSnapshotSensitivityMap: decodeSensitivityMap(
       accepted.payload_sensitivity_map_version,
@@ -1294,6 +1438,7 @@ const readRunSnapshot = (
 const appendEvent = (
   connection: Database,
   options: {
+    readonly activityAttemptId?: string;
     readonly engineOperationId?: string;
     readonly eventId: string;
     readonly kind: string;
@@ -1309,10 +1454,10 @@ const appendEvent = (
     .query(
       `INSERT INTO kojo_execution_events(
         event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms,
-        engine_operation_id,
+        engine_operation_id, activity_attempt_id,
         payload_encoding_version, payload_schema_identity, payload_json,
         payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256
-      ) VALUES (?, ?, ?, 1, ?, 1, ?, ?, 1, 'kojo.workflow-run-event/v1', ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, 1, ?, 1, ?, ?, ?, 1, 'kojo.workflow-run-event/v1', ?, ?, ?, ?)`,
     )
     .run(
       options.eventId,
@@ -1321,6 +1466,7 @@ const appendEvent = (
       options.kind,
       options.recordedAtMs,
       options.engineOperationId ?? null,
+      options.activityAttemptId ?? null,
       payloadJson,
       SENSITIVITY_MAP_VERSION,
       encodeSensitivityMap(options.sensitivityMap),
@@ -1952,6 +2098,27 @@ export const DrizzleWorkflowScheduleRepositoryLive = Layer.sync(WorkflowSchedule
       }),
     ),
 }));
+const nextEventSequence = (connection: Database, runId: string) =>
+  (
+    connection
+      .query("SELECT last_event_sequence FROM kojo_workflow_runs WHERE run_id = ?")
+      .get(runId) as { readonly last_event_sequence: number }
+  ).last_event_sequence + 1;
+
+const advanceRunTrace = (
+  connection: Database,
+  runId: string,
+  sequence: number,
+  updatedAtMs: number,
+) => {
+  connection
+    .query(
+      `UPDATE kojo_workflow_runs
+       SET last_event_sequence = ?, row_version = row_version + 1, updated_at_ms = ?
+       WHERE run_id = ?`,
+    )
+    .run(sequence, updatedAtMs, runId);
+};
 
 export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository, () => ({
   acceptManualStart: (start: WorkflowRunStartRecord) =>
@@ -2234,7 +2401,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
              ORDER BY accepted_at_ms DESC, run_id DESC LIMIT ?`,
           )
           .all(...parameters) as ReadonlyArray<StoredRun>;
-        return rows.map(toRunListItem);
+        return rows.map((row) => toRunListItem(connection, row));
       }),
     ),
   show: (project, runId) =>
@@ -2246,7 +2413,8 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
       withWritableProjectStore(project, (connection) => {
         const rows = connection
           .query(
-            `SELECT operation.run_id, run.workflow_key, run.workflow_revision, operation.request_json
+            `SELECT operation.run_id, run.workflow_key, run.workflow_revision, operation.request_json,
+                    operation.attempt_count
              FROM kojo_engine_operations operation
              JOIN kojo_workflow_runs run ON run.run_id = operation.run_id
              WHERE operation.kind = 'submit' AND operation.state = 'pending'
@@ -2256,6 +2424,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           .all(...(runId === undefined ? [] : [runId])) as ReadonlyArray<{
           readonly request_json: string;
           readonly run_id: string;
+          readonly attempt_count: number;
           readonly workflow_key: string;
           readonly workflow_revision: string;
         }>;
@@ -2267,6 +2436,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
             workflowKey: row.workflow_key,
             workflowRevision: row.workflow_revision,
             input: request.input,
+            engineGeneration: row.attempt_count + 1,
           };
         });
       }),
@@ -2511,6 +2681,359 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           return readRunSnapshot(connection, options.runId);
         }),
       ),
+    ),
+  prepareActivity: (project, runId, operation, preparedAtMs) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) =>
+        transaction(connection, () => {
+          const existing =
+            (connection
+              .query(
+                `SELECT activity_name, definition_fingerprint, execution_generation, confirmed_attempt_id,
+                result_json
+                 FROM kojo_workflow_activity_operations
+                 WHERE run_id = ? AND durable_operation_key = ?`,
+              )
+              .get(runId, operation.durableOperationKey) as {
+              readonly activity_name: string;
+              readonly confirmed_attempt_id: string | null;
+              readonly definition_fingerprint: string;
+              readonly execution_generation: number;
+              readonly result_json: string | null;
+            } | null) ?? undefined;
+          if (existing === undefined) {
+            connection
+              .query(
+                `INSERT INTO kojo_workflow_activity_operations(
+                  run_id, durable_operation_key, activity_name, definition_fingerprint,
+                  execution_generation, prepared_at_ms
+                ) VALUES (?, ?, ?, ?, 1, ?)`,
+              )
+              .run(
+                runId,
+                operation.durableOperationKey,
+                operation.activityName,
+                operation.definitionFingerprint,
+                preparedAtMs,
+              );
+            return { _tag: "ready" as const, executionGeneration: 1 };
+          }
+          const latestAttempt = connection
+            .query(
+              `SELECT state FROM kojo_workflow_activity_attempts
+               WHERE run_id = ? AND durable_operation_key = ?
+               ORDER BY invocation_number DESC
+               LIMIT 1`,
+            )
+            .get(runId, operation.durableOperationKey) as {
+            readonly state: "started" | "result-observed" | "engine-confirmed";
+          } | null;
+          const decision = decideWorkflowActivityReplay(
+            operation,
+            {
+              activityName: existing.activity_name,
+              confirmedAttemptId: existing.confirmed_attempt_id,
+              definitionFingerprint: existing.definition_fingerprint,
+              durableOperationKey: operation.durableOperationKey,
+              executionGeneration: existing.execution_generation,
+              resultJson: existing.result_json,
+            },
+            latestAttempt?.state,
+          );
+          if (decision._tag === "completed") {
+            return {
+              ...decision,
+              result: JSON.parse(decision.resultJson),
+            };
+          }
+          return decision;
+        }),
+      ),
+    ),
+  startActivityAttempt: (project, runId, operation, options, startedAtMs) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) =>
+        transaction(connection, () => {
+          const registered =
+            (connection
+              .query(
+                `SELECT activity_name, definition_fingerprint
+                 FROM kojo_workflow_activity_operations
+                 WHERE run_id = ? AND durable_operation_key = ?`,
+              )
+              .get(runId, operation.durableOperationKey) as {
+              readonly activity_name: string;
+              readonly definition_fingerprint: string;
+            } | null) ?? undefined;
+          if (
+            registered === undefined ||
+            registered.activity_name !== operation.activityName ||
+            registered.definition_fingerprint !== operation.definitionFingerprint
+          ) {
+            throw new Error("Workflow Activity was not prepared for this Durable Operation Key");
+          }
+          const invocation = connection
+            .query(
+              `SELECT COALESCE(MAX(invocation_number), 0) + 1 AS invocation_number
+               FROM kojo_workflow_activity_attempts
+               WHERE run_id = ? AND durable_operation_key = ?`,
+            )
+            .get(runId, operation.durableOperationKey) as { readonly invocation_number: number };
+          const attempt: WorkflowActivityAttemptRecord = {
+            ...operation,
+            attemptId: randomUUID(),
+            executionGeneration: options.executionGeneration,
+            activityIdempotencyKey: options.activityIdempotencyKey,
+            effectRetryNumber: options.effectRetryNumber,
+            invocationNumber: invocation.invocation_number,
+          };
+          connection
+            .query(
+              `INSERT INTO kojo_workflow_activity_attempts(
+                attempt_id, run_id, durable_operation_key, activity_name, execution_generation,
+                effect_retry_number, invocation_number, activity_idempotency_key, state, started_at_ms
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'started', ?)`,
+            )
+            .run(
+              attempt.attemptId,
+              runId,
+              attempt.durableOperationKey,
+              attempt.activityName,
+              attempt.executionGeneration,
+              attempt.effectRetryNumber,
+              attempt.invocationNumber,
+              attempt.activityIdempotencyKey,
+              startedAtMs,
+            );
+          const sequence = nextEventSequence(connection, runId);
+          appendEvent(connection, {
+            activityAttemptId: attempt.attemptId,
+            eventId: randomUUID(),
+            kind: "activity.attempt-started",
+            payload: {
+              activityIdempotencyKey: attempt.activityIdempotencyKey,
+              activityName: attempt.activityName,
+              durableOperationKey: attempt.durableOperationKey,
+              effectRetryNumber: attempt.effectRetryNumber,
+              invocationNumber: attempt.invocationNumber,
+            },
+            recordedAtMs: startedAtMs,
+            runId,
+            sequence,
+            sensitivityMap: sensitivityMap([]),
+          });
+          advanceRunTrace(connection, runId, sequence, startedAtMs);
+          return attempt;
+        }),
+      ),
+    ),
+  observeActivityAttempt: (project, runId, attemptId, outcomeCode, observedAtMs) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) =>
+        transaction(connection, () => {
+          const attempt =
+            (connection
+              .query(
+                `SELECT durable_operation_key, activity_name, state
+                 FROM kojo_workflow_activity_attempts WHERE run_id = ? AND attempt_id = ?`,
+              )
+              .get(runId, attemptId) as {
+              readonly activity_name: string;
+              readonly durable_operation_key: string;
+              readonly state: "started" | "result-observed" | "engine-confirmed";
+            } | null) ?? undefined;
+          if (attempt === undefined || attempt.state !== "started") return;
+          const sequence = nextEventSequence(connection, runId);
+          appendEvent(connection, {
+            activityAttemptId: attemptId,
+            eventId: randomUUID(),
+            kind: "activity.result-observed",
+            payload: {
+              activityName: attempt.activity_name,
+              durableOperationKey: attempt.durable_operation_key,
+              outcomeCode,
+            },
+            recordedAtMs: observedAtMs,
+            runId,
+            sequence,
+            sensitivityMap: sensitivityMap([]),
+          });
+          connection
+            .query(
+              `UPDATE kojo_workflow_activity_attempts
+               SET state = 'result-observed', outcome_code = ?, result_observed_at_ms = ?
+               WHERE attempt_id = ?`,
+            )
+            .run(outcomeCode, observedAtMs, attemptId);
+          advanceRunTrace(connection, runId, sequence, observedAtMs);
+        }),
+      ),
+    ),
+  confirmActivityAttempt: (project, runId, attemptId, result, confirmedAtMs) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) =>
+        transaction(connection, () => {
+          const attempt =
+            (connection
+              .query(
+                `SELECT durable_operation_key, activity_name, state
+                 FROM kojo_workflow_activity_attempts WHERE run_id = ? AND attempt_id = ?`,
+              )
+              .get(runId, attemptId) as {
+              readonly activity_name: string;
+              readonly durable_operation_key: string;
+              readonly state: "started" | "result-observed" | "engine-confirmed";
+            } | null) ?? undefined;
+          if (attempt === undefined || attempt.state === "engine-confirmed") return;
+          if (attempt.state !== "result-observed") {
+            throw new Error(
+              "Workflow Activity result was not observed before durable confirmation",
+            );
+          }
+          const operation =
+            (connection
+              .query(
+                `SELECT confirmed_attempt_id FROM kojo_workflow_activity_operations
+                 WHERE run_id = ? AND durable_operation_key = ?`,
+              )
+              .get(runId, attempt.durable_operation_key) as {
+              readonly confirmed_attempt_id: string | null;
+            } | null) ?? undefined;
+          if (operation === undefined) throw new Error("Workflow Activity operation disappeared");
+          if (
+            operation.confirmed_attempt_id !== null &&
+            operation.confirmed_attempt_id !== attemptId
+          ) {
+            throw new Error("Workflow Activity Durable Operation Key has conflicting completion");
+          }
+          const sequence = nextEventSequence(connection, runId);
+          appendEvent(connection, {
+            activityAttemptId: attemptId,
+            eventId: randomUUID(),
+            kind: "activity.result-confirmed",
+            payload: {
+              activityName: attempt.activity_name,
+              durableOperationKey: attempt.durable_operation_key,
+            },
+            recordedAtMs: confirmedAtMs,
+            runId,
+            sequence,
+            sensitivityMap: sensitivityMap([]),
+          });
+          connection
+            .query(
+              `UPDATE kojo_workflow_activity_attempts
+               SET state = 'engine-confirmed', engine_confirmed_at_ms = ?
+               WHERE attempt_id = ?`,
+            )
+            .run(confirmedAtMs, attemptId);
+          connection
+            .query(
+              `UPDATE kojo_workflow_activity_operations
+               SET confirmed_attempt_id = ?, result_json = ?
+               WHERE run_id = ? AND durable_operation_key = ?`,
+            )
+            .run(attemptId, JSON.stringify(result), runId, attempt.durable_operation_key);
+          advanceRunTrace(connection, runId, sequence, confirmedAtMs);
+        }),
+      ),
+    ),
+  recordActivityReplayReuse: (project, runId, operation, confirmedAttemptId, recordedAtMs) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) =>
+        transaction(connection, () => {
+          const stored =
+            (connection
+              .query(
+                `SELECT activity_name, definition_fingerprint, confirmed_attempt_id
+                 FROM kojo_workflow_activity_operations
+                 WHERE run_id = ? AND durable_operation_key = ?`,
+              )
+              .get(runId, operation.durableOperationKey) as {
+              readonly activity_name: string;
+              readonly confirmed_attempt_id: string | null;
+              readonly definition_fingerprint: string;
+            } | null) ?? undefined;
+          if (
+            stored?.activity_name !== operation.activityName ||
+            stored.definition_fingerprint !== operation.definitionFingerprint ||
+            stored.confirmed_attempt_id !== confirmedAttemptId
+          ) {
+            throw new Error(
+              "Workflow Activity replay evidence does not match its Durable Operation Key",
+            );
+          }
+          const sequence = nextEventSequence(connection, runId);
+          appendEvent(connection, {
+            activityAttemptId: confirmedAttemptId,
+            eventId: randomUUID(),
+            kind: "activity.result-reused",
+            payload: {
+              activityName: operation.activityName,
+              durableOperationKey: operation.durableOperationKey,
+            },
+            recordedAtMs,
+            runId,
+            sequence,
+            sensitivityMap: sensitivityMap([]),
+          });
+          advanceRunTrace(connection, runId, sequence, recordedAtMs);
+        }),
+      ),
+    ),
+  recoverActivitySubmission: (project, runId, hostStartedAtMs) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) =>
+        transaction(connection, () => {
+          const incomplete = connection
+            .query(
+              `SELECT 1 FROM kojo_workflow_activity_attempts
+               WHERE run_id = ? AND state != 'engine-confirmed' AND started_at_ms < ?
+               LIMIT 1`,
+            )
+            .get(runId, hostStartedAtMs);
+          if (incomplete === null) return false;
+          const updated = connection
+            .query(
+              `UPDATE kojo_engine_operations
+               SET state = 'pending', next_attempt_at_ms = ?, confirmed_at_ms = NULL,
+                 confirmation_event_id = NULL, updated_at_ms = ?
+               WHERE run_id = ? AND kind = 'submit' AND state = 'confirmed'
+                 AND last_attempted_at_ms < ?`,
+            )
+            .run(hostStartedAtMs, hostStartedAtMs, runId, hostStartedAtMs);
+          if (updated.changes === 0) return false;
+          const sequence = nextEventSequence(connection, runId);
+          appendEvent(connection, {
+            eventId: randomUUID(),
+            kind: "run.engine-recovery-queued",
+            payload: { runId },
+            recordedAtMs: hostStartedAtMs,
+            runId,
+            sequence,
+            sensitivityMap: sensitivityMap([]),
+          });
+          advanceRunTrace(connection, runId, sequence, hostStartedAtMs);
+          return true;
+        }),
+      ),
+    ),
+  engineGeneration: (project, runId) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) => {
+        const operation =
+          (connection
+            .query(
+              `SELECT state, attempt_count FROM kojo_engine_operations
+               WHERE run_id = ? AND kind = 'submit'`,
+            )
+            .get(runId) as {
+            readonly attempt_count: number;
+            readonly state: "pending" | "confirmed" | "needs-attention";
+          } | null) ?? undefined;
+        if (operation === undefined) return undefined;
+        return operation.attempt_count + (operation.state === "pending" ? 1 : 0);
+      }),
     ),
   recordOutcome: (project, runId, outcome, finalizedAtMs) =>
     Effect.sync(() =>

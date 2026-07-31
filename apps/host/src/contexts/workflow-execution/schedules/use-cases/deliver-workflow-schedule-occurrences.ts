@@ -148,7 +148,7 @@ export const deliverWorkflowScheduleOccurrences = (
       validation.project,
       Effect.gen(function* () {
         const now = clock.now();
-        yield* backend.register(validation.project, executable.map(asLocalDefinition));
+        yield* backend.register(validation.project, executable.map(asLocalDefinition), runs);
         const pendingSubmissions = yield* runs.pendingSubmissions(validation.project);
         for (const pending of pendingSubmissions) {
           const definition = executable.find(

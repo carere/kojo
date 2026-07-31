@@ -129,6 +129,13 @@ export function WorkflowRuns(props: WorkflowRunsProps) {
                   </Show>
                 </div>
               </Show>
+              <span class="text-muted-foreground">
+                {" "}
+                · Activities: {run.activitySummary.invocationAttempts} attempts,{" "}
+                {run.activitySummary.incompleteAttempts} incomplete,{" "}
+                {run.activitySummary.durableCompletions} durable, {run.activitySummary.replayReuses}{" "}
+                replay reuses
+              </span>
             </li>
           )}
         </For>
