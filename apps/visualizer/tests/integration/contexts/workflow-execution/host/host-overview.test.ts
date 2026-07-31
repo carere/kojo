@@ -1,4 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createServer, type Socket } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, describe, expect, it } from "@effect/vitest";
 import { EMPTY_EXECUTION_TRACE_FILTERS, ProjectIdentity, WorkflowRunId } from "@kojo/control";
 import { Effect, Schema, Stream } from "effect";
@@ -35,6 +38,46 @@ const abortingSameOriginFetch = ((input: RequestInfo | URL, init?: RequestInit) 
     return response;
   });
 }) as typeof fetch;
+
+interface StalledControlServer {
+  readonly connected: Promise<void>;
+  readonly socketPath: string;
+  readonly stop: () => Promise<void>;
+}
+
+const startStalledControlServer = async (): Promise<StalledControlServer> => {
+  const directory = await mkdtemp(join(tmpdir(), "kojo-stalled-control-"));
+  const socketPath = join(directory, "host.sock");
+  const sockets = new Set<Socket>();
+  let notifyConnected: (() => void) | undefined;
+  const connected = new Promise<void>((resolve) => {
+    notifyConnected = resolve;
+  });
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+    notifyConnected?.();
+    notifyConnected = undefined;
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  return {
+    connected,
+    socketPath,
+    stop: async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error === undefined ? resolve() : reject(error))),
+      );
+      await rm(directory, { force: true, recursive: true });
+    },
+  };
+};
 
 const withHost = <A>(
   use: (
@@ -144,6 +187,41 @@ describe("Host overview", () => {
       Effect.provideService(FetchHttpClient.Fetch, sameOriginFetch),
     );
   });
+
+  it.effect("cancels a stalled Artifact Host request when the browser disconnects", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(startStalledControlServer),
+      (server) =>
+        Effect.gen(function* () {
+          const previousSocketPath = process.env.KOJO_HOST_SOCKET;
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              if (previousSocketPath === undefined) delete process.env.KOJO_HOST_SOCKET;
+              else process.env.KOJO_HOST_SOCKET = previousSocketPath;
+            }),
+          );
+          process.env.KOJO_HOST_SOCKET = server.socketPath;
+          const controller = new AbortController();
+          const request = new Request(
+            "http://kojo.test/api/artifacts?project=00000000-0000-7000-8000-000000000001&run=00000000-0000-7000-8000-000000000002&artifact=artifact-1",
+            { signal: controller.signal },
+          );
+          request.headers.set("origin", "http://kojo.test");
+          request.headers.set("sec-fetch-site", "same-origin");
+          const response = handleApiRequest(request);
+          yield* Effect.promise(() => server.connected);
+          controller.abort();
+          const settled = yield* Effect.promise(() =>
+            Promise.race([
+              response.then((value) => ({ response: value })),
+              Bun.sleep(100).then(() => ({ response: undefined })),
+            ]),
+          );
+          expect(settled.response?.status).toBe(503);
+        }),
+      (server) => Effect.promise(server.stop),
+    ),
+  );
 
   it.effect("is exposed through an explicit same-origin operation", () =>
     withHost(() =>

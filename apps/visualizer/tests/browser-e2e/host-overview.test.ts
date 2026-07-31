@@ -61,13 +61,9 @@ export default defineConfig({
 `;
 
 afterEach(async () => {
-  if (fixture !== undefined) {
-    await fixture.browser.close();
-    fixture.visualizer.kill("SIGTERM");
-    await fixture.visualizer.exited;
-    await fixture.host.stop();
-    fixture = undefined;
-  }
+  const closingFixture = fixture;
+  fixture = undefined;
+  if (closingFixture !== undefined) await closeFixture(closingFixture);
   await Promise.all(temporaryDirectories.splice(0).map((cleanup) => cleanup()));
 });
 
@@ -276,46 +272,34 @@ test("downloads a real Artifact as an inert attachment instead of rendering it",
     .projectIdentity as string;
   const artifactUrl = `${origin}/api/artifacts?artifact=${artifactId}&project=${identity}&run=${runId}`;
 
-  const artifactResponse = await within(
-    "Artifact endpoint fetch",
-    page.evaluate(async (url) => {
-      const signal = AbortSignal.timeout(10_000);
-      try {
-        const response = await fetch(url, { signal });
-        return {
-          body: await response.text(),
-          headers: Object.fromEntries(response.headers),
-          status: response.status,
-        };
-      } catch (error) {
-        return { error: String(error) };
-      }
-    }, artifactUrl),
-  );
-  if ("error" in artifactResponse) {
-    throw new Error(`Artifact endpoint did not settle: ${artifactResponse.error}`);
-  }
-  expect(artifactResponse.status).toBe(200);
-  expect(artifactResponse.headers).toMatchObject({
+  const artifactResponse = await page.request.get(artifactUrl, { timeout: 10_000 });
+  expect(artifactResponse.status()).toBe(200);
+  expect(artifactResponse.headers()).toMatchObject({
     "cache-control": "no-store",
     "content-disposition": `attachment; filename="artifact-${artifactId}.json"`,
     "content-type": "application/octet-stream",
     "x-content-type-options": "nosniff",
   });
-  expect(artifactResponse.body).toContain("present:");
+  expect(await artifactResponse.text()).toContain("present:");
 
-  const download = page.waitForEvent("download", { timeout: 10_000 });
   await page.evaluate((url) => {
     const link = document.createElement("a");
+    link.dataset.artifactDownload = "";
     link.download = "";
     link.href = url;
+    link.textContent = "Download Artifact";
     document.body.append(link);
-    link.click();
-    link.remove();
   }, artifactUrl);
-  const artifactDownload = await within("Artifact attachment download", download);
+  const artifactLink = page.locator("[data-artifact-download]");
+  const download = page.waitForEvent("download", { timeout: 10_000 });
+  await artifactLink.click();
+  const artifactDownload = await download;
+  await artifactLink.evaluate((link) => link.remove());
+  const downloadPath = await artifactDownload.path();
+  expect(downloadPath).not.toBeNull();
+  if (downloadPath !== null) expect(await readFile(downloadPath, "utf8")).toContain("present:");
   expect(artifactDownload.suggestedFilename()).toBe(`artifact-${artifactId}.json`);
-  expect(await within("Artifact download completion", artifactDownload.failure())).toBeNull();
+  expect(await artifactDownload.failure()).toBeNull();
   expect(page.url()).not.toBe(artifactUrl);
   expect(await page.locator("body").innerText()).not.toContain("present:");
 }, 60_000);
@@ -337,7 +321,6 @@ const startFixture = async (): Promise<Fixture> => {
     },
   );
   const visualizerStderr = readStderr(visualizer);
-
   try {
     await waitFor(async () => {
       try {
@@ -358,10 +341,57 @@ const startFixture = async (): Promise<Fixture> => {
       visualizer,
     };
   } catch (error) {
-    if (visualizer.exitCode === null) visualizer.kill("SIGTERM");
-    await visualizer.exited;
-    await host.stop();
+    await stopVisualizer(visualizer);
+    await host.crash();
     throw withFixtureStderr(error, await visualizerStderr);
+  }
+};
+
+const closeFixture = async (closingFixture: Fixture) => {
+  let failure: unknown;
+  try {
+    await closeBrowser(closingFixture.browser);
+  } catch (error) {
+    failure = error;
+  }
+  try {
+    await stopVisualizer(closingFixture.visualizer);
+  } catch (error) {
+    failure ??= error;
+  }
+  try {
+    await closingFixture.host.crash();
+  } catch (error) {
+    failure ??= error;
+  }
+  if (failure !== undefined) throw failure;
+};
+
+const cleanupDeadlineMs = 1_000;
+
+const settlesWithin = async (operation: Promise<unknown>) =>
+  Promise.race([
+    operation.then(
+      () => true,
+      () => true,
+    ),
+    Bun.sleep(cleanupDeadlineMs).then(() => false),
+  ]);
+
+const closeBrowser = async (browser: Browser) => {
+  const closed = await Promise.race([
+    browser.close().then(() => true),
+    Bun.sleep(cleanupDeadlineMs).then(() => false),
+  ]);
+  if (!closed) throw new Error("Browser teardown did not settle after its request was cancelled.");
+};
+
+const stopVisualizer = async (visualizer: Bun.Subprocess) => {
+  if (visualizer.exitCode === null) visualizer.kill("SIGTERM");
+  if (await settlesWithin(visualizer.exited)) return;
+  if (visualizer.exitCode === null) visualizer.kill("SIGKILL");
+  if (!(await settlesWithin(visualizer.exited))) {
+    throw new Error("Visualizer teardown did not settle after SIGKILL.");
   }
 };
 

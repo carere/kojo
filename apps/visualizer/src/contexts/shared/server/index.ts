@@ -75,7 +75,25 @@ export const handleApiRequest = (request: Request) =>
  */
 type ArtifactDownloader = (
   input: ExecutionArtifactDownloadInput,
+  signal: AbortSignal,
 ) => Promise<ExecutionArtifactDownloadResult>;
+
+/** Interrupts the scoped Host request as soon as the browser disconnects. */
+const interruptWhenAborted = (signal: AbortSignal) =>
+  Effect.callback<never>((resume) => {
+    const onAbort = () => resume(Effect.interrupt);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+    return Effect.sync(() => signal.removeEventListener("abort", onAbort));
+  });
+
+const downloadArtifactForRequest = (input: ExecutionArtifactDownloadInput, signal: AbortSignal) =>
+  Effect.runPromise(
+    Effect.raceFirst(
+      downloadExecutionArtifact(input).pipe(Effect.provide(HostControlClientLive)),
+      interruptWhenAborted(signal),
+    ),
+  );
 
 /**
  * Builds an intentionally inert Artifact attachment response. Keeping the
@@ -84,8 +102,7 @@ type ArtifactDownloader = (
  */
 export const handleArtifactAttachment = async (
   request: Request,
-  download: ArtifactDownloader = (input) =>
-    Effect.runPromise(downloadExecutionArtifact(input).pipe(Effect.provide(HostControlClientLive))),
+  download: ArtifactDownloader = downloadArtifactForRequest,
 ): Promise<Response | undefined> => {
   const url = new URL(request.url);
   if (request.method !== "GET" || url.pathname !== "/api/artifacts") return undefined;
@@ -102,11 +119,14 @@ export const handleArtifactAttachment = async (
     return new Response("Invalid Artifact request.", { status: 400 });
   }
   try {
-    const result = await download({
-      artifactId,
-      identity: identity as never,
-      runId: runId as never,
-    });
+    const result = await download(
+      {
+        artifactId,
+        identity: identity as never,
+        runId: runId as never,
+      },
+      request.signal,
+    );
     if (!result.ok) {
       return new Response("Execution Artifact is unavailable.", {
         status: result.error.code === "execution-artifact-not-found" ? 404 : 410,

@@ -1057,7 +1057,7 @@ export type ExecutionTraceExportInput = typeof ExecutionTraceExportInput.Type;
 
 export const ExecutionTraceExportArtifact = Schema.Struct({
   artifact: ExecutionArtifact,
-  /** Present only when the caller explicitly asked to include this safe Artifact. */
+  /** Present only when the caller explicitly requested this Artifact's content. */
   contentBase64: Schema.NullOr(Schema.String),
 });
 export type ExecutionTraceExportArtifact = typeof ExecutionTraceExportArtifact.Type;
