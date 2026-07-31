@@ -247,6 +247,25 @@ export default defineConfig({
 });
 `;
 
+const sigtermTraceFollowConfiguration = `
+import { Effect, Schema } from "effect";
+import { defineConfig, defineWorkflow } from "@kojo/workflow";
+
+const input = Schema.Struct({ message: Schema.String });
+export default defineConfig({
+  workflows: [
+    defineWorkflow({
+      workflowKey: "trace-follow-hold",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      handler: () => Effect.never
+    })
+  ]
+});
+`;
+
 const sensitiveConfiguration = `
 import { Effect, Schema } from "effect";
 import { defineConfig, defineWorkflow } from "@kojo/workflow";
@@ -3288,13 +3307,13 @@ it("detaches a trace-follow client on SIGTERM without stopping the Host Run", as
   const project = join(directory.path, "project");
   await initializeGit(project);
   await installWorkflowDependencies(project);
-  await writeFile(join(project, "kojo.config.ts"), configuration);
+  await writeFile(join(project, "kojo.config.ts"), sigtermTraceFollowConfiguration);
   const host = await startKojoHostProcess();
-  cleanups.push(host.stop);
+  cleanups.push(host.crash);
 
   expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
   const started = await runKojoCli(
-    ["run", "start", "slow", "--input", '{"message":"keep-running"}', "--json"],
+    ["run", "start", "trace-follow-hold", "--input", '{"message":"keep-running"}', "--json"],
     host.socketPath,
     project,
   );
@@ -3305,9 +3324,21 @@ it("detaches a trace-follow client on SIGTERM without stopping the Host Run", as
     host.socketPath,
     project,
   );
-  await followingClient.waitForStdout('"sequence":1');
-  followingClient.child.kill("SIGTERM");
-  const detached = await followingClient.result;
+  let detached: Awaited<typeof followingClient.result> | undefined;
+  try {
+    await followingClient.waitForStdout('"sequence":1');
+    followingClient.child.kill("SIGTERM");
+    detached = await finishKojoCliWithin(followingClient, 2_000, "SIGTERM trace-follow shutdown");
+  } finally {
+    if (followingClient.child.exitCode === null) followingClient.child.kill("SIGKILL");
+    await completeWithin(
+      followingClient.result.then(() => undefined),
+      2_000,
+      "SIGTERM trace-follow child cleanup",
+    );
+  }
+  if (detached === undefined)
+    throw new Error("SIGTERM trace-follow client did not return a result.");
   expect(detached.exitCode, `${detached.stdout}${detached.stderr}`).toBe(0);
 
   const shown = await runKojoCli(["run", "show", runId, "--json"], host.socketPath, project);
