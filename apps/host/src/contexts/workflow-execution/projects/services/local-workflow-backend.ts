@@ -38,12 +38,17 @@ import {
 } from "@kojo/workflow";
 import { Cause, Context, Duration, Effect, Exit, Layer, Option, Schema, Scope } from "effect";
 import {
+  ClusterSchema,
   ClusterWorkflowEngine,
+  EntityAddress,
+  EntityId,
+  EntityType,
   RunnerAddress,
   ShardId,
   Sharding,
   SingleRunner,
 } from "effect/unstable/cluster";
+import { MessageStorage } from "effect/unstable/cluster/MessageStorage";
 import { SqlClient } from "effect/unstable/sql";
 import * as Activity from "effect/unstable/workflow/Activity";
 import * as DurableClock from "effect/unstable/workflow/DurableClock";
@@ -54,6 +59,7 @@ import { workflowActivityIdempotencyKey } from "../../runs/models/workflow-activ
 import type {
   WorkflowActivityAttemptRecord,
   WorkflowActivityOperation,
+  WorkflowActivityPreparation,
   WorkflowRunRepository,
 } from "../../runs/repositories/workflow-run-repository";
 import {
@@ -80,6 +86,7 @@ import {
 const databasePath = (project: ProjectSnapshot) => join(project.path, ".kojo", "kojo.sqlite");
 const ownershipPath = (project: ProjectSnapshot) =>
   join(project.path, ".kojo", "project-runtime-lock.sqlite");
+const ownershipWaitAttempts = 80;
 
 const configure = (sql: SqlClient.SqlClient) =>
   Effect.gen(function* () {
@@ -108,6 +115,8 @@ interface ActiveBackend {
   activityRepository?: WorkflowRunRepository["Service"];
   readonly engine: WorkflowEngine.WorkflowEngine["Service"];
   readonly entries: Map<string, Entry>;
+  readonly messageStorage: MessageStorage["Service"];
+  readonly project: ProjectSnapshot;
   readonly recoveredRuns: Set<string>;
   readonly scope: Scope.Closeable;
   readonly sharding: Sharding.Sharding["Service"];
@@ -117,7 +126,10 @@ interface ActiveBackend {
 const waitForOwnership = (sharding: Sharding.Sharding["Service"]) =>
   Effect.gen(function* () {
     const probe = ShardId.make("default", 1);
-    for (let attempt = 0; attempt < 40; attempt += 1) {
+    // The replacement Host starts only after an abandoned one-second lease
+    // expires. Allow one further bounded lease interval for runner bootstrap
+    // and the first assignment refresh; otherwise recovery races the lease.
+    for (let attempt = 0; attempt < ownershipWaitAttempts; attempt += 1) {
       if (sharding.hasShardId(probe)) return true;
       yield* Effect.sleep("25 millis");
     }
@@ -192,6 +204,10 @@ export const makeLocalWorkflowBackendLayer = (
           const backend = active.get(path);
           if (backend === undefined) return;
           active.delete(path);
+          // A reservation loser can be waiting on the winner's durable
+          // confirmation. Signal it before closing the backend scope so a
+          // Host shutdown cannot wait forever for that confirmation.
+          yield* runWorkInterrupter.interruptProject(backend.project);
           yield* Scope.close(backend.scope, Exit.void);
         });
 
@@ -277,6 +293,7 @@ export const makeLocalWorkflowBackendLayer = (
             );
             const sharding = Context.get(context, Sharding.Sharding);
             const engine = Context.get(context, WorkflowEngine.WorkflowEngine);
+            const messageStorage = Context.get(context, MessageStorage);
             yield* Layer.buildWithScope(
               Layer.merge(registrationLayer, scheduleWakeupRegistration).pipe(
                 Layer.provide(Layer.succeed(WorkflowEngine.WorkflowEngine, engine)),
@@ -290,6 +307,8 @@ export const makeLocalWorkflowBackendLayer = (
             active.set(project.path, {
               engine,
               entries: new Map(defaultEntries.map((entry) => [entry.identity, entry])),
+              messageStorage,
+              project,
               recoveredRuns: new Set(),
               scope,
               sharding,
@@ -321,19 +340,6 @@ export const makeLocalWorkflowBackendLayer = (
       ) =>
         Effect.gen(function* () {
           const backend = getActiveBackend(active, project);
-          if (activityRepository !== undefined) {
-            backend.activityRepository = activityRepository;
-            if (activityRepository.recoverActivitySubmission !== undefined) {
-              for (const activeRun of yield* activityRepository.activeRuns(project)) {
-                if (backend.recoveredRuns.has(activeRun.runId)) continue;
-                yield* activityRepository
-                  .recoverActivitySubmission(project, activeRun.runId, backend.startedAtMs)
-                  .pipe(
-                    Effect.tap(() => Effect.sync(() => backend.recoveredRuns.add(activeRun.runId))),
-                  );
-              }
-            }
-          }
           const childDispatcher: ChildRunDispatcher = {
             invoke: (parentRunId, parent, invocation) =>
               invokeChildWorkflowRun(
@@ -345,14 +351,48 @@ export const makeLocalWorkflowBackendLayer = (
                 invocation,
               ),
           };
-          for (const entry of makeEntries(
+          const entries = makeEntries(
             definitions,
             project,
             activityRepository,
             selectedProviderRuntime,
             childDispatcher,
             runWorkInterrupter,
-          )) {
+          );
+          if (activityRepository !== undefined) {
+            backend.activityRepository = activityRepository;
+            if (activityRepository.recoverActivitySubmission !== undefined) {
+              for (const activeRun of yield* activityRepository.activeRuns(project)) {
+                if (backend.recoveredRuns.has(activeRun.runId)) continue;
+                const recovered = yield* activityRepository.recoverActivitySubmission(
+                  project,
+                  activeRun.runId,
+                  backend.startedAtMs,
+                );
+                if (recovered) {
+                  const currentGeneration = yield* currentEngineGeneration(
+                    backend,
+                    project,
+                    activeRun.runId,
+                  );
+                  const superseded = entries.find(
+                    (entry) =>
+                      entry.workflowKey === activeRun.workflowKey &&
+                      entry.workflowRevision === activeRun.workflowRevision,
+                  );
+                  if (superseded !== undefined && currentGeneration > 1) {
+                    yield* superseded.retireGeneration(
+                      backend,
+                      activeRun.runId,
+                      currentGeneration - 1,
+                    );
+                  }
+                }
+                backend.recoveredRuns.add(activeRun.runId);
+              }
+            }
+          }
+          for (const entry of entries) {
             if (backend.entries.has(entry.identity)) continue;
             yield* Layer.buildWithScope(
               entry.registration.pipe(
@@ -365,7 +405,11 @@ export const makeLocalWorkflowBackendLayer = (
         });
 
       yield* Effect.addFinalizer(() =>
-        Effect.forEach(Array.from(ownership.keys()), releaseOwnership, { discard: true }),
+        Effect.forEach(Array.from(active.keys()), quiesce, { discard: true }).pipe(
+          Effect.andThen(
+            Effect.forEach(Array.from(ownership.keys()), releaseOwnership, { discard: true }),
+          ),
+        ),
       );
 
       const currentEngineGeneration = (
@@ -584,6 +628,12 @@ interface Entry {
     runId: string,
     engineGeneration: number,
   ) => Effect.Effect<void>;
+  /** Removes the superseded Effect Cluster execution before it can await lost in-memory state. */
+  readonly retireGeneration: (
+    backend: ActiveBackend,
+    runId: string,
+    engineGeneration: number,
+  ) => Effect.Effect<void>;
   readonly registration: Layer.Layer<never, never, WorkflowEngine.WorkflowEngine>;
 }
 
@@ -781,6 +831,23 @@ const makeEntries = (
           ),
           Effect.catchCause(() => Effect.void),
         ) as unknown as Effect.Effect<void>,
+      retireGeneration: (backend, runId, engineGeneration) =>
+        workflow.executionId({ engineGeneration, input: undefined, runId }).pipe(
+          Effect.map((executionId) => {
+            const entityId = EntityId.make(executionId);
+            const shardGroup = Context.get(
+              workflow.annotations,
+              ClusterSchema.ShardGroup,
+            )(entityId);
+            return EntityAddress.make({
+              entityId,
+              entityType: EntityType.make(`Workflow/${workflow._tag}`),
+              shardId: backend.sharding.getShardId(entityId, shardGroup),
+            });
+          }),
+          Effect.flatMap(backend.messageStorage.clearAddress),
+          Effect.orDie,
+        ) as Effect.Effect<void>,
       registration: registration as unknown as Layer.Layer<
         never,
         never,
@@ -1475,49 +1542,61 @@ const makeWorkflowActivityRuntime = (
     };
     return Effect.suspend(() =>
       Effect.gen(function* () {
-        const prepared = yield* Effect.gen(function* () {
-          for (let poll = 0; poll < 100; poll += 1) {
-            const preparation = yield* repository.prepareActivity(
+        const awaitPreparation = () =>
+          runWorkInterrupter.interruptible(
+            project,
+            runId,
+            Effect.gen(function* () {
+              for (;;) {
+                const preparation = yield* repository.prepareActivity(
+                  project,
+                  runId,
+                  operation,
+                  Date.now(),
+                );
+                if (preparation._tag !== "awaiting-confirmation") return preparation;
+                yield* Effect.sleep("10 millis");
+              }
+            }),
+          );
+        const reuse = (
+          confirmation: Extract<WorkflowActivityPreparation, { readonly _tag: "completed" }>,
+        ) =>
+          Effect.gen(function* () {
+            yield* repository.recordActivityReplayReuse(
               project,
               runId,
               operation,
+              confirmation.confirmedAttemptId,
               Date.now(),
             );
-            if (preparation._tag !== "awaiting-confirmation") return preparation;
-            yield* Effect.sleep("10 millis");
-          }
+            const agent = agentOperations.get(operation.durableOperationKey);
+            if (agent !== undefined) {
+              yield* repository.recordAgentTrace(project, runId, {
+                artifactIds: [],
+                artifacts: [],
+                durationMs: null,
+                kind: "agent.replayed",
+                operationKey: operation.durableOperationKey,
+                providerKind: agent.providerKind,
+                recordedAtMs: Date.now(),
+                sandboxIdentity: agent.sandboxIdentity,
+              });
+            }
+            return confirmation.result as Success["Type"];
+          });
+        const prepared = yield* awaitPreparation();
+        if (prepared._tag === "run-not-running") {
           return yield* Effect.die(
-            `Workflow Activity confirmation stalled: ${operation.durableOperationKey}`,
+            `Workflow Activity cannot wait for a claim while Run is ${prepared.state}.`,
           );
-        });
+        }
         if (prepared._tag === "conflict") {
           return yield* Effect.die(
             `Conflicting Durable Operation Key: ${operation.durableOperationKey}`,
           );
         }
-        if (prepared._tag === "completed") {
-          yield* repository.recordActivityReplayReuse(
-            project,
-            runId,
-            operation,
-            prepared.confirmedAttemptId,
-            Date.now(),
-          );
-          const agent = agentOperations.get(operation.durableOperationKey);
-          if (agent !== undefined) {
-            yield* repository.recordAgentTrace(project, runId, {
-              artifactIds: [],
-              artifacts: [],
-              durationMs: null,
-              kind: "agent.replayed",
-              operationKey: operation.durableOperationKey,
-              providerKind: agent.providerKind,
-              recordedAtMs: Date.now(),
-              sandboxIdentity: agent.sandboxIdentity,
-            });
-          }
-          return prepared.result as Success["Type"];
-        }
+        if (prepared._tag === "completed") return yield* reuse(prepared);
 
         let lastAttempt: WorkflowActivityAttemptRecord | undefined;
         let observed = false;
@@ -1541,6 +1620,13 @@ const makeWorkflowActivityRuntime = (
               },
               Date.now(),
             );
+            if (attempt === undefined) {
+              const replay = yield* awaitPreparation();
+              if (replay._tag === "completed") return yield* reuse(replay);
+              return yield* Effect.die(
+                `Workflow Activity attempt reservation ended without confirmation: ${operation.durableOperationKey}`,
+              );
+            }
             lastAttempt = attempt;
             const externalAttempt: WorkflowActivityAttempt = {
               attemptId: attempt.attemptId,

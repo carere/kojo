@@ -37,16 +37,45 @@ it.effect("rejects incompatible key reuse and retries an unobserved external com
       decideWorkflowActivityReplay(
         { ...activity, definitionFingerprint: "send-message-v2" },
         stored,
-        "engine-confirmed",
+        { executionGeneration: 1, state: "engine-confirmed" },
       ),
     ).toEqual({ _tag: "conflict" });
-    expect(decideWorkflowActivityReplay(activity, stored, "started")).toEqual({
-      _tag: "ready",
-      executionGeneration: 1,
-    });
-    expect(decideWorkflowActivityReplay(activity, stored, "result-observed")).toEqual({
+    expect(
+      decideWorkflowActivityReplay(activity, stored, {
+        executionGeneration: 1,
+        state: "started",
+      }),
+    ).toEqual({
       _tag: "awaiting-confirmation",
     });
+    expect(
+      decideWorkflowActivityReplay(activity, stored, {
+        executionGeneration: 1,
+        state: "result-observed",
+      }),
+    ).toEqual({
+      _tag: "awaiting-confirmation",
+    });
+  }),
+);
+
+it.effect("allows a recovery generation while another replay waits for its attempt", () =>
+  Effect.sync(() => {
+    const stored = {
+      ...activity,
+      confirmedAttemptId: null,
+      executionGeneration: 2,
+      resultJson: null,
+    };
+    expect(
+      decideWorkflowActivityReplay(activity, stored, {
+        executionGeneration: 1,
+        state: "started",
+      }),
+    ).toEqual({ _tag: "ready", executionGeneration: 2 });
+    expect(
+      decideWorkflowActivityReplay(activity, stored, { executionGeneration: 2, state: "started" }),
+    ).toEqual({ _tag: "awaiting-confirmation" });
   }),
 );
 
@@ -61,7 +90,7 @@ it.effect("reuses exactly the stored result after durable confirmation", () =>
           executionGeneration: 2,
           resultJson: '{"sent":true}',
         },
-        "engine-confirmed",
+        { executionGeneration: 2, state: "engine-confirmed" },
       ),
     ).toEqual({
       _tag: "completed",

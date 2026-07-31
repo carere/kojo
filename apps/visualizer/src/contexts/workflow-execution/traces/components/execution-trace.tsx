@@ -6,7 +6,7 @@ import {
   type ProjectIdentity,
   type WorkflowRunId,
 } from "@kojo/control";
-import { Effect, Fiber, Stream } from "effect";
+import { Effect, Exit, Fiber, Stream } from "effect";
 import {
   createEffect,
   createResource,
@@ -30,7 +30,7 @@ export interface ExecutionTraceProps {
   readonly followTrace?: (
     selection: ExecutionTraceSelection,
     afterSequence: number,
-  ) => Stream.Stream<ControlSubscriptionUpdate>;
+  ) => Stream.Stream<ControlSubscriptionUpdate, unknown>;
   readonly loadTrace?: (
     selection: ExecutionTraceSelection,
   ) => Promise<ExecutionTracePage | undefined>;
@@ -95,18 +95,31 @@ export function ExecutionTrace(props: ExecutionTraceProps) {
             client.AcknowledgeControlSubscription(delivery).pipe(Effect.asVoid),
           )
         : props.acknowledgeTrace(delivery);
-    const consume = <E,>(updates: Stream.Stream<ControlSubscriptionUpdate, E>) =>
-      Stream.runForEach(updates, (update) => {
+    const reloadAuthoritative = () =>
+      Effect.tryPromise({
+        try: () => (props.loadTrace ?? readTrace)(selection),
+        catch: () => new Error("Execution Trace reload failed."),
+      }).pipe(
+        Effect.flatMap((page) =>
+          page === undefined
+            ? Effect.fail(new Error("Execution Trace reload failed."))
+            : Effect.sync(() => {
+                setLiveTrace(page);
+                return page;
+              }),
+        ),
+      );
+    const consume = <E,>(updates: Stream.Stream<ControlSubscriptionUpdate, E>) => {
+      let sawResync = false;
+      return Stream.runForEach(updates, (update) => {
         const reloadBeforeAcknowledging =
           update.kind === "resync-required" &&
           "runId" in update &&
           update.identity === selection.identity &&
           update.runId === selection.runId;
+        if (reloadBeforeAcknowledging) sawResync = true;
         const processed = reloadBeforeAcknowledging
-          ? Effect.tryPromise({
-              try: () => Promise.resolve(refetch()),
-              catch: () => new Error("Execution Trace reload failed."),
-            }).pipe(Effect.asVoid)
+          ? reloadAuthoritative().pipe(Effect.asVoid)
           : Effect.sync(() => {
               if (
                 update.kind !== "trace-event" ||
@@ -134,26 +147,51 @@ export function ExecutionTrace(props: ExecutionTraceProps) {
         // unacknowledged. The Host can then send a bounded resync instead of
         // treating unavailable browser state as processed.
         return processed.pipe(Effect.andThen(acknowledge(update)));
-      });
-    const fiber = visualizerApiRuntime.runFork(
-      props.followTrace === undefined
-        ? Effect.flatMap(VisualizerApiClient, (client) =>
-            consume(
-              client.SubscribeControl({
-                projects: [selection.identity],
-                topics: ["traces"],
-                traces: [
-                  {
-                    identity: selection.identity,
-                    runId: selection.runId,
-                    afterSequence: history.highWaterSequence,
-                  },
-                ],
-              }),
-            ),
-          )
-        : consume(props.followTrace(selection, history.highWaterSequence)),
-    );
+      }).pipe(Effect.as(sawResync));
+    };
+    const follow = Effect.gen(function* () {
+      let afterSequence = history.highWaterSequence;
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const updates =
+          props.followTrace === undefined
+            ? yield* Effect.map(VisualizerApiClient, (client) =>
+                client.SubscribeControl({
+                  projects: [selection.identity],
+                  topics: ["traces"],
+                  traces: [
+                    {
+                      identity: selection.identity,
+                      runId: selection.runId,
+                      afterSequence,
+                    },
+                  ],
+                }),
+              )
+            : props.followTrace(selection, afterSequence);
+        const exit = yield* Effect.exit(consume(updates));
+        if (Exit.isFailure(exit)) {
+          // Transport loss is not a successful delivery. Reload durable state
+          // before the bounded reconnect so the next subscription resumes
+          // from a real high-water sequence and cannot duplicate events.
+          const reloaded = yield* Effect.exit(reloadAuthoritative());
+          if (Exit.isSuccess(reloaded)) {
+            afterSequence = reloaded.value.highWaterSequence;
+          }
+        } else if (exit.value) {
+          // A resync terminal closes its stream by design. The authoritative
+          // reload happened before its notice was acknowledged; reopen from
+          // that page's durable high-water sequence.
+          const reloaded = yield* Effect.exit(reloadAuthoritative());
+          if (Exit.isSuccess(reloaded)) {
+            afterSequence = reloaded.value.highWaterSequence;
+          }
+        } else {
+          return;
+        }
+        yield* Effect.sleep(`${Math.min(attempt + 1, 4) * 50} millis`);
+      }
+    });
+    const fiber = visualizerApiRuntime.runFork(follow);
     onCleanup(() => {
       void visualizerApiRuntime.runPromise(Fiber.interrupt(fiber));
     });

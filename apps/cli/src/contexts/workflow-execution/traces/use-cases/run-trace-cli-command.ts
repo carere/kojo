@@ -151,6 +151,7 @@ export const runTraceCliCommand = async (args: ReadonlyArray<string>, json: bool
   process.once("SIGTERM", detach);
   try {
     for (let attempt = 1; attempt <= 5 && !detached && !final; attempt += 1) {
+      let resyncReloaded = false;
       let failure:
         | ReturnType<typeof transportFailure>
         | ReturnType<typeof workflowRunFailure>
@@ -168,7 +169,13 @@ export const runTraceCliCommand = async (args: ReadonlyArray<string>, json: bool
               if (update.kind === "resync-required") {
                 const resync = await reload({ afterSequence: lastSequence });
                 failure = resync.failure;
-                return { continueFollowing: failure === undefined && !final, processed: true };
+                resyncReloaded = failure === undefined && !final;
+                // A resync terminal notification ends the current advisory
+                // stream. Stop this consumer after the authoritative reload
+                // (but before returning to the outer retry loop) so it sends
+                // its normal stream interrupt rather than waiting forever
+                // for an RPC terminal frame that raced the notification.
+                return { continueFollowing: false, processed: true };
               }
               if (update.kind !== "trace-event" || update.sequence <= lastSequence) {
                 return { continueFollowing: true, processed: true };
@@ -200,6 +207,16 @@ export const runTraceCliCommand = async (args: ReadonlyArray<string>, json: bool
       if (detached) return 0;
       if (failure !== undefined) return writeFailure(failure, json, command);
       if (final) return 0;
+      // A resync notice deliberately ends its current advisory stream after
+      // authoritative history reload. Re-open a bounded subscription from
+      // that durable checkpoint instead of treating the clean stream Exit as
+      // a transport failure.
+      // The Host deliberately ends a resync stream after the terminal notice.
+      // Depending on the RPC transport's teardown timing, that completed
+      // advisory stream can surface as either a normal Exit or a transport
+      // failure. The authoritative reload above has already succeeded, so
+      // either result must resume from the durable checkpoint.
+      if (resyncReloaded) continue;
       if (attempt === 5 || Exit.isSuccess(exit)) {
         return writeFailure(
           transportFailure(new Error("subscription disconnected")),

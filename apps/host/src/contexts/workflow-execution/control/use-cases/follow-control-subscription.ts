@@ -7,7 +7,10 @@ import {
   type ProjectIdentity,
 } from "@kojo/control";
 import { Effect, Queue, Stream } from "effect";
-import type { ControlSubscriptionDeliveryWindowShape } from "../services/control-subscription-delivery-window";
+import {
+  CONTROL_SUBSCRIPTION_MAX_UNACKNOWLEDGED,
+  type ControlSubscriptionDeliveryWindowShape,
+} from "../services/control-subscription-delivery-window";
 import type { ControlResourceTopic } from "../services/control-subscription-reader";
 
 type ResourceTopic = ControlResourceTopic;
@@ -183,7 +186,11 @@ export const followControlSubscription =
               );
             });
           },
-          { bufferSize: 16, strategy: "dropping" },
+          // A full unacknowledged delivery window still needs one reserved
+          // terminal slot. The next offer is `resync-required`; if it were
+          // dropped with the sixteenth update, a slow consumer would only see
+          // an unexplained stream end.
+          { bufferSize: CONTROL_SUBSCRIPTION_MAX_UNACKNOWLEDGED + 1, strategy: "dropping" },
         ).pipe(Stream.ensuring(session.close)),
       ),
     ) as Stream.Stream<ControlSubscriptionUpdate, never, R>;

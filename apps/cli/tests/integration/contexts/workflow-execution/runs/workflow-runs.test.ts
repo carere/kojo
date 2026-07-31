@@ -93,7 +93,7 @@ const removeDockerTestImage = async () => {
 
 const configuration = `
 import { Effect, Schema } from "effect";
-import { activity, defineConfig, defineWorkflow } from "@kojo/workflow";
+import { Workflow, activity, defineConfig, defineWorkflow } from "@kojo/workflow";
 
 const input = Schema.Struct({ message: Schema.String });
 const activityResult = Schema.Struct({ idempotencyKey: Schema.String, invocationNumber: Schema.Number });
@@ -187,6 +187,37 @@ export default defineConfig({
             ? Effect.fail("try again")
             : Effect.succeed({ idempotencyKey: attempt.idempotencyKey, invocationNumber: attempt.invocationNumber });
         })
+      })
+    }),
+    defineWorkflow({
+      workflowKey: "trace-burst",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      handler: () => Effect.gen(function* () {
+        // Ensure trace follow has completed history-first setup before the
+        // live burst starts; this keeps the window pressure on one active
+        // subscription rather than on the initial Trace page.
+        yield* Effect.sleep("2 seconds");
+        for (let index = 0; index < 12; index += 1) {
+          yield* activity({
+            operationKey: "burst-" + index,
+            name: "Burst " + index,
+            successSchema: Schema.String,
+            failureSchema: Schema.String,
+            execute: () => Effect.succeed("burst-" + index),
+          });
+        }
+        // The test releases this durable barrier only after the live client
+        // has received Host-owned resync recovery and opened a new stream.
+        // It keeps the Run non-final without relying on a timed delay.
+        const deferred = yield* Workflow.deferred({
+          operationKey: "release-trace-burst",
+          successSchema: Schema.String,
+        });
+        const release = yield* Workflow.await(deferred);
+        return "burst-" + release;
       })
     }),
     defineWorkflow({
@@ -782,6 +813,19 @@ const waitForProof = async (path: string, prefix: string, expectedCount = 1) => 
   throw new Error(`Timed out waiting for ${prefix} Activity proof.`);
 };
 
+const waitForCondition = async (
+  label: string,
+  condition: () => boolean | Promise<boolean>,
+  timeoutMs = 8_000,
+) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await condition()) return;
+    await Bun.sleep(25);
+  }
+  throw new Error(`Timed out waiting for ${label}.`);
+};
+
 const waitForFinalRun = async (
   socketPath: string,
   project: string,
@@ -861,6 +905,57 @@ const finishKojoCliWithin = async (
   return result;
 };
 
+const completeWithin = async (operation: Promise<void>, timeoutMs: number, label: string) => {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => reject(new Error(`${label} exceeded ${timeoutMs}ms.`)), timeoutMs);
+  });
+  try {
+    await Promise.race([operation, deadline]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+};
+
+const TRACE_PROXY_CLOSE_GRACE_MS = 500;
+
+interface TraceProxySocketPair {
+  readonly downstream: Socket;
+  readonly terminateUpstream: () => void;
+  readonly upstream: Socket;
+}
+
+interface TraceProxySocketState {
+  readonly connections: number;
+  readonly liveDownstreamSockets: number;
+  readonly liveUpstreamSockets: number;
+  readonly maximumOpenDownstreamSockets: number;
+  readonly maximumOpenUpstreamSockets: number;
+  readonly stopped: boolean;
+}
+
+const waitForTraceProxySocketClose = (socket: Socket) =>
+  new Promise<void>((resolve) => {
+    if (socket.destroyed) {
+      resolve();
+      return;
+    }
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (timeout !== undefined) clearTimeout(timeout);
+      socket.off("close", finish);
+      resolve();
+    };
+    socket.once("close", finish);
+    timeout = setTimeout(() => {
+      socket.destroy();
+      timeout = setTimeout(finish, 100);
+    }, TRACE_PROXY_CLOSE_GRACE_MS);
+  });
+
 const startTraceProxy = async (
   socketPath: string,
   upstreamSocketPath: string,
@@ -869,6 +964,8 @@ const startTraceProxy = async (
     readonly dropAfterSubscriptionChunk?: ReadonlySet<number>;
     /** Drop only an acknowledgement RPC response after the Host has processed it. */
     readonly dropAcknowledgementResponse?: ReadonlySet<number>;
+    /** Hold an acknowledgement request so the Host observes genuine consumer lag. */
+    readonly delayAcknowledgementRequest?: ReadonlyMap<number, number>;
     readonly dropImmediately?: ReadonlySet<number>;
   },
 ) => {
@@ -877,31 +974,112 @@ const startTraceProxy = async (
   let droppedAcknowledgementResponses = 0;
   let droppedSubscriptionChunks = 0;
   let acknowledgementRequests = 0;
+  let resyncRequiredUpdates = 0;
   let subscriptionRequests = 0;
-  const sockets = new Set<Socket>();
+  let maximumOpenDownstreamSockets = 0;
+  let maximumOpenUpstreamSockets = 0;
+  let stopped = false;
+  let acknowledgementResponseLossSocketState: TraceProxySocketState | undefined;
+  let subscriptionLossSocketState: TraceProxySocketState | undefined;
+  const socketPairs = new Set<TraceProxySocketPair>();
+  const downstreamSockets = new Set<Socket>();
+  const upstreamSockets = new Set<Socket>();
+  const delayedWrites = new Set<ReturnType<typeof setTimeout>>();
+  const socketState = (): TraceProxySocketState => ({
+    connections,
+    liveDownstreamSockets: downstreamSockets.size,
+    liveUpstreamSockets: upstreamSockets.size,
+    maximumOpenDownstreamSockets,
+    maximumOpenUpstreamSockets,
+    stopped,
+  });
   const server = createServer((downstream) => {
     connections += 1;
-    sockets.add(downstream);
-    downstream.once("close", () => sockets.delete(downstream));
+    downstreamSockets.add(downstream);
+    maximumOpenDownstreamSockets = Math.max(maximumOpenDownstreamSockets, downstreamSockets.size);
+    downstream.once("close", () => downstreamSockets.delete(downstream));
     if (options.dropImmediately?.has(connections)) {
       droppedConnections += 1;
       downstream.destroy();
       return;
     }
     const upstream = createConnection(upstreamSocketPath);
-    sockets.add(upstream);
-    upstream.once("close", () => sockets.delete(upstream));
-    upstream.once("error", () => downstream.destroy());
-    downstream.once("error", () => upstream.destroy());
+    upstreamSockets.add(upstream);
+    maximumOpenUpstreamSockets = Math.max(maximumOpenUpstreamSockets, upstreamSockets.size);
+    let droppingResponse = false;
     const requests = new Map<
       string | number,
       { readonly operation: "acknowledgement" | "subscription"; readonly ordinal: number }
     >();
+    const activeRequests = new Set<string | number>();
+    let pendingProtocolDisconnect: Set<string | number> | undefined;
+    let protocolDisconnectStarted = false;
+    let protocolDisconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let protocolCloseTimer: ReturnType<typeof setTimeout> | undefined;
+    const finishProtocolDisconnect = () => {
+      if (!protocolDisconnectStarted || upstream.destroyed) return;
+      protocolDisconnectStarted = false;
+      if (protocolDisconnectTimer !== undefined) clearTimeout(protocolDisconnectTimer);
+      protocolDisconnectTimer = undefined;
+      pendingProtocolDisconnect = undefined;
+      upstream.write('{"_tag":"Eof"}\n', () => {
+        upstream.end();
+        protocolCloseTimer = setTimeout(() => {
+          if (!upstream.destroyed) upstream.destroy();
+        }, TRACE_PROXY_CLOSE_GRACE_MS);
+      });
+    };
+    const maybeFinishProtocolDisconnect = () => {
+      if (
+        pendingProtocolDisconnect !== undefined &&
+        [...pendingProtocolDisconnect].every((requestId) => !activeRequests.has(requestId))
+      ) {
+        finishProtocolDisconnect();
+      }
+    };
+    const interruptAndEndHostClient = () => {
+      if (protocolDisconnectStarted) return;
+      protocolDisconnectStarted = true;
+      const requestIds = new Set(activeRequests);
+      pendingProtocolDisconnect = requestIds;
+      if (requestIds.size === 0) {
+        finishProtocolDisconnect();
+        return;
+      }
+      const interrupts = [...requestIds]
+        .map((requestId) => JSON.stringify({ _tag: "Interrupt", requestId }))
+        .join("\n");
+      upstream.write(`${interrupts}\n`, maybeFinishProtocolDisconnect);
+      // A malformed or uncooperative peer must not strand the fixture. The
+      // normal path waits for every terminal Exit; this is only the bounded
+      // test-transport fallback.
+      protocolDisconnectTimer = setTimeout(finishProtocolDisconnect, 500);
+    };
+    const pair: TraceProxySocketPair = {
+      downstream,
+      terminateUpstream: interruptAndEndHostClient,
+      upstream,
+    };
+    socketPairs.add(pair);
+    upstream.once("close", () => {
+      if (protocolDisconnectTimer !== undefined) clearTimeout(protocolDisconnectTimer);
+      if (protocolCloseTimer !== undefined) clearTimeout(protocolCloseTimer);
+      socketPairs.delete(pair);
+      upstreamSockets.delete(upstream);
+    });
+    upstream.once("error", () => {
+      if (!downstream.destroyed) downstream.destroy();
+    });
+    downstream.once("error", () => {
+      if (!droppingResponse) interruptAndEndHostClient();
+    });
+    downstream.once("end", interruptAndEndHostClient);
     let downstreamBuffer = "";
     const requestFrames = (chunk: Buffer) => {
       downstreamBuffer += chunk.toString("utf8");
       const frames = downstreamBuffer.split("\n");
       downstreamBuffer = frames.pop() ?? "";
+      let delayMs: number | undefined;
       for (const frame of frames) {
         try {
           const request = JSON.parse(frame) as {
@@ -910,6 +1088,7 @@ const startTraceProxy = async (
             tag?: string;
           };
           if (request._tag !== "Request" || request.id === undefined) continue;
+          activeRequests.add(request.id);
           if (request.tag === "SubscribeControl") {
             requests.set(request.id, {
               operation: "subscription",
@@ -917,18 +1096,33 @@ const startTraceProxy = async (
             });
           }
           if (request.tag === "AcknowledgeControlSubscription") {
+            const ordinal = ++acknowledgementRequests;
             requests.set(request.id, {
               operation: "acknowledgement",
-              ordinal: ++acknowledgementRequests,
+              ordinal,
             });
+            const configuredDelay = options.delayAcknowledgementRequest?.get(ordinal);
+            if (configuredDelay !== undefined) delayMs = Math.max(delayMs ?? 0, configuredDelay);
           }
         } catch {
           // The proxy only recognizes complete NDJSON request frames; it never
           // changes or invents protocol data when an unrelated frame is split.
         }
       }
+      return delayMs;
     };
-    downstream.on("data", requestFrames);
+    downstream.on("data", (chunk: Buffer) => {
+      const delayMs = requestFrames(chunk);
+      if (delayMs === undefined) {
+        upstream.write(chunk);
+        return;
+      }
+      const delayedWrite = setTimeout(() => {
+        delayedWrites.delete(delayedWrite);
+        if (!upstream.destroyed) upstream.write(chunk);
+      }, delayMs);
+      delayedWrites.add(delayedWrite);
+    });
     let upstreamBuffer = "";
     upstream.on("data", (chunk) => {
       upstreamBuffer += chunk.toString("utf8");
@@ -942,6 +1136,10 @@ const startTraceProxy = async (
             _tag?: string;
             requestId?: string | number;
           };
+          if (response._tag === "Exit" && response.requestId !== undefined) {
+            activeRequests.delete(response.requestId);
+            maybeFinishProtocolDisconnect();
+          }
           const request =
             response.requestId === undefined ? undefined : requests.get(response.requestId);
           if (request === undefined) continue;
@@ -961,26 +1159,38 @@ const startTraceProxy = async (
             droppedSubscriptionChunks += 1;
             dropAfterForward = true;
           }
+          if (
+            request.operation === "subscription" &&
+            response._tag === "Chunk" &&
+            frame.includes('"kind":"resync-required"')
+          ) {
+            resyncRequiredUpdates += 1;
+          }
         } catch {
           // Forward unknown protocol frames unchanged.
         }
       }
       if (dropBeforeForward) {
         droppedConnections += 1;
-        upstream.destroy();
+        // The Host has completed the acknowledgement. Drop only the client
+        // side so no response bytes are delivered. The Host-facing side uses
+        // active-request Interrupt → terminal Exit → Eof → bounded close.
+        acknowledgementResponseLossSocketState = socketState();
+        droppingResponse = true;
         downstream.destroy();
+        interruptAndEndHostClient();
         return;
       }
       downstream.write(chunk);
       if (dropAfterForward) {
         droppedConnections += 1;
+        subscriptionLossSocketState = socketState();
         queueMicrotask(() => {
-          upstream.destroy();
           downstream.destroy();
+          interruptAndEndHostClient();
         });
       }
     });
-    downstream.pipe(upstream);
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -1002,8 +1212,33 @@ const startTraceProxy = async (
     get droppedSubscriptionChunks() {
       return droppedSubscriptionChunks;
     },
+    get subscriptionRequests() {
+      return subscriptionRequests;
+    },
+    get resyncRequiredUpdates() {
+      return resyncRequiredUpdates;
+    },
+    get acknowledgementResponseLossSocketState() {
+      return acknowledgementResponseLossSocketState;
+    },
+    get subscriptionLossSocketState() {
+      return subscriptionLossSocketState;
+    },
+    get socketState() {
+      return socketState();
+    },
+    get upstreamConnections() {
+      return upstreamSockets.size;
+    },
     stop: async () => {
-      for (const socket of sockets) socket.destroy();
+      if (stopped) return;
+      stopped = true;
+      for (const delayedWrite of delayedWrites) clearTimeout(delayedWrite);
+      const pairs = [...socketPairs];
+      for (const pair of pairs) pair.terminateUpstream();
+      for (const socket of downstreamSockets) socket.destroy();
+      const upstreamClose = pairs.map((pair) => waitForTraceProxySocketClose(pair.upstream));
+      await Promise.all(upstreamClose);
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
       );
@@ -1295,8 +1530,13 @@ it("bounds trace follow transport retries and reports an unavailable Host", asyn
 
   expect(followed.exitCode).toBe(3);
   expect(JSON.parse(followed.stdout).error.code).toBe("host-unavailable");
-  expect(proxy.connections).toBe(5);
-  expect(proxy.droppedConnections).toBe(5);
+  expect(proxy.connections).toBeGreaterThanOrEqual(1);
+  expect(proxy.droppedConnections).toBe(proxy.connections);
+  expect(proxy.socketState).toMatchObject({
+    liveUpstreamSockets: 0,
+    maximumOpenDownstreamSockets: expect.any(Number),
+    maximumOpenUpstreamSockets: 0,
+  });
 });
 
 it("follows history first, resumes after one lost transport request, and never duplicates evidence", async () => {
@@ -1329,6 +1569,13 @@ it("follows history first, resumes after one lost transport request, and never d
   expect(result.exitCode, `${result.stdout}${result.stderr}`).toBe(0);
   expect(proxy.droppedConnections).toBe(1);
   expect(proxy.droppedSubscriptionChunks).toBe(1);
+  // The first lost live subscription has one Host-facing connection. The
+  // assertion records the moment of loss; it does not assume any survivor
+  // count once the CLI reconnects.
+  expect(proxy.subscriptionLossSocketState).toMatchObject({
+    liveDownstreamSockets: 1,
+    liveUpstreamSockets: 1,
+  });
   const events = result.stdout
     .trim()
     .split("\n")
@@ -1342,6 +1589,15 @@ it("follows history first, resumes after one lost transport request, and never d
   expect(events.map((event) => event.sequence)).toEqual(
     [...events].map((event) => event.sequence).sort((a, b) => a - b),
   );
+  await proxy.stop();
+  cleanups.splice(cleanups.lastIndexOf(proxy.stop), 1);
+  expect(proxy.socketState).toMatchObject({
+    liveDownstreamSockets: 0,
+    liveUpstreamSockets: 0,
+    stopped: true,
+  });
+  await completeWithin(host.stop(), 8_000, "Host stop after lost subscription transport");
+  cleanups.splice(cleanups.lastIndexOf(host.stop), 1);
 }, 10_000);
 
 it("retries a lost acknowledgement response without falsely advancing trace progress", async () => {
@@ -1377,6 +1633,21 @@ it("retries a lost acknowledgement response without falsely advancing trace prog
 
   expect(result.exitCode, `${result.stdout}${result.stderr}`).toBe(0);
   expect(proxy.droppedAcknowledgementResponses).toBe(1);
+  // The acknowledgement response is lost while the subscription remains
+  // connected, exercising a multi-connection fault without assuming those
+  // sockets survive the protocol teardown.
+  expect(proxy.acknowledgementResponseLossSocketState).toMatchObject({
+    liveDownstreamSockets: expect.any(Number),
+    liveUpstreamSockets: expect.any(Number),
+    maximumOpenDownstreamSockets: expect.any(Number),
+    maximumOpenUpstreamSockets: expect.any(Number),
+  });
+  expect(
+    proxy.acknowledgementResponseLossSocketState?.liveDownstreamSockets,
+  ).toBeGreaterThanOrEqual(2);
+  expect(proxy.acknowledgementResponseLossSocketState?.liveUpstreamSockets).toBeGreaterThanOrEqual(
+    2,
+  );
   const events = result.stdout
     .trim()
     .split("\n")
@@ -1386,7 +1657,110 @@ it("retries a lost acknowledgement response without falsely advancing trace prog
     );
   expect(events.map((event) => event.kind)).toContain("run.completed");
   expect(new Set(events.map((event) => event.sequence)).size).toBe(events.length);
-}, 10_000);
+  const diagnostics = (await readFile(host.diagnosticPath, "utf8"))
+    .trim()
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as { readonly operation?: string; readonly outcome?: string });
+  expect(
+    diagnostics.filter(
+      (event) =>
+        event.operation === "AcknowledgeControlSubscription" && event.outcome === "success",
+    ),
+  ).toHaveLength(2);
+  await proxy.stop();
+  cleanups.splice(cleanups.lastIndexOf(proxy.stop), 1);
+  expect(proxy.socketState).toMatchObject({
+    liveDownstreamSockets: 0,
+    liveUpstreamSockets: 0,
+    stopped: true,
+  });
+  await completeWithin(host.stop(), 8_000, "Host stop after lost acknowledgement response");
+  cleanups.splice(cleanups.lastIndexOf(host.stop), 1);
+}, 15_000);
+
+it("reloads and resumes a running Trace after the Host requires resync without duplicates", async () => {
+  const directory = await makeTemporaryDirectory("kojo-trace-follow-resync-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), configuration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+  const proxyPath = join(directory.path, "trace-proxy.sock");
+  const proxy = await startTraceProxy(proxyPath, host.socketPath, {
+    // The first delivery remains unacknowledged while the running Workflow
+    // produces more than 16 Events before a durable barrier. This exercises
+    // the real Host delivery window rather than fabricating resync at the CLI
+    // boundary, and the barrier keeps the Run non-final until reconnection.
+    delayAcknowledgementRequest: new Map([[1, 250]]),
+  });
+  cleanups.push(proxy.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "trace-burst", "--input", '{"message":"resync"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = JSON.parse(started.stdout).result.run.runId as string;
+  const followed = startKojoCli(["trace", "follow", runId, "--json"], proxyPath, project);
+  await followed.waitForStdout('"sequence":1');
+  await waitForCondition("Host resync-required delivery", () => proxy.resyncRequiredUpdates > 0);
+  await waitForCondition("the post-resync subscription", () => proxy.subscriptionRequests >= 2);
+  let suspended:
+    | {
+        readonly suspension?: { readonly completionToken?: string; readonly kind?: string };
+      }
+    | undefined;
+  await waitForCondition("the durable trace-burst barrier", async () => {
+    const shown = await runKojoCli(["run", "show", runId, "--json"], host.socketPath, project);
+    if (shown.exitCode !== 0) return false;
+    suspended = JSON.parse(shown.stdout).result.run;
+    return suspended?.suspension?.kind === "deferred";
+  });
+  const completionToken = suspended?.suspension?.completionToken;
+  expect(completionToken).toEqual(expect.any(String));
+  const released = await runKojoCli(
+    [
+      "run",
+      "deferred",
+      "complete",
+      runId,
+      completionToken as string,
+      "--value",
+      '"released"',
+      "--request-key",
+      "release-trace-burst",
+      "--json",
+    ],
+    host.socketPath,
+    project,
+  );
+  expect(released.exitCode, `${released.stdout}${released.stderr}`).toBe(0);
+  const result = await finishKojoCliWithin(followed, 6_000, "trace follow after Host resync");
+
+  expect(result.exitCode, `${result.stdout}${result.stderr}`).toBe(0);
+  const events = result.stdout
+    .trim()
+    .split("\n")
+    .map(
+      (line) =>
+        JSON.parse(line).result.event as { readonly kind: string; readonly sequence: number },
+    );
+  expect(events.length).toBeGreaterThan(16);
+  // The terminal resync ends one stream successfully; the CLI then opens a
+  // second subscription from its durable high-water sequence before release.
+  expect(proxy.resyncRequiredUpdates).toBeGreaterThanOrEqual(1);
+  expect(proxy.subscriptionRequests).toBeGreaterThanOrEqual(2);
+  expect(events.map((event) => event.kind)).toContain("run.completed");
+  expect(new Set(events.map((event) => event.sequence)).size).toBe(events.length);
+  expect(events.map((event) => event.sequence)).toEqual(
+    [...events].map((event) => event.sequence).sort((left, right) => left - right),
+  );
+}, 15_000);
 
 it("runs Commands in a durable logical Sandbox and records safe Artifact-backed trace evidence", async () => {
   const directory = await makeTemporaryDirectory("kojo-workflow-sandbox-");
@@ -1726,6 +2100,19 @@ it("recreates a provider session after a Host crash while retaining Sandbox work
   expect(
     (completedCommand?.artifactIds as ReadonlyArray<string> | undefined)?.length ?? 0,
   ).toBeGreaterThan(0);
+  const afterRestartAttempts = (
+    completed.activityTrace as {
+      readonly attempts: ReadonlyArray<{
+        readonly durableOperationKey: string;
+        readonly invocationNumber: number;
+        readonly state: string;
+      }>;
+    }
+  ).attempts.filter((attempt) => attempt.durableOperationKey === "after-restart");
+  expect(afterRestartAttempts).toEqual([
+    expect.objectContaining({ invocationNumber: 1, state: "started" }),
+    expect.objectContaining({ invocationNumber: 2, state: "engine-confirmed" }),
+  ]);
 }, 30_000);
 
 it("runs, inspects, and filters a durable Child Workflow Run", async () => {
@@ -2067,6 +2454,19 @@ it("retries interrupted Agent work with the durable Activity identity and no unc
   expect(trace).not.toEqual(
     expect.arrayContaining([expect.objectContaining({ kind: "agent.session-continued" })]),
   );
+  const cluster = new Database(join(project, ".kojo", "kojo.sqlite"), { readonly: true });
+  try {
+    expect(
+      cluster
+        .query(
+          `SELECT entity_id FROM cluster_messages
+           WHERE entity_type = ? AND processed = FALSE`,
+        )
+        .all("Workflow/Kojo/agent-recovery/1"),
+    ).toEqual([]);
+  } finally {
+    cluster.close();
+  }
 }, 30_000);
 
 it("reconciles a non-final Workflow Run after the Host restarts", async () => {
@@ -2331,8 +2731,21 @@ it("recovers a completed external Activity whose success was not observed before
     invocationAttempts: 2,
     incompleteAttempts: 1,
     durableCompletions: 1,
-    replayReuses: 1,
+    replayReuses: 0,
   });
+  const cluster = new Database(join(project, ".kojo", "kojo.sqlite"), { readonly: true });
+  try {
+    expect(
+      cluster
+        .query(
+          `SELECT entity_id FROM cluster_messages
+           WHERE entity_type = ? AND processed = FALSE`,
+        )
+        .all("Workflow/Kojo/activity-crash-window/1"),
+    ).toEqual([]);
+  } finally {
+    cluster.close();
+  }
   const crashProofs = await waitForProof(proofPath, "crash", 2);
   expect(crashProofs).toHaveLength(2);
   expect([...new Set(crashProofs.map((line) => line.split(":").at(-1)))]).toHaveLength(1);

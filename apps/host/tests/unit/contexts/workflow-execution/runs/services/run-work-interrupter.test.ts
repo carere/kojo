@@ -39,4 +39,41 @@ describe("Run work interrupter", () => {
       }),
     ),
   );
+
+  it.effect("signals every active work item when a Project backend closes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const project = {
+          identity: Schema.decodeUnknownSync(ProjectIdentity)(Bun.randomUUIDv7()),
+          path: "/tmp/kojo-run-work-interrupter-project",
+        };
+        const otherProject = { ...project, path: "/tmp/kojo-run-work-interrupter-other" };
+        const interrupter = makeRunWorkInterrupter();
+        const cleaned: Array<Deferred.Deferred<void>> = [];
+
+        for (const runId of ["first-run", "second-run"]) {
+          const started = yield* Deferred.make<void>();
+          const completed = yield* Deferred.make<void>();
+          yield* Effect.forkScoped(
+            interrupter.interruptible(
+              project,
+              runId,
+              Deferred.succeed(started, undefined).pipe(
+                Effect.andThen(Effect.never),
+                Effect.ensuring(Deferred.succeed(completed, undefined)),
+              ),
+            ),
+          );
+          yield* Deferred.await(started);
+          cleaned.push(completed);
+        }
+        yield* Effect.forkScoped(
+          interrupter.interruptible(otherProject, "other-run", Effect.never),
+        );
+
+        yield* interrupter.interruptProject(project);
+        yield* Effect.forEach(cleaned, Deferred.await, { discard: true });
+      }),
+    ),
+  );
 });

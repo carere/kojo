@@ -177,6 +177,11 @@ export interface WorkflowActivityAttemptRecord extends WorkflowActivityOperation
 export type WorkflowActivityPreparation =
   | { readonly _tag: "ready"; readonly executionGeneration: number }
   | { readonly _tag: "awaiting-confirmation" }
+  /** The durable Run can no longer accept this Activity. Do not wait for a claim. */
+  | {
+      readonly _tag: "run-not-running";
+      readonly state: "suspended" | "stopping" | "stopped" | "failed" | "completed" | "missing";
+    }
   | {
       readonly _tag: "completed";
       readonly confirmedAttemptId: string;
@@ -215,6 +220,8 @@ export interface WorkflowRunRepositoryShape {
     project: ProjectSnapshot,
     input: WorkflowRunListInput,
   ) => Effect.Effect<ReadonlyArray<WorkflowRunListItem>>;
+  /** A complete project-level revision used by advisory resource subscriptions. */
+  readonly revision: (project: ProjectSnapshot) => Effect.Effect<string>;
   readonly show: (
     project: ProjectSnapshot,
     runId: string,
@@ -327,7 +334,7 @@ export interface WorkflowRunRepositoryShape {
       readonly executionGeneration: number;
     },
     startedAtMs: number,
-  ) => Effect.Effect<WorkflowActivityAttemptRecord>;
+  ) => Effect.Effect<WorkflowActivityAttemptRecord | undefined>;
   readonly observeActivityAttempt: (
     project: ProjectSnapshot,
     runId: string,

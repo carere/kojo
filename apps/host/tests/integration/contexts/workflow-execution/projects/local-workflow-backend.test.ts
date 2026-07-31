@@ -603,7 +603,7 @@ describe("Local Workflow backend ownership", () => {
               },
               timestamp,
             ),
-          ).toEqual({ _tag: "conflict" });
+          ).toEqual({ _tag: "run-not-running", state: "stopping" });
           expect(yield* repository.pendingSubmissions(fixture.project, parentRunId)).toEqual([]);
 
           yield* repository.recordOutcome(

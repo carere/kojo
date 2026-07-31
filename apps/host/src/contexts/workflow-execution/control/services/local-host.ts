@@ -40,6 +40,7 @@ import {
   completeWorkflowDeferred,
   listWorkflowRuns,
   readExecutionTrace,
+  readWorkflowRunsRevision,
   resumeWorkflowRun,
   revealWorkflowRun,
   showWorkflowRun,
@@ -200,10 +201,7 @@ const controlResourceFingerprint = (
         JSON.stringify,
       );
     case "runs":
-      return Effect.map(
-        listWorkflowRuns({ identity, states: [], workflowKeys: [], limit: 200 }),
-        JSON.stringify,
-      );
+      return readWorkflowRunsRevision(identity);
   }
 };
 

@@ -689,6 +689,87 @@ test("renders live chronological Execution Trace evidence separately from the Wo
     .toEqual([{ deliverySequence: 1, subscriptionId: "browser-subscription" }]);
 });
 
+test("reloads durable trace state and reconnects after live transport loss", async () => {
+  setLocale("en", { reload: false });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+    "00000000-0000-7000-8000-000000000025",
+  );
+  const runId = Schema.decodeUnknownSync(WorkflowRunId)("00000000-0000-7000-8000-000000000026");
+  const firstPage: ExecutionTracePage = {
+    events: [],
+    final: false,
+    firstSequence: null,
+    hasMore: false,
+    highWaterSequence: 1,
+    lastSequence: 1,
+    nextCursor: null,
+    runState: "running",
+  };
+  const reconnectedEvent = {
+    eventId: "reconnected-event",
+    runId,
+    sequence: 2,
+    envelopeVersion: 1,
+    kind: "run.completed",
+    kindVersion: 1,
+    recordedAtMs: 2,
+    observedAtMs: null,
+    engineOperationId: null,
+    activityAttemptId: null,
+    boundaryId: null,
+    childRunId: null,
+    compatibility: "supported" as const,
+    payload: {},
+  };
+  const reloadedPage: ExecutionTracePage = {
+    ...firstPage,
+    events: [reconnectedEvent],
+    firstSequence: 2,
+    highWaterSequence: 2,
+    lastSequence: 2,
+  };
+  let loads = 0;
+  let follows = 0;
+  const acknowledged: Array<number> = [];
+  dispose = render(
+    () => (
+      <ColorModeProvider initialColorMode="light">
+        <ExecutionTrace
+          selection={{ identity, runId }}
+          loadTrace={() => Promise.resolve(loads++ === 0 ? firstPage : reloadedPage)}
+          followTrace={() => {
+            follows += 1;
+            return follows === 1
+              ? Stream.fail(new Error("socket lost"))
+              : Stream.make({
+                  deliverySequence: 1,
+                  kind: "trace-event" as const,
+                  identity,
+                  runId,
+                  sequence: 2,
+                  subscriptionId: "reconnected" as never,
+                  event: reconnectedEvent,
+                });
+          }}
+          acknowledgeTrace={(delivery) =>
+            Effect.sync(() => {
+              acknowledged.push(delivery.deliverySequence);
+            })
+          }
+        />
+      </ColorModeProvider>
+    ),
+    root,
+  );
+
+  await expect.poll(() => follows).toBe(2);
+  await expect.poll(() => loads).toBe(2);
+  await expect.element(page.getByText("run.completed@1")).toBeVisible();
+  expect(acknowledged).toEqual([1]);
+});
+
 test("acknowledges a trace resync only after its authoritative reload succeeds", async () => {
   setLocale("en", { reload: false });
   const root = document.createElement("div");

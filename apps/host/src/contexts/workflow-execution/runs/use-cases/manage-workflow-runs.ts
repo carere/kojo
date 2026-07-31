@@ -679,6 +679,17 @@ export const listWorkflowRuns = (
     return { ok: true, runs: yield* repository.list(resolved.project, input) };
   });
 
+/** Complete project revision for advisory `runs` subscriptions. */
+export const readWorkflowRunsRevision = (
+  identity: ProjectIdentity,
+): Effect.Effect<string, never, ProjectIndexRepository | ProjectLayout | WorkflowRunRepository> =>
+  Effect.gen(function* () {
+    const resolved = yield* resolveProject(identity);
+    if ("code" in resolved) return "missing-project";
+    const repository = yield* WorkflowRunRepository;
+    return yield* repository.revision(resolved.project);
+  });
+
 export const showWorkflowRun = (
   identity: ProjectIdentity,
   runId: string,

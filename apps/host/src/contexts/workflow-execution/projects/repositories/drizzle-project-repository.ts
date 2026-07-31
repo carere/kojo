@@ -48,10 +48,12 @@ import type {
 import {
   type ExecutionTraceRead,
   type WorkflowActivityAttemptRecord,
+  type WorkflowAgentTraceRecord,
   type WorkflowRunChildStartRecord,
   WorkflowRunRepository,
   type WorkflowRunScheduleStartRecord,
   type WorkflowRunStartRecord,
+  type WorkflowSandboxTraceRecord,
 } from "../../runs/repositories/workflow-run-repository";
 import { WorkflowScheduleRepository } from "../../schedules/repositories/workflow-schedule-repository";
 import { ProjectRepository } from "./project-repository";
@@ -127,6 +129,7 @@ const REQUIRED_OBJECTS = [
   "kojo_workflow_activity_attempts",
   "kojo_activity_attempts_run_idx",
   "kojo_activity_attempts_idempotency_idx",
+  "kojo_activity_attempt_generation_retry_idx",
   "kojo_execution_events",
   "kojo_execution_events_kind_idx",
   "kojo_execution_events_engine_operation_idx",
@@ -161,6 +164,7 @@ const migrationChecksums = [
   "0003_workflow_activity_operations.sql",
   "0004_workflow_activity_execution_generations.sql",
   "0005_workflow_activity_results.sql",
+  "_0006_workflow_activity_execution_claims.sql",
 ].map((file) =>
   createHash("sha256")
     .update(readFileSync(fileURLToPath(new URL(`./migrations/${file}`, import.meta.url)), "utf8"))
@@ -1401,6 +1405,53 @@ const readActivityTrace = (
   };
 };
 
+const sandboxTraceKinds = new Set<WorkflowSandboxTraceRecord["kind"]>([
+  "sandbox.acquired",
+  "sandbox.session-recreated",
+  "command.completed",
+  "command.failed",
+  "command.timed-out",
+]);
+
+const agentTraceKinds = new Set<WorkflowAgentTraceRecord["kind"]>([
+  "agent.started",
+  "agent.completed",
+  "agent.failed",
+  "agent.session-continued",
+  "agent.replayed",
+]);
+
+const isSandboxTraceKind = (kind: unknown): kind is WorkflowSandboxTraceRecord["kind"] =>
+  typeof kind === "string" && sandboxTraceKinds.has(kind as WorkflowSandboxTraceRecord["kind"]);
+
+const isAgentTraceKind = (kind: unknown): kind is WorkflowAgentTraceRecord["kind"] =>
+  typeof kind === "string" && agentTraceKinds.has(kind as WorkflowAgentTraceRecord["kind"]);
+
+const settledBoundaryKind = (
+  kind: WorkflowSandboxTraceRecord["kind"] | WorkflowAgentTraceRecord["kind"],
+) =>
+  kind === "sandbox.acquired" || kind === "sandbox.session-recreated" || kind === "agent.started"
+    ? ("boundary.started" as const)
+    : ("boundary.completed" as const);
+
+type BoundaryEvidencePayload = {
+  readonly artifactIds?: ReadonlyArray<string>;
+  readonly durationMs?: number | null;
+  readonly evidence?: {
+    readonly kind?: unknown;
+    readonly source?: unknown;
+  };
+  readonly exitCode?: number | null;
+  readonly operationKey: string;
+  readonly providerKind: string;
+  readonly sandboxIdentity: string;
+};
+
+/**
+ * Sandbox and Agent integrations predate the settled ADR 0011 Event catalog.
+ * Their source identity stays in the generic Boundary Event body so snapshots
+ * retain their public evidence model without introducing undeclared v1 kinds.
+ */
 const readSandboxTrace = (connection: Database, runId: string) =>
   (
     connection
@@ -1409,39 +1460,37 @@ const readSandboxTrace = (connection: Database, runId: string) =>
        FROM kojo_execution_events
        WHERE run_id = ? AND kind IN (
          'sandbox.acquired', 'sandbox.session-recreated',
-         'command.completed', 'command.failed', 'command.timed-out'
+         'command.completed', 'command.failed', 'command.timed-out',
+         'boundary.started', 'boundary.completed'
        )
        ORDER BY sequence ASC`,
       )
       .all(runId) as ReadonlyArray<{
-      readonly kind:
-        | "sandbox.acquired"
-        | "sandbox.session-recreated"
-        | "command.completed"
-        | "command.failed"
-        | "command.timed-out";
+      readonly kind: string;
       readonly payload_json: string;
       readonly recorded_at_ms: number;
     }>
-  ).map((event) => {
-    const payload = JSON.parse(event.payload_json) as {
-      readonly artifactIds?: ReadonlyArray<string>;
-      readonly durationMs?: number | null;
-      readonly exitCode?: number | null;
-      readonly operationKey: string;
-      readonly providerKind: string;
-      readonly sandboxIdentity: string;
-    };
-    return {
-      artifactIds: [...(payload.artifactIds ?? [])],
-      durationMs: payload.durationMs ?? null,
-      exitCode: payload.exitCode ?? null,
-      kind: event.kind,
-      operationKey: payload.operationKey,
-      providerKind: payload.providerKind,
-      recordedAtMs: event.recorded_at_ms,
-      sandboxIdentity: payload.sandboxIdentity,
-    };
+  ).flatMap((event) => {
+    const payload = JSON.parse(event.payload_json) as BoundaryEvidencePayload;
+    const kind = isSandboxTraceKind(event.kind)
+      ? event.kind
+      : payload.evidence?.source === "sandbox" && isSandboxTraceKind(payload.evidence.kind)
+        ? payload.evidence.kind
+        : undefined;
+    return kind === undefined
+      ? []
+      : [
+          {
+            artifactIds: [...(payload.artifactIds ?? [])],
+            durationMs: payload.durationMs ?? null,
+            exitCode: payload.exitCode ?? null,
+            kind,
+            operationKey: payload.operationKey,
+            providerKind: payload.providerKind,
+            recordedAtMs: event.recorded_at_ms,
+            sandboxIdentity: payload.sandboxIdentity,
+          },
+        ];
   });
 
 const readAgentTrace = (connection: Database, runId: string) =>
@@ -1450,39 +1499,38 @@ const readAgentTrace = (connection: Database, runId: string) =>
       .query(
         `SELECT kind, recorded_at_ms, payload_json
          FROM kojo_execution_events
-         WHERE run_id = ? AND kind IN (
-           'agent.started', 'agent.completed', 'agent.failed',
-           'agent.session-continued', 'agent.replayed'
-         )
-         ORDER BY sequence ASC`,
+       WHERE run_id = ? AND kind IN (
+         'agent.started', 'agent.completed', 'agent.failed',
+         'agent.session-continued', 'agent.replayed',
+         'boundary.started', 'boundary.completed'
+       )
+       ORDER BY sequence ASC`,
       )
       .all(runId) as ReadonlyArray<{
-      readonly kind:
-        | "agent.started"
-        | "agent.completed"
-        | "agent.failed"
-        | "agent.session-continued"
-        | "agent.replayed";
+      readonly kind: string;
       readonly payload_json: string;
       readonly recorded_at_ms: number;
     }>
-  ).map((event) => {
-    const payload = JSON.parse(event.payload_json) as {
-      readonly artifactIds?: ReadonlyArray<string>;
-      readonly durationMs?: number | null;
-      readonly operationKey: string;
-      readonly providerKind: string;
-      readonly sandboxIdentity: string;
-    };
-    return {
-      artifactIds: [...(payload.artifactIds ?? [])],
-      durationMs: payload.durationMs ?? null,
-      kind: event.kind,
-      operationKey: payload.operationKey,
-      providerKind: payload.providerKind,
-      recordedAtMs: event.recorded_at_ms,
-      sandboxIdentity: payload.sandboxIdentity,
-    };
+  ).flatMap((event) => {
+    const payload = JSON.parse(event.payload_json) as BoundaryEvidencePayload;
+    const kind = isAgentTraceKind(event.kind)
+      ? event.kind
+      : payload.evidence?.source === "agent" && isAgentTraceKind(payload.evidence.kind)
+        ? payload.evidence.kind
+        : undefined;
+    return kind === undefined
+      ? []
+      : [
+          {
+            artifactIds: [...(payload.artifactIds ?? [])],
+            durationMs: payload.durationMs ?? null,
+            kind,
+            operationKey: payload.operationKey,
+            providerKind: payload.providerKind,
+            recordedAtMs: event.recorded_at_ms,
+            sandboxIdentity: payload.sandboxIdentity,
+          },
+        ];
   });
 
 const readRunSnapshot = (
@@ -1548,15 +1596,79 @@ const readRunSnapshot = (
 
 const traceFilterSql = (filters: ExecutionTraceFilters, values: Array<string | number>) => {
   const clauses: Array<string> = [];
+  const activityNames = filters.activityNames ?? [];
+  const artifactConditions = filters.artifactConditions ?? [];
+  const boundaryIds = filters.boundaryIds ?? [];
+  const eventFamilies = filters.eventFamilies ?? [];
+  const occurrenceOutcomes = filters.occurrenceOutcomes ?? [];
+  const parentRunIds = filters.parentRunIds ?? [];
+  const runStates = filters.runStates ?? [];
+  const scheduleKeys = filters.scheduleKeys ?? [];
+  const triggerKinds = filters.triggerKinds ?? [];
+  const workflowKeys = filters.workflowKeys ?? [];
   const addIn = (column: string, entries: ReadonlyArray<string>) => {
     if (entries.length === 0) return;
     clauses.push(`${column} IN (${entries.map(() => "?").join(", ")})`);
+    values.push(...entries);
+  };
+  const addRunIn = (column: string, entries: ReadonlyArray<string>) => {
+    if (entries.length === 0) return;
+    clauses.push(
+      `run_id IN (SELECT run_id FROM kojo_workflow_runs WHERE ${column} IN (${entries
+        .map(() => "?")
+        .join(", ")}))`,
+    );
     values.push(...entries);
   };
   addIn("kind", filters.kinds);
   addIn("engine_operation_id", filters.engineOperationIds);
   addIn("activity_attempt_id", filters.activityAttemptIds);
   addIn("child_run_id", filters.childRunIds);
+  addIn("boundary_id", boundaryIds);
+  if (eventFamilies.length > 0) {
+    clauses.push(`(${eventFamilies.map(() => "kind LIKE ?").join(" OR ")})`);
+    values.push(...eventFamilies.map((family) => `${family}.%`));
+  }
+  if (activityNames.length > 0) {
+    clauses.push(
+      `activity_attempt_id IN (SELECT attempt_id FROM kojo_workflow_activity_attempts WHERE activity_name IN (${activityNames
+        .map(() => "?")
+        .join(", ")}))`,
+    );
+    values.push(...activityNames);
+  }
+  if (artifactConditions.length > 0) {
+    clauses.push(
+      `EXISTS (SELECT 1 FROM kojo_execution_event_artifacts event_artifact
+         JOIN kojo_execution_artifacts artifact ON artifact.run_id = event_artifact.run_id
+          AND artifact.artifact_id = event_artifact.artifact_id
+        WHERE event_artifact.run_id = kojo_execution_events.run_id
+          AND event_artifact.event_id = kojo_execution_events.event_id
+          AND artifact.condition IN (${artifactConditions.map(() => "?").join(", ")}))`,
+    );
+    values.push(...artifactConditions);
+  }
+  addRunIn("state", runStates);
+  addRunIn("workflow_key", workflowKeys);
+  addRunIn("trigger_kind", triggerKinds);
+  addRunIn("parent_run_id", parentRunIds);
+  addRunIn("schedule_key", scheduleKeys);
+  if (occurrenceOutcomes.length > 0) {
+    clauses.push(
+      `EXISTS (SELECT 1 FROM kojo_workflow_schedule_occurrences occurrence
+        WHERE occurrence.linked_run_id = kojo_execution_events.run_id
+          AND occurrence.outcome IN (${occurrenceOutcomes.map(() => "?").join(", ")}))`,
+    );
+    values.push(...occurrenceOutcomes);
+  }
+  if (filters.recordedAfterMs !== undefined) {
+    clauses.push("recorded_at_ms >= ?");
+    values.push(filters.recordedAfterMs);
+  }
+  if (filters.recordedBeforeMs !== undefined) {
+    clauses.push("recorded_at_ms <= ?");
+    values.push(filters.recordedBeforeMs);
+  }
   return clauses;
 };
 
@@ -2743,6 +2855,26 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
         return rows.map((row) => toRunListItem(connection, row));
       }),
     ),
+  revision: (project) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) => {
+        // Read every Run's durable row version. This is an authoritative
+        // project-level change fingerprint, not a capped newest-page sample;
+        // a mutation to Run 501 remains visible to subscribers.
+        const row = connection
+          .query(
+            `SELECT COUNT(*) AS count,
+                    COALESCE(group_concat(revision, '|'), '') AS revisions
+               FROM (
+                 SELECT run_id || ':' || row_version || ':' || updated_at_ms AS revision
+                   FROM kojo_workflow_runs
+                  ORDER BY run_id ASC
+               )`,
+          )
+          .get() as { readonly count: number; readonly revisions: string };
+        return `${row.count}:${row.revisions}`;
+      }),
+    ),
   show: (project, runId) =>
     Effect.sync(() =>
       withWritableProjectStore(project, (connection) => readRunSnapshot(connection, runId)),
@@ -3254,7 +3386,20 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
       withWritableProjectStore(project, (connection) =>
         transaction(connection, () => {
           const run = readStoredRun(connection, runId);
-          if (run === undefined || run.state !== "running") return { _tag: "conflict" as const };
+          if (run === undefined || run.state !== "running") {
+            const state =
+              run?.state === "suspended" ||
+              run?.state === "stopping" ||
+              run?.state === "stopped" ||
+              run?.state === "failed" ||
+              run?.state === "completed"
+                ? run.state
+                : "missing";
+            return {
+              _tag: "run-not-running" as const,
+              state,
+            };
+          }
           const existing =
             (connection
               .query(
@@ -3289,12 +3434,13 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           }
           const latestAttempt = connection
             .query(
-              `SELECT state FROM kojo_workflow_activity_attempts
+              `SELECT execution_generation, state FROM kojo_workflow_activity_attempts
                WHERE run_id = ? AND durable_operation_key = ?
                ORDER BY invocation_number DESC
                LIMIT 1`,
             )
             .get(runId, operation.durableOperationKey) as {
+            readonly execution_generation: number;
             readonly state: "started" | "result-observed" | "engine-confirmed";
           } | null;
           const decision = decideWorkflowActivityReplay(
@@ -3307,7 +3453,12 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
               executionGeneration: existing.execution_generation,
               resultJson: existing.result_json,
             },
-            latestAttempt?.state,
+            latestAttempt === null
+              ? undefined
+              : {
+                  executionGeneration: latestAttempt.execution_generation,
+                  state: latestAttempt.state,
+                },
           );
           if (decision._tag === "completed") {
             return {
@@ -3330,21 +3481,37 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           const registered =
             (connection
               .query(
-                `SELECT activity_name, definition_fingerprint
+                `SELECT activity_name, definition_fingerprint, execution_generation
                  FROM kojo_workflow_activity_operations
                  WHERE run_id = ? AND durable_operation_key = ?`,
               )
               .get(runId, operation.durableOperationKey) as {
               readonly activity_name: string;
               readonly definition_fingerprint: string;
+              readonly execution_generation: number;
             } | null) ?? undefined;
           if (
             registered === undefined ||
             registered.activity_name !== operation.activityName ||
-            registered.definition_fingerprint !== operation.definitionFingerprint
+            registered.definition_fingerprint !== operation.definitionFingerprint ||
+            registered.execution_generation !== options.executionGeneration
           ) {
             throw new Error("Workflow Activity was not prepared for this Durable Operation Key");
           }
+          const alreadyStarted = connection
+            .query(
+              `SELECT attempt_id FROM kojo_workflow_activity_attempts
+               WHERE run_id = ? AND durable_operation_key = ? AND execution_generation = ?
+                 AND effect_retry_number = ?
+               LIMIT 1`,
+            )
+            .get(
+              runId,
+              operation.durableOperationKey,
+              options.executionGeneration,
+              options.effectRetryNumber,
+            ) as { readonly attempt_id: string } | null;
+          if (alreadyStarted !== null) return undefined;
           const invocation = connection
             .query(
               `SELECT COALESCE(MAX(invocation_number), 0) + 1 AS invocation_number
@@ -3449,12 +3616,13 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           const attempt =
             (connection
               .query(
-                `SELECT durable_operation_key, activity_name, state
+                `SELECT durable_operation_key, activity_name, execution_generation, state
                  FROM kojo_workflow_activity_attempts WHERE run_id = ? AND attempt_id = ?`,
               )
               .get(runId, attemptId) as {
               readonly activity_name: string;
               readonly durable_operation_key: string;
+              readonly execution_generation: number;
               readonly state: "started" | "result-observed" | "engine-confirmed";
             } | null) ?? undefined;
           if (attempt === undefined || attempt.state === "engine-confirmed") return;
@@ -3466,13 +3634,18 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           const operation =
             (connection
               .query(
-                `SELECT confirmed_attempt_id FROM kojo_workflow_activity_operations
+                `SELECT confirmed_attempt_id, execution_generation
+                 FROM kojo_workflow_activity_operations
                  WHERE run_id = ? AND durable_operation_key = ?`,
               )
               .get(runId, attempt.durable_operation_key) as {
               readonly confirmed_attempt_id: string | null;
+              readonly execution_generation: number;
             } | null) ?? undefined;
           if (operation === undefined) throw new Error("Workflow Activity operation disappeared");
+          if (operation.execution_generation !== attempt.execution_generation) {
+            return;
+          }
           if (
             operation.confirmed_attempt_id !== null &&
             operation.confirmed_attempt_id !== attemptId
@@ -3562,15 +3735,11 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           const eventId = randomUUID();
           appendEvent(connection, {
             eventId,
-            kind:
-              trace.artifactIds.length > 0
-                ? "artifact.recorded"
-                : trace.kind === "sandbox.acquired" || trace.kind === "sandbox.session-recreated"
-                  ? "boundary.started"
-                  : "boundary.completed",
+            kind: settledBoundaryKind(trace.kind),
             payload: {
               artifactIds: trace.artifactIds,
               durationMs: trace.durationMs,
+              evidence: { kind: trace.kind, source: "sandbox" },
               exitCode: trace.exitCode,
               operationKey: trace.operationKey,
               providerKind: trace.providerKind,
@@ -3618,15 +3787,11 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           const eventId = randomUUID();
           appendEvent(connection, {
             eventId,
-            kind:
-              trace.artifactIds.length > 0
-                ? "artifact.recorded"
-                : trace.kind === "agent.started"
-                  ? "boundary.started"
-                  : "boundary.completed",
+            kind: settledBoundaryKind(trace.kind),
             payload: {
               artifactIds: trace.artifactIds,
               durationMs: trace.durationMs,
+              evidence: { kind: trace.kind, source: "agent" },
               operationKey: trace.operationKey,
               providerKind: trace.providerKind,
               sandboxIdentity: trace.sandboxIdentity,
@@ -3669,14 +3834,22 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
     Effect.sync(() =>
       withWritableProjectStore(project, (connection) =>
         transaction(connection, () => {
-          const incomplete = connection
+          const recoveredActivities = connection
             .query(
-              `SELECT 1 FROM kojo_workflow_activity_attempts
-               WHERE run_id = ? AND state != 'engine-confirmed' AND started_at_ms < ?
-               LIMIT 1`,
+              `UPDATE kojo_workflow_activity_operations
+               SET execution_generation = execution_generation + 1
+               WHERE run_id = ? AND confirmed_attempt_id IS NULL
+                 AND EXISTS (
+                   SELECT 1 FROM kojo_workflow_activity_attempts
+                   WHERE kojo_workflow_activity_attempts.run_id =
+                       kojo_workflow_activity_operations.run_id
+                     AND kojo_workflow_activity_attempts.durable_operation_key =
+                       kojo_workflow_activity_operations.durable_operation_key
+                     AND state != 'engine-confirmed' AND started_at_ms < ?
+                 )`,
             )
-            .get(runId, hostStartedAtMs);
-          if (incomplete === null) return false;
+            .run(runId, hostStartedAtMs);
+          if (recoveredActivities.changes === 0) return false;
           const updated = connection
             .query(
               `UPDATE kojo_engine_operations

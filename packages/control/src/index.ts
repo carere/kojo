@@ -874,6 +874,18 @@ export const LEGACY_PERSISTED_EXECUTION_EVENT_KINDS_V1 = [
   "workflow-deferred.completed",
   "run.engine-recovery-queued",
   "run.engine-late-outcome",
+  // Sandbox and Agent adapters wrote these source-specific identities before
+  // ADR 0011 settled their durable representation as Boundary Events.
+  "sandbox.acquired",
+  "sandbox.session-recreated",
+  "command.completed",
+  "command.failed",
+  "command.timed-out",
+  "agent.started",
+  "agent.completed",
+  "agent.failed",
+  "agent.session-continued",
+  "agent.replayed",
 ] as const;
 
 export const ExecutionTraceCompatibility = Schema.Literals([
@@ -882,6 +894,24 @@ export const ExecutionTraceCompatibility = Schema.Literals([
   "kind-version-unsupported",
 ]);
 export type ExecutionTraceCompatibility = typeof ExecutionTraceCompatibility.Type;
+
+export const ExecutionTraceEventFamily = Schema.Literals([
+  "run",
+  "child",
+  "activity",
+  "deferred",
+  "clock",
+  "boundary",
+  "artifact",
+  "reconciliation",
+]);
+export type ExecutionTraceEventFamily = typeof ExecutionTraceEventFamily.Type;
+
+export const ExecutionTraceTriggerKind = Schema.Literals(["manual", "schedule", "child"]);
+export type ExecutionTraceTriggerKind = typeof ExecutionTraceTriggerKind.Type;
+
+export const ExecutionTraceArtifactCondition = Schema.Literals(["available", "missing", "expired"]);
+export type ExecutionTraceArtifactCondition = typeof ExecutionTraceArtifactCondition.Type;
 
 /** One safe, chronological entry in a Workflow Run's immutable trace. */
 export const ExecutionTraceEvent = Schema.Struct({
@@ -908,19 +938,45 @@ export type ExecutionTraceEvent = typeof ExecutionTraceEvent.Type;
  * inspects opaque payload JSON, so index and cursor behavior stay stable.
  */
 export const ExecutionTraceFilters = Schema.Struct({
+  activityNames: Schema.optionalKey(Schema.Array(Schema.String)),
   kinds: Schema.Array(ExecutionEventKindV1),
+  eventFamilies: Schema.optionalKey(Schema.Array(ExecutionTraceEventFamily)),
+  boundaryIds: Schema.optionalKey(Schema.Array(Schema.String)),
+  artifactConditions: Schema.optionalKey(Schema.Array(ExecutionTraceArtifactCondition)),
   engineOperationIds: Schema.Array(Schema.String),
   activityAttemptIds: Schema.Array(Schema.String),
   childRunIds: Schema.Array(WorkflowRunId),
+  runStates: Schema.optionalKey(Schema.Array(WorkflowRunState)),
+  workflowKeys: Schema.optionalKey(Schema.Array(Schema.String)),
+  triggerKinds: Schema.optionalKey(Schema.Array(ExecutionTraceTriggerKind)),
+  parentRunIds: Schema.optionalKey(Schema.Array(WorkflowRunId)),
+  scheduleKeys: Schema.optionalKey(Schema.Array(Schema.String)),
+  occurrenceOutcomes: Schema.optionalKey(Schema.Array(WorkflowScheduleOccurrenceOutcome)),
+  recordedAfterMs: Schema.optionalKey(
+    Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  ),
+  recordedBeforeMs: Schema.optionalKey(
+    Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  ),
 });
 export type ExecutionTraceFilters = typeof ExecutionTraceFilters.Type;
 
 /** The one settled empty-filter value shared by every Trace consumer. */
 export const EMPTY_EXECUTION_TRACE_FILTERS: ExecutionTraceFilters = {
+  activityNames: [],
+  artifactConditions: [],
+  boundaryIds: [],
   activityAttemptIds: [],
   childRunIds: [],
   engineOperationIds: [],
+  eventFamilies: [],
   kinds: [],
+  occurrenceOutcomes: [],
+  parentRunIds: [],
+  runStates: [],
+  scheduleKeys: [],
+  triggerKinds: [],
+  workflowKeys: [],
 };
 
 export const ExecutionTraceReadInput = Schema.Struct({

@@ -29,10 +29,22 @@ const checksum = (contents: Omit<ExecutionTraceCursor, "checksum">) =>
 /** Filter order is not semantic, so equivalent filters share a cursor. */
 export const executionTraceFilterFingerprint = (filters: ExecutionTraceFilters) =>
   JSON.stringify({
+    activityNames: [...(filters.activityNames ?? [])].sort(),
     activityAttemptIds: [...filters.activityAttemptIds].sort(),
+    artifactConditions: [...(filters.artifactConditions ?? [])].sort(),
+    boundaryIds: [...(filters.boundaryIds ?? [])].sort(),
     childRunIds: [...filters.childRunIds].sort(),
     engineOperationIds: [...filters.engineOperationIds].sort(),
+    eventFamilies: [...(filters.eventFamilies ?? [])].sort(),
     kinds: [...filters.kinds].sort(),
+    occurrenceOutcomes: [...(filters.occurrenceOutcomes ?? [])].sort(),
+    parentRunIds: [...(filters.parentRunIds ?? [])].sort(),
+    recordedAfterMs: filters.recordedAfterMs ?? null,
+    recordedBeforeMs: filters.recordedBeforeMs ?? null,
+    runStates: [...(filters.runStates ?? [])].sort(),
+    scheduleKeys: [...(filters.scheduleKeys ?? [])].sort(),
+    triggerKinds: [...(filters.triggerKinds ?? [])].sort(),
+    workflowKeys: [...(filters.workflowKeys ?? [])].sort(),
   });
 
 export const encodeExecutionTraceCursor = (

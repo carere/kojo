@@ -78,10 +78,22 @@ const waitForSocket = async (socketPath: string, processHandle: Bun.Subprocess) 
   throw new Error("Timed out while starting the Kojo Host fixture.");
 };
 
-const readStderr = (processHandle: Bun.Subprocess) =>
-  processHandle.stderr instanceof ReadableStream
-    ? new Response(processHandle.stderr).text()
+const readStderr = (processHandle: Bun.Subprocess) => {
+  const stderr = processHandle.stderr;
+  return stderr instanceof ReadableStream
+    ? (async () => {
+        const reader = stderr.getReader();
+        const chunks: Array<string> = [];
+        for (;;) {
+          const next = await reader.read();
+          if (next.done) break;
+          const chunk = new TextDecoder().decode(next.value);
+          chunks.push(chunk);
+        }
+        return chunks.join("");
+      })()
     : Promise.resolve("");
+};
 
 const withStderr = (error: unknown, stderr: string) => {
   const message = error instanceof Error ? error.message : String(error);

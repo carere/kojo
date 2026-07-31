@@ -36,6 +36,13 @@
       "when": 1785715200000,
       "tag": "0005_workflow_activity_results",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1785715200001,
+      "tag": "_0006_workflow_activity_execution_claims",
+      "breakpoints": true
     }
   ]
 }

@@ -4,7 +4,12 @@ import { chmod, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "@effect/vitest";
-import { ProjectIdentity, RequestKey, type WorkflowScheduleDefinition } from "@kojo/control";
+import {
+  EMPTY_EXECUTION_TRACE_FILTERS,
+  ProjectIdentity,
+  RequestKey,
+  type WorkflowScheduleDefinition,
+} from "@kojo/control";
 import { Effect, Schema } from "effect";
 import {
   completeProjectRepositoryMigration,
@@ -401,6 +406,7 @@ describe("Drizzle Execution Trace reads", () => {
         { activityIdempotencyKey: "publish:one", effectRetryNumber: 0, executionGeneration: 1 },
         3,
       );
+      if (attempt === undefined) return yield* Effect.die("Expected the first Activity attempt");
       yield* repository.observeActivityAttempt(
         fixture.project,
         "run-one",
@@ -518,6 +524,349 @@ describe("Drizzle Execution Trace reads", () => {
         ]),
       });
     }).pipe(Effect.provide(DrizzleWorkflowRunRepositoryLive)),
+  );
+
+  it.effect("fingerprints Runs beyond the historical 200-item sample", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() => initializedProject("kojo-runs-revision-"));
+      const database = new Database(fixture.databasePath);
+      for (let index = 1; index <= 501; index += 1) {
+        database
+          .query(
+            `INSERT INTO kojo_workflow_runs(
+              run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision,
+              engine_reference_version, engine_reference_json, engine_reference_sha256,
+              trigger_kind, state, last_event_sequence, row_version, accepted_at_ms, updated_at_ms
+            ) VALUES (?, ?, zeroblob(32), 'workflow', 'revision', 1, '{}', randomblob(32),
+              'manual', 'running', 0, 1, ?, ?)`,
+          )
+          .run(`revision-run-${index}`, `revision-start-${index}`, index, index);
+      }
+      database.close();
+
+      const repository = yield* WorkflowRunRepository;
+      const before = yield* repository.revision(fixture.project);
+      const changed = new Database(fixture.databasePath);
+      changed
+        .query(
+          "UPDATE kojo_workflow_runs SET row_version = 2, updated_at_ms = 9999 WHERE run_id = ?",
+        )
+        .run("revision-run-501");
+      changed.close();
+      const after = yield* repository.revision(fixture.project);
+
+      expect(after).not.toBe(before);
+      expect(after).toContain("revision-run-501:2:9999");
+    }).pipe(Effect.provide(DrizzleWorkflowRunRepositoryLive)),
+  );
+
+  it.effect("applies indexed family, Activity, Run, boundary, and time filters", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() => initializedProject("kojo-trace-filters-"));
+      const repository = yield* WorkflowRunRepository;
+      yield* repository.acceptManualStart({
+        project: fixture.project,
+        requestKey: requestKey("filter-start"),
+        requestHash: new Uint8Array(32),
+        runId: "filter-run",
+        workflowKey: "filtered-workflow",
+        workflowRevision: "revision",
+        encodedInput: {},
+        inputSensitivityPaths: [],
+        startSnapshot: {
+          workflow: {
+            workflowKey: "filtered-workflow",
+            workflowRevision: "revision",
+            sourceIdentity: "test",
+            inputSchemaFingerprint: "test",
+          },
+          trigger: { kind: "manual", requestKey: requestKey("filter-start") },
+          environment: {
+            projectIdentity: fixture.project.identity,
+            definitionSnapshotId: "test",
+            runtimeKind: "local-effect-workflow",
+          },
+          input: {},
+          inputSensitivityPaths: [],
+        },
+        acceptedAtMs: 1,
+      });
+      const operation = {
+        activityName: "publish",
+        definitionFingerprint: "publish-v1",
+        durableOperationKey: "publish",
+      };
+      yield* repository.prepareActivity(fixture.project, "filter-run", operation, 2);
+      yield* repository.startActivityAttempt(
+        fixture.project,
+        "filter-run",
+        operation,
+        { activityIdempotencyKey: "publish:one", effectRetryNumber: 0, executionGeneration: 1 },
+        2,
+      );
+      const database = new Database(fixture.databasePath);
+      database
+        .query(
+          `INSERT INTO kojo_execution_events(
+            event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms,
+            boundary_id, payload_encoding_version, payload_schema_identity, payload_json,
+            payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256
+          ) VALUES ('filter-boundary', 'filter-run', 3, 1, 'boundary.started', 1, 3,
+            'boundary-1', 1, 'schema', '{}', 1, '{}', zeroblob(32))`,
+        )
+        .run();
+      database
+        .query("UPDATE kojo_workflow_runs SET last_event_sequence = 3 WHERE run_id = ?")
+        .run("filter-run");
+      database.close();
+
+      const filtered = yield* repository.readTrace(fixture.project, "filter-run", {
+        filters: {
+          ...EMPTY_EXECUTION_TRACE_FILTERS,
+          activityNames: ["publish"],
+          eventFamilies: ["activity"],
+          recordedAfterMs: 1,
+          runStates: ["running"],
+          workflowKeys: ["filtered-workflow"],
+        },
+        limit: 100,
+      });
+      expect(filtered?.events).toEqual([
+        expect.objectContaining({ kind: "activity.attempt-started", sequence: 2 }),
+      ]);
+      const boundary = yield* repository.readTrace(fixture.project, "filter-run", {
+        filters: { ...EMPTY_EXECUTION_TRACE_FILTERS, boundaryIds: ["boundary-1"] },
+        limit: 100,
+      });
+      expect(boundary?.events).toEqual([
+        expect.objectContaining({ kind: "boundary.started", sequence: 3 }),
+      ]);
+    }).pipe(Effect.provide(DrizzleWorkflowRunRepositoryLive)),
+  );
+
+  it.effect(
+    "persists and reconstructs active Sandbox and Agent evidence through the closed Event catalog",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() =>
+          initializedProject("kojo-execution-trace-boundary-evidence-"),
+        );
+        const repository = yield* WorkflowRunRepository;
+        yield* repository.acceptManualStart({
+          project: fixture.project,
+          requestKey: requestKey("boundary-evidence-start"),
+          requestHash: new Uint8Array(32),
+          runId: "boundary-evidence-run",
+          workflowKey: "workflow",
+          workflowRevision: "revision",
+          encodedInput: {},
+          inputSensitivityPaths: [],
+          startSnapshot: {
+            workflow: {
+              workflowKey: "workflow",
+              workflowRevision: "revision",
+              sourceIdentity: "test",
+              inputSchemaFingerprint: "test",
+            },
+            trigger: { kind: "manual", requestKey: requestKey("boundary-evidence-start") },
+            environment: {
+              projectIdentity: fixture.project.identity,
+              definitionSnapshotId: "test",
+              runtimeKind: "local-effect-workflow",
+            },
+            input: {},
+            inputSensitivityPaths: [],
+          },
+          acceptedAtMs: 1,
+        });
+        yield* repository.recordSandboxTrace(fixture.project, "boundary-evidence-run", {
+          artifactIds: ["sandbox-artifact"],
+          artifacts: [
+            {
+              artifactId: "sandbox-artifact",
+              byteSize: 1,
+              displayName: "sandbox.json",
+              mediaType: "application/json",
+              sha256: new Uint8Array(32),
+              storageKey: "sandbox-artifact",
+            },
+          ],
+          durationMs: null,
+          exitCode: null,
+          kind: "sandbox.acquired",
+          operationKey: "sandbox-acquire",
+          providerKind: "local",
+          recordedAtMs: 2,
+          sandboxIdentity: "sandbox",
+        });
+        yield* repository.recordSandboxTrace(fixture.project, "boundary-evidence-run", {
+          artifactIds: [],
+          artifacts: [],
+          durationMs: 3,
+          exitCode: 0,
+          kind: "command.completed",
+          operationKey: "command",
+          providerKind: "local",
+          recordedAtMs: 3,
+          sandboxIdentity: "sandbox",
+        });
+        yield* repository.recordAgentTrace(fixture.project, "boundary-evidence-run", {
+          artifactIds: [],
+          artifacts: [],
+          durationMs: null,
+          kind: "agent.started",
+          operationKey: "agent",
+          providerKind: "test-agent",
+          recordedAtMs: 4,
+          sandboxIdentity: "sandbox",
+        });
+        yield* repository.recordAgentTrace(fixture.project, "boundary-evidence-run", {
+          artifactIds: ["agent-artifact"],
+          artifacts: [
+            {
+              artifactId: "agent-artifact",
+              byteSize: 1,
+              displayName: "agent.json",
+              mediaType: "application/json",
+              sha256: new Uint8Array(32),
+              storageKey: "agent-artifact",
+            },
+          ],
+          durationMs: 5,
+          kind: "agent.completed",
+          operationKey: "agent",
+          providerKind: "test-agent",
+          recordedAtMs: 5,
+          sandboxIdentity: "sandbox",
+        });
+
+        const run = yield* repository.show(fixture.project, "boundary-evidence-run");
+        expect(run?.run.sandboxTrace).toEqual([
+          expect.objectContaining({
+            artifactIds: ["sandbox-artifact"],
+            kind: "sandbox.acquired",
+            operationKey: "sandbox-acquire",
+          }),
+          expect.objectContaining({
+            durationMs: 3,
+            exitCode: 0,
+            kind: "command.completed",
+            operationKey: "command",
+          }),
+        ]);
+        expect(run?.run.agentTrace).toEqual([
+          expect.objectContaining({ kind: "agent.started", operationKey: "agent" }),
+          expect.objectContaining({
+            artifactIds: ["agent-artifact"],
+            durationMs: 5,
+            kind: "agent.completed",
+            operationKey: "agent",
+          }),
+        ]);
+        const database = new Database(fixture.databasePath, { readonly: true });
+        const kinds = database
+          .query("SELECT kind FROM kojo_execution_events WHERE run_id = ? ORDER BY sequence ASC")
+          .all("boundary-evidence-run") as ReadonlyArray<{ readonly kind: string }>;
+        database.close();
+        expect(kinds.map((event) => event.kind)).toEqual([
+          "run.accepted",
+          "boundary.started",
+          "boundary.completed",
+          "boundary.started",
+          "boundary.completed",
+        ]);
+      }).pipe(Effect.provide(DrizzleWorkflowRunRepositoryLive)),
+  );
+
+  it.effect(
+    "reconstructs source-specific Sandbox evidence written before the settled catalog",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() =>
+          initializedProject("kojo-execution-trace-legacy-boundary-evidence-"),
+        );
+        const repository = yield* WorkflowRunRepository;
+        yield* repository.acceptManualStart({
+          project: fixture.project,
+          requestKey: requestKey("legacy-boundary-evidence-start"),
+          requestHash: new Uint8Array(32),
+          runId: "legacy-boundary-evidence-run",
+          workflowKey: "workflow",
+          workflowRevision: "revision",
+          encodedInput: {},
+          inputSensitivityPaths: [],
+          startSnapshot: {
+            workflow: {
+              workflowKey: "workflow",
+              workflowRevision: "revision",
+              sourceIdentity: "test",
+              inputSchemaFingerprint: "test",
+            },
+            trigger: { kind: "manual", requestKey: requestKey("legacy-boundary-evidence-start") },
+            environment: {
+              projectIdentity: fixture.project.identity,
+              definitionSnapshotId: "test",
+              runtimeKind: "local-effect-workflow",
+            },
+            input: {},
+            inputSensitivityPaths: [],
+          },
+          acceptedAtMs: 1,
+        });
+        yield* Effect.sync(() => {
+          const database = new Database(fixture.databasePath);
+          database
+            .query(
+              `INSERT INTO kojo_execution_events(
+              event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms,
+              payload_encoding_version, payload_schema_identity, payload_json,
+              payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256
+            ) VALUES (?, ?, 2, 1, 'command.completed', 1, 2, 1,
+              'kojo.workflow-run-event/v1', ?, 1, '{}', zeroblob(32))`,
+            )
+            .run(
+              "legacy-command",
+              "legacy-boundary-evidence-run",
+              JSON.stringify({
+                artifactIds: [],
+                durationMs: 1,
+                exitCode: 0,
+                operationKey: "legacy-command",
+                providerKind: "local",
+                sandboxIdentity: "sandbox",
+              }),
+            );
+          database
+            .query("UPDATE kojo_workflow_runs SET last_event_sequence = 2 WHERE run_id = ?")
+            .run("legacy-boundary-evidence-run");
+          database.close();
+        });
+
+        expect(
+          (yield* repository.show(fixture.project, "legacy-boundary-evidence-run"))?.run
+            .sandboxTrace,
+        ).toEqual([
+          expect.objectContaining({
+            kind: "command.completed",
+            operationKey: "legacy-command",
+          }),
+        ]);
+        expect(
+          (yield* repository.readTrace(fixture.project, "legacy-boundary-evidence-run", {
+            filters: {
+              activityAttemptIds: [],
+              childRunIds: [],
+              engineOperationIds: [],
+              kinds: [],
+            },
+            limit: 10,
+          }))?.events.map(toExecutionTraceEvent),
+        ).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ kind: "command.completed", compatibility: "supported" }),
+          ]),
+        );
+      }).pipe(Effect.provide(DrizzleWorkflowRunRepositoryLive)),
   );
 
   it.effect(
