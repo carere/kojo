@@ -2,7 +2,7 @@ import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type BrowserContext, chromium } from "playwright";
+import { type Browser, type BrowserContext, chromium } from "playwright";
 import { afterEach, expect, test } from "vitest";
 import { makeTemporaryDirectory, runKojoCli } from "../../../../tests/support/cli-process";
 import {
@@ -250,6 +250,47 @@ test("force-reclaims an owned browser process when bounded shutdown misses its d
   }
 });
 
+test("force-reclaims an owned browser process when both Playwright closes fail", async () => {
+  const profile = await makeTemporaryDirectory("kojo-browser-profile-failed-reclaim-");
+  const browser = Bun.spawn(
+    [
+      chromium.executablePath(),
+      "--headless",
+      "--no-default-browser-check",
+      "--no-first-run",
+      `--user-data-dir=${profile.path}`,
+      "about:blank",
+    ],
+    { stderr: "ignore", stdout: "ignore" },
+  );
+  try {
+    await waitFor(async () => (await ownedBrowserPids(profile.path)).length > 0, browser);
+    let owningCloseCalled = false;
+    const failingBrowser: Pick<BrowserContext, "browser" | "close"> = {
+      browser: () =>
+        ({
+          close: () => {
+            owningCloseCalled = true;
+            return Promise.reject(new Error("Owning Browser close failed."));
+          },
+        }) as Browser,
+      close: () => Promise.reject(new Error("Browser context close failed.")),
+    };
+
+    await expect(closeBrowser(failingBrowser, profile.path)).rejects.toThrow(
+      "BrowserContext.close failed",
+    );
+    expect(owningCloseCalled).toBe(true);
+    expect(await ownedBrowserPids(profile.path)).toEqual([]);
+    expect(await browser.exited).toBeTypeOf("number");
+  } finally {
+    await terminateOwnedBrowser(profile.path);
+    if (browser.exitCode === null) browser.kill("SIGKILL");
+    await settlesWithin(browser.exited);
+    await profile.cleanup();
+  }
+});
+
 test("selects only Chromium processes with this fixture's exact profile argument", () => {
   const profilePath = "/private/tmp/kojo-browser-profile-[exact]";
   const browser = chromium.executablePath();
@@ -475,33 +516,73 @@ const settlesWithin = async (operation: Promise<unknown>) =>
     Bun.sleep(cleanupDeadlineMs).then(() => false),
   ]);
 
+type CloseOutcome =
+  | { readonly _tag: "failed"; readonly error: unknown }
+  | { readonly _tag: "succeeded" };
+
+type TimedCloseOutcome = CloseOutcome | { readonly _tag: "timed-out" };
+
+const observeClose = (operation: Promise<void>): Promise<CloseOutcome> =>
+  operation.then(
+    () => ({ _tag: "succeeded" }) as const,
+    (error) => ({ _tag: "failed", error }) as const,
+  );
+
+const closeWithin = async (operation: Promise<CloseOutcome>): Promise<TimedCloseOutcome> =>
+  Promise.race([
+    operation,
+    Bun.sleep(cleanupDeadlineMs).then(() => ({ _tag: "timed-out" }) as const),
+  ]);
+
+const describeCloseOutcome = (
+  owner: "Browser.close" | "BrowserContext.close",
+  outcome: TimedCloseOutcome,
+) => `${owner} ${outcome._tag}`;
+
+const closeFailureCause = (...outcomes: ReadonlyArray<TimedCloseOutcome | undefined>) =>
+  outcomes.find(
+    (outcome): outcome is Extract<CloseOutcome, { readonly _tag: "failed" }> =>
+      outcome?._tag === "failed",
+  )?.error;
+
 const closeBrowser = async (
   browser: Pick<BrowserContext, "browser" | "close">,
   profilePath: string,
 ) => {
-  const closeOutcome = browser.close().then(
-    () => "closed" as const,
-    () => "failed" as const,
-  );
-  const closed = await Promise.race([
-    closeOutcome,
-    Bun.sleep(cleanupDeadlineMs).then(() => "timed-out" as const),
-  ]);
-  if (closed === "closed") return;
+  const contextClose = observeClose(browser.close());
+  const initialContextOutcome = await closeWithin(contextClose);
+  if (initialContextOutcome._tag === "succeeded") return;
+
+  let owningBrowserClose: Promise<CloseOutcome> | undefined;
+  let owningBrowserOutcome: TimedCloseOutcome | undefined;
   const owningBrowser = browser.browser();
   if (owningBrowser !== null) {
-    const browserCloseOutcome = owningBrowser.close().then(
-      () => "closed" as const,
-      () => "failed" as const,
-    );
-    if (await settlesWithin(Promise.all([closeOutcome, browserCloseOutcome]))) return;
+    owningBrowserClose = observeClose(owningBrowser.close());
+    const [contextOutcome, browserOutcome] = await Promise.all([
+      closeWithin(contextClose),
+      closeWithin(owningBrowserClose),
+    ]);
+    owningBrowserOutcome = browserOutcome;
+    if (contextOutcome._tag === "succeeded" && browserOutcome._tag === "succeeded") return;
   }
   if (!(await terminateOwnedBrowser(profilePath))) {
-    throw new Error(`Browser teardown ${closed} and force-reclaiming its owned process failed.`);
+    throw new Error(
+      `${describeCloseOutcome("BrowserContext.close", initialContextOutcome)} and force-reclaiming its owned process failed.`,
+      { cause: closeFailureCause(initialContextOutcome, owningBrowserOutcome) },
+    );
   }
-  if (await settlesWithin(closeOutcome)) return;
+  const finalContextOutcome = await closeWithin(contextClose);
+  const finalOwningBrowserOutcome =
+    owningBrowserClose === undefined ? undefined : await closeWithin(owningBrowserClose);
+  if (
+    finalContextOutcome._tag === "succeeded" &&
+    (finalOwningBrowserOutcome === undefined || finalOwningBrowserOutcome._tag === "succeeded")
+  ) {
+    return;
+  }
   throw new Error(
-    `Browser teardown ${closed}; process was reclaimed but its close operation did not settle.`,
+    `Browser process was reclaimed, but ${describeCloseOutcome("BrowserContext.close", finalContextOutcome)}${finalOwningBrowserOutcome === undefined ? "" : ` and ${describeCloseOutcome("Browser.close", finalOwningBrowserOutcome)}`}.`,
+    { cause: closeFailureCause(finalContextOutcome, finalOwningBrowserOutcome) },
   );
 };
 
