@@ -81,7 +81,9 @@ const projectLayoutError = (identity: ProjectIdentity, message: string, findingK
     [findingKey as never],
   );
 
-const asLocalDefinition = (definition: AnyWorkflowDefinition): AnyLocalWorkflowDefinition => ({
+export const asLocalDefinition = (
+  definition: AnyWorkflowDefinition,
+): AnyLocalWorkflowDefinition => ({
   workflowKey: definition.workflowKey,
   revision: definition.revision,
   inputSchema: definition.inputSchema,
@@ -161,7 +163,7 @@ const observeRun = (
     }
   });
 
-const reconcileRun = (
+export const reconcileWorkflowRun = (
   backend: WorkflowBackend["Service"],
   repository: WorkflowRunRepository["Service"],
   project: ProjectSnapshot,
@@ -283,7 +285,7 @@ const reconcilePendingWorkflowRuns = (
               candidate.revision === activeRun.workflowRevision,
           );
           if (definition !== undefined) {
-            yield* reconcileRun(
+            yield* reconcileWorkflowRun(
               backend,
               repository,
               validation.project,
@@ -535,7 +537,7 @@ export const startWorkflowRun = (input: {
         ),
       };
     }
-    yield* reconcileRun(
+    yield* reconcileWorkflowRun(
       backend,
       repository,
       validation.project,

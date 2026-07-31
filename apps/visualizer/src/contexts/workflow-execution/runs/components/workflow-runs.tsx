@@ -1,5 +1,6 @@
 import type { ProjectIdentity, ProjectWorkflowRunsSnapshot, WorkflowRunId } from "@kojo/control";
 import { createSignal, For, Show } from "solid-js";
+import { Button } from "../../../shared/components/ui/button";
 
 export interface WorkflowRunsProps {
   readonly snapshots: ReadonlyArray<ProjectWorkflowRunsSnapshot>;
@@ -14,6 +15,7 @@ export interface WorkflowRunsProps {
     runId: WorkflowRunId,
     value: unknown,
   ) => Promise<void>;
+  readonly onShowRun?: (identity: ProjectIdentity, runId: string) => void;
 }
 
 export function WorkflowRuns(props: WorkflowRunsProps) {
@@ -49,7 +51,14 @@ export function WorkflowRuns(props: WorkflowRunsProps) {
         <For each={runs()}>
           {({ project, run }) => (
             <li>
-              {run.runId} <span class="text-muted-foreground">{run.state}</span> {run.workflowKey}@
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={() => props.onShowRun?.(project.identity, run.runId)}
+              >
+                {run.runId}
+              </Button>{" "}
+              <span class="text-muted-foreground">{run.state}</span> {run.workflowKey}@
               {run.workflowRevision}
               <Show when={run.allowedActions.length > 0}>
                 <div class="mt-2 flex flex-wrap items-center gap-2 font-sans">

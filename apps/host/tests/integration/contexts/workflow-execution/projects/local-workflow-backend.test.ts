@@ -31,6 +31,82 @@ afterEach(async () => {
 });
 
 describe("Local Workflow backend ownership", () => {
+  it.live(
+    "delivers an occurrence-specific durable wake-up after the Project Runtime restarts",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() =>
+          initializedWorkflowProject("kojo-schedule-wakeup-"),
+        );
+        const wakeup = {
+          scheduleKey: "nightly-report",
+          scheduledAtMs: Date.now() + 500,
+          scheduleRevision: "schedule-v1",
+        };
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const backendContext = yield* Layer.build(makeLocalWorkflowBackendLayer("first-host"));
+            const backend = Context.get(backendContext, WorkflowBackend);
+            const runtimeContext = yield* Layer.build(
+              ProjectRuntimeLive.pipe(
+                Layer.provide([
+                  DrizzleProjectRepositoryLive,
+                  Layer.succeed(WorkflowBackend, backend),
+                ]),
+              ),
+            );
+            const runtime = Context.get(runtimeContext, ProjectRuntime);
+            expect(
+              yield* runtime.coordinateRegistration(fixture.project, Effect.succeed({}), (ready) =>
+                Effect.succeed(ready),
+              ),
+            ).toBe(true);
+            yield* backend.armScheduleWakeup?.(fixture.project, wakeup) ??
+              Effect.die("missing wake-up adapter");
+          }),
+        );
+
+        yield* Effect.sleep("750 millis");
+
+        const due = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const backendContext = yield* Layer.build(
+              makeLocalWorkflowBackendLayer("restarted-host"),
+            );
+            const backend = Context.get(backendContext, WorkflowBackend);
+            const runtimeContext = yield* Layer.build(
+              ProjectRuntimeLive.pipe(
+                Layer.provide([
+                  DrizzleProjectRepositoryLive,
+                  Layer.succeed(WorkflowBackend, backend),
+                ]),
+              ),
+            );
+            const runtime = Context.get(runtimeContext, ProjectRuntime);
+            expect(
+              yield* runtime.coordinateRegistration(fixture.project, Effect.succeed({}), (ready) =>
+                Effect.succeed(ready),
+              ),
+            ).toBe(true);
+            return yield* (
+              backend.takeDueScheduleWakeups?.(fixture.project) ??
+              Effect.die("missing wake-up adapter")
+            ).pipe(
+              Effect.repeat({
+                until: (wakeups) => wakeups.length === 1,
+                schedule: Schedule.spaced("25 millis"),
+                times: 200,
+              }),
+            );
+          }),
+        );
+
+        expect(due).toEqual([wakeup]);
+      }),
+    15_000,
+  );
+
   it.live("retries bounded ownership contention and acquires after release", () =>
     Effect.gen(function* () {
       const directory = yield* Effect.promise(() =>
@@ -396,6 +472,39 @@ const makeRecoveryDefinition = (
       return { activityResult, wakeUpDelivered: true };
     }),
 });
+
+const initializedWorkflowProject = async (prefix: string) => {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  cleanups.push(() => rm(directory, { recursive: true }));
+  const projectPath = join(directory, "project");
+  const dataPath = join(projectPath, ".kojo");
+  await mkdir(dataPath, { recursive: true, mode: 0o700 });
+  const project: ProjectSnapshot = {
+    identity: Schema.decodeUnknownSync(ProjectIdentity)(Bun.randomUUIDv7()),
+    path: projectPath,
+  };
+  await writeFile(
+    join(dataPath, "project.json"),
+    `${JSON.stringify({ layoutVersion: 1, projectIdentity: project.identity })}\n`,
+    { mode: 0o600 },
+  );
+  const databasePath = join(dataPath, "kojo.sqlite");
+  const database = new Database(databasePath, { create: true, strict: true });
+  database.exec(`CREATE TABLE kojo_project_store_identity (
+    singleton_key INTEGER PRIMARY KEY NOT NULL CHECK (singleton_key = 1),
+    project_identity TEXT NOT NULL UNIQUE,
+    database_instance_id TEXT NOT NULL UNIQUE
+  ) STRICT`);
+  database
+    .query("INSERT INTO kojo_project_store_identity VALUES (1, ?, ?)")
+    .run(project.identity, randomUUID());
+  database.exec("PRAGMA user_version = 0");
+  database.close();
+  await chmod(databasePath, 0o600);
+  migrateProjectRepository(project);
+  expect(completeProjectRepositoryMigration(project, true)).toBe(true);
+  return { project };
+};
 
 const awaitState = (
   backend: WorkflowBackend["Service"],

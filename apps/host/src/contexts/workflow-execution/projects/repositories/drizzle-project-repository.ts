@@ -21,6 +21,7 @@ import type {
   WorkflowRunSnapshot,
   WorkflowRunSuspension,
   WorkflowScheduleDefinition,
+  WorkflowScheduleOccurrenceSnapshot,
   WorkflowScheduleSnapshot,
 } from "@kojo/control";
 import type { WorkflowScheduleSnapshot as WorkflowScheduleDefinitionSnapshot } from "@kojo/control/project-definition-validation";
@@ -39,6 +40,7 @@ import {
 import type { StoredWorkflowRunSnapshot } from "../../runs/repositories/workflow-run-repository";
 import {
   WorkflowRunRepository,
+  type WorkflowRunScheduleStartRecord,
   type WorkflowRunStartRecord,
 } from "../../runs/repositories/workflow-run-repository";
 import { WorkflowScheduleRepository } from "../../schedules/repositories/workflow-schedule-repository";
@@ -1055,6 +1057,61 @@ const listStoredSchedules = (connection: Database): ReadonlyArray<WorkflowSchedu
       .all() as ReadonlyArray<StoredSchedule>
   ).map(toScheduleSnapshot);
 
+type StoredOccurrence = {
+  readonly applied_revision: string;
+  readonly delivery_attempt_count: number;
+  readonly first_attempted_at_ms: number | null;
+  readonly linked_run_id: string | null;
+  readonly outcome: "planned" | "started" | "skipped" | "invalidated" | "failed";
+  readonly planned_at_ms: number;
+  readonly processed_at_ms: number | null;
+  readonly reason_code: string | null;
+  readonly resolved_input_json: string;
+  readonly resolved_input_sensitivity_map_json: string;
+  readonly resolved_input_sensitivity_map_version: number;
+  readonly schedule_key: string;
+  readonly scheduled_at_ms: number;
+};
+
+const occurrenceSelect = `
+  SELECT schedule_key, scheduled_at_ms, applied_revision, resolved_input_json,
+    resolved_input_sensitivity_map_version, resolved_input_sensitivity_map_json,
+    outcome, reason_code, delivery_attempt_count, planned_at_ms, first_attempted_at_ms,
+    processed_at_ms, linked_run_id
+  FROM kojo_workflow_schedule_occurrences`;
+
+const readStoredOccurrence = (
+  connection: Database,
+  scheduleKey: string,
+  scheduledAtMs: number,
+): StoredOccurrence | undefined =>
+  (connection
+    .query(`${occurrenceSelect} WHERE schedule_key = ? AND scheduled_at_ms = ?`)
+    .get(scheduleKey, scheduledAtMs) as StoredOccurrence | null) ?? undefined;
+
+const toOccurrenceSnapshot = (row: StoredOccurrence): WorkflowScheduleOccurrenceSnapshot => {
+  const inputSensitivityMap = decodeSensitivityMap(
+    row.resolved_input_sensitivity_map_version,
+    row.resolved_input_sensitivity_map_json,
+  );
+  return {
+    scheduleKey: row.schedule_key,
+    scheduledAtMs: row.scheduled_at_ms,
+    appliedRevision: row.applied_revision,
+    input: JSON.parse(row.resolved_input_json),
+    // Treat a corrupt stored map as fully sensitive. Occurrences are visible through
+    // control surfaces, so falling back to an empty map could expose a persisted input.
+    inputSensitivityPaths: inputSensitivityMap.valid ? [...inputSensitivityMap.map.paths] : ["$"],
+    outcome: row.outcome,
+    reasonCode: row.reason_code,
+    deliveryAttemptCount: row.delivery_attempt_count,
+    plannedAtMs: row.planned_at_ms,
+    firstAttemptedAtMs: row.first_attempted_at_ms,
+    processedAtMs: row.processed_at_ms,
+    linkedRunId: row.linked_run_id,
+  };
+};
+
 const toScheduleDefinition = (
   definition: WorkflowScheduleDefinitionSnapshot,
 ): WorkflowScheduleDefinition => ({
@@ -1502,6 +1559,14 @@ export const DrizzleWorkflowScheduleRepositoryLive = Layer.sync(WorkflowSchedule
                    updated_at_ms = ? WHERE schedule_key = ?`,
             )
             .run(acceptedAt, input.scheduleKey);
+          connection
+            .query(
+              `UPDATE kojo_workflow_schedule_occurrences
+                 SET outcome = 'invalidated', reason_code = 'schedule.disabled', processed_at_ms = ?,
+                   row_version = row_version + 1
+               WHERE schedule_key = ? AND outcome = 'planned'`,
+            )
+            .run(acceptedAt, input.scheduleKey);
           insertScheduleReceipt(connection, {
             acceptedAtMs: acceptedAt,
             operationKind: "schedule.disable",
@@ -1519,6 +1584,108 @@ export const DrizzleWorkflowScheduleRepositoryLive = Layer.sync(WorkflowSchedule
           };
         }),
       ),
+    ),
+  planOccurrence: (input) =>
+    Effect.sync(() =>
+      withWritableProjectStore(input.project, (connection) =>
+        transaction(connection, () => {
+          const schedule = readStoredSchedule(connection, input.scheduleKey);
+          if (
+            schedule === undefined ||
+            schedule.enabled_intent !== 1 ||
+            schedule.condition !== "available" ||
+            schedule.applied_revision !== input.appliedRevision ||
+            schedule.next_occurrence_ms !== input.scheduledAtMs
+          ) {
+            return undefined;
+          }
+          const existing = readStoredOccurrence(connection, input.scheduleKey, input.scheduledAtMs);
+          if (existing !== undefined) return toOccurrenceSnapshot(existing);
+          const plannedAt = safeTimestamp(input.plannedAtMs);
+          const inputJson = JSON.stringify(input.input);
+          connection
+            .query(
+              `INSERT INTO kojo_workflow_schedule_occurrences(
+                schedule_key, scheduled_at_ms, applied_revision, resolved_input_encoding_version,
+                resolved_input_schema_identity, resolved_input_json,
+                resolved_input_sensitivity_map_version, resolved_input_sensitivity_map_json,
+                resolved_input_sha256, outcome, delivery_attempt_count, planned_at_ms, row_version
+              ) VALUES (?, ?, ?, 1, 'kojo.workflow-schedule-input/v1', ?, ?, ?, ?, 'planned', 0, ?, 1)`,
+            )
+            .run(
+              input.scheduleKey,
+              input.scheduledAtMs,
+              input.appliedRevision,
+              inputJson,
+              SENSITIVITY_MAP_VERSION,
+              encodeSensitivityMap(sensitivityMap(input.inputSensitivityPaths)),
+              hash(inputJson),
+              plannedAt,
+            );
+          const planned = readStoredOccurrence(connection, input.scheduleKey, input.scheduledAtMs);
+          if (planned === undefined) throw new Error("Workflow Schedule Occurrence was not stored");
+          return toOccurrenceSnapshot(planned);
+        }),
+      ),
+    ),
+  advanceAfterStart: (input) =>
+    Effect.sync(() =>
+      withWritableProjectStore(input.project, (connection) =>
+        transaction(connection, () => {
+          const schedule = readStoredSchedule(connection, input.scheduleKey);
+          if (
+            schedule === undefined ||
+            schedule.enabled_intent !== 1 ||
+            schedule.condition !== "available" ||
+            schedule.applied_revision !== input.appliedRevision ||
+            schedule.next_occurrence_ms !== input.scheduledAtMs
+          ) {
+            return schedule === undefined ? undefined : toScheduleSnapshot(schedule);
+          }
+          const advancedAt = safeTimestamp(input.advancedAtMs);
+          connection
+            .query(
+              `UPDATE kojo_workflow_schedule_states
+                 SET high_water_mark_ms = ?, next_occurrence_ms = ?, row_version = row_version + 1,
+                   updated_at_ms = ?
+               WHERE schedule_key = ?`,
+            )
+            .run(input.scheduledAtMs, input.nextOccurrenceMs, advancedAt, input.scheduleKey);
+          const advanced = readStoredSchedule(connection, input.scheduleKey);
+          if (advanced === undefined) throw new Error("Workflow Schedule disappeared after start");
+          return toScheduleSnapshot(advanced);
+        }),
+      ),
+    ),
+  listOccurrences: (project, input) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) => {
+        const clauses: Array<string> = [];
+        const parameters: Array<string | number> = [];
+        if (input.scheduleKeys.length > 0) {
+          clauses.push(`schedule_key IN (${input.scheduleKeys.map(() => "?").join(", ")})`);
+          parameters.push(...input.scheduleKeys);
+        }
+        if (input.outcomes.length > 0) {
+          clauses.push(`outcome IN (${input.outcomes.map(() => "?").join(", ")})`);
+          parameters.push(...input.outcomes);
+        }
+        parameters.push(input.limit);
+        const where = clauses.length === 0 ? "" : `WHERE ${clauses.join(" AND ")}`;
+        const rows = connection
+          .query(
+            `${occurrenceSelect} ${where} ORDER BY scheduled_at_ms DESC, schedule_key ASC LIMIT ?`,
+          )
+          .all(...parameters) as ReadonlyArray<StoredOccurrence>;
+        return rows.map(toOccurrenceSnapshot);
+      }),
+    ),
+  showOccurrence: (project, scheduleKey, scheduledAtMs) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) => {
+        const occurrence = readStoredOccurrence(connection, scheduleKey, scheduledAtMs);
+        return occurrence === undefined ? undefined : toOccurrenceSnapshot(occurrence);
+      }),
     ),
 }));
 
@@ -1633,6 +1800,145 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
               start.acceptedAtMs,
               start.acceptedAtMs,
               start.acceptedAtMs,
+            );
+          const run = readRunSnapshot(connection, start.runId);
+          if (run === undefined) throw new Error("Workflow Run was not stored");
+          return { _tag: "accepted" as const, run, alreadyApplied: false };
+        }),
+      ),
+    ),
+  acceptScheduledStart: (start: WorkflowRunScheduleStartRecord) =>
+    Effect.sync(() =>
+      withWritableProjectStore(start.project, (connection) =>
+        transaction(connection, () => {
+          const occurrence = readStoredOccurrence(
+            connection,
+            start.scheduleKey,
+            start.scheduledAtMs,
+          );
+          if (occurrence === undefined || occurrence.outcome !== "planned") {
+            if (occurrence?.outcome === "started" && occurrence.linked_run_id !== null) {
+              const run = readRunSnapshot(connection, occurrence.linked_run_id);
+              if (run === undefined)
+                throw new Error("Started Workflow Schedule Occurrence has no Run");
+              return { _tag: "accepted" as const, run, alreadyApplied: true };
+            }
+            return { _tag: "occurrence-not-planned" as const };
+          }
+          if (occurrence.applied_revision !== start.scheduleRevision) {
+            return { _tag: "occurrence-not-planned" as const };
+          }
+          const existing =
+            (connection
+              .query(
+                "SELECT run_id, start_request_sha256 FROM kojo_workflow_runs WHERE start_request_key = ?",
+              )
+              .get(start.requestKey) as {
+              readonly run_id: string;
+              readonly start_request_sha256: Uint8Array;
+            } | null) ?? undefined;
+          if (existing !== undefined) {
+            if (!sameBytes(existing.start_request_sha256, start.requestHash)) {
+              return { _tag: "request-key-conflict" as const };
+            }
+            const run = readRunSnapshot(connection, existing.run_id);
+            if (run === undefined) throw new Error("Workflow Run start has no Workflow Run");
+            connection
+              .query(
+                `UPDATE kojo_workflow_schedule_occurrences
+                   SET outcome = 'started', linked_run_id = ?, first_attempted_at_ms = COALESCE(first_attempted_at_ms, ?),
+                     processed_at_ms = COALESCE(processed_at_ms, ?), delivery_attempt_count = delivery_attempt_count + 1,
+                     row_version = row_version + 1
+                 WHERE schedule_key = ? AND scheduled_at_ms = ? AND outcome = 'planned'`,
+              )
+              .run(
+                existing.run_id,
+                start.acceptedAtMs,
+                start.acceptedAtMs,
+                start.scheduleKey,
+                start.scheduledAtMs,
+              );
+            return { _tag: "accepted" as const, run, alreadyApplied: true };
+          }
+
+          const engineReferenceJson = JSON.stringify({
+            kind: "effect-workflow",
+            runId: start.runId,
+            workflowKey: start.workflowKey,
+            workflowRevision: start.workflowRevision,
+          });
+          const operationJson = JSON.stringify({
+            input: start.encodedInput,
+            workflowKey: start.workflowKey,
+            workflowRevision: start.workflowRevision,
+          });
+          const eventId = randomUUID();
+          const operationId = randomUUID();
+          connection
+            .query(
+              `INSERT INTO kojo_workflow_runs(
+                run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision,
+                engine_reference_version, engine_reference_json, engine_reference_sha256,
+                trigger_kind, schedule_key, scheduled_at_ms, schedule_revision, state,
+                last_event_sequence, row_version, accepted_at_ms, updated_at_ms
+              ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, 'schedule', ?, ?, ?, 'running', 1, 1, ?, ?)`,
+            )
+            .run(
+              start.runId,
+              start.requestKey,
+              start.requestHash,
+              start.workflowKey,
+              start.workflowRevision,
+              engineReferenceJson,
+              hash(engineReferenceJson),
+              start.scheduleKey,
+              start.scheduledAtMs,
+              start.scheduleRevision,
+              start.acceptedAtMs,
+              start.acceptedAtMs,
+            );
+          appendEvent(connection, {
+            eventId,
+            kind: "run.accepted",
+            payload: start.startSnapshot,
+            recordedAtMs: start.acceptedAtMs,
+            runId: start.runId,
+            sequence: 1,
+            sensitivityMap: prefixedSensitivityMap("input", start.inputSensitivityPaths),
+          });
+          connection
+            .query(
+              `INSERT INTO kojo_engine_operations(
+                operation_id, run_id, kind, operation_key, request_encoding_version,
+                request_schema_identity, request_json, request_sensitivity_map_version,
+                request_sensitivity_map_json, request_sha256, state, attempt_count,
+                next_attempt_at_ms, created_at_ms, updated_at_ms
+              ) VALUES (?, ?, 'submit', 'initial', 1, 'kojo.workflow-run-submit/v1', ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`,
+            )
+            .run(
+              operationId,
+              start.runId,
+              operationJson,
+              SENSITIVITY_MAP_VERSION,
+              encodeSensitivityMap(prefixedSensitivityMap("input", start.inputSensitivityPaths)),
+              hash(operationJson),
+              start.acceptedAtMs,
+              start.acceptedAtMs,
+              start.acceptedAtMs,
+            );
+          connection
+            .query(
+              `UPDATE kojo_workflow_schedule_occurrences
+                 SET outcome = 'started', linked_run_id = ?, first_attempted_at_ms = ?, processed_at_ms = ?,
+                   delivery_attempt_count = delivery_attempt_count + 1, row_version = row_version + 1
+               WHERE schedule_key = ? AND scheduled_at_ms = ? AND outcome = 'planned'`,
+            )
+            .run(
+              start.runId,
+              start.acceptedAtMs,
+              start.acceptedAtMs,
+              start.scheduleKey,
+              start.scheduledAtMs,
             );
           const run = readRunSnapshot(connection, start.runId);
           if (run === undefined) throw new Error("Workflow Run was not stored");

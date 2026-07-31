@@ -7,7 +7,7 @@ import {
   type WorkflowScheduleSnapshot,
 } from "@kojo/control";
 import { Effect, Schema } from "effect";
-import { createResource, Show } from "solid-js";
+import { createResource, createSignal, Show } from "solid-js";
 import { m } from "../../../../i18n/messages";
 import { LanguageToggle } from "../../../preferences/components/language-toggle";
 import { ThemeToggle } from "../../../preferences/components/theme-toggle";
@@ -15,6 +15,7 @@ import { VisualizerApiClient, visualizerApiRuntime } from "../../../shared/servi
 import { ProjectNavigator } from "../../../workflow-authoring/projects/components/project-navigator";
 import { WorkflowDefinitionSnapshots } from "../../../workflow-authoring/projects/components/workflow-definition-snapshots";
 import { WorkflowRuns } from "../../runs/components/workflow-runs";
+import { WorkflowScheduleOccurrences } from "../../schedules/components/workflow-schedule-occurrences";
 import { WorkflowSchedules } from "../../schedules/components/workflow-schedules";
 
 export interface HostOverviewProps {
@@ -33,6 +34,7 @@ const loadHostOverview = async () => {
 
 export function HostOverview(props: HostOverviewProps) {
   const [overview, { refetch }] = createResource(() => (props.loadOverview ?? loadHostOverview)());
+  const [navigation, setNavigation] = createSignal<string>();
   const controlSchedule = async (
     identity: HostOverviewSnapshot["projects"][number]["identity"],
     schedule: WorkflowScheduleSnapshot,
@@ -122,12 +124,40 @@ export function HostOverview(props: HostOverviewProps) {
               <WorkflowSchedules
                 snapshots={current().workflowSchedules}
                 onAction={controlSchedule}
+                onShowOccurrences={(identity, scheduleKey) =>
+                  setNavigation(
+                    `Schedule ${scheduleKey} in Project ${identity} · occurrence history`,
+                  )
+                }
+              />
+              <WorkflowScheduleOccurrences
+                snapshots={current().workflowOccurrences}
+                onShowSchedule={(identity, scheduleKey) =>
+                  setNavigation(`Schedule ${scheduleKey} in Project ${identity}`)
+                }
+                onShowRun={(identity, runId) =>
+                  setNavigation(`Workflow Run ${runId} in Project ${identity}`)
+                }
               />
               <WorkflowRuns
                 snapshots={current().workflowRuns}
                 onResume={resume}
                 onCompleteDeferred={completeDeferred}
+                onShowRun={(identity, runId) =>
+                  setNavigation(`Workflow Run ${runId} in Project ${identity}`)
+                }
               />
+              <Show when={navigation()}>
+                {(target) => (
+                  <p
+                    aria-live="polite"
+                    data-navigation-target={target()}
+                    class="text-muted-foreground text-sm"
+                  >
+                    Navigated to {target()}
+                  </p>
+                )}
+              </Show>
             </section>
           )}
         </Show>

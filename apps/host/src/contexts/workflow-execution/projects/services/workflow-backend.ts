@@ -93,6 +93,16 @@ export interface AnyLocalWorkflowDefinition {
 
 export type WorkflowBackendAssessment = "ready" | "uninitialized" | "needs-attention";
 
+/**
+ * An occurrence-specific delayed wake-up. Its durable implementation remains
+ * inside LocalWorkflowBackend; callers only use the stable schedule identity.
+ */
+export interface WorkflowScheduleWakeup {
+  readonly scheduleKey: string;
+  readonly scheduledAtMs: number;
+  readonly scheduleRevision: string;
+}
+
 export interface WorkflowBackendShape {
   readonly hostIdentity?: string;
   readonly acquire: (project: ProjectSnapshot) => Effect.Effect<boolean>;
@@ -105,6 +115,13 @@ export interface WorkflowBackendShape {
     project: ProjectSnapshot,
     definitions: ReadonlyArray<AnyLocalWorkflowDefinition>,
   ) => Effect.Effect<void>;
+  readonly armScheduleWakeup?: (
+    project: ProjectSnapshot,
+    wakeup: WorkflowScheduleWakeup,
+  ) => Effect.Effect<void>;
+  readonly takeDueScheduleWakeups?: (
+    project: ProjectSnapshot,
+  ) => Effect.Effect<ReadonlyArray<WorkflowScheduleWakeup>>;
   readonly submit: (
     project: ProjectSnapshot,
     options: {

@@ -21,6 +21,7 @@ import {
 import { makeLocalWorkflowBackendLayer } from "../contexts/workflow-execution/projects/services/local-workflow-backend";
 import { ProjectRuntimeLive } from "../contexts/workflow-execution/projects/services/project-runtime";
 import { ScheduleClockLive } from "../contexts/workflow-execution/schedules/services/schedule-clock";
+import { WorkflowScheduleSupervisorLive } from "../contexts/workflow-execution/schedules/services/workflow-schedule-supervisor";
 
 export const startLiveKojoHost = async () => {
   const socketPath = process.env.KOJO_HOST_SOCKET ?? defaultSocketPath();
@@ -39,16 +40,20 @@ export const startLiveKojoHost = async () => {
   const projectRuntime = ProjectRuntimeLive.pipe(
     Layer.provide([DrizzleProjectRepositoryLive, workflowBackend, diagnostics]),
   );
+  const runtimeDependencies = Layer.mergeAll(
+    projectIndex,
+    projectLayout,
+    DrizzleWorkflowRunRepositoryLive,
+    DrizzleWorkflowScheduleRepositoryLive,
+    ScheduleClockLive,
+    workflowBackend,
+    projectRuntime,
+  );
+  const scheduleSupervisor = WorkflowScheduleSupervisorLive.pipe(
+    Layer.provide(runtimeDependencies),
+  );
   const serverLayer = makeKojoControlServerLayer(protocol, diagnostics, hostIdentity).pipe(
-    Layer.provide([
-      projectIndex,
-      projectLayout,
-      DrizzleWorkflowRunRepositoryLive,
-      DrizzleWorkflowScheduleRepositoryLive,
-      ScheduleClockLive,
-      workflowBackend,
-      projectRuntime,
-    ]),
+    Layer.provide(Layer.merge(runtimeDependencies, scheduleSupervisor)),
   ) as Layer.Layer<never, unknown>;
 
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });

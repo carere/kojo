@@ -29,6 +29,13 @@ export interface WorkflowRunStartRecord {
   readonly acceptedAtMs: number;
 }
 
+/** A due Workflow Schedule Occurrence uses its composite identity as its stable Start Request. */
+export interface WorkflowRunScheduleStartRecord extends WorkflowRunStartRecord {
+  readonly scheduleKey: string;
+  readonly scheduledAtMs: number;
+  readonly scheduleRevision: string;
+}
+
 export interface PendingWorkflowRunSubmission {
   readonly project: ProjectSnapshot;
   readonly runId: string;
@@ -59,10 +66,17 @@ export type WorkflowRunStartAcceptance =
     }
   | { readonly _tag: "request-key-conflict" };
 
+export type WorkflowRunScheduleStartAcceptance =
+  | WorkflowRunStartAcceptance
+  | { readonly _tag: "occurrence-not-planned" };
+
 export interface WorkflowRunRepositoryShape {
   readonly acceptManualStart: (
     start: WorkflowRunStartRecord,
   ) => Effect.Effect<WorkflowRunStartAcceptance>;
+  readonly acceptScheduledStart: (
+    start: WorkflowRunScheduleStartRecord,
+  ) => Effect.Effect<WorkflowRunScheduleStartAcceptance>;
   readonly list: (
     project: ProjectSnapshot,
     input: WorkflowRunListInput,

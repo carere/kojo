@@ -13,6 +13,8 @@ import {
   type WorkflowRunStartResult,
   type WorkflowScheduleListResult,
   type WorkflowScheduleMutationResult,
+  type WorkflowScheduleOccurrenceListResult,
+  type WorkflowScheduleOccurrenceQueryResult,
   type WorkflowScheduleQueryResult,
 } from "@kojo/control";
 import { Effect, Exit, Layer, Scope } from "effect";
@@ -35,6 +37,10 @@ import {
   showWorkflowRun,
   startWorkflowRun,
 } from "../../runs/use-cases/manage-workflow-runs";
+import {
+  listWorkflowScheduleOccurrences,
+  showWorkflowScheduleOccurrence,
+} from "../../schedules/use-cases/deliver-workflow-schedule-occurrences";
 import {
   disableWorkflowSchedule,
   enableWorkflowSchedule,
@@ -146,6 +152,8 @@ const workflowScheduleDiagnostic =
     result:
       | WorkflowScheduleListResult
       | WorkflowScheduleMutationResult
+      | WorkflowScheduleOccurrenceListResult
+      | WorkflowScheduleOccurrenceQueryResult
       | WorkflowScheduleQueryResult,
   ) => ({
     projectIdentity: identity,
@@ -245,6 +253,22 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           "DisableWorkflowSchedule",
           String(options.requestId),
           disableWorkflowSchedule({ identity, scheduleKey, requestKey }),
+          workflowScheduleDiagnostic(identity),
+        ),
+      ListWorkflowScheduleOccurrences: (input, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ListWorkflowScheduleOccurrences",
+          String(options.requestId),
+          listWorkflowScheduleOccurrences(input),
+          workflowScheduleDiagnostic(input.identity),
+        ),
+      ShowWorkflowScheduleOccurrence: ({ identity, scheduleKey, scheduledAtMs }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ShowWorkflowScheduleOccurrence",
+          String(options.requestId),
+          showWorkflowScheduleOccurrence(identity, scheduleKey, scheduledAtMs),
           workflowScheduleDiagnostic(identity),
         ),
       StartWorkflowRun: ({ identity, workflowKey, workflowRevision, input, requestKey }, options) =>

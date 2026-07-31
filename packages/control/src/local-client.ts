@@ -32,6 +32,9 @@ import {
   type WorkflowScheduleListInput,
   type WorkflowScheduleListResult,
   type WorkflowScheduleMutationResult,
+  type WorkflowScheduleOccurrenceListInput,
+  type WorkflowScheduleOccurrenceListResult,
+  type WorkflowScheduleOccurrenceQueryResult,
   type WorkflowScheduleQueryResult,
 } from "./index";
 
@@ -192,6 +195,20 @@ export const makeLocalClient = (options: LocalClientOptions) => {
         client.DisableWorkflowSchedule({ identity, scheduleKey, requestKey }),
       ),
     );
+  const listWorkflowScheduleOccurrences = (input: WorkflowScheduleOccurrenceListInput) =>
+    activateAndRetry(
+      request("occurrences:list", (client) => client.ListWorkflowScheduleOccurrences(input)),
+    );
+  const showWorkflowScheduleOccurrence = (
+    identity: ProjectIdentity,
+    scheduleKey: string,
+    scheduledAtMs: number,
+  ) =>
+    activateAndRetry(
+      request("occurrences:show", (client) =>
+        client.ShowWorkflowScheduleOccurrence({ identity, scheduleKey, scheduledAtMs }),
+      ),
+    );
   const startWorkflowRun = (
     identity: ProjectIdentity,
     workflowKey: string,
@@ -271,6 +288,19 @@ export const makeLocalClient = (options: LocalClientOptions) => {
               { concurrency: "unbounded" },
             )
           : [];
+        const occurrences = host.capabilities.includes("occurrences:list")
+          ? yield* Effect.forEach(
+              projects,
+              (project) =>
+                client.ListWorkflowScheduleOccurrences({
+                  identity: project.identity,
+                  scheduleKeys: [],
+                  outcomes: [],
+                  limit: 20,
+                }),
+              { concurrency: "unbounded" },
+            )
+          : [];
         return {
           host,
           projects,
@@ -279,6 +309,12 @@ export const makeLocalClient = (options: LocalClientOptions) => {
             const project = projects[index];
             return result?.ok && project !== undefined
               ? [{ project, schedules: result.schedules }]
+              : [];
+          }),
+          workflowOccurrences: occurrences.flatMap((result, index) => {
+            const project = projects[index];
+            return result?.ok && project !== undefined
+              ? [{ project, occurrences: result.occurrences }]
               : [];
           }),
           workflowRuns: runs.flatMap((result, index) => {
@@ -320,6 +356,8 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     listNextWorkflowSchedules,
     enableWorkflowSchedule,
     disableWorkflowSchedule,
+    listWorkflowScheduleOccurrences,
+    showWorkflowScheduleOccurrence,
     startWorkflowRun,
     listWorkflowRuns,
     showWorkflowRun,
@@ -397,6 +435,20 @@ export const makeLocalClient = (options: LocalClientOptions) => {
       requestKey: RequestKey,
     ) => Effect.Effect<
       WorkflowScheduleMutationResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly listWorkflowScheduleOccurrences: (
+      input: WorkflowScheduleOccurrenceListInput,
+    ) => Effect.Effect<
+      WorkflowScheduleOccurrenceListResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly showWorkflowScheduleOccurrence: (
+      identity: ProjectIdentity,
+      scheduleKey: string,
+      scheduledAtMs: number,
+    ) => Effect.Effect<
+      WorkflowScheduleOccurrenceQueryResult,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;
     readonly startWorkflowRun: (

@@ -21,9 +21,11 @@ import {
 import {
   DrizzleProjectRepositoryLive,
   DrizzleWorkflowRunRepositoryLive,
+  DrizzleWorkflowScheduleRepositoryLive,
 } from "../../../../../src/contexts/workflow-execution/projects/repositories/drizzle-project-repository";
 import { makeLocalWorkflowBackendLayer } from "../../../../../src/contexts/workflow-execution/projects/services/local-workflow-backend";
 import { ProjectRuntimeLive } from "../../../../../src/contexts/workflow-execution/projects/services/project-runtime";
+import { ScheduleClockLive } from "../../../../../src/contexts/workflow-execution/schedules/services/schedule-clock";
 
 const cleanups: Array<() => Promise<void>> = [];
 const TEST_HOST_IDENTITY = Schema.decodeUnknownSync(HostIdentity)(
@@ -57,7 +59,7 @@ describe("local Kojo Host control", () => {
           }),
         );
         expect(Schema.decodeUnknownSync(LegacyHostInformation)(legacyHandshake)).toEqual({
-          protocol: { major: 1, minor: 4 },
+          protocol: { major: 1, minor: 5 },
           hostVersion: "0.1.0",
           capabilities: ["projects:list"],
         });
@@ -69,7 +71,7 @@ describe("local Kojo Host control", () => {
 
         expect(overview).toEqual({
           host: {
-            protocol: { major: 1, minor: 4 },
+            protocol: { major: 1, minor: 5 },
             hostVersion: "0.1.0",
             capabilities: [
               "projects:list",
@@ -84,6 +86,8 @@ describe("local Kojo Host control", () => {
               "schedules:next",
               "schedules:enable",
               "schedules:disable",
+              "occurrences:list",
+              "occurrences:show",
               "runs:start",
               "runs:list",
               "runs:show",
@@ -95,6 +99,7 @@ describe("local Kojo Host control", () => {
           projects: [],
           projectDefinitions: [],
           workflowSchedules: [],
+          workflowOccurrences: [],
           workflowRuns: [],
         });
         const directoryMode = yield* Effect.promise(() => stat(directory));
@@ -126,7 +131,7 @@ describe("local Kojo Host control", () => {
           hostIdentity: "host:00000000-0000-4000-8000-000000000000",
           hostVersion: "0.1.0",
           protocolMajor: 1,
-          protocolMinor: 4,
+          protocolMinor: 5,
         });
       }),
   );
@@ -230,6 +235,10 @@ const startTestHost = (socketPath: string, diagnosticPath: string) => {
   const protocol = RpcServer.layerProtocolSocketServer.pipe(
     Layer.provide([BunSocketServer.layer({ path: socketPath }), RpcSerialization.layerNdjson]),
   );
+  const workflowBackend = makeLocalWorkflowBackendLayer(TEST_HOST_IDENTITY);
+  const projectRuntime = ProjectRuntimeLive.pipe(
+    Layer.provide([DrizzleProjectRepositoryLive, workflowBackend]),
+  );
   const serverLayer = makeKojoControlServerLayer(
     protocol,
     makeHostDiagnosticLoggerLayer(diagnosticPath),
@@ -239,12 +248,10 @@ const startTestHost = (socketPath: string, diagnosticPath: string) => {
       makeFileProjectIndexRepositoryLayer(join(dirname(socketPath), "projects.json")),
       GitProjectLayoutLive.pipe(Layer.provide(SubprocessProjectDefinitionLoaderLive)),
       DrizzleWorkflowRunRepositoryLive,
-      ProjectRuntimeLive.pipe(
-        Layer.provide([
-          DrizzleProjectRepositoryLive,
-          makeLocalWorkflowBackendLayer(TEST_HOST_IDENTITY),
-        ]),
-      ),
+      DrizzleWorkflowScheduleRepositoryLive,
+      ScheduleClockLive,
+      workflowBackend,
+      projectRuntime,
     ]),
   ) as Layer.Layer<never, unknown>;
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });

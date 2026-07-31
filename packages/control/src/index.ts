@@ -8,7 +8,7 @@ import {
 
 export { ProjectIdentity } from "@kojo/workflow";
 
-export const PROTOCOL_VERSION = { major: 1, minor: 4 } as const;
+export const PROTOCOL_VERSION = { major: 1, minor: 5 } as const;
 export const CONTROL_CAPABILITIES = [
   "projects:list",
   "projects:list-page",
@@ -22,6 +22,8 @@ export const CONTROL_CAPABILITIES = [
   "schedules:next",
   "schedules:enable",
   "schedules:disable",
+  "occurrences:list",
+  "occurrences:show",
   "runs:start",
   "runs:list",
   "runs:show",
@@ -299,6 +301,92 @@ export const WorkflowScheduleMutationResult = Schema.Union([
 ]);
 export type WorkflowScheduleMutationResult = typeof WorkflowScheduleMutationResult.Type;
 
+export const WorkflowScheduleOccurrenceOutcome = Schema.Literals([
+  "planned",
+  "started",
+  "skipped",
+  "invalidated",
+  "failed",
+]);
+export type WorkflowScheduleOccurrenceOutcome = typeof WorkflowScheduleOccurrenceOutcome.Type;
+
+/**
+ * The durable, inspectable lifecycle of one Schedule Key + scheduled UTC
+ * instant. It remains separate from the Workflow Run it may start.
+ */
+export const WorkflowScheduleOccurrenceSnapshot = Schema.Struct({
+  scheduleKey: Schema.String,
+  scheduledAtMs: Schema.Number,
+  appliedRevision: Schema.String,
+  input: Schema.Unknown,
+  inputSensitivityPaths: Schema.Array(Schema.String),
+  outcome: WorkflowScheduleOccurrenceOutcome,
+  reasonCode: Schema.NullOr(Schema.String),
+  deliveryAttemptCount: Schema.Number,
+  plannedAtMs: Schema.Number,
+  firstAttemptedAtMs: Schema.NullOr(Schema.Number),
+  processedAtMs: Schema.NullOr(Schema.Number),
+  linkedRunId: Schema.NullOr(Schema.String),
+});
+export type WorkflowScheduleOccurrenceSnapshot = typeof WorkflowScheduleOccurrenceSnapshot.Type;
+
+export const WorkflowScheduleOccurrenceOperationErrorCode = Schema.Literals([
+  "project-not-found",
+  "project-layout-invalid",
+  "project-runtime-not-ready",
+  "schedule-not-found",
+  "occurrence-not-found",
+]);
+export type WorkflowScheduleOccurrenceOperationErrorCode =
+  typeof WorkflowScheduleOccurrenceOperationErrorCode.Type;
+
+export const WorkflowScheduleOccurrenceOperationError = Schema.Struct({
+  code: WorkflowScheduleOccurrenceOperationErrorCode,
+  message: Schema.String,
+  next: Schema.String,
+  affectedResource: Schema.Union([
+    Schema.Struct({ kind: Schema.Literal("project"), identity: ProjectIdentity }),
+    Schema.Struct({
+      kind: Schema.Literal("schedule"),
+      identity: ProjectIdentity,
+      scheduleKey: Schema.String,
+    }),
+    Schema.Struct({
+      kind: Schema.Literal("occurrence"),
+      identity: ProjectIdentity,
+      scheduleKey: Schema.String,
+      scheduledAtMs: Schema.Number,
+    }),
+  ]),
+  findingKeys: Schema.Array(ReadinessFindingKey),
+});
+export type WorkflowScheduleOccurrenceOperationError =
+  typeof WorkflowScheduleOccurrenceOperationError.Type;
+
+export const WorkflowScheduleOccurrenceListInput = Schema.Struct({
+  identity: ProjectIdentity,
+  scheduleKeys: Schema.Array(Schema.String),
+  outcomes: Schema.Array(WorkflowScheduleOccurrenceOutcome),
+  limit: Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 200 })),
+});
+export type WorkflowScheduleOccurrenceListInput = typeof WorkflowScheduleOccurrenceListInput.Type;
+
+export const WorkflowScheduleOccurrenceListResult = Schema.Union([
+  Schema.Struct({
+    ok: Schema.Literal(true),
+    occurrences: Schema.Array(WorkflowScheduleOccurrenceSnapshot),
+  }),
+  Schema.Struct({ ok: Schema.Literal(false), error: WorkflowScheduleOccurrenceOperationError }),
+]);
+export type WorkflowScheduleOccurrenceListResult = typeof WorkflowScheduleOccurrenceListResult.Type;
+
+export const WorkflowScheduleOccurrenceQueryResult = Schema.Union([
+  Schema.Struct({ ok: Schema.Literal(true), occurrence: WorkflowScheduleOccurrenceSnapshot }),
+  Schema.Struct({ ok: Schema.Literal(false), error: WorkflowScheduleOccurrenceOperationError }),
+]);
+export type WorkflowScheduleOccurrenceQueryResult =
+  typeof WorkflowScheduleOccurrenceQueryResult.Type;
+
 export const WorkflowRunId = Schema.String.check(
   Schema.isMinLength(1),
   Schema.isMaxLength(200),
@@ -332,7 +420,17 @@ export const WorkflowRunStartSnapshot = Schema.Struct({
     sourceIdentity: Schema.String,
     inputSchemaFingerprint: Schema.String,
   }),
-  trigger: Schema.Struct({ kind: Schema.Literal("manual"), requestKey: RequestKey }),
+  trigger: Schema.Union([
+    Schema.Struct({ kind: Schema.Literal("manual"), requestKey: RequestKey }),
+    Schema.Struct({
+      kind: Schema.Literal("schedule"),
+      requestKey: RequestKey,
+      scheduleKey: Schema.String,
+      occurrence: Schema.Struct({ scheduleKey: Schema.String, scheduledAtMs: Schema.Number }),
+      scheduledAtMs: Schema.Number,
+      scheduleRevision: Schema.String,
+    }),
+  ]),
   environment: Schema.Struct({
     projectIdentity: ProjectIdentity,
     definitionSnapshotId: Schema.String,
@@ -478,6 +576,13 @@ export const ProjectWorkflowSchedulesSnapshot = Schema.Struct({
 });
 export type ProjectWorkflowSchedulesSnapshot = typeof ProjectWorkflowSchedulesSnapshot.Type;
 
+export const ProjectWorkflowScheduleOccurrencesSnapshot = Schema.Struct({
+  project: ProjectSnapshot,
+  occurrences: Schema.Array(WorkflowScheduleOccurrenceSnapshot),
+});
+export type ProjectWorkflowScheduleOccurrencesSnapshot =
+  typeof ProjectWorkflowScheduleOccurrencesSnapshot.Type;
+
 export const ProjectMutationResult = Schema.Union([
   Schema.Struct({
     ok: Schema.Literal(true),
@@ -498,6 +603,7 @@ export const HostOverview = Schema.Struct({
   projects: Schema.Array(ProjectSnapshot),
   projectDefinitions: Schema.Array(ProjectWorkflowSnapshot),
   workflowSchedules: Schema.Array(ProjectWorkflowSchedulesSnapshot),
+  workflowOccurrences: Schema.Array(ProjectWorkflowScheduleOccurrencesSnapshot),
   workflowRuns: Schema.Array(ProjectWorkflowRunsSnapshot),
 });
 export type HostOverview = typeof HostOverview.Type;
@@ -562,6 +668,16 @@ export const EnableWorkflowSchedule = Rpc.make("EnableWorkflowSchedule", {
 export const DisableWorkflowSchedule = Rpc.make("DisableWorkflowSchedule", {
   payload: { identity: ProjectIdentity, scheduleKey: Schema.String, requestKey: RequestKey },
   success: WorkflowScheduleMutationResult,
+});
+
+export const ListWorkflowScheduleOccurrences = Rpc.make("ListWorkflowScheduleOccurrences", {
+  payload: WorkflowScheduleOccurrenceListInput.fields,
+  success: WorkflowScheduleOccurrenceListResult,
+});
+
+export const ShowWorkflowScheduleOccurrence = Rpc.make("ShowWorkflowScheduleOccurrence", {
+  payload: { identity: ProjectIdentity, scheduleKey: Schema.String, scheduledAtMs: Schema.Number },
+  success: WorkflowScheduleOccurrenceQueryResult,
 });
 
 export const StartWorkflowRun = Rpc.make("StartWorkflowRun", {
@@ -643,6 +759,8 @@ export const KojoControl = RpcGroup.make(
   ListNextWorkflowSchedules,
   EnableWorkflowSchedule,
   DisableWorkflowSchedule,
+  ListWorkflowScheduleOccurrences,
+  ShowWorkflowScheduleOccurrence,
   StartWorkflowRun,
   ListWorkflowRuns,
   ShowWorkflowRun,
