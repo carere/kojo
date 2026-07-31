@@ -9,6 +9,10 @@ import { SqliteClient } from "@effect/sql-sqlite-bun";
 import type { ProjectSnapshot } from "@kojo/control";
 import type {
   AcquiredWorkflowSandbox,
+  AgentFailure,
+  AgentProvider,
+  AgentResult,
+  AgentSession,
   Command,
   CommandFailure,
   CommandResult,
@@ -18,12 +22,15 @@ import type {
 } from "@kojo/workflow";
 import {
   AcquiredWorkflowSandbox as AcquiredWorkflowSandboxSchema,
+  AgentFailure as AgentFailureSchema,
+  AgentResult as AgentResultSchema,
   CommandFailure as CommandFailureSchema,
   CommandResult as CommandResultSchema,
   SandboxProviderFailure as SandboxProviderFailureSchema,
   type WorkflowActivityAttempt,
   type WorkflowActivityOptions,
   WorkflowActivityRuntime,
+  WorkflowAgentRuntime,
   WorkflowChildFailure,
   WorkflowChildRuntime,
   WorkflowCommandRuntime,
@@ -571,7 +578,13 @@ const makeEntries = (
         Effect.orDie,
         Effect.flatMap((decoded) => {
           const sandboxDefinitions = new Map<string, WorkflowSandboxDefinition>();
-          const activityRuntime = makeWorkflowActivityRuntime(project, runId, activityRepository);
+          const agentOperations = new Map<string, AgentOperation>();
+          const activityRuntime = makeWorkflowActivityRuntime(
+            project,
+            runId,
+            activityRepository,
+            agentOperations,
+          );
           return definition
             .execute(decoded as never, operations)
             .pipe(
@@ -601,6 +614,18 @@ const makeEntries = (
               Effect.provideService(
                 WorkflowChildRuntime,
                 makeWorkflowChildRuntime(runId, definition, childDispatcher),
+              ),
+              Effect.provideService(
+                WorkflowAgentRuntime,
+                makeWorkflowAgentRuntime(
+                  project,
+                  runId,
+                  activityRuntime,
+                  activityRepository,
+                  providerRuntime,
+                  sandboxDefinitions,
+                  agentOperations,
+                ),
               ),
             );
         }),
@@ -722,6 +747,15 @@ const toEngineDeferredToken = (token: string): string | undefined => {
 const validOperationKey = (operationKey: string) =>
   operationKey.length > 0 && operationKey.length <= 200;
 
+const workflowEngineActivityName = (
+  activityName: string,
+  operationKey: string,
+  executionGeneration: number,
+) =>
+  `Kojo/Activity/${createHash("sha256")
+    .update(`${activityName}\u0000${operationKey}`)
+    .digest("hex")}/${executionGeneration}`;
+
 const assertOperationKey = (operationKey: string) => {
   if (!validOperationKey(operationKey)) {
     throw new Error("A Durable Operation Key must contain from 1 to 200 characters.");
@@ -832,6 +866,65 @@ const commandDefinitionIdentity = (command: Command, sandbox: AcquiredWorkflowSa
       }),
     )
     .digest("hex");
+
+interface AgentOperation {
+  readonly providerKind: AgentProvider["kind"];
+  readonly sandboxIdentity: string;
+}
+
+const agentDefinitionIdentity = (
+  agent: AgentProvider,
+  prompt: string,
+  sandbox: AcquiredWorkflowSandbox,
+  session: AgentSession | undefined,
+) =>
+  createHash("sha256")
+    .update(
+      JSON.stringify({
+        agent: {
+          kind: agent.kind,
+          providerKey: agent.providerKey,
+          providerRevision: agent.revision,
+          ...(agent.kind === "custom" ? {} : { model: agent.model }),
+        },
+        promptSha256: createHash("sha256").update(prompt).digest("hex"),
+        sandboxIdentity: sandbox.identity,
+        ...(session === undefined
+          ? {}
+          : {
+              sessionSha256: createHash("sha256")
+                .update(
+                  JSON.stringify({
+                    providerKey: session.providerKey,
+                    providerKind: session.providerKind,
+                    providerRevision: session.providerRevision,
+                    sandboxIdentity: session.sandboxIdentity,
+                    sessionId: session.sessionId,
+                  }),
+                )
+                .digest("hex"),
+            }),
+      }),
+    )
+    .digest("hex");
+
+const agentProviderSupportsContinuation = (agent: AgentProvider) =>
+  agent.kind === "custom"
+    ? agent.supportsSessionContinuation === true
+    : agent.kind === "codex" || agent.kind === "claude-code" || agent.kind === "pi";
+
+const sandboxProviderSupportsAgentContinuation = (sandbox: WorkflowSandboxDefinition) =>
+  sandbox.provider.kind === "custom"
+    ? sandbox.provider.supportsAgentSessionContinuation === true
+    : sandbox.provider.kind === "docker" ||
+      sandbox.provider.kind === "podman" ||
+      sandbox.provider.kind === "unsafe-host";
+
+const agentFailure = (
+  sandboxIdentity: string,
+  message: string,
+  tag: AgentFailure["_tag"],
+): AgentFailure => ({ _tag: tag, message, sandboxIdentity });
 
 const artifactDirectory = (project: ProjectSnapshot, runId: string) =>
   join(project.path, ".kojo", "artifacts", runId);
@@ -1091,10 +1184,200 @@ const makeWorkflowCommandRuntime = (
   },
 });
 
+const makeWorkflowAgentRuntime = (
+  project: ProjectSnapshot | undefined,
+  runId: string,
+  activityRuntime: WorkflowActivityRuntime["Service"],
+  repository: WorkflowRunRepository["Service"] | undefined,
+  providerRuntime: ProviderRuntime["Service"],
+  sandboxDefinitions: ReadonlyMap<string, WorkflowSandboxDefinition>,
+  agentOperations: Map<string, AgentOperation>,
+): WorkflowAgentRuntime["Service"] => ({
+  run: ({ agent, operationKey, prompt, sandbox, session, timeout }) => {
+    if (
+      project === undefined ||
+      repository === undefined ||
+      !validOperationKey(operationKey) ||
+      prompt.trim().length === 0
+    ) {
+      return Effect.fail(
+        agentFailure(
+          sandbox.identity,
+          "Agent execution is not configured for durable execution.",
+          "agent-provider-failure",
+        ),
+      );
+    }
+    const definition = sandboxDefinitions.get(sandbox.identity);
+    if (definition === undefined) {
+      return Effect.fail(
+        agentFailure(
+          sandbox.identity,
+          "Workflow Sandbox was not acquired in this Workflow Run.",
+          "agent-provider-failure",
+        ),
+      );
+    }
+    if (
+      session !== undefined &&
+      (!agentProviderSupportsContinuation(agent) ||
+        !sandboxProviderSupportsAgentContinuation(definition) ||
+        session.providerKind !== agent.kind ||
+        session.providerKey !== agent.providerKey ||
+        session.providerRevision !== agent.revision ||
+        session.sandboxIdentity !== sandbox.identity)
+    ) {
+      return Effect.fail(
+        agentFailure(
+          sandbox.identity,
+          "This Agent Provider and Workflow Sandbox cannot continue the supplied Agent Session.",
+          "agent-session-continuation-unsupported",
+        ),
+      );
+    }
+    agentOperations.set(operationKey, {
+      providerKind: agent.kind,
+      sandboxIdentity: sandbox.identity,
+    });
+    return activityRuntime.execute({
+      definitionIdentity: agentDefinitionIdentity(agent, prompt, sandbox, session),
+      failureSchema: AgentFailureSchema,
+      name: `Run Agent ${agent.providerKey}@${agent.revision}`,
+      operationKey,
+      successSchema: AgentResultSchema,
+      execute: (attempt) => {
+        const invocation = repository
+          .recordAgentTrace(project, runId, {
+            artifactIds: [],
+            artifacts: [],
+            durationMs: null,
+            kind: "agent.started",
+            operationKey,
+            providerKind: agent.kind,
+            recordedAtMs: Date.now(),
+            sandboxIdentity: sandbox.identity,
+          })
+          .pipe(
+            Effect.andThen(
+              providerRuntime
+                .runAgent({
+                  agent,
+                  definition,
+                  idempotencyKey: attempt.idempotencyKey,
+                  project,
+                  prompt,
+                  runId,
+                  sandbox,
+                  ...(session === undefined ? {} : { session }),
+                })
+                .pipe(
+                  Effect.mapError((error) =>
+                    agentFailure(sandbox.identity, error.message, "agent-provider-failure"),
+                  ),
+                ),
+            ),
+          );
+        const timed =
+          timeout === undefined
+            ? invocation
+            : invocation.pipe(
+                Effect.timeoutOrElse({
+                  duration: timeout,
+                  orElse: () =>
+                    Effect.fail(
+                      agentFailure(
+                        sandbox.identity,
+                        "Agent execution exceeded its declared timeout.",
+                        "agent-timed-out",
+                      ),
+                    ),
+                }),
+              );
+        return timed.pipe(
+          Effect.matchEffect({
+            onFailure: (failure) =>
+              repository
+                .recordAgentTrace(project, runId, {
+                  artifactIds: [],
+                  artifacts: [],
+                  durationMs: null,
+                  kind: "agent.failed",
+                  operationKey,
+                  providerKind: agent.kind,
+                  recordedAtMs: Date.now(),
+                  sandboxIdentity: sandbox.identity,
+                })
+                .pipe(Effect.andThen(Effect.fail(failure))),
+            onSuccess: (result) =>
+              Effect.gen(function* () {
+                const supportsContinuation =
+                  agentProviderSupportsContinuation(agent) &&
+                  sandboxProviderSupportsAgentContinuation(definition);
+                const nextSession =
+                  result.sessionId === undefined || !supportsContinuation
+                    ? undefined
+                    : ({
+                        _tag: "agent-session" as const,
+                        providerKey: agent.providerKey,
+                        providerKind: agent.kind,
+                        providerRevision: agent.revision,
+                        sandboxIdentity: sandbox.identity,
+                        sessionId: result.sessionId,
+                      } satisfies AgentSession);
+                const artifact = yield* writeSandboxArtifact(project, runId, "agent-result.json", {
+                  commits: result.commits,
+                  hasSession: nextSession !== undefined,
+                  providerKind: agent.kind,
+                  usage: result.usage,
+                }).pipe(
+                  Effect.mapError((error) =>
+                    agentFailure(sandbox.identity, error.message, "agent-provider-failure"),
+                  ),
+                );
+                const normalized: AgentResult = {
+                  artifactIds: [artifact.artifactId],
+                  commits: result.commits,
+                  sandboxIdentity: sandbox.identity,
+                  text: result.text,
+                  ...(result.usage === undefined ? {} : { usage: result.usage }),
+                  ...(nextSession === undefined ? {} : { session: nextSession }),
+                };
+                if (result.sessionContinued) {
+                  yield* repository.recordAgentTrace(project, runId, {
+                    artifactIds: [],
+                    artifacts: [],
+                    durationMs: null,
+                    kind: "agent.session-continued",
+                    operationKey,
+                    providerKind: agent.kind,
+                    recordedAtMs: Date.now(),
+                    sandboxIdentity: sandbox.identity,
+                  });
+                }
+                yield* repository.recordAgentTrace(project, runId, {
+                  artifactIds: normalized.artifactIds,
+                  artifacts: [artifact],
+                  durationMs: result.durationMs,
+                  kind: "agent.completed",
+                  operationKey,
+                  providerKind: agent.kind,
+                  recordedAtMs: Date.now(),
+                  sandboxIdentity: sandbox.identity,
+                });
+                return normalized;
+              }),
+          }),
+        );
+      },
+    });
+  },
+});
+
 const makeWorkflowActivityRuntime = (
   project: ProjectSnapshot | undefined,
   runId: string,
   repository: WorkflowRunRepository["Service"] | undefined,
+  agentOperations: ReadonlyMap<string, AgentOperation> = new Map(),
 ): WorkflowActivityRuntime["Service"] => ({
   execute: <Success extends Schema.Top, Failure extends Schema.Top = typeof Schema.Never>(
     options: WorkflowActivityOptions<Success, Failure>,
@@ -1147,6 +1430,19 @@ const makeWorkflowActivityRuntime = (
             prepared.confirmedAttemptId,
             Date.now(),
           );
+          const agent = agentOperations.get(operation.durableOperationKey);
+          if (agent !== undefined) {
+            yield* repository.recordAgentTrace(project, runId, {
+              artifactIds: [],
+              artifacts: [],
+              durationMs: null,
+              kind: "agent.replayed",
+              operationKey: operation.durableOperationKey,
+              providerKind: agent.providerKind,
+              recordedAtMs: Date.now(),
+              sandboxIdentity: agent.sandboxIdentity,
+            });
+          }
           return prepared.result as Success["Type"];
         }
 
@@ -1217,7 +1513,14 @@ const makeWorkflowActivityRuntime = (
             ? invoke
             : Activity.retry(invoke, { times: options.retry.maxRetries });
         const durable = Activity.make({
-          name: `${activityName}/${prepared.executionGeneration}`,
+          // The engine identity must include the durable operation key. Two
+          // Agent (or Command) calls may deliberately share a provider label,
+          // yet represent distinct durable work.
+          name: workflowEngineActivityName(
+            activityName,
+            operation.durableOperationKey,
+            prepared.executionGeneration,
+          ),
           success: options.successSchema,
           error: options.failureSchema ?? (Schema.Never as unknown as Failure),
           execute,

@@ -8,7 +8,7 @@ import {
 
 export { ProjectIdentity } from "@kojo/workflow";
 
-export const PROTOCOL_VERSION = { major: 1, minor: 5 } as const;
+export const PROTOCOL_VERSION = { major: 1, minor: 6 } as const;
 export const CONTROL_CAPABILITIES = [
   "projects:list",
   "projects:list-page",
@@ -518,6 +518,27 @@ export const WorkflowSandboxTraceEntry = Schema.Struct({
 });
 export type WorkflowSandboxTraceEntry = typeof WorkflowSandboxTraceEntry.Type;
 
+/**
+ * Safe Agent Activity evidence. Session ids, prompts, transcripts, and result
+ * text are Sensitive Execution Data and deliberately never appear here.
+ */
+export const WorkflowAgentTraceEntry = Schema.Struct({
+  artifactIds: Schema.Array(Schema.String),
+  durationMs: Schema.NullOr(Schema.Number),
+  kind: Schema.Literals([
+    "agent.started",
+    "agent.completed",
+    "agent.failed",
+    "agent.session-continued",
+    "agent.replayed",
+  ]),
+  operationKey: Schema.String,
+  providerKind: Schema.String,
+  recordedAtMs: Schema.Number,
+  sandboxIdentity: Schema.String,
+});
+export type WorkflowAgentTraceEntry = typeof WorkflowAgentTraceEntry.Type;
+
 export const WorkflowRunListItem = Schema.Struct({
   runId: WorkflowRunId,
   workflowKey: Schema.String,
@@ -531,6 +552,7 @@ export const WorkflowRunListItem = Schema.Struct({
   childInvocationKey: Schema.optionalKey(Schema.NullOr(Schema.String)),
   allowedActions: Schema.Array(WorkflowRunAction),
   activitySummary: WorkflowActivitySummary,
+  agentTrace: Schema.Array(WorkflowAgentTraceEntry),
   sandboxTrace: Schema.Array(WorkflowSandboxTraceEntry),
 });
 export type WorkflowRunListItem = typeof WorkflowRunListItem.Type;

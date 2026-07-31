@@ -268,6 +268,8 @@ export interface CustomSandboxProvider {
   readonly kind: "custom";
   readonly providerKey: string;
   readonly revision: string;
+  /** Declare this only when the provider can prove Agent Session continuation. */
+  readonly supportsAgentSessionContinuation?: true;
   readonly acquire?: (
     input: CustomSandboxAcquireInput,
   ) => Effect.Effect<void, SandboxProviderFailure>;
@@ -349,6 +351,171 @@ export const AcquiredWorkflowSandbox = Schema.Struct({
   imageKey: Schema.optionalKey(Schema.String),
   imageRevision: Schema.optionalKey(Schema.String),
 });
+
+export type AgentProviderKind =
+  | "codex"
+  | "claude-code"
+  | "pi"
+  | "cursor"
+  | "opencode"
+  | "github-copilot";
+
+/**
+ * A credential-free, versioned description of one built-in coding Agent.
+ *
+ * The Host resolves the provider's local credential only when it invokes the
+ * Agent. Definitions must never contain credentials or session material.
+ */
+export interface BuiltInAgentProvider {
+  readonly kind: AgentProviderKind;
+  readonly providerKey: string;
+  readonly revision: string;
+  readonly model: string;
+}
+
+/**
+ * The safe input a custom Agent Provider receives. The logical Workflow
+ * Sandbox intentionally contains no live provider handle.
+ */
+export interface CustomAgentRunInput {
+  readonly idempotencyKey: string;
+  readonly prompt: string;
+  readonly sandbox: AcquiredWorkflowSandbox;
+  readonly session?: AgentSession;
+}
+
+/** A custom Agent may require Effect services that its author provided. */
+export interface CustomAgentProvider {
+  readonly kind: "custom";
+  readonly providerKey: string;
+  readonly revision: string;
+  /** Declare this only when the provider can prove session continuation. */
+  readonly supportsSessionContinuation?: true;
+  readonly run: (
+    input: CustomAgentRunInput,
+  ) => Effect.Effect<AgentProviderResult, AgentProviderFailure>;
+}
+
+export type AgentProvider = BuiltInAgentProvider | CustomAgentProvider;
+
+export interface AgentProviderFailure {
+  readonly _tag: "agent-provider-failure";
+  readonly message: string;
+}
+
+export const AgentProviderFailure = Schema.Struct({
+  _tag: Schema.Literal("agent-provider-failure"),
+  message: Schema.String,
+});
+
+/** Optional token usage reported by a coding Agent Provider. */
+export interface AgentUsage {
+  readonly cacheCreationInputTokens: number;
+  readonly cacheReadInputTokens: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+}
+
+export const AgentUsage = Schema.Struct({
+  cacheCreationInputTokens: Schema.Number,
+  cacheReadInputTokens: Schema.Number,
+  inputTokens: Schema.Number,
+  outputTokens: Schema.Number,
+});
+
+/**
+ * A provider-native session reference. It is a protected continuation
+ * capability, not a Workflow Run resume token or a provider handle.
+ */
+export interface AgentSession {
+  readonly _tag: "agent-session";
+  readonly providerKey: string;
+  readonly providerKind: AgentProvider["kind"];
+  readonly providerRevision: string;
+  readonly sandboxIdentity: string;
+  readonly sessionId: string;
+}
+
+export const AgentSession = Schema.Struct({
+  _tag: Schema.Literal("agent-session"),
+  providerKey: Schema.String,
+  providerKind: Schema.Literals([
+    "codex",
+    "claude-code",
+    "pi",
+    "cursor",
+    "opencode",
+    "github-copilot",
+    "custom",
+  ]),
+  providerRevision: Schema.String,
+  sandboxIdentity: Schema.String,
+  sessionId: Schema.String,
+});
+
+/** The normalized result returned by an Agent Activity. */
+export interface AgentResult {
+  readonly artifactIds: ReadonlyArray<string>;
+  readonly commits: ReadonlyArray<{ readonly sha: string }>;
+  readonly sandboxIdentity: string;
+  /** The authoritative completed Activity result. */
+  readonly text: string;
+  readonly usage?: AgentUsage;
+  readonly session?: AgentSession;
+}
+
+export const AgentResult = Schema.Struct({
+  artifactIds: Schema.Array(Schema.String),
+  commits: Schema.Array(Schema.Struct({ sha: Schema.String })),
+  sandboxIdentity: Schema.String,
+  text: Schema.String,
+  usage: Schema.optionalKey(AgentUsage),
+  session: Schema.optionalKey(AgentSession),
+});
+
+/** The provider-level outcome before Kojo records an Artifact or Session. */
+export interface AgentProviderResult {
+  readonly commits: ReadonlyArray<{ readonly sha: string }>;
+  readonly sessionId?: string;
+  readonly text: string;
+  readonly usage?: AgentUsage;
+}
+
+export interface AgentFailure {
+  readonly _tag:
+    | "agent-provider-failure"
+    | "agent-session-continuation-unsupported"
+    | "agent-timed-out";
+  readonly message: string;
+  readonly sandboxIdentity: string;
+}
+
+export const AgentFailure = Schema.Struct({
+  _tag: Schema.Literals([
+    "agent-provider-failure",
+    "agent-session-continuation-unsupported",
+    "agent-timed-out",
+  ]),
+  message: Schema.String,
+  sandboxIdentity: Schema.String,
+});
+
+export interface WorkflowAgentRuntimeShape {
+  readonly run: (options: {
+    readonly agent: AgentProvider;
+    readonly operationKey: string;
+    readonly prompt: string;
+    readonly sandbox: AcquiredWorkflowSandbox;
+    readonly session?: AgentSession;
+    readonly timeout?: Duration.Input;
+  }) => Effect.Effect<AgentResult, AgentFailure>;
+}
+
+/** Host-provided runtime for durable Agent Activities. */
+export class WorkflowAgentRuntime extends Context.Service<
+  WorkflowAgentRuntime,
+  WorkflowAgentRuntimeShape
+>()("kojo/workflow/WorkflowAgentRuntime") {}
 
 export interface Command {
   readonly commandKey: string;
@@ -443,6 +610,18 @@ export const Command = {
   }) => Effect.flatMap(WorkflowCommandRuntime, (runtime) => runtime.run(options)),
 };
 
+/** Runs one coding Agent as a durable Workflow Activity. */
+export const Agent = {
+  run: (options: {
+    readonly agent: AgentProvider;
+    readonly operationKey: string;
+    readonly prompt: string;
+    readonly sandbox: AcquiredWorkflowSandbox;
+    readonly session?: AgentSession;
+    readonly timeout?: Duration.Input;
+  }) => Effect.flatMap(WorkflowAgentRuntime, (runtime) => runtime.run(options)),
+};
+
 const validDefinitionPart = (value: string) => value.trim().length > 0 && value.length <= 200;
 
 const immutable = <Value>(value: Value): Value => {
@@ -481,6 +660,23 @@ export const defineCustomSandboxProvider = (
 ): CustomSandboxProvider => {
   assertDefinitionPart(provider.providerKey, "Sandbox Provider Key");
   assertDefinitionPart(provider.revision, "Sandbox Provider Revision");
+  return immutable({ ...provider });
+};
+
+/** Creates an immutable built-in Agent Provider without credential fields. */
+export const defineBuiltInAgentProvider = (
+  provider: BuiltInAgentProvider,
+): BuiltInAgentProvider => {
+  assertDefinitionPart(provider.providerKey, "Agent Provider Key");
+  assertDefinitionPart(provider.revision, "Agent Provider Revision");
+  assertDefinitionPart(provider.model, "Agent Model");
+  return immutable({ ...provider });
+};
+
+/** Creates an immutable custom Agent Provider with its Host-facing operation. */
+export const defineCustomAgentProvider = (provider: CustomAgentProvider): CustomAgentProvider => {
+  assertDefinitionPart(provider.providerKey, "Agent Provider Key");
+  assertDefinitionPart(provider.revision, "Agent Provider Revision");
   return immutable({ ...provider });
 };
 

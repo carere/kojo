@@ -202,6 +202,21 @@ export const writeWorkflowRun = (
   if (run.sandboxTrace.length > 0) {
     process.stdout.write(`Sandbox evidence: ${run.sandboxTrace.length} trace entries\n`);
   }
+  if (run.agentTrace.length > 0) {
+    const attempts = run.agentTrace.filter((entry) => entry.kind === "agent.started").length;
+    const replayed = run.agentTrace.filter((entry) => entry.kind === "agent.replayed").length;
+    const continued = run.agentTrace.filter(
+      (entry) => entry.kind === "agent.session-continued",
+    ).length;
+    process.stdout.write(
+      `Agent evidence: ${attempts} attempts, ${replayed} Activity replays, ${continued} provider-session continuations\n`,
+    );
+  }
+  if (run.allowedActions.includes("resume")) {
+    process.stdout.write(
+      "Workflow Run resume is available; it is separate from Agent Session continuation.\n",
+    );
+  }
   if (requestKey !== undefined) process.stdout.write(`Request Key: ${requestKey}\n`);
   if (alreadyApplied === true) process.stdout.write("Reused an existing Workflow Run.\n");
   for (const warning of warnings) {

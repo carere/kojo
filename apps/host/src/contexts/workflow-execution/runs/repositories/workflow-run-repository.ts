@@ -96,6 +96,29 @@ export interface WorkflowSandboxTraceRecord {
   readonly sandboxIdentity: string;
 }
 
+export interface WorkflowAgentTraceRecord {
+  readonly artifactIds: ReadonlyArray<string>;
+  readonly artifacts: ReadonlyArray<{
+    readonly artifactId: string;
+    readonly byteSize: number;
+    readonly displayName: string;
+    readonly mediaType: string;
+    readonly sha256: Uint8Array;
+    readonly storageKey: string;
+  }>;
+  readonly durationMs: number | null;
+  readonly kind:
+    | "agent.started"
+    | "agent.completed"
+    | "agent.failed"
+    | "agent.session-continued"
+    | "agent.replayed";
+  readonly operationKey: string;
+  readonly providerKind: string;
+  readonly recordedAtMs: number;
+  readonly sandboxIdentity: string;
+}
+
 export interface WorkflowActivityAttemptRecord extends WorkflowActivityOperation {
   readonly activityIdempotencyKey: string;
   readonly attemptId: string;
@@ -248,6 +271,11 @@ export interface WorkflowRunRepositoryShape {
     project: ProjectSnapshot,
     runId: string,
     trace: WorkflowSandboxTraceRecord,
+  ) => Effect.Effect<void>;
+  readonly recordAgentTrace: (
+    project: ProjectSnapshot,
+    runId: string,
+    trace: WorkflowAgentTraceRecord,
   ) => Effect.Effect<void>;
 }
 

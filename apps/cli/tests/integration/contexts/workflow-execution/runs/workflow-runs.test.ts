@@ -392,7 +392,7 @@ export default defineConfig({
 
 const sandboxConfiguration = `
 import { Effect, Schema } from "effect";
-import { Command, CommandFailure, CommandResult, Sandbox, defineCommand, defineConfig, defineCustomSandboxProvider, defineSandbox, defineSandboxImage, defineWorkflow } from "@kojo/workflow";
+import { Agent, AgentFailure, AgentResult, Command, CommandFailure, CommandResult, Sandbox, defineCommand, defineConfig, defineCustomAgentProvider, defineCustomSandboxProvider, defineSandbox, defineSandboxImage, defineWorkflow } from "@kojo/workflow";
 import { docker } from "@kojo/workflow/sandboxes/docker";
 import { unsafeHost } from "@kojo/workflow/sandboxes/unsafe-host";
 
@@ -425,10 +425,49 @@ const customSandbox = defineSandbox({
     kind: "custom",
     providerKey: "test-custom",
     revision: "1",
+    supportsAgentSessionContinuation: true,
     runCommand: ({ command }) =>
       Effect.succeed({ durationMs: 1, exitCode: 0, stderr: "", stdout: "custom:" + command.commandKey }),
   }),
 });
+const customAgent = defineCustomAgentProvider({
+  kind: "custom",
+  providerKey: "test-agent",
+  revision: "1",
+  supportsSessionContinuation: true,
+  run: ({ prompt, session }) => Effect.sync(() => {
+    if (process.env.KOJO_TEST_AGENT_CREDENTIAL !== "agent-secret-from-environment") {
+      throw new Error("Agent credential was not resolved at invocation.");
+    }
+    return {
+      commits: [{ sha: session === undefined ? "first-commit" : "continued-commit" }],
+      sessionId: session === undefined ? "first-session" : "continued-session",
+      text: (session === undefined ? "first:" : "continued:") + prompt,
+      usage: { inputTokens: 1, cacheCreationInputTokens: 2, cacheReadInputTokens: 3, outputTokens: 4 },
+    };
+  }),
+});
+const unsupportedAgent = defineCustomAgentProvider({
+  kind: "custom",
+  providerKey: "unsupported-agent",
+  revision: "1",
+  run: () => Effect.succeed({ commits: [], text: "unreachable" }),
+});
+const interruptedAgent = defineCustomAgentProvider({
+  kind: "custom",
+  providerKey: "interrupted-agent",
+  revision: "1",
+  supportsSessionContinuation: true,
+  run: () => Effect.never,
+});
+const unsupportedSession = {
+  _tag: "agent-session",
+  providerKind: "custom",
+  providerKey: "unsupported-agent",
+  providerRevision: "1",
+  sandboxIdentity: "will-not-match",
+  sessionId: "not-captured",
+};
 const echo = defineCommand({
   commandKey: "echo-environment",
   revision: "1",
@@ -535,6 +574,71 @@ export default defineConfig({
         return yield* Command.run({ operationKey: "after-restart", sandbox: acquired, command: recovery });
       }),
     }),
+    defineWorkflow({
+      workflowKey: "agent-continuation",
+      revision: "1",
+      inputSchema: input,
+      successSchema: AgentResult,
+      failureSchema: AgentFailure,
+      handler: ({ message }) => Effect.gen(function* () {
+        const acquired = yield* Sandbox.acquire({ operationKey: "sandbox", sandbox: customSandbox });
+        const first = yield* Agent.run({
+          agent: customAgent,
+          operationKey: "first-agent-attempt",
+          prompt: "first " + message,
+          sandbox: acquired,
+        });
+        if (first.session === undefined) return yield* Effect.die("Expected an Agent Session.");
+        const continued = yield* Agent.run({
+          agent: customAgent,
+          operationKey: "continued-agent-attempt",
+          prompt: "continued " + message,
+          sandbox: acquired,
+          session: first.session,
+        });
+        yield* Agent.run({
+          agent: customAgent,
+          operationKey: "first-agent-attempt",
+          prompt: "first " + message,
+          sandbox: acquired,
+        });
+        return continued;
+      }),
+    }),
+    defineWorkflow({
+      workflowKey: "agent-unsupported-continuation",
+      revision: "1",
+      inputSchema: input,
+      successSchema: AgentResult,
+      failureSchema: AgentFailure,
+      handler: () => Effect.gen(function* () {
+        const acquired = yield* Sandbox.acquire({ operationKey: "sandbox", sandbox: customSandbox });
+        return yield* Agent.run({
+          agent: unsupportedAgent,
+          operationKey: "unsupported-agent-attempt",
+          prompt: "unreachable",
+          sandbox: acquired,
+          session: unsupportedSession,
+        });
+      }),
+    }),
+    defineWorkflow({
+      workflowKey: "agent-interrupted-without-session",
+      revision: "1",
+      inputSchema: input,
+      successSchema: AgentResult,
+      failureSchema: AgentFailure,
+      handler: () => Effect.gen(function* () {
+        const acquired = yield* Sandbox.acquire({ operationKey: "sandbox", sandbox: customSandbox });
+        return yield* Agent.run({
+          agent: interruptedAgent,
+          operationKey: "interrupted-agent-attempt",
+          prompt: "wait",
+          sandbox: acquired,
+          timeout: "5 millis",
+        });
+      }),
+    }),
   ],
 });
 `;
@@ -587,6 +691,74 @@ export default defineConfig({
       })
     })
   ]
+});
+`;
+
+const agentRecoveryConfiguration = (proofPath: string) => `
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { Effect, Schema } from "effect";
+import {
+  Agent,
+  AgentFailure,
+  AgentResult,
+  Sandbox,
+  defineConfig,
+  defineCustomAgentProvider,
+  defineCustomSandboxProvider,
+  defineSandbox,
+  defineWorkflow,
+} from "@kojo/workflow";
+
+const proofPath = ${JSON.stringify(proofPath)};
+const input = Schema.Struct({ message: Schema.String });
+const sandbox = defineSandbox({
+  sandboxKey: "agent-recovery-sandbox",
+  revision: "1",
+  provider: defineCustomSandboxProvider({
+    kind: "custom",
+    providerKey: "agent-recovery-sandbox",
+    revision: "1",
+    supportsAgentSessionContinuation: true,
+    runCommand: () => Effect.succeed({ durationMs: 0, exitCode: 0, stderr: "", stdout: "" }),
+  }),
+});
+const agent = defineCustomAgentProvider({
+  kind: "custom",
+  providerKey: "agent-recovery",
+  revision: "1",
+  supportsSessionContinuation: true,
+  run: ({ idempotencyKey }) => Effect.sync(() => {
+    const wasStarted = existsSync(proofPath) && readFileSync(proofPath, "utf8").includes("agent:");
+    appendFileSync(proofPath, "agent:" + idempotencyKey + "\\n");
+    return wasStarted;
+  }).pipe(
+    Effect.flatMap((wasStarted) =>
+      wasStarted
+        ? Effect.succeed({ commits: [], sessionId: "recovered-session", text: "recovered" })
+        : Effect.never
+    )
+  ),
+});
+
+export default defineConfig({
+  workflows: [
+    defineWorkflow({
+      workflowKey: "agent-recovery",
+      revision: "1",
+      inputSchema: input,
+      successSchema: AgentResult,
+      failureSchema: AgentFailure,
+      handler: () => Effect.gen(function* () {
+        const acquired = yield* Sandbox.acquire({ operationKey: "sandbox", sandbox });
+        return yield* Agent.run({
+          agent,
+          operationKey: "after-restart",
+          prompt: "recover",
+          sandbox: acquired,
+        });
+      }),
+    }),
+  ],
 });
 `;
 
@@ -934,6 +1106,99 @@ it("runs a custom Provider through the same logical Sandbox contract", async () 
   });
   expect(completed.sandboxTrace).toEqual(
     expect.arrayContaining([expect.objectContaining({ providerKind: "custom" })]),
+  );
+});
+
+it("runs durable Agent Activities with explicit Session continuation and protected credentials", async () => {
+  const directory = await makeTemporaryDirectory("kojo-workflow-agent-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), sandboxConfiguration);
+  const previousCredential = process.env.KOJO_TEST_AGENT_CREDENTIAL;
+  process.env.KOJO_TEST_AGENT_CREDENTIAL = "agent-secret-from-environment";
+  const host = await startKojoHostProcess();
+  if (previousCredential === undefined) delete process.env.KOJO_TEST_AGENT_CREDENTIAL;
+  else process.env.KOJO_TEST_AGENT_CREDENTIAL = previousCredential;
+  cleanups.push(host.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "agent-continuation", "--input", '{"message":"hello"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = JSON.parse(started.stdout).result.run.runId as string;
+  const completed = await waitForFinalRun(host.socketPath, project, runId);
+  const trace = completed.agentTrace as ReadonlyArray<Record<string, unknown>>;
+  expect(completed).toMatchObject({
+    state: "completed",
+    outcome: { kind: "completed", value: { session: { _tag: "sensitive-value-masked" } } },
+  });
+  expect(trace).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ kind: "agent.started", providerKind: "custom" }),
+      expect.objectContaining({ kind: "agent.replayed" }),
+      expect.objectContaining({ kind: "agent.session-continued" }),
+      expect.objectContaining({ kind: "agent.completed" }),
+    ]),
+  );
+  expect(JSON.stringify(completed)).not.toContain("agent-secret-from-environment");
+  expect(await readFile(join(project, ".kojo", "kojo.sqlite"), "utf8")).not.toContain(
+    "agent-secret-from-environment",
+  );
+  expect(await readFile(host.diagnosticPath, "utf8")).not.toContain(
+    "agent-secret-from-environment",
+  );
+
+  const unsupported = await runKojoCli(
+    ["run", "start", "agent-unsupported-continuation", "--input", '{"message":"hello"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  const unsupportedRun = await waitForFinalRun(
+    host.socketPath,
+    project,
+    JSON.parse(unsupported.stdout).result.run.runId as string,
+  );
+  expect(unsupportedRun).toMatchObject({ state: "failed", agentTrace: [] });
+  expect(
+    (
+      unsupportedRun.activityTrace as {
+        readonly attempts: ReadonlyArray<{ readonly activityName: string }>;
+      }
+    ).attempts.filter((attempt) => attempt.activityName.startsWith("Run Agent")),
+  ).toEqual([]);
+
+  const interrupted = await runKojoCli(
+    [
+      "run",
+      "start",
+      "agent-interrupted-without-session",
+      "--input",
+      '{"message":"hello"}',
+      "--json",
+    ],
+    host.socketPath,
+    project,
+  );
+  const interruptedRun = await waitForFinalRun(
+    host.socketPath,
+    project,
+    JSON.parse(interrupted.stdout).result.run.runId as string,
+  );
+  const interruptedTrace = interruptedRun.agentTrace as ReadonlyArray<Record<string, unknown>>;
+  expect(interruptedRun).toMatchObject({ state: "failed" });
+  expect(interruptedTrace).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ kind: "agent.started" }),
+      expect.objectContaining({ kind: "agent.failed" }),
+    ]),
+  );
+  expect(interruptedTrace).not.toEqual(
+    expect.arrayContaining([expect.objectContaining({ kind: "agent.session-continued" })]),
   );
 });
 
@@ -1317,6 +1582,63 @@ it("rejects undeclared Child Workflow targets and empty invocation keys", async 
   expect(await childrenOf(undeclared.runId as string)).toEqual([]);
   expect(await childrenOf(emptyKey.runId as string)).toEqual([]);
 });
+it("retries interrupted Agent work with the durable Activity identity and no uncaptured Session", async () => {
+  const directory = await makeTemporaryDirectory("kojo-workflow-agent-recovery-");
+  cleanups.push(directory.cleanup);
+  const hostStore = await makeTemporaryDirectory("kojo-workflow-agent-host-");
+  cleanups.push(hostStore.cleanup);
+  const project = join(directory.path, "project");
+  const proofPath = join(directory.path, "agent-proof.txt");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), agentRecoveryConfiguration(proofPath));
+  const firstHost = await startKojoHostProcess({ storePath: hostStore.path });
+  cleanups.push(firstHost.stop);
+
+  expect((await runKojoCli(["init", project], firstHost.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "agent-recovery", "--input", '{"message":"hello"}', "--json"],
+    firstHost.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = JSON.parse(started.stdout).result.run.runId as string;
+  await waitForProof(proofPath, "agent");
+  await firstHost.crash();
+
+  // The runner lease must expire before another Host may activate this Project.
+  await Bun.sleep(1_100);
+  const secondHost = await startKojoHostProcess({ storePath: hostStore.path });
+  cleanups.push(secondHost.stop);
+  const initialized = await runKojoCli(["init", project], secondHost.socketPath);
+  expect(initialized.exitCode, `${initialized.stdout}${initialized.stderr}`).toBe(0);
+  const completed = await waitForFinalRun(secondHost.socketPath, project, runId);
+  const proof = await waitForProof(proofPath, "agent", 2);
+  const trace = completed.agentTrace as ReadonlyArray<Record<string, unknown>>;
+  const attempts = (
+    completed.activityTrace as {
+      readonly attempts: ReadonlyArray<{
+        readonly activityIdempotencyKey: string;
+        readonly activityName: string;
+      }>;
+    }
+  ).attempts.filter((attempt) => attempt.activityName.startsWith("Run Agent"));
+
+  expect(completed).toMatchObject({
+    state: "completed",
+    outcome: { kind: "completed", value: { session: { _tag: "sensitive-value-masked" } } },
+  });
+  expect(new Set(proof.map((line) => line.slice("agent:".length)))).toHaveLength(1);
+  expect(attempts.length).toBeGreaterThanOrEqual(2);
+  expect(new Set(attempts.map((attempt) => attempt.activityIdempotencyKey))).toHaveLength(1);
+  expect(trace.filter((entry) => entry.kind === "agent.started").length).toBeGreaterThanOrEqual(2);
+  expect(trace).toEqual(
+    expect.arrayContaining([expect.objectContaining({ kind: "agent.completed" })]),
+  );
+  expect(trace).not.toEqual(
+    expect.arrayContaining([expect.objectContaining({ kind: "agent.session-continued" })]),
+  );
+}, 30_000);
 
 it("reconciles a non-final Workflow Run after the Host restarts", async () => {
   const directory = await makeTemporaryDirectory("kojo-workflow-runs-restart-");

@@ -1,6 +1,9 @@
 import type { ProjectSnapshot } from "@kojo/control";
 import type {
   AcquiredWorkflowSandbox,
+  AgentProvider,
+  AgentProviderResult,
+  AgentSession,
   Command,
   CommandExecutionResult,
   SandboxProviderFailure,
@@ -17,6 +20,14 @@ export interface ProviderSandboxAcquisition {
 
 export interface ProviderCommandExecution extends CommandExecutionResult {
   readonly sessionRecreated: boolean;
+  readonly worktreeBranch: string;
+}
+
+export interface ProviderAgentExecution extends AgentProviderResult {
+  readonly durationMs: number;
+  readonly sessionRecreated: boolean;
+  /** True only when this invocation explicitly continued a prior Agent Session. */
+  readonly sessionContinued: boolean;
   readonly worktreeBranch: string;
 }
 
@@ -38,6 +49,16 @@ export interface ProviderRuntimeShape {
     readonly runId: string;
     readonly sandbox: AcquiredWorkflowSandbox;
   }) => Effect.Effect<ProviderCommandExecution, SandboxProviderFailure>;
+  readonly runAgent: (input: {
+    readonly agent: AgentProvider;
+    readonly definition: WorkflowSandboxDefinition;
+    readonly idempotencyKey: string;
+    readonly project: ProjectSnapshot;
+    readonly prompt: string;
+    readonly runId: string;
+    readonly sandbox: AcquiredWorkflowSandbox;
+    readonly session?: AgentSession;
+  }) => Effect.Effect<ProviderAgentExecution, SandboxProviderFailure>;
   readonly releaseProject: (project: ProjectSnapshot) => Effect.Effect<void>;
 }
 
@@ -56,6 +77,11 @@ export const ProviderRuntimeUnavailable = {
     Effect.fail({
       _tag: "sandbox-provider-failure" as const,
       message: "Workflow Sandbox execution is not configured for this Project Runtime.",
+    }),
+  runAgent: () =>
+    Effect.fail({
+      _tag: "sandbox-provider-failure" as const,
+      message: "Workflow Agent execution is not configured for this Project Runtime.",
     }),
   releaseProject: () => Effect.void,
 } satisfies ProviderRuntimeShape;
