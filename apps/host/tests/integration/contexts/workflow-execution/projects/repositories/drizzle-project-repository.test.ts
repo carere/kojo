@@ -560,6 +560,193 @@ describe("Drizzle Execution Trace reads", () => {
     }).pipe(Effect.provide(DrizzleWorkflowRunRepositoryLive)),
   );
 
+  it.effect("records adjacent idempotent parent evidence when Child Runs link and finish", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() => initializedProject("kojo-child-trace-events-"));
+      const repository = yield* WorkflowRunRepository;
+      yield* repository.acceptManualStart({
+        project: fixture.project,
+        requestKey: requestKey("child-trace-parent-start"),
+        requestHash: new Uint8Array(32),
+        runId: "child-trace-parent",
+        workflowKey: "parent",
+        workflowRevision: "revision",
+        encodedInput: {},
+        inputSensitivityPaths: [],
+        startSnapshot: {
+          workflow: {
+            workflowKey: "parent",
+            workflowRevision: "revision",
+            sourceIdentity: "test",
+            inputSchemaFingerprint: "test",
+          },
+          trigger: {
+            kind: "manual",
+            requestKey: requestKey("child-trace-parent-start"),
+          },
+          environment: {
+            projectIdentity: fixture.project.identity,
+            definitionSnapshotId: "test",
+            runtimeKind: "local-effect-workflow",
+          },
+          input: {},
+          inputSensitivityPaths: [],
+        },
+        acceptedAtMs: 1,
+      });
+      const acceptChild = (runId: string, invocationKey: string, acceptedAtMs: number) =>
+        repository.acceptChildStart({
+          project: fixture.project,
+          requestKey: requestKey(`${runId}-start`),
+          requestHash: new Uint8Array(32),
+          runId,
+          workflowKey: "child",
+          workflowRevision: "revision",
+          encodedInput: { invocationKey },
+          inputSensitivityPaths: [],
+          startSnapshot: {
+            workflow: {
+              workflowKey: "child",
+              workflowRevision: "revision",
+              sourceIdentity: "test",
+              inputSchemaFingerprint: "test",
+            },
+            trigger: {
+              kind: "child",
+              parentRunId: "child-trace-parent" as never,
+              invocationKey,
+            },
+            environment: {
+              projectIdentity: fixture.project.identity,
+              definitionSnapshotId: "test",
+              runtimeKind: "local-effect-workflow",
+            },
+            input: { invocationKey },
+            inputSensitivityPaths: [],
+          },
+          acceptedAtMs,
+          parentRunId: "child-trace-parent",
+          invocationKey,
+        });
+      const childRuns = [
+        { runId: "child-completed", invocationKey: "completed" },
+        { runId: "child-failed", invocationKey: "failed" },
+        { runId: "child-stopped", invocationKey: "stopped" },
+      ] as const;
+      for (const [index, child] of childRuns.entries()) {
+        expect(yield* acceptChild(child.runId, child.invocationKey, 2 + index)).toMatchObject({
+          _tag: "accepted",
+          alreadyApplied: false,
+        });
+      }
+      expect(yield* acceptChild("child-completed", "completed", 2)).toMatchObject({
+        _tag: "accepted",
+        alreadyApplied: true,
+      });
+      for (const [index, child] of childRuns.entries()) {
+        yield* repository.confirmSubmission(fixture.project, child.runId, 5 + index);
+        yield* repository.confirmSubmission(fixture.project, child.runId, 5 + index);
+      }
+      yield* repository.recordOutcome(
+        fixture.project,
+        "child-completed",
+        { kind: "completed", sensitivityPaths: [], value: "done" },
+        8,
+      );
+      yield* repository.recordOutcome(
+        fixture.project,
+        "child-completed",
+        { kind: "completed", sensitivityPaths: [], value: "done" },
+        8,
+      );
+      yield* repository.recordOutcome(
+        fixture.project,
+        "child-failed",
+        { kind: "failed", sensitivityPaths: [], value: "failed" },
+        9,
+      );
+      yield* repository.recordOutcome(
+        fixture.project,
+        "child-failed",
+        { kind: "failed", sensitivityPaths: [], value: "failed" },
+        9,
+      );
+      expect(
+        yield* repository.acceptStop(fixture.project, {
+          requestHash: new Uint8Array(32),
+          requestKey: requestKey("stop-child-trace"),
+          runId: "child-stopped",
+          requestedAtMs: 10,
+        }),
+      ).toMatchObject({ _tag: "accepted", alreadyApplied: false });
+      yield* repository.recordStopped(fixture.project, "child-stopped", 11);
+      yield* repository.recordStopped(fixture.project, "child-stopped", 11);
+      yield* repository.recordOutcome(
+        fixture.project,
+        "child-stopped",
+        { kind: "completed", sensitivityPaths: [], value: "late" },
+        12,
+      );
+
+      const parentTrace = yield* repository.readTrace(fixture.project, "child-trace-parent", {
+        filters: EMPTY_EXECUTION_TRACE_FILTERS,
+        limit: 100,
+      });
+      expect(parentTrace?.events.map((event) => event.sequence)).toEqual([
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+      ]);
+      expect(parentTrace?.events.map((event) => event.kind)).toEqual([
+        "run.accepted",
+        "child.requested",
+        "child.requested",
+        "child.requested",
+        "child.linked",
+        "child.linked",
+        "child.linked",
+        "child.finished",
+        "child.finished",
+        "child.finished",
+      ]);
+      expect(parentTrace?.events.map((event) => event.childRunId)).toEqual([
+        null,
+        "child-completed",
+        "child-failed",
+        "child-stopped",
+        "child-completed",
+        "child-failed",
+        "child-stopped",
+        "child-completed",
+        "child-failed",
+        "child-stopped",
+      ]);
+      expect(parentTrace?.events.slice(4, 7).map((event) => event.payload)).toEqual([
+        { invocationKey: "completed", runId: "child-completed", workflowKey: "child" },
+        { invocationKey: "failed", runId: "child-failed", workflowKey: "child" },
+        { invocationKey: "stopped", runId: "child-stopped", workflowKey: "child" },
+      ]);
+      expect(parentTrace?.events.slice(7).map((event) => event.payload)).toEqual([
+        {
+          invocationKey: "completed",
+          outcome: "completed",
+          runId: "child-completed",
+          workflowKey: "child",
+        },
+        {
+          invocationKey: "failed",
+          outcome: "failed",
+          runId: "child-failed",
+          workflowKey: "child",
+        },
+        {
+          invocationKey: "stopped",
+          outcome: "stopped",
+          runId: "child-stopped",
+          workflowKey: "child",
+        },
+      ]);
+    }).pipe(Effect.provide(DrizzleWorkflowRunRepositoryLive)),
+  );
+
   it.effect("applies indexed family, Activity, Run, boundary, and time filters", () =>
     Effect.gen(function* () {
       const fixture = yield* Effect.promise(() => initializedProject("kojo-trace-filters-"));
@@ -763,17 +950,54 @@ describe("Drizzle Execution Trace reads", () => {
             operationKey: "agent",
           }),
         ]);
-        const database = new Database(fixture.databasePath, { readonly: true });
-        const kinds = database
-          .query("SELECT kind FROM kojo_execution_events WHERE run_id = ? ORDER BY sequence ASC")
-          .all("boundary-evidence-run") as ReadonlyArray<{ readonly kind: string }>;
-        database.close();
-        expect(kinds.map((event) => event.kind)).toEqual([
+        const trace = yield* repository.readTrace(fixture.project, "boundary-evidence-run", {
+          filters: EMPTY_EXECUTION_TRACE_FILTERS,
+          limit: 100,
+        });
+        expect(trace?.events.map((event) => event.kind)).toEqual([
           "run.accepted",
           "boundary.started",
           "boundary.completed",
           "boundary.started",
           "boundary.completed",
+        ]);
+        expect(trace?.events.map((event) => event.boundaryId)).toEqual([
+          null,
+          "sandbox-acquire",
+          "command",
+          "agent",
+          "agent",
+        ]);
+        const commandBoundary = yield* repository.readTrace(
+          fixture.project,
+          "boundary-evidence-run",
+          {
+            filters: { ...EMPTY_EXECUTION_TRACE_FILTERS, boundaryIds: ["command"] },
+            limit: 100,
+          },
+        );
+        expect(commandBoundary?.events).toEqual([
+          expect.objectContaining({
+            boundaryId: "command",
+            kind: "boundary.completed",
+            sequence: 3,
+          }),
+        ]);
+        const agentBoundary = yield* repository.readTrace(
+          fixture.project,
+          "boundary-evidence-run",
+          {
+            filters: { ...EMPTY_EXECUTION_TRACE_FILTERS, boundaryIds: ["agent"] },
+            limit: 100,
+          },
+        );
+        expect(agentBoundary?.events).toEqual([
+          expect.objectContaining({ boundaryId: "agent", kind: "boundary.started", sequence: 4 }),
+          expect.objectContaining({
+            boundaryId: "agent",
+            kind: "boundary.completed",
+            sequence: 5,
+          }),
         ]);
       }).pipe(Effect.provide(DrizzleWorkflowRunRepositoryLive)),
   );

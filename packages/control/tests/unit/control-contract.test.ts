@@ -6,6 +6,7 @@ import {
   EXECUTION_EVENT_KINDS_V1,
   ExecutionEventKindV1,
   HostInformation,
+  LEGACY_PERSISTED_EXECUTION_EVENT_KINDS_V1,
   ProjectIdentity,
   RequestKey,
 } from "../../src";
@@ -90,6 +91,25 @@ it("publishes one closed v1 Execution Event catalog", () => {
   );
   expect(() => Schema.decodeUnknownSync(ExecutionEventKindV1)("activity.unversioned")).toThrow();
   expect(() => Schema.decodeUnknownSync(ExecutionEventKindV1)("child.started")).toThrow();
+});
+
+it("publishes the complete reader-only pre-ADR compatibility catalog", () => {
+  expect(LEGACY_PERSISTED_EXECUTION_EVENT_KINDS_V1).toEqual([
+    "child.started",
+    "workflow-deferred.completed",
+    "run.engine-recovery-queued",
+    "run.engine-late-outcome",
+    "sandbox.acquired",
+    "sandbox.session-recreated",
+    "command.completed",
+    "command.failed",
+    "command.timed-out",
+    "agent.started",
+    "agent.completed",
+    "agent.failed",
+    "agent.session-continued",
+    "agent.replayed",
+  ]);
 });
 
 it.effect(

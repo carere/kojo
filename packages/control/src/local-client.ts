@@ -123,6 +123,7 @@ export const UNIX_CONTROL_DISCONNECT_GRACE_MS = 100;
 
 interface UnixControlTerminalWait {
   readonly await: Effect.Effect<void>;
+  readonly interruptRequestIds: ReadonlySet<RpcRequestId>;
   readonly requestIds: ReadonlySet<RpcRequestId>;
 }
 
@@ -138,6 +139,7 @@ export interface UnixControlRequestRegistry {
   readonly add: (requestId: RpcRequestId) => void;
   readonly clear: () => void;
   readonly delete: (requestId: RpcRequestId) => void;
+  readonly interrupted: (requestId: RpcRequestId) => void;
   readonly terminal: (requestId: RpcRequestId) => void;
   readonly beginTerminalWait: () => Effect.Effect<UnixControlTerminalWait>;
 }
@@ -145,6 +147,7 @@ export interface UnixControlRequestRegistry {
 /** @internal Keeps bounded disconnect acknowledgement state local to one protocol. */
 export const makeUnixControlRequestRegistry = (): UnixControlRequestRegistry => {
   const active = new Set<RpcRequestId>();
+  const interrupted = new Set<RpcRequestId>();
   const waits = new Set<UnixControlTerminalWaitState>();
 
   const finish = (wait: UnixControlTerminalWaitState) => {
@@ -157,16 +160,23 @@ export const makeUnixControlRequestRegistry = (): UnixControlRequestRegistry => 
     active,
     add: (requestId) => {
       active.add(requestId);
+      interrupted.delete(requestId);
     },
     clear: () => {
       active.clear();
+      interrupted.clear();
       for (const wait of [...waits]) finish(wait);
     },
     delete: (requestId) => {
       active.delete(requestId);
+      interrupted.delete(requestId);
+    },
+    interrupted: (requestId) => {
+      if (active.has(requestId)) interrupted.add(requestId);
     },
     terminal: (requestId) => {
       active.delete(requestId);
+      interrupted.delete(requestId);
       for (const wait of [...waits]) {
         wait.requestIds.delete(requestId);
         if (wait.requestIds.size === 0) finish(wait);
@@ -187,6 +197,9 @@ export const makeUnixControlRequestRegistry = (): UnixControlRequestRegistry => 
           wait.timeout = setTimeout(() => finish(wait), UNIX_CONTROL_DISCONNECT_GRACE_MS);
         }
         return {
+          interruptRequestIds: new Set(
+            [...requestIds].filter((requestId) => !interrupted.has(requestId)),
+          ),
           requestIds,
           await: Deferred.await(wait.deferred).pipe(
             Effect.ensuring(
@@ -250,7 +263,7 @@ export const disconnectUnixControlConnection = (
   Effect.gen(function* () {
     const terminalWait = yield* requestRegistry.beginTerminalWait();
     yield* Effect.forEach(
-      terminalWait.requestIds,
+      terminalWait.interruptRequestIds,
       (requestId) => protocol.send(0, { _tag: "Interrupt", requestId }).pipe(Effect.ignore),
       { discard: true },
     );
@@ -294,7 +307,7 @@ export const trackUnixControlProtocol = (
           const requestId = RequestId(request.requestId);
           return protocol
             .send(clientId, request, transferables)
-            .pipe(Effect.tap(() => Effect.sync(() => requestRegistry.delete(requestId))));
+            .pipe(Effect.tap(() => Effect.sync(() => requestRegistry.interrupted(requestId))));
         }
         default:
           return protocol.send(clientId, request, transferables);

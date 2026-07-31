@@ -507,7 +507,7 @@ it.effect(
     }),
 );
 
-it.effect("waits for delayed terminal Exit before ending a Unix connection", () =>
+it.effect("waits for terminal Exit after an RPC stream already sent Interrupt", () =>
   Effect.gen(function* () {
     const events: Array<string> = [];
     let receive: ((response: never) => Effect.Effect<void>) | undefined;
@@ -557,6 +557,7 @@ it.effect("waits for delayed terminal Exit before ending a Unix connection", () 
       .pipe(Effect.forkScoped);
     yield* Effect.yieldNow;
     yield* tracked.send(0, request);
+    yield* tracked.send(0, { _tag: "Interrupt", requestId: 37 });
     yield* disconnectUnixControlConnection(socket as NetSocket, tracked, requestRegistry);
 
     expect(events).toEqual(["Interrupt", "Exit", "Eof", "end"]);
@@ -593,6 +594,8 @@ it.effect("tracks only active Unix RPC requests for disconnect", () =>
 
     yield* tracked.send(0, request(2));
     yield* tracked.send(0, { _tag: "Interrupt", requestId: 2 });
+    expect([...requestRegistry.active]).toEqual([99, 2]);
+    yield* deliver({ _tag: "Exit", requestId: 2 } as never);
     expect([...requestRegistry.active]).toEqual([99]);
 
     yield* tracked.send(0, request(3));

@@ -1539,6 +1539,98 @@ it("bounds trace follow transport retries and reports an unavailable Host", asyn
   });
 });
 
+it("continues an opaque Trace cursor across a concurrent stop and follows stopped finality", async () => {
+  const directory = await makeTemporaryDirectory("kojo-trace-cursor-stopped-follow-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), durableWaitConfiguration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "manual-wait", "--input", '{"message":"stop-follow"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = JSON.parse(started.stdout).result.run.runId as string;
+  let shown = await runKojoCli(["run", "show", runId, "--json"], host.socketPath, project);
+  for (
+    let attempt = 0;
+    attempt < 100 && JSON.parse(shown.stdout).result.run.state !== "suspended";
+    attempt += 1
+  ) {
+    await Bun.sleep(25);
+    shown = await runKojoCli(["run", "show", runId, "--json"], host.socketPath, project);
+  }
+  expect(JSON.parse(shown.stdout).result.run).toMatchObject({ state: "suspended" });
+
+  const firstPage = await runKojoCli(
+    ["trace", "show", runId, "--limit", "1", "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(firstPage.exitCode, `${firstPage.stdout}${firstPage.stderr}`).toBe(0);
+  const initialPage = JSON.parse(firstPage.stdout).result.page as {
+    readonly events: ReadonlyArray<{ readonly kind: string; readonly sequence: number }>;
+    readonly highWaterSequence: number;
+    readonly nextCursor: string;
+  };
+  expect(initialPage.events).toEqual([
+    expect.objectContaining({ kind: "run.accepted", sequence: 1 }),
+  ]);
+  expect(initialPage.nextCursor).toEqual(expect.any(String));
+
+  const following = startKojoCli(["trace", "follow", runId, "--json"], host.socketPath, project);
+  await following.waitForStdout('"sequence":1');
+  const stopped = await runKojoCli(["run", "stop", runId, "--json"], host.socketPath, project);
+  expect(stopped.exitCode, `${stopped.stdout}${stopped.stderr}`).toBe(0);
+  expect(JSON.parse(stopped.stdout).result.run).toMatchObject({
+    state: "stopped",
+    outcome: { kind: "stopped" },
+  });
+
+  const continued = await runKojoCli(
+    ["trace", "show", runId, "--cursor", initialPage.nextCursor, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(continued.exitCode, `${continued.stdout}${continued.stderr}`).toBe(0);
+  const continuedPage = JSON.parse(continued.stdout).result.page as {
+    readonly events: ReadonlyArray<{ readonly kind: string; readonly sequence: number }>;
+    readonly final: boolean;
+    readonly highWaterSequence: number;
+    readonly runState: string;
+  };
+  expect(continuedPage).toMatchObject({ final: true, runState: "stopped" });
+  expect(continuedPage.highWaterSequence).toBeGreaterThan(initialPage.highWaterSequence);
+  expect(continuedPage.events[0]?.sequence).toBe(2);
+  expect(continuedPage.events.map((event) => event.kind)).toEqual(
+    expect.arrayContaining(["run.stop-requested", "run.stopped"]),
+  );
+  expect(new Set(continuedPage.events.map((event) => event.sequence)).size).toBe(
+    continuedPage.events.length,
+  );
+
+  const followed = await finishKojoCliWithin(following, 6_000, "Trace follow to stopped finality");
+  expect(followed.exitCode, `${followed.stdout}${followed.stderr}`).toBe(0);
+  const followedEvents = followed.stdout
+    .trim()
+    .split("\n")
+    .map(
+      (line) =>
+        JSON.parse(line).result.event as { readonly kind: string; readonly sequence: number },
+    );
+  expect(followedEvents.at(-1)).toMatchObject({ kind: "run.stopped" });
+  expect(new Set(followedEvents.map((event) => event.sequence)).size).toBe(followedEvents.length);
+  expect(followedEvents.map((event) => event.sequence)).toEqual(
+    [...followedEvents].map((event) => event.sequence).sort((left, right) => left - right),
+  );
+});
+
 it("follows history first, resumes after one lost transport request, and never duplicates evidence", async () => {
   const directory = await makeTemporaryDirectory("kojo-trace-follow-resume-");
   cleanups.push(directory.cleanup);

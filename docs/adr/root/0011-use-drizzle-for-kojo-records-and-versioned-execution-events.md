@@ -185,6 +185,10 @@ This is the immutable authoritative history used to build one Run's Execution Tr
 
 Appending increments `kojo_workflow_runs.last_event_sequence` with `UPDATE ... RETURNING` and inserts that sequence in the same `BEGIN IMMEDIATE` transaction. Sequences begin at one. A `BEFORE UPDATE` trigger always aborts; explicit Run deletion may delete Events. Corrections and reconciled observations append new Events.
 
+Sandbox, Command, and Agent Boundary Events persist their Durable Operation Key
+as `boundary_id`. That stable logical-operation identity correlates start and
+completion evidence across replay and enables indexed Boundary filtering.
+
 Indexes: `(run_id, kind, sequence)` and each non-null correlation identity. There is no JSON-content index.
 
 ### `kojo_execution_artifacts`
@@ -278,6 +282,7 @@ An unsupported envelope or kind version is returned as a visible compatibility p
 - Kojo writes use short `BEGIN IMMEDIATE` Drizzle transactions. No Effect call, provider call, filesystem operation, or network operation occurs inside them.
 - Manual start acceptance commits the control receipt, Workflow Run, `run.accepted` Event, and pending submission operation together.
 - Schedule delivery commits the occurrence decision, Workflow Run, first Event, and pending submission operation together.
+- Child start acceptance commits the Child Workflow Run, its `run.accepted` Event, pending submission operation, and the parent's `child.requested` Event together. Durable submission confirmation adds exactly one parent `child.linked` Event in the confirmation transaction. A completed, failed, or stopped Child Workflow Run adds exactly one parent `child.finished` Event in the winning finality transaction. All three parent Events correlate through `child_run_id`.
 - A lifecycle transition commits current state, its Event, and any engine-operation confirmation together.
 - An Activity invocation commits its Attempt and `activity.attempt-started` before external work. Observing its external result does not claim durability. After Effect confirms the replay value, Kojo records `engine-confirmed` and `activity.result-confirmed` together.
 - Recovery retries each pending engine operation with its stable identity. A confirmed Effect observation missing from Kojo appends the missing Event idempotently and updates state in one transaction.

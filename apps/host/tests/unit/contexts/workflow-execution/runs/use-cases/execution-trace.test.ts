@@ -1,4 +1,5 @@
 import { expect, it } from "@effect/vitest";
+import { LEGACY_PERSISTED_EXECUTION_EVENT_KINDS_V1 } from "@kojo/control";
 import { Effect } from "effect";
 import {
   decodeExecutionTraceCursor,
@@ -60,10 +61,23 @@ it.effect("masks sensitive evidence and makes unsupported Event versions visible
       compatibility: "envelope-version-unsupported",
       payload: { _tag: "sensitive-value-masked" },
     });
-    expect(toExecutionTraceEvent({ ...event, kind: "child.started" })).toMatchObject({
-      compatibility: "supported",
-    });
-    expect(toExecutionTraceEvent({ ...event, kind: "run.recovery-queued" })).toMatchObject({
+    for (const kind of LEGACY_PERSISTED_EXECUTION_EVENT_KINDS_V1) {
+      expect(toExecutionTraceEvent({ ...event, kind })).toMatchObject({
+        compatibility: "supported",
+        payload: { outcome: "success", token: { _tag: "sensitive-value-masked" } },
+      });
+      expect(
+        toExecutionTraceEvent({
+          ...event,
+          kind,
+          payloadSensitivityMap: { valid: false as const },
+        }),
+      ).toMatchObject({
+        compatibility: "supported",
+        payload: { _tag: "sensitive-value-masked" },
+      });
+    }
+    expect(toExecutionTraceEvent({ ...event, kind: "sandbox.unknown" })).toMatchObject({
       compatibility: "kind-version-unsupported",
       payload: { _tag: "sensitive-value-masked" },
     });

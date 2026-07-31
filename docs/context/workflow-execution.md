@@ -22,6 +22,7 @@ _Avoid_: Schedule config, cron process
 
 **Child Workflow Run**:
 A Workflow Run durably started and owned by another Workflow Run, with identity scoped to its parent, Workflow Key, and stable invocation key. It has its own state and Execution Trace, cannot outlive its parent, and replay never creates a replacement for the same invocation.
+Its parent Execution Trace records `child.requested` when the Child Workflow Run is accepted, `child.linked` when submission is durably confirmed, and one `child.finished` when completed, failed, or stopped finality wins. These facts use the Child Workflow Run identity for correlation and are committed atomically with the lifecycle decision they describe.
 _Avoid_: Nested execution, execution boundary
 
 **Kojo Host**:
@@ -94,6 +95,7 @@ _Avoid_: Workflow session, checkpoint
 
 **Execution Boundary**:
 A nested unit of activity within a Workflow Run. Its start is recorded for live inspection and crash evidence, and its end produces one context-rich Diagnostic Event. The Workflow Definition determines which kinds of activity become boundaries.
+Sandbox, Command, and Agent Boundary Events use their Durable Operation Key as the Boundary Identity, so evidence for the same replay-sensitive logical operation remains correlated across its start and completion.
 _Avoid_: Log scope, trace span
 
 **Diagnostic Event**:

@@ -1767,6 +1767,7 @@ const appendEvent = (
   connection: Database,
   options: {
     readonly activityAttemptId?: string;
+    readonly boundaryId?: string;
     readonly engineOperationId?: string;
     readonly eventId: string;
     readonly kind: string;
@@ -1786,10 +1787,10 @@ const appendEvent = (
     .query(
       `INSERT INTO kojo_execution_events(
         event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms,
-        engine_operation_id, activity_attempt_id, child_run_id,
+        engine_operation_id, activity_attempt_id, boundary_id, child_run_id,
         payload_encoding_version, payload_schema_identity, payload_json,
         payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256
-      ) VALUES (?, ?, ?, 1, ?, 1, ?, ?, ?, ?, 1, 'kojo.workflow-run-event/v1', ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, 1, ?, 1, ?, ?, ?, ?, ?, 1, 'kojo.workflow-run-event/v1', ?, ?, ?, ?)`,
     )
     .run(
       options.eventId,
@@ -1799,6 +1800,7 @@ const appendEvent = (
       options.recordedAtMs,
       options.engineOperationId ?? null,
       options.activityAttemptId ?? null,
+      options.boundaryId ?? null,
       options.childRunId ?? null,
       payloadJson,
       SENSITIVITY_MAP_VERSION,
@@ -2453,6 +2455,40 @@ const advanceRunTrace = (
     .run(sequence, updatedAtMs, runId);
 };
 
+const appendParentChildEvidence = (
+  connection: Database,
+  child: StoredRun,
+  kind: "child.linked" | "child.finished",
+  recordedAtMs: number,
+  outcome?: "completed" | "failed" | "stopped",
+) => {
+  if (child.parent_run_id === null || child.child_invocation_key === null) return;
+  const existing = connection
+    .query(
+      `SELECT event_id FROM kojo_execution_events
+       WHERE run_id = ? AND kind = ? AND child_run_id = ? LIMIT 1`,
+    )
+    .get(child.parent_run_id, kind, child.run_id) as { readonly event_id: string } | null;
+  if (existing !== null) return;
+  const sequence = nextEventSequence(connection, child.parent_run_id);
+  appendEvent(connection, {
+    eventId: randomUUID(),
+    kind,
+    childRunId: child.run_id,
+    payload: {
+      invocationKey: child.child_invocation_key,
+      runId: child.run_id,
+      workflowKey: child.workflow_key,
+      ...(outcome === undefined ? {} : { outcome }),
+    },
+    recordedAtMs,
+    runId: child.parent_run_id,
+    sequence,
+    sensitivityMap: sensitivityMap([]),
+  });
+  advanceRunTrace(connection, child.parent_run_id, sequence, recordedAtMs);
+};
+
 export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository, () => ({
   acceptManualStart: (start: WorkflowRunStartRecord) =>
     Effect.sync(() =>
@@ -2992,6 +3028,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
                WHERE run_id = ?`,
             )
             .run(confirmedAtMs, sequence.last_event_sequence + 1, confirmedAtMs, runId);
+          appendParentChildEvidence(connection, run, "child.linked", confirmedAtMs);
         }),
       ),
     ),
@@ -3237,6 +3274,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
               stoppedAtMs,
               runId,
             );
+          appendParentChildEvidence(connection, run, "child.finished", stoppedAtMs, "stopped");
         }),
       ),
     ),
@@ -3734,6 +3772,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           const sequence = nextEventSequence(connection, runId);
           const eventId = randomUUID();
           appendEvent(connection, {
+            boundaryId: trace.operationKey,
             eventId,
             kind: settledBoundaryKind(trace.kind),
             payload: {
@@ -3786,6 +3825,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           const sequence = nextEventSequence(connection, runId);
           const eventId = randomUUID();
           appendEvent(connection, {
+            boundaryId: trace.operationKey,
             eventId,
             kind: settledBoundaryKind(trace.kind),
             payload: {
@@ -3957,6 +3997,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
               finalizedAtMs,
               runId,
             );
+          appendParentChildEvidence(connection, run, "child.finished", finalizedAtMs, outcome.kind);
         }),
       ),
     ),
