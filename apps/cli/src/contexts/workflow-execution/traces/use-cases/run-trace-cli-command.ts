@@ -21,14 +21,29 @@ import {
   ProjectInitializationError,
   resolveInitializedProject,
 } from "../../../workflow-authoring/projects/services/project-initializer";
+import {
+  TraceExportArchiveTooLargeError,
+  TraceExportDestinationExistsError,
+  writeExecutionTraceExport,
+} from "../services/write-execution-trace-export";
+
+const sensitiveExportWarning = {
+  code: "sensitive-content-not-scanned",
+  message: "Revealed payloads may contain arbitrary secrets; Kojo did not scan them.",
+  next: "Handle the ZIP as sensitive and avoid copying it into logs or issue trackers.",
+};
 
 /** The workflow-execution CLI boundary for chronological Trace inspection. */
 export const runTraceCliCommand = async (args: ReadonlyArray<string>, json: boolean) => {
   const options = parseOptions(args.slice(2));
   const operation = args[1];
   const command = `trace.${operation ?? "unknown"}`;
-  if (options === undefined || (operation !== "show" && operation !== "follow")) {
-    return writeFailure(invalid("Run: kojo trace show|follow <Run Identity>"), json, command);
+  if (options === undefined || !["show", "follow", "export"].includes(operation ?? "")) {
+    return writeFailure(
+      invalid("Run: kojo trace show|follow|export <Run Identity>"),
+      json,
+      command,
+    );
   }
   if (
     options.args.length !== 1 ||
@@ -43,19 +58,28 @@ export const runTraceCliCommand = async (args: ReadonlyArray<string>, json: bool
     options.workflowKeys.length > 0 ||
     options.scheduleKeys.length > 0 ||
     options.parentRunId !== undefined ||
-    options.reveal ||
-    (operation === "follow" && options.cursor !== undefined)
+    (operation === "follow" && options.cursor !== undefined) ||
+    (operation !== "export" &&
+      (options.reveal ||
+        options.includeArtifacts ||
+        options.acknowledgeSensitiveExport ||
+        options.output !== undefined)) ||
+    (operation === "export" &&
+      (options.cursor !== undefined ||
+        options.limit !== undefined ||
+        options.output === undefined ||
+        (!options.reveal && options.acknowledgeSensitiveExport)))
   ) {
     return writeFailure(
       invalid(
-        "Run: kojo trace show <Run Identity> [--limit <1-500>] [--cursor <cursor>] [--project <path>|--project-id <Project Identity>] [--json] or kojo trace follow <Run Identity> [--limit <1-500>] [--project <path>|--project-id <Project Identity>] [--json]",
+        "Run: kojo trace show <Run Identity> [--limit <1-500>] [--cursor <cursor>] [--project <path>|--project-id <Project Identity>] [--json] or kojo trace follow <Run Identity> [--limit <1-500>] [--project <path>|--project-id <Project Identity>] [--json] or kojo trace export <Run Identity> --output <path.zip> [--reveal --acknowledge-sensitive-export] [--include-artifacts] [--project <path>|--project-id <Project Identity>] [--json]",
       ),
       json,
       command,
     );
   }
   const limit = options.limit === undefined ? 100 : Number(options.limit);
-  if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+  if (operation !== "export" && (!Number.isInteger(limit) || limit < 1 || limit > 500)) {
     return writeFailure(invalid("Use --limit with a whole number from 1 to 500."), json, command);
   }
   let identity: ProjectSnapshot["identity"];
@@ -87,6 +111,74 @@ export const runTraceCliCommand = async (args: ReadonlyArray<string>, json: bool
     return writeFailure(invalid("Use a valid Run Identity."), json, command);
   }
   const client = makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath());
+  if (operation === "export") {
+    const destination = options.output;
+    if (destination === undefined) {
+      return writeFailure(invalid("Choose a ZIP export destination with --output."), json, command);
+    }
+    if (options.reveal && !(await acknowledgeSensitiveExport(options.acknowledgeSensitiveExport))) {
+      return writeFailure(
+        invalid(
+          "Revealing payloads requires acknowledgement. Use --acknowledge-sensitive-export in non-interactive use.",
+        ),
+        json,
+        command,
+      );
+    }
+    const exported = await runEffect(
+      client.exportExecutionTrace({
+        identity,
+        includeArtifacts: options.includeArtifacts,
+        revealPayloads: options.reveal,
+        runId,
+      }),
+    );
+    if (!exported.succeeded) return writeFailure(transportFailure(exported.error), json, command);
+    if (!exported.value.ok)
+      return writeFailure(workflowRunFailure(exported.value.error), json, command);
+    try {
+      await writeExecutionTraceExport(destination, exported.value.trace, options.reveal);
+    } catch (error) {
+      return writeFailure(
+        invalid(
+          error instanceof TraceExportDestinationExistsError
+            ? error.message
+            : error instanceof TraceExportArchiveTooLargeError
+              ? error.message
+              : "Execution Trace export could not be written to that destination.",
+        ),
+        json,
+        command,
+      );
+    }
+    if (json) {
+      process.stdout.write(
+        `${JSON.stringify({
+          schemaVersion: 1,
+          command,
+          result: {
+            destination,
+            highWaterSequence: exported.value.trace.highWaterSequence,
+            artifactCount: exported.value.trace.artifacts.filter(
+              (artifact) => artifact.contentBase64 !== null,
+            ).length,
+            payloadsRevealed: options.reveal,
+          },
+          warnings: options.reveal ? [sensitiveExportWarning] : [],
+        })}\n`,
+      );
+    } else {
+      if (options.reveal) {
+        process.stderr.write(
+          `Warning: ${sensitiveExportWarning.message} ${sensitiveExportWarning.next}\n`,
+        );
+      }
+      process.stdout.write(
+        `Exported Execution Trace through sequence ${exported.value.trace.highWaterSequence} to ${destination}\n`,
+      );
+    }
+    return 0;
+  }
   const traceInput = (continuation: {
     readonly afterSequence?: number;
     readonly cursor?: string;
@@ -233,4 +325,17 @@ export const runTraceCliCommand = async (args: ReadonlyArray<string>, json: bool
     process.off("SIGINT", detach);
     process.off("SIGTERM", detach);
   }
+};
+
+const acknowledgeSensitiveExport = async (acknowledged: boolean) => {
+  if (acknowledged) return true;
+  if (process.stdin.isTTY !== true || process.stderr.isTTY !== true) return false;
+  process.stderr.write(
+    "Warning: this ZIP will contain unredacted payloads that may include secrets. Type 'export sensitive' to continue: ",
+  );
+  const response = await new Promise<string>((resolve) => {
+    process.stdin.once("data", (value) => resolve(String(value)));
+    process.stdin.resume();
+  });
+  return response.trim() === "export sensitive";
 };

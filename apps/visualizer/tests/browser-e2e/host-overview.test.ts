@@ -2,7 +2,7 @@ import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type Browser, chromium } from "playwright";
+import { type BrowserContext, chromium, type Download } from "playwright";
 import { afterEach, expect, test } from "vitest";
 import { makeTemporaryDirectory, runKojoCli } from "../../../../tests/support/cli-process";
 import {
@@ -11,10 +11,16 @@ import {
 } from "../../../../tests/support/host-process";
 
 interface Fixture {
-  readonly browser: Browser;
+  readonly browser: BrowserContext;
+  readonly browserProfile: TemporaryDirectory;
   readonly host: KojoHostProcessFixture;
   readonly port: number;
   readonly visualizer: Bun.Subprocess;
+}
+
+interface TemporaryDirectory {
+  readonly cleanup: () => Promise<void>;
+  readonly path: string;
 }
 
 const fixtureStartupTimeoutMs = 30_000;
@@ -25,16 +31,58 @@ const workflowPackagePath = fileURLToPath(
   new URL("../../../../packages/workflow", import.meta.url),
 );
 const effectPackagePath = fileURLToPath(new URL("../../node_modules/effect", import.meta.url));
+const artifactDownloadConfiguration = `
+import { Effect, Schema } from "effect";
+import { Command, CommandFailure, CommandResult, Sandbox, defineCommand, defineConfig, defineSandbox, defineWorkflow } from "@kojo/workflow";
+import { unsafeHost } from "@kojo/workflow/sandboxes/unsafe-host";
+
+const sandbox = defineSandbox({
+  sandboxKey: "local-command",
+  revision: "1",
+  provider: unsafeHost({ providerKey: "trusted-local", revision: "1" }),
+});
+const command = defineCommand({
+  commandKey: "echo-environment",
+  revision: "1",
+  arguments: ["/bin/sh", "-lc", "printf '%s:%s' \\"$KOJO_SANDBOX_VALUE\\" \\"$PWD\\""],
+  environment: { KOJO_SANDBOX_VALUE: "present" },
+  workingDirectory: ".",
+});
+
+export default defineConfig({
+  workflows: [
+    defineWorkflow({
+      workflowKey: "sandbox-command",
+      revision: "1",
+      inputSchema: Schema.Struct({ message: Schema.String }),
+      successSchema: CommandResult,
+      failureSchema: CommandFailure,
+      handler: () => Effect.gen(function* () {
+        const acquired = yield* Sandbox.acquire({ operationKey: "sandbox", sandbox });
+        return yield* Command.run({ operationKey: "command", sandbox: acquired, command });
+      }),
+    }),
+  ],
+});
+`;
 
 afterEach(async () => {
-  if (fixture !== undefined) {
-    await fixture.browser.close();
-    fixture.visualizer.kill("SIGTERM");
-    await fixture.visualizer.exited;
-    await fixture.host.stop();
-    fixture = undefined;
+  const closingFixture = fixture;
+  fixture = undefined;
+  const cleanups = temporaryDirectories.splice(0);
+  let failure: unknown;
+  try {
+    if (closingFixture !== undefined) await closeFixture(closingFixture);
+  } catch (error) {
+    failure = error;
+  } finally {
+    const results = await Promise.allSettled(cleanups.map((cleanup) => cleanup()));
+    const rejected = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    failure ??= rejected?.reason;
   }
-  await Promise.all(temporaryDirectories.splice(0).map((cleanup) => cleanup()));
+  if (failure !== undefined) throw failure;
 });
 
 test("loads the Host-authoritative Project state and reconciles Navigator preferences by Project Identity", async () => {
@@ -162,48 +210,285 @@ export default defineConfig({
   expect(await projects.nth(0).getAttribute("aria-current")).toBe("page");
 }, 60_000);
 
+test("force-reclaims a browser that misses its bounded shutdown", async () => {
+  const profile = await makeTemporaryDirectory("kojo-browser-profile-reclaim-");
+  let browser: BrowserContext | undefined;
+  try {
+    browser = await chromium.launchPersistentContext(profile.path, { headless: true });
+    expect(await ownedBrowserPids(profile.path)).not.toHaveLength(0);
+
+    const neverClosingBrowser: Pick<BrowserContext, "close"> = {
+      close: () => new Promise<void>(() => undefined),
+    };
+    await expect(closeBrowser(neverClosingBrowser, profile.path)).resolves.toBeUndefined();
+    expect(await ownedBrowserPids(profile.path)).toEqual([]);
+  } finally {
+    await terminateOwnedBrowser(profile.path);
+    if (browser !== undefined) await settlesWithin(browser.close());
+    await profile.cleanup();
+  }
+});
+
+test("downloads a real Artifact as an inert attachment instead of rendering it", async () => {
+  fixture = await startFixture();
+  const page = await within("browser page startup", fixture.browser.newPage());
+  const origin = `http://127.0.0.1:${fixture.port}`;
+  await within("visualizer page navigation", page.goto(origin, { waitUntil: "domcontentloaded" }));
+  await page.getByText("Connected to Kojo Host 0.1.0").waitFor({ state: "visible" });
+
+  const directory = await makeTemporaryDirectory("kojo-artifact-download-browser-");
+  temporaryDirectories.push(directory.cleanup);
+  await mkdir(join(directory.path, "node_modules", "@kojo"), { recursive: true });
+  await symlink(
+    workflowPackagePath,
+    join(directory.path, "node_modules", "@kojo", "workflow"),
+    "dir",
+  );
+  await symlink(effectPackagePath, join(directory.path, "node_modules", "effect"), "dir");
+  const project = join(directory.path, "project");
+  await run(["git", "init", project]);
+  await run([
+    "git",
+    "-C",
+    project,
+    "-c",
+    "user.name=Kojo Test",
+    "-c",
+    "user.email=kojo@example.test",
+    "commit",
+    "--allow-empty",
+    "--message",
+    "initial",
+  ]);
+  await writeFile(join(project, "kojo.config.ts"), artifactDownloadConfiguration);
+  expect(
+    (
+      await within(
+        "Artifact project initialization",
+        runKojoCli(["init", project], fixture.host.socketPath),
+      )
+    ).exitCode,
+  ).toBe(0);
+
+  const started = await within(
+    "Artifact Workflow Run start",
+    runKojoCli(
+      ["run", "start", "sandbox-command", "--input", '{"message":"download"}', "--json"],
+      fixture.host.socketPath,
+      project,
+    ),
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = JSON.parse(started.stdout).result.run.runId as string;
+  let artifactId: string | undefined;
+  await within(
+    "Artifact record",
+    (async () => {
+      for (let attempt = 0; attempt < 100 && artifactId === undefined; attempt += 1) {
+        const shown = await within(
+          "Artifact Workflow Run inspection",
+          runKojoCli(["run", "show", runId, "--json"], fixture.host.socketPath, project),
+        );
+        if (shown.exitCode === 0) {
+          const run = JSON.parse(shown.stdout).result.run as {
+            readonly sandboxTrace?: ReadonlyArray<{
+              readonly artifactIds?: ReadonlyArray<string>;
+              readonly kind?: string;
+            }>;
+          };
+          artifactId = run.sandboxTrace?.find((entry) => entry.kind === "command.completed")
+            ?.artifactIds?.[0];
+        }
+        if (artifactId === undefined) await Bun.sleep(50);
+      }
+    })(),
+    15_000,
+  );
+  expect(artifactId).toEqual(expect.any(String));
+  if (artifactId === undefined) throw new Error("The browser fixture did not record an Artifact.");
+  const identity = JSON.parse(await readFile(join(project, ".kojo", "project.json"), "utf8"))
+    .projectIdentity as string;
+  const artifactUrl = `${origin}/api/artifacts?artifact=${artifactId}&project=${identity}&run=${runId}`;
+
+  const artifactResponse = await page.request.get(artifactUrl, { timeout: 10_000 });
+  expect(artifactResponse.status()).toBe(200);
+  expect(artifactResponse.headers()).toMatchObject({
+    "cache-control": "no-store",
+    "content-disposition": `attachment; filename="artifact-${artifactId}.json"`,
+    "content-type": "application/octet-stream",
+    "x-content-type-options": "nosniff",
+  });
+  expect(await artifactResponse.text()).toContain("present:");
+
+  // The page loaded before the CLI created the Project and Workflow Run. Refresh the
+  // Host-authoritative overview before exercising the real download control.
+  await page.reload({ waitUntil: "domcontentloaded" });
+  const runButton = page.getByRole("button", { name: runId });
+  await runButton.waitFor({ state: "visible", timeout: browserAssertionTimeoutMs });
+  await runButton.click();
+  const artifactLink = page.getByRole("link", { name: `Download Artifact ${artifactId}` });
+  await artifactLink.waitFor({ state: "visible", timeout: browserAssertionTimeoutMs });
+  const download = page.waitForEvent("download", { timeout: 10_000 });
+  let artifactDownload: Download | undefined;
+  try {
+    await artifactLink.click();
+    artifactDownload = await download;
+  } finally {
+    await download.catch(() => undefined);
+  }
+  if (artifactDownload === undefined) throw new Error("Artifact download did not settle.");
+  const downloadPath = await artifactDownload.path();
+  expect(downloadPath).not.toBeNull();
+  if (downloadPath !== null) expect(await readFile(downloadPath, "utf8")).toContain("present:");
+  expect(artifactDownload.suggestedFilename()).toBe(`artifact-${artifactId}.json`);
+  expect(await artifactDownload.failure()).toBeNull();
+  expect(page.url()).not.toBe(artifactUrl);
+  expect(await page.locator("body").innerText()).not.toContain("present:");
+}, 60_000);
+
 const startFixture = async (): Promise<Fixture> => {
   const visualizerDirectory = process.cwd().endsWith("apps/visualizer")
     ? process.cwd()
     : join(process.cwd(), "apps/visualizer");
   const port = await availablePort();
-  const host = await startKojoHostProcess();
-
-  const visualizer = Bun.spawn(
-    ["bun", "vite", "dev", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
-    {
-      cwd: visualizerDirectory,
-      env: { ...process.env, KOJO_HOST_SOCKET: host.socketPath },
-      stdout: "ignore",
-      stderr: "pipe",
-    },
-  );
-  const visualizerStderr = readStderr(visualizer);
-
+  const browserProfile = await makeTemporaryDirectory("kojo-browser-profile-");
+  let host: KojoHostProcessFixture | undefined;
+  let visualizer: Bun.Subprocess | undefined;
+  let visualizerStderr: Promise<string> = Promise.resolve("");
   try {
+    host = await startKojoHostProcess();
+    visualizer = Bun.spawn(
+      ["bun", "vite", "dev", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
+      {
+        cwd: visualizerDirectory,
+        env: { ...process.env, KOJO_HOST_SOCKET: host.socketPath },
+        stdout: "ignore",
+        stderr: "pipe",
+      },
+    );
+    visualizerStderr = readStderr(visualizer);
     await waitFor(async () => {
       try {
-        return (
-          await fetch(`http://127.0.0.1:${port}`, {
-            signal: AbortSignal.timeout(1_000),
-          })
-        ).ok;
+        const origin = `http://127.0.0.1:${port}`;
+        const page = await fetch(origin, { signal: AbortSignal.timeout(1_000) });
+        if (!page.ok) return false;
+        const api = await fetch(`${origin}/api/artifacts`, {
+          signal: AbortSignal.timeout(1_000),
+        });
+        return api.status === 400;
       } catch {
         return false;
       }
     }, visualizer);
 
     return {
-      browser: await chromium.launch({ headless: true }),
+      browser: await chromium.launchPersistentContext(browserProfile.path, { headless: true }),
+      browserProfile,
       host,
       port,
       visualizer,
     };
   } catch (error) {
-    if (visualizer.exitCode === null) visualizer.kill("SIGTERM");
-    await visualizer.exited;
-    await host.stop();
+    await Promise.allSettled([
+      ...(visualizer === undefined ? [] : [stopVisualizer(visualizer)]),
+      ...(host === undefined ? [] : [host.crash()]),
+      terminateOwnedBrowser(browserProfile.path),
+    ]);
+    await Promise.allSettled([browserProfile.cleanup()]);
     throw withFixtureStderr(error, await visualizerStderr);
+  }
+};
+
+const closeFixture = async (closingFixture: Fixture) => {
+  let failure: unknown;
+  try {
+    await closeBrowser(closingFixture.browser, closingFixture.browserProfile.path);
+  } catch (error) {
+    failure = error;
+  }
+  try {
+    await stopVisualizer(closingFixture.visualizer);
+  } catch (error) {
+    failure ??= error;
+  }
+  try {
+    await closingFixture.host.crash();
+  } catch (error) {
+    failure ??= error;
+  }
+  try {
+    await closingFixture.browserProfile.cleanup();
+  } catch (error) {
+    failure ??= error;
+  }
+  if (failure !== undefined) throw failure;
+};
+
+const cleanupDeadlineMs = 1_000;
+
+const settlesWithin = async (operation: Promise<unknown>) =>
+  Promise.race([
+    operation.then(
+      () => true,
+      () => true,
+    ),
+    Bun.sleep(cleanupDeadlineMs).then(() => false),
+  ]);
+
+const closeBrowser = async (browser: Pick<BrowserContext, "close">, profilePath: string) => {
+  const closed = await Promise.race([
+    browser.close().then(
+      () => "closed" as const,
+      () => "failed" as const,
+    ),
+    Bun.sleep(cleanupDeadlineMs).then(() => "timed-out" as const),
+  ]);
+  if (closed === "closed") return;
+  if (await terminateOwnedBrowser(profilePath)) return;
+  throw new Error(`Browser teardown ${closed} and force-reclaiming its owned process failed.`);
+};
+
+const ownedBrowserPids = async (profilePath: string) => {
+  const search = Bun.spawn(["pgrep", "-f", profilePath], { stderr: "ignore", stdout: "pipe" });
+  const [exitCode, stdout] = await Promise.all([search.exited, new Response(search.stdout).text()]);
+  if (exitCode !== 0) return [];
+  return stdout
+    .trim()
+    .split("\n")
+    .map((value) => Number.parseInt(value, 10))
+    .filter((value) => Number.isSafeInteger(value) && value > 0);
+};
+
+const signalOwnedBrowser = async (signal: "SIGKILL" | "SIGTERM", pids: ReadonlyArray<number>) => {
+  if (pids.length === 0) return;
+  const processHandle = Bun.spawn(["kill", `-${signal}`, ...pids.map(String)], {
+    stderr: "ignore",
+    stdout: "ignore",
+  });
+  await processHandle.exited;
+};
+
+/** Reclaims only Chromium processes launched with this fixture's unique profile. */
+const terminateOwnedBrowser = async (profilePath: string) => {
+  await signalOwnedBrowser("SIGTERM", await ownedBrowserPids(profilePath));
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if ((await ownedBrowserPids(profilePath)).length === 0) return true;
+    await Bun.sleep(25);
+  }
+  await signalOwnedBrowser("SIGKILL", await ownedBrowserPids(profilePath));
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if ((await ownedBrowserPids(profilePath)).length === 0) return true;
+    await Bun.sleep(25);
+  }
+  return (await ownedBrowserPids(profilePath)).length === 0;
+};
+
+const stopVisualizer = async (visualizer: Bun.Subprocess) => {
+  if (visualizer.exitCode === null) visualizer.kill("SIGTERM");
+  if (await settlesWithin(visualizer.exited)) return;
+  if (visualizer.exitCode === null) visualizer.kill("SIGKILL");
+  if (!(await settlesWithin(visualizer.exited))) {
+    throw new Error("Visualizer teardown did not settle after SIGKILL.");
   }
 };
 
@@ -233,6 +518,23 @@ const waitFor = async (condition: () => Promise<boolean>, processHandle: Bun.Sub
     await Bun.sleep(25);
   }
   throw new Error("Timed out while starting the browser acceptance fixture.");
+};
+
+const within = async <Value>(label: string, operation: Promise<Value>, timeoutMs = 10_000) => {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`${label} exceeded ${timeoutMs}ms.`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
 };
 
 const readStderr = (processHandle: Bun.Subprocess) =>

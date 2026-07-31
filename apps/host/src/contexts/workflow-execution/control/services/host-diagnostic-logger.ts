@@ -73,6 +73,8 @@ export const HostRequestDiagnosticEvent = Schema.Struct({
     "ShowWorkflowRun",
     "RevealWorkflowRun",
     "ReadExecutionTrace",
+    "ExportExecutionTrace",
+    "DownloadExecutionArtifact",
     "SubscribeControl",
     "AcknowledgeControlSubscription",
     "ResumeWorkflowRun",

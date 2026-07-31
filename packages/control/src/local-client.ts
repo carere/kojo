@@ -21,6 +21,10 @@ import {
   type ControlSubscriptionDelivery,
   type ControlSubscriptionInput,
   type ControlSubscriptionUpdate,
+  type ExecutionArtifactDownloadInput,
+  type ExecutionArtifactDownloadResult,
+  type ExecutionTraceExportInput,
+  type ExecutionTraceExportResult,
   type ExecutionTraceQueryResult,
   type ExecutionTraceReadInput,
   type HostOverview,
@@ -535,6 +539,12 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     );
   const readExecutionTrace = (input: ExecutionTraceReadInput) =>
     activateAndRetry(request("traces:read", (client) => client.ReadExecutionTrace(input)));
+  const exportExecutionTrace = (input: ExecutionTraceExportInput) =>
+    activateAndRetry(request("traces:export", (client) => client.ExportExecutionTrace(input)));
+  const downloadExecutionArtifact = (input: ExecutionArtifactDownloadInput) =>
+    activateAndRetry(
+      request("artifacts:read", (client) => client.DownloadExecutionArtifact(input)),
+    );
   const subscribeControl = (input: ControlSubscriptionInput) =>
     Stream.unwrap(
       Effect.gen(function* () {
@@ -704,6 +714,8 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     showWorkflowRun,
     revealWorkflowRun,
     readExecutionTrace,
+    exportExecutionTrace,
+    downloadExecutionArtifact,
     subscribeControl,
     acknowledgeControlSubscription,
     resumeWorkflowRun,
@@ -851,6 +863,18 @@ export const makeLocalClient = (options: LocalClientOptions) => {
       input: ExecutionTraceReadInput,
     ) => Effect.Effect<
       ExecutionTraceQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly exportExecutionTrace: (
+      input: ExecutionTraceExportInput,
+    ) => Effect.Effect<
+      ExecutionTraceExportResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly downloadExecutionArtifact: (
+      input: ExecutionArtifactDownloadInput,
+    ) => Effect.Effect<
+      ExecutionArtifactDownloadResult,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;
     readonly subscribeControl: (

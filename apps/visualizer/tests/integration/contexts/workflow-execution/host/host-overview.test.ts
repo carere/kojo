@@ -1,11 +1,18 @@
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createServer, type Socket } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, describe, expect, it } from "@effect/vitest";
 import { EMPTY_EXECUTION_TRACE_FILTERS, ProjectIdentity, WorkflowRunId } from "@kojo/control";
 import { Effect, Schema, Stream } from "effect";
 import { FetchHttpClient } from "effect/unstable/http";
 import { startKojoHostProcess } from "../../../../../../../tests/support/host-process";
 import { HostOverviewError } from "../../../../../src/contexts/shared/models/contracts";
-import { disposeApi, handleApiRequest } from "../../../../../src/contexts/shared/server";
+import {
+  disposeApi,
+  handleApiRequest,
+  handleArtifactAttachment,
+} from "../../../../../src/contexts/shared/server";
 import {
   makeVisualizerApiClientLayer,
   VisualizerApiClient,
@@ -31,6 +38,46 @@ const abortingSameOriginFetch = ((input: RequestInfo | URL, init?: RequestInit) 
     return response;
   });
 }) as typeof fetch;
+
+interface StalledControlServer {
+  readonly connected: Promise<void>;
+  readonly socketPath: string;
+  readonly stop: () => Promise<void>;
+}
+
+const startStalledControlServer = async (): Promise<StalledControlServer> => {
+  const directory = await mkdtemp(join(tmpdir(), "kojo-stalled-control-"));
+  const socketPath = join(directory, "host.sock");
+  const sockets = new Set<Socket>();
+  let notifyConnected: (() => void) | undefined;
+  const connected = new Promise<void>((resolve) => {
+    notifyConnected = resolve;
+  });
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+    notifyConnected?.();
+    notifyConnected = undefined;
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  return {
+    connected,
+    socketPath,
+    stop: async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error === undefined ? resolve() : reject(error))),
+      );
+      await rm(directory, { force: true, recursive: true });
+    },
+  };
+};
 
 const withHost = <A>(
   use: (
@@ -58,6 +105,41 @@ const withHost = <A>(
   );
 
 describe("Host overview", () => {
+  it("delivers Artifact bytes only as a nosniff attachment", async () => {
+    const request = new Request(
+      "http://kojo.test/api/artifacts?project=00000000-0000-7000-8000-000000000001&run=00000000-0000-7000-8000-000000000002&artifact=artifact-1",
+    );
+    const response = await handleArtifactAttachment(request, async (input) => {
+      expect(input).toMatchObject({ artifactId: "artifact-1" });
+      return {
+        ok: true,
+        download: {
+          artifact: {
+            artifactId: "artifact-1",
+            byteSize: 25,
+            condition: "available",
+            createdAtMs: 1,
+            displayName: "untrusted.html",
+            mediaType: "text/html",
+            sha256: "a".repeat(64),
+            unavailableAtMs: null,
+            unavailableReasonCode: null,
+          },
+          contentBase64: Buffer.from("<script>window.pwned = true</script>").toString("base64"),
+        },
+      };
+    });
+    expect(response).toBeDefined();
+    expect(response?.status).toBe(200);
+    expect(response?.headers.get("cache-control")).toBe("no-store");
+    expect(response?.headers.get("content-disposition")).toBe(
+      'attachment; filename="artifact-artifact-1.json"',
+    );
+    expect(response?.headers.get("content-type")).toBe("application/octet-stream");
+    expect(response?.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(await response?.text()).toBe("<script>window.pwned = true</script>");
+  });
+
   it.effect(
     "proxies a Host-owned Trace query through the real same-origin and Unix-socket boundaries",
     () =>
@@ -106,15 +188,52 @@ describe("Host overview", () => {
     );
   });
 
+  it.effect("cancels a stalled Artifact Host request when the browser disconnects", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(startStalledControlServer),
+      (server) =>
+        Effect.gen(function* () {
+          const previousSocketPath = process.env.KOJO_HOST_SOCKET;
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              if (previousSocketPath === undefined) delete process.env.KOJO_HOST_SOCKET;
+              else process.env.KOJO_HOST_SOCKET = previousSocketPath;
+            }),
+          );
+          process.env.KOJO_HOST_SOCKET = server.socketPath;
+          const controller = new AbortController();
+          const request = new Request(
+            "http://kojo.test/api/artifacts?project=00000000-0000-7000-8000-000000000001&run=00000000-0000-7000-8000-000000000002&artifact=artifact-1",
+            { signal: controller.signal },
+          );
+          request.headers.set("origin", "http://kojo.test");
+          request.headers.set("sec-fetch-site", "same-origin");
+          const response = handleApiRequest(request);
+          yield* Effect.promise(() => server.connected);
+          controller.abort();
+          const settled = yield* Effect.promise(() =>
+            Promise.race([
+              response.then((value) => ({ response: value })),
+              Bun.sleep(100).then(() => ({ response: undefined })),
+            ]),
+          );
+          expect(settled.response?.status).toBe(503);
+        }),
+      (server) => Effect.promise(server.stop),
+    ),
+  );
+
   it.effect("is exposed through an explicit same-origin operation", () =>
     withHost(() =>
       Effect.gen(function* () {
         const client = yield* VisualizerApiClient;
         const overview = yield* client.HostOverview();
         expect(overview.host).toMatchObject({
-          protocol: { major: 1, minor: 10 },
+          protocol: { major: 1, minor: 11 },
           capabilities: expect.arrayContaining([
             "traces:read",
+            "traces:export",
+            "artifacts:read",
             "control:subscribe",
             "control:acknowledge",
           ]),

@@ -3,6 +3,8 @@ import type {
   ControlSubscriptionDelivery,
   ControlSubscriptionInput,
   ControlSubscriptionUpdate,
+  ExecutionArtifactDownloadInput,
+  ExecutionArtifactDownloadResult,
   ExecutionTraceQueryResult,
   ExecutionTraceReadInput,
   ProjectIdentity,
@@ -45,6 +47,23 @@ export const readExecutionTrace = (input: ExecutionTraceReadInput) =>
         )
       : (client.readExecutionTrace(input).pipe(Effect.mapError(hostError)) as Effect.Effect<
           ExecutionTraceQueryResult,
+          HostOverviewError
+        >),
+  );
+
+/** Server-only use case for an attachment response; browsers never see Host socket bytes directly. */
+export const downloadExecutionArtifact = (input: ExecutionArtifactDownloadInput) =>
+  Effect.flatMap(HostControlClient, (client) =>
+    client.downloadExecutionArtifact === undefined
+      ? Effect.fail(
+          new HostOverviewError({
+            code: "host-unavailable",
+            message: "The visualizer Host client cannot download Execution Artifacts.",
+            next: "Restart the visualizer and try again.",
+          }),
+        )
+      : (client.downloadExecutionArtifact(input).pipe(Effect.mapError(hostError)) as Effect.Effect<
+          ExecutionArtifactDownloadResult,
           HostOverviewError
         >),
   );

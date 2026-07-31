@@ -64,7 +64,7 @@ describe("local Kojo Host control", () => {
           }),
         );
         expect(Schema.decodeUnknownSync(LegacyHostInformation)(legacyHandshake)).toEqual({
-          protocol: { major: 1, minor: 10 },
+          protocol: { major: 1, minor: 11 },
           hostVersion: "0.1.0",
           capabilities: ["projects:list"],
         });
@@ -76,7 +76,7 @@ describe("local Kojo Host control", () => {
 
         expect(overview).toEqual({
           host: {
-            protocol: { major: 1, minor: 10 },
+            protocol: { major: 1, minor: 11 },
             hostVersion: "0.1.0",
             capabilities: [
               "projects:list",
@@ -104,6 +104,8 @@ describe("local Kojo Host control", () => {
               "runs:deferred-complete",
               "runs:stop",
               "traces:read",
+              "traces:export",
+              "artifacts:read",
               "control:subscribe",
               "control:acknowledge",
             ],
@@ -144,7 +146,7 @@ describe("local Kojo Host control", () => {
           hostIdentity: "host:00000000-0000-4000-8000-000000000000",
           hostVersion: "0.1.0",
           protocolMajor: 1,
-          protocolMinor: 10,
+          protocolMinor: 11,
         });
       }),
   );

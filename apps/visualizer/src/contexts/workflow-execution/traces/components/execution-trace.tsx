@@ -68,6 +68,26 @@ const readTrace = async (
   }
 };
 
+const artifactIdsFromPayload = (payload: unknown): ReadonlyArray<string> => {
+  if (typeof payload !== "object" || payload === null || !("artifactIds" in payload)) return [];
+  const artifactIds = (payload as { readonly artifactIds?: unknown }).artifactIds;
+  return Array.isArray(artifactIds)
+    ? artifactIds.filter(
+        (artifactId): artifactId is string =>
+          typeof artifactId === "string" && artifactId.length > 0 && artifactId.length <= 128,
+      )
+    : [];
+};
+
+const artifactDownloadHref = (selection: ExecutionTraceSelection, artifactId: string) => {
+  const search = new URLSearchParams({
+    artifact: artifactId,
+    project: selection.identity,
+    run: selection.runId,
+  });
+  return `/api/artifacts?${search}`;
+};
+
 /** Chronological evidence is deliberately rendered apart from the Run tree. */
 export function ExecutionTrace(props: ExecutionTraceProps) {
   const [liveTrace, setLiveTrace] = createSignal<ExecutionTracePage | undefined>();
@@ -234,6 +254,20 @@ export function ExecutionTrace(props: ExecutionTraceProps) {
                         {event.kindVersion}
                         <Show when={event.compatibility !== "supported"}>
                           <span class="text-amber-600"> · {event.compatibility}</span>
+                        </Show>
+                        <Show when={event.kind !== "artifact.unavailable"}>
+                          <For each={artifactIdsFromPayload(event.payload)}>
+                            {(artifactId) => (
+                              <a
+                                aria-label={`Download Artifact ${artifactId}`}
+                                class="ml-2 text-primary underline"
+                                download=""
+                                href={artifactDownloadHref(selection(), artifactId)}
+                              >
+                                Download Artifact
+                              </a>
+                            )}
+                          </For>
                         </Show>
                       </li>
                     )}

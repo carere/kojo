@@ -42,6 +42,7 @@ import {
 import { decideWorkflowActivityReplay } from "../../runs/models/workflow-activity";
 import { preservesStoppedOutcome } from "../../runs/models/workflow-run-stop";
 import type {
+  StoredExecutionArtifact,
   StoredExecutionTraceEvent,
   StoredWorkflowRunSnapshot,
 } from "../../runs/repositories/workflow-run-repository";
@@ -1760,6 +1761,111 @@ const readStoredExecutionTrace = (
   };
 };
 
+const toStoredExecutionArtifact = (row: {
+  readonly artifact_id: string;
+  readonly byte_size: number;
+  readonly condition: "available" | "missing" | "expired";
+  readonly created_at_ms: number;
+  readonly display_name: string;
+  readonly media_type: string;
+  readonly sha256: Uint8Array;
+  readonly storage_key: string;
+  readonly unavailable_at_ms: number | null;
+  readonly unavailable_reason_code: string | null;
+}): StoredExecutionArtifact => ({
+  artifactId: row.artifact_id,
+  byteSize: row.byte_size,
+  condition: row.condition,
+  createdAtMs: row.created_at_ms,
+  displayName: row.display_name,
+  mediaType: row.media_type,
+  sha256: row.sha256,
+  storageKey: row.storage_key,
+  unavailableAtMs: row.unavailable_at_ms,
+  unavailableReasonCode: row.unavailable_reason_code,
+});
+
+/** Reads a full export from one durable per-Run high-water mark. */
+const exportStoredExecutionTrace = (connection: Database, runId: string) => {
+  const run =
+    (connection
+      .query("SELECT state, last_event_sequence FROM kojo_workflow_runs WHERE run_id = ?")
+      .get(runId) as {
+      readonly last_event_sequence: number;
+      readonly state: "running" | "suspended" | "stopping" | "stopped" | "failed" | "completed";
+    } | null) ?? undefined;
+  if (run === undefined) return undefined;
+  const rows = connection
+    .query(
+      `SELECT event_id, run_id, sequence, envelope_version, kind, kind_version,
+              recorded_at_ms, observed_at_ms, engine_operation_id, activity_attempt_id,
+              boundary_id, child_run_id, payload_json, payload_sensitivity_map_version,
+              payload_sensitivity_map_json
+       FROM kojo_execution_events
+       WHERE run_id = ? AND sequence <= ?
+       ORDER BY sequence ASC`,
+    )
+    .all(runId, run.last_event_sequence) as ReadonlyArray<{
+    readonly activity_attempt_id: string | null;
+    readonly boundary_id: string | null;
+    readonly child_run_id: string | null;
+    readonly engine_operation_id: string | null;
+    readonly envelope_version: number;
+    readonly event_id: string;
+    readonly kind: string;
+    readonly kind_version: number;
+    readonly observed_at_ms: number | null;
+    readonly payload_json: string;
+    readonly payload_sensitivity_map_json: string;
+    readonly payload_sensitivity_map_version: number;
+    readonly recorded_at_ms: number;
+    readonly run_id: string;
+    readonly sequence: number;
+  }>;
+  const events: ReadonlyArray<StoredExecutionTraceEvent> = rows.map((row) => ({
+    activityAttemptId: row.activity_attempt_id,
+    boundaryId: row.boundary_id,
+    childRunId: row.child_run_id,
+    engineOperationId: row.engine_operation_id,
+    envelopeVersion: row.envelope_version,
+    eventId: row.event_id,
+    kind: row.kind,
+    kindVersion: row.kind_version,
+    observedAtMs: row.observed_at_ms,
+    payload: JSON.parse(row.payload_json),
+    payloadSensitivityMap: decodeSensitivityMap(
+      row.payload_sensitivity_map_version,
+      row.payload_sensitivity_map_json,
+    ),
+    recordedAtMs: row.recorded_at_ms,
+    runId: row.run_id,
+    sequence: row.sequence,
+  }));
+  const artifacts = connection
+    .query(
+      `SELECT DISTINCT artifact.artifact_id, artifact.storage_key, artifact.display_name,
+              artifact.media_type, artifact.byte_size, artifact.sha256, artifact.condition,
+              artifact.created_at_ms, artifact.unavailable_at_ms, artifact.unavailable_reason_code
+       FROM kojo_execution_artifacts artifact
+       JOIN kojo_execution_event_artifacts event_artifact
+         ON event_artifact.run_id = artifact.run_id
+        AND event_artifact.artifact_id = artifact.artifact_id
+       JOIN kojo_execution_events event ON event.event_id = event_artifact.event_id
+        AND event.run_id = event_artifact.run_id
+       WHERE artifact.run_id = ? AND event.sequence <= ?
+       ORDER BY artifact.created_at_ms ASC, artifact.artifact_id ASC`,
+    )
+    .all(runId, run.last_event_sequence) as ReadonlyArray<
+    Parameters<typeof toStoredExecutionArtifact>[0]
+  >;
+  return {
+    artifacts: artifacts.map(toStoredExecutionArtifact),
+    events,
+    highWaterSequence: run.last_event_sequence,
+    runState: run.state,
+  };
+};
+
 /** Keep writes on the same closed v1 catalog that readers advertise. */
 const executionEventKindsV1 = new Set<string>(EXECUTION_EVENT_KINDS_V1);
 
@@ -2919,6 +3025,71 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
     Effect.sync(() =>
       withWritableProjectStore(project, (connection) =>
         readStoredExecutionTrace(connection, runId, input),
+      ),
+    ),
+  exportTrace: (project, runId) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) =>
+        exportStoredExecutionTrace(connection, runId),
+      ),
+    ),
+  findArtifact: (project, runId, artifactId) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) => {
+        const artifact =
+          (connection
+            .query(
+              `SELECT artifact_id, storage_key, display_name, media_type, byte_size, sha256,
+                      condition, created_at_ms, unavailable_at_ms, unavailable_reason_code
+               FROM kojo_execution_artifacts
+               WHERE run_id = ? AND artifact_id = ?`,
+            )
+            .get(runId, artifactId) as Parameters<typeof toStoredExecutionArtifact>[0] | null) ??
+          undefined;
+        return artifact === undefined ? undefined : toStoredExecutionArtifact(artifact);
+      }),
+    ),
+  recordArtifactUnavailable: (project, runId, artifactId, reasonCode, recordedAtMs) =>
+    Effect.sync(() =>
+      withWritableProjectStore(project, (connection) =>
+        transaction(connection, () => {
+          const artifact =
+            (connection
+              .query(
+                `SELECT condition FROM kojo_execution_artifacts
+                 WHERE run_id = ? AND artifact_id = ?`,
+              )
+              .get(runId, artifactId) as {
+              readonly condition: "available" | "missing" | "expired";
+            } | null) ?? undefined;
+          if (artifact?.condition !== "available") return;
+          const condition = reasonCode === "artifact.expired" ? "expired" : "missing";
+          const sequence = nextEventSequence(connection, runId);
+          const eventId = randomUUID();
+          appendEvent(connection, {
+            eventId,
+            kind: "artifact.unavailable",
+            payload: { artifactId, condition, reasonCode },
+            recordedAtMs,
+            runId,
+            sequence,
+            sensitivityMap: sensitivityMap([]),
+          });
+          connection
+            .query(
+              `UPDATE kojo_execution_artifacts
+               SET condition = ?, unavailable_at_ms = ?, unavailable_reason_code = ?
+               WHERE run_id = ? AND artifact_id = ?`,
+            )
+            .run(condition, recordedAtMs, reasonCode, runId, artifactId);
+          connection
+            .query(
+              `INSERT INTO kojo_execution_event_artifacts(run_id, event_id, artifact_id, role)
+               VALUES (?, ?, ?, 'unavailable')`,
+            )
+            .run(runId, eventId, artifactId);
+          advanceRunTrace(connection, runId, sequence, recordedAtMs);
+        }),
       ),
     ),
   pendingSubmissions: (project, runId) =>
