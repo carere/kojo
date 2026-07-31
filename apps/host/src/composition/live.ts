@@ -20,6 +20,7 @@ import {
 } from "../contexts/workflow-execution/projects/repositories/drizzle-project-repository";
 import { makeLocalWorkflowBackendLayer } from "../contexts/workflow-execution/projects/services/local-workflow-backend";
 import { ProjectRuntimeLive } from "../contexts/workflow-execution/projects/services/project-runtime";
+import { SandcastleProviderRuntimeLive } from "../contexts/workflow-execution/sandboxes/services/sandcastle-provider-runtime";
 import { ScheduleClockLive } from "../contexts/workflow-execution/schedules/services/schedule-clock";
 import { WorkflowScheduleSupervisorLive } from "../contexts/workflow-execution/schedules/services/workflow-schedule-supervisor";
 
@@ -36,7 +37,9 @@ export const startLiveKojoHost = async () => {
   const protocol = RpcServer.layerProtocolSocketServer.pipe(
     Layer.provide([BunSocketServer.layer({ path: socketPath }), RpcSerialization.layerNdjson]),
   );
-  const workflowBackend = makeLocalWorkflowBackendLayer(hostIdentity);
+  const workflowBackend = makeLocalWorkflowBackendLayer(hostIdentity).pipe(
+    Layer.provide(SandcastleProviderRuntimeLive),
+  );
   const projectRuntime = ProjectRuntimeLive.pipe(
     Layer.provide([DrizzleProjectRepositoryLive, workflowBackend, diagnostics]),
   );

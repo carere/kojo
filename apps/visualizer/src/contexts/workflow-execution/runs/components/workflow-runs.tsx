@@ -135,6 +135,10 @@ export function WorkflowRuns(props: WorkflowRunsProps) {
                 {run.activitySummary.incompleteAttempts} incomplete,{" "}
                 {run.activitySummary.durableCompletions} durable, {run.activitySummary.replayReuses}{" "}
                 replay reuses
+                <Show when={run.sandboxTrace.length > 0}>
+                  {" "}
+                  · Sandbox: {run.sandboxTrace.length} trace entries
+                </Show>
               </span>
             </li>
           )}

@@ -156,6 +156,18 @@ test("shows accepted Workflow Definition snapshots from the Host", async () => {
                         durableCompletions: 1,
                         replayReuses: 0,
                       },
+                      sandboxTrace: [
+                        {
+                          artifactIds: ["artifact-1"],
+                          durationMs: 2,
+                          exitCode: 0,
+                          kind: "command.completed",
+                          operationKey: "command",
+                          providerKind: "docker",
+                          recordedAtMs: 2,
+                          sandboxIdentity: "sandbox-1",
+                        },
+                      ],
                     },
                   ],
                 },
@@ -172,6 +184,7 @@ test("shows accepted Workflow Definition snapshots from the Host", async () => {
   await expect.element(page.getByText("echo 1")).toBeVisible();
   await expect.element(page.getByText("00000000-0000-7000-8000-000000000010")).toBeVisible();
   await expect.element(page.getByText("completed")).toBeVisible();
+  await expect.element(page.getByText("Sandbox: 1 trace entries")).toBeVisible();
 });
 
 test("only renders Host-authorized Workflow Run controls", async () => {
@@ -207,6 +220,7 @@ test("only renders Host-authorized Workflow Run controls", async () => {
                 finalizedAtMs: null,
                 allowedActions: [],
                 activitySummary: emptyActivitySummary,
+                sandboxTrace: [],
               },
               {
                 runId: manualRun,
@@ -219,6 +233,7 @@ test("only renders Host-authorized Workflow Run controls", async () => {
                 finalizedAtMs: null,
                 allowedActions: ["resume"],
                 activitySummary: emptyActivitySummary,
+                sandboxTrace: [],
               },
               {
                 runId: deferredRun,
@@ -231,6 +246,7 @@ test("only renders Host-authorized Workflow Run controls", async () => {
                 finalizedAtMs: null,
                 allowedActions: ["deferred-complete"],
                 activitySummary: emptyActivitySummary,
+                sandboxTrace: [],
               },
             ],
           },
@@ -341,6 +357,7 @@ test("navigates between a Schedule Occurrence and its linked resources", async (
                       finalizedAtMs: scheduledAtMs,
                       allowedActions: [],
                       activitySummary: emptyActivitySummary,
+                      sandboxTrace: [],
                     },
                   ],
                 },

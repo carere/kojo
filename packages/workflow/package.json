@@ -5,7 +5,12 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./testing": "./src/testing.ts"
+    "./testing": "./src/testing.ts",
+    "./sandboxes/docker": "./src/sandboxes/docker.ts",
+    "./sandboxes/podman": "./src/sandboxes/podman.ts",
+    "./sandboxes/vercel": "./src/sandboxes/vercel.ts",
+    "./sandboxes/daytona": "./src/sandboxes/daytona.ts",
+    "./sandboxes/unsafe-host": "./src/sandboxes/unsafe-host.ts"
   },
   "dependencies": {
     "effect": "4.0.0-beta.102"

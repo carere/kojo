@@ -170,6 +170,11 @@ export interface WorkflowActivityOptions<
   readonly operationKey: string;
   /** A safe display name; it defaults to the Durable Operation Key. */
   readonly name?: string;
+  /**
+   * An immutable operation-definition identity used by Kojo-owned wrappers
+   * such as Sandboxes and Commands to reject conflicting key reuse.
+   */
+  readonly definitionIdentity?: string;
   readonly successSchema: Success;
   readonly failureSchema?: Failure;
   /**
@@ -209,6 +214,278 @@ export const activity = <
     Success["Type"],
     Failure["Type"]
   >;
+
+export type SandboxProviderKind = "docker" | "podman" | "vercel" | "daytona" | "unsafe-host";
+
+/**
+ * A credential-free, versioned description of a Sandbox Provider. Provider
+ * credentials belong to the Host environment and are resolved only when work
+ * is invoked.
+ */
+export interface BuiltInSandboxProvider {
+  readonly kind: SandboxProviderKind;
+  readonly providerKey: string;
+  readonly revision: string;
+  /** Host execution has no isolation and must be acknowledged explicitly. */
+  readonly unsafeAcknowledged?: true;
+}
+
+/** A custom Provider runs through the same Host-owned ProviderRuntime seam. */
+export interface CustomSandboxProvider {
+  readonly kind: "custom";
+  readonly providerKey: string;
+  readonly revision: string;
+  readonly acquire?: (
+    input: CustomSandboxAcquireInput,
+  ) => Effect.Effect<void, SandboxProviderFailure>;
+  readonly runCommand: (
+    input: CustomSandboxCommandInput,
+  ) => Effect.Effect<CommandExecutionResult, SandboxProviderFailure>;
+}
+
+export type SandboxProvider = BuiltInSandboxProvider | CustomSandboxProvider;
+
+export interface SandboxProviderFailure {
+  readonly _tag: "sandbox-provider-failure";
+  readonly message: string;
+}
+
+export const SandboxProviderFailure = Schema.Struct({
+  _tag: Schema.Literal("sandbox-provider-failure"),
+  message: Schema.String,
+});
+
+/** The safe context a custom provider receives; it deliberately has no handle. */
+export interface CustomSandboxAcquireInput {
+  readonly image: SandboxImageDefinition | undefined;
+  readonly sandbox: AcquiredWorkflowSandbox;
+}
+
+/** The safe context a custom provider receives for one command invocation. */
+export interface CustomSandboxCommandInput extends CustomSandboxAcquireInput {
+  readonly command: Command;
+}
+
+/**
+ * An immutable image description. `source` is version-controlled definition
+ * data, never a credential-bearing provider configuration.
+ */
+export interface SandboxImageDefinition {
+  readonly imageKey: string;
+  readonly revision: string;
+  readonly source: {
+    readonly kind: "container-image";
+    readonly reference: string;
+  };
+}
+
+/** A versioned logical environment selected by workflow code. */
+export interface WorkflowSandboxDefinition {
+  readonly sandboxKey: string;
+  readonly revision: string;
+  readonly provider: SandboxProvider;
+  readonly image?: SandboxImageDefinition;
+}
+
+/**
+ * The durable, logical Sandbox returned by {@link Sandbox.acquire}. The
+ * identity is scoped to one Workflow Run and is not a provider session handle.
+ */
+export interface AcquiredWorkflowSandbox {
+  readonly _tag: "workflow-sandbox";
+  readonly identity: string;
+  readonly operationKey: string;
+  readonly providerKind: SandboxProvider["kind"];
+  readonly providerKey: string;
+  readonly providerRevision: string;
+  readonly sandboxKey: string;
+  readonly revision: string;
+  readonly imageKey?: string;
+  readonly imageRevision?: string;
+}
+
+export const AcquiredWorkflowSandbox = Schema.Struct({
+  _tag: Schema.Literal("workflow-sandbox"),
+  identity: Schema.String,
+  operationKey: Schema.String,
+  providerKind: Schema.Literals(["docker", "podman", "vercel", "daytona", "unsafe-host", "custom"]),
+  providerKey: Schema.String,
+  providerRevision: Schema.String,
+  sandboxKey: Schema.String,
+  revision: Schema.String,
+  imageKey: Schema.optionalKey(Schema.String),
+  imageRevision: Schema.optionalKey(Schema.String),
+});
+
+export interface Command {
+  readonly commandKey: string;
+  readonly revision: string;
+  /** An argument vector. Kojo never requires authors to pre-concatenate it. */
+  readonly arguments: ReadonlyArray<string>;
+  readonly workingDirectory?: string;
+  readonly environment?: Readonly<Record<string, string>>;
+  readonly timeout?: Duration.Input;
+  /** Default `none` quotes the argument vector; `sh` deliberately invokes a shell. */
+  readonly shell?: "none" | "sh";
+  /** Default `fail` turns a non-zero exit into a typed failure. */
+  readonly nonZeroExit?: "fail" | "return";
+}
+
+export interface CommandExecutionResult {
+  readonly durationMs: number;
+  readonly exitCode: number;
+  readonly stderr: string;
+  readonly stdout: string;
+}
+
+export interface CommandResult extends CommandExecutionResult {
+  readonly artifactIds: ReadonlyArray<string>;
+  readonly sandboxIdentity: string;
+}
+
+export const CommandResult = Schema.Struct({
+  artifactIds: Schema.Array(Schema.String),
+  durationMs: Schema.Number,
+  exitCode: Schema.Number,
+  sandboxIdentity: Schema.String,
+  stderr: Schema.String,
+  stdout: Schema.String,
+});
+
+export interface CommandFailure {
+  readonly _tag: "command-failed" | "command-timed-out" | "sandbox-provider-failure";
+  readonly exitCode?: number;
+  readonly message: string;
+  readonly sandboxIdentity: string;
+}
+
+export const CommandFailure = Schema.Struct({
+  _tag: Schema.Literals(["command-failed", "command-timed-out", "sandbox-provider-failure"]),
+  exitCode: Schema.optionalKey(Schema.Number),
+  message: Schema.String,
+  sandboxIdentity: Schema.String,
+});
+
+export interface WorkflowSandboxRuntimeShape {
+  readonly acquire: (options: {
+    readonly operationKey: string;
+    readonly sandbox: WorkflowSandboxDefinition;
+  }) => Effect.Effect<AcquiredWorkflowSandbox, SandboxProviderFailure>;
+}
+
+/** Host-provided runtime that owns all live Sandbox Provider handles. */
+export class WorkflowSandboxRuntime extends Context.Service<
+  WorkflowSandboxRuntime,
+  WorkflowSandboxRuntimeShape
+>()("kojo/workflow/WorkflowSandboxRuntime") {}
+
+export interface WorkflowCommandRuntimeShape {
+  readonly run: (options: {
+    readonly command: Command;
+    readonly operationKey: string;
+    readonly sandbox: AcquiredWorkflowSandbox;
+  }) => Effect.Effect<CommandResult, CommandFailure>;
+}
+
+/** Host-provided command runtime. Commands receive a logical Sandbox only. */
+export class WorkflowCommandRuntime extends Context.Service<
+  WorkflowCommandRuntime,
+  WorkflowCommandRuntimeShape
+>()("kojo/workflow/WorkflowCommandRuntime") {}
+
+/** Durable operations for logical Workflow Sandboxes. */
+export const Sandbox = {
+  acquire: (options: {
+    readonly operationKey: string;
+    readonly sandbox: WorkflowSandboxDefinition;
+  }) => Effect.flatMap(WorkflowSandboxRuntime, (runtime) => runtime.acquire(options)),
+};
+
+/** Durable Command execution inside an acquired logical Workflow Sandbox. */
+export const Command = {
+  run: (options: {
+    readonly command: Command;
+    readonly operationKey: string;
+    readonly sandbox: AcquiredWorkflowSandbox;
+  }) => Effect.flatMap(WorkflowCommandRuntime, (runtime) => runtime.run(options)),
+};
+
+const validDefinitionPart = (value: string) => value.trim().length > 0 && value.length <= 200;
+
+const immutable = <Value>(value: Value): Value => {
+  if (Array.isArray(value)) {
+    for (const item of value) immutable(item);
+  } else if (value !== null && typeof value === "object") {
+    for (const item of Object.values(value as Record<string, unknown>)) immutable(item);
+  }
+  return Object.freeze(value);
+};
+
+const assertDefinitionPart = (value: string, name: string) => {
+  if (!validDefinitionPart(value)) {
+    throw new Error(`${name} must contain from 1 to 200 non-whitespace characters.`);
+  }
+};
+
+/** Creates an immutable built-in Provider value without credential fields. */
+export const defineBuiltInSandboxProvider = (
+  provider: BuiltInSandboxProvider,
+): BuiltInSandboxProvider => {
+  assertDefinitionPart(provider.providerKey, "Sandbox Provider Key");
+  assertDefinitionPart(provider.revision, "Sandbox Provider Revision");
+  if (provider.kind === "unsafe-host" && provider.unsafeAcknowledged !== true) {
+    throw new Error("Unsafe host execution requires unsafeAcknowledged: true.");
+  }
+  if (provider.kind !== "unsafe-host" && provider.unsafeAcknowledged !== undefined) {
+    throw new Error("Only the unsafe-host Provider may acknowledge host execution.");
+  }
+  return immutable({ ...provider });
+};
+
+/** Creates an immutable custom Provider value with its Host-facing operations. */
+export const defineCustomSandboxProvider = (
+  provider: CustomSandboxProvider,
+): CustomSandboxProvider => {
+  assertDefinitionPart(provider.providerKey, "Sandbox Provider Key");
+  assertDefinitionPart(provider.revision, "Sandbox Provider Revision");
+  return immutable({ ...provider });
+};
+
+/** Creates an immutable, credential-free Sandbox Image Definition. */
+export const defineSandboxImage = (image: SandboxImageDefinition): SandboxImageDefinition => {
+  assertDefinitionPart(image.imageKey, "Sandbox Image Key");
+  assertDefinitionPart(image.revision, "Sandbox Image Revision");
+  if (image.source.reference.trim().length === 0) {
+    throw new Error("Sandbox Image source reference must not be empty.");
+  }
+  return immutable({ ...image, source: { ...image.source } });
+};
+
+/** Creates an immutable logical Workflow Sandbox definition. */
+export const defineSandbox = (sandbox: WorkflowSandboxDefinition): WorkflowSandboxDefinition => {
+  assertDefinitionPart(sandbox.sandboxKey, "Workflow Sandbox Key");
+  assertDefinitionPart(sandbox.revision, "Workflow Sandbox Revision");
+  return immutable({ ...sandbox });
+};
+
+/** Creates an immutable Command value with an explicit argument vector. */
+export const defineCommand = (command: Command): Command => {
+  assertDefinitionPart(command.commandKey, "Command Key");
+  assertDefinitionPart(command.revision, "Command Revision");
+  if (
+    command.arguments.length === 0 ||
+    command.arguments.some((argument) => argument.length === 0)
+  ) {
+    throw new Error(
+      "Command arguments must contain a non-empty executable and no empty arguments.",
+    );
+  }
+  return immutable({
+    ...command,
+    arguments: [...command.arguments],
+    ...(command.environment === undefined ? {} : { environment: { ...command.environment } }),
+  });
+};
 
 export interface WorkflowDefinition<
   Input extends Schema.Top,
