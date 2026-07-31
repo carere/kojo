@@ -26,6 +26,28 @@ export function WorkflowRuns(props: WorkflowRunsProps) {
     props.snapshots.flatMap((snapshot) =>
       snapshot.runs.map((run) => ({ project: snapshot.project, run })),
     );
+  const treeRuns = () => {
+    const all = runs();
+    const byParent = new Map<string, typeof all>();
+    const roots: typeof all = [];
+    for (const item of all) {
+      const parent = item.run.parentRunId;
+      if (parent == null || !all.some((candidate) => candidate.run.runId === parent)) {
+        roots.push(item);
+        continue;
+      }
+      const children = byParent.get(parent) ?? [];
+      children.push(item);
+      byParent.set(parent, children);
+    }
+    const ordered: Array<(typeof all)[number] & { readonly depth: number }> = [];
+    const add = (item: (typeof all)[number], depth: number) => {
+      ordered.push({ ...item, depth });
+      for (const child of byParent.get(item.run.runId) ?? []) add(child, depth + 1);
+    };
+    for (const root of roots) add(root, 0);
+    return ordered;
+  };
   const parsedValue = (
     runId: string,
   ): { readonly ok: true; readonly value: unknown } | undefined => {
@@ -48,9 +70,14 @@ export function WorkflowRuns(props: WorkflowRunsProps) {
       </p>
       <Show when={error()}>{(message) => <p class="text-destructive text-sm">{message()}</p>}</Show>
       <ul class="space-y-1 font-mono text-xs">
-        <For each={runs()}>
-          {({ project, run }) => (
-            <li>
+        <For each={treeRuns()}>
+          {({ project, run, depth }) => (
+            <li
+              class={depth === 0 ? undefined : "border-muted border-l-2 pl-3"}
+              data-parent-run-id={run.parentRunId}
+              data-run-id={run.runId}
+              style={{ "margin-left": `${depth * 1.5}rem` }}
+            >
               <Button
                 size="xs"
                 variant="ghost"
@@ -60,6 +87,12 @@ export function WorkflowRuns(props: WorkflowRunsProps) {
               </Button>{" "}
               <span class="text-muted-foreground">{run.state}</span> {run.workflowKey}@
               {run.workflowRevision}
+              <Show when={run.parentRunId != null}>
+                <span class="text-muted-foreground">
+                  {" "}
+                  ← {run.parentRunId} ({run.childInvocationKey})
+                </span>
+              </Show>
               <Show when={run.allowedActions.length > 0}>
                 <div class="mt-2 flex flex-wrap items-center gap-2 font-sans">
                   <input

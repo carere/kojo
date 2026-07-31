@@ -36,6 +36,12 @@ export interface WorkflowRunScheduleStartRecord extends WorkflowRunStartRecord {
   readonly scheduleRevision: string;
 }
 
+/** A child invocation is identified by its parent, target Workflow Key, and stable invocation key. */
+export interface WorkflowRunChildStartRecord extends WorkflowRunStartRecord {
+  readonly parentRunId: string;
+  readonly invocationKey: string;
+}
+
 export interface PendingWorkflowRunSubmission {
   readonly engineGeneration: number;
   readonly project: ProjectSnapshot;
@@ -51,6 +57,7 @@ export interface ActiveWorkflowRun {
   readonly workflowKey: string;
   readonly workflowRevision: string;
   readonly state: "running" | "suspended" | "stopping";
+  readonly suspensionKind: WorkflowRunSuspension["kind"] | null;
 }
 
 export interface WorkflowRunOutcome {
@@ -96,6 +103,10 @@ export type WorkflowRunScheduleStartAcceptance =
   | WorkflowRunStartAcceptance
   | { readonly _tag: "occurrence-not-planned" };
 
+export type WorkflowRunChildStartAcceptance =
+  | WorkflowRunStartAcceptance
+  | { readonly _tag: "invocation-key-conflict" };
+
 export interface WorkflowRunRepositoryShape {
   readonly acceptManualStart: (
     start: WorkflowRunStartRecord,
@@ -103,6 +114,9 @@ export interface WorkflowRunRepositoryShape {
   readonly acceptScheduledStart: (
     start: WorkflowRunScheduleStartRecord,
   ) => Effect.Effect<WorkflowRunScheduleStartAcceptance>;
+  readonly acceptChildStart: (
+    start: WorkflowRunChildStartRecord,
+  ) => Effect.Effect<WorkflowRunChildStartAcceptance>;
   readonly list: (
     project: ProjectSnapshot,
     input: WorkflowRunListInput,

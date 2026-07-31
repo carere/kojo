@@ -41,6 +41,7 @@ import { decideWorkflowActivityReplay } from "../../runs/models/workflow-activit
 import type { StoredWorkflowRunSnapshot } from "../../runs/repositories/workflow-run-repository";
 import {
   type WorkflowActivityAttemptRecord,
+  type WorkflowRunChildStartRecord,
   WorkflowRunRepository,
   type WorkflowRunScheduleStartRecord,
   type WorkflowRunStartRecord,
@@ -1247,6 +1248,8 @@ type StoredRun = {
   readonly finalized_at_ms: number | null;
   readonly outcome_summary_json: string | null;
   readonly outcome_event_id: string | null;
+  readonly parent_run_id: string | null;
+  readonly child_invocation_key: string | null;
   readonly run_id: string;
   readonly start_request_key: string;
   readonly state: string;
@@ -1262,7 +1265,7 @@ const readStoredRun = (connection: Database, runId: string): StoredRun | undefin
     .query(
       `SELECT run_id, start_request_key, workflow_key, workflow_revision, state,
         accepted_at_ms, engine_confirmed_at_ms, updated_at_ms, finalized_at_ms, outcome_summary_json,
-        outcome_event_id, suspension_kind, suspension_details_json
+        outcome_event_id, parent_run_id, child_invocation_key, suspension_kind, suspension_details_json
        FROM kojo_workflow_runs WHERE run_id = ?`,
     )
     .get(runId) as StoredRun | null) ?? undefined;
@@ -1319,6 +1322,8 @@ const toRunListItem = (connection: Database, row: StoredRun): WorkflowRunListIte
   engineConfirmedAtMs: row.engine_confirmed_at_ms,
   updatedAtMs: row.updated_at_ms,
   finalizedAtMs: row.finalized_at_ms,
+  parentRunId: row.parent_run_id as WorkflowRunListItem["parentRunId"],
+  childInvocationKey: row.child_invocation_key,
   allowedActions:
     row.state !== "suspended"
       ? []
@@ -1442,6 +1447,7 @@ const appendEvent = (
     readonly engineOperationId?: string;
     readonly eventId: string;
     readonly kind: string;
+    readonly childRunId?: string;
     readonly payload: unknown;
     readonly sensitivityMap: SensitivityMap;
     readonly recordedAtMs: number;
@@ -1454,10 +1460,10 @@ const appendEvent = (
     .query(
       `INSERT INTO kojo_execution_events(
         event_id, run_id, sequence, envelope_version, kind, kind_version, recorded_at_ms,
-        engine_operation_id, activity_attempt_id,
+        engine_operation_id, activity_attempt_id, child_run_id,
         payload_encoding_version, payload_schema_identity, payload_json,
         payload_sensitivity_map_version, payload_sensitivity_map_json, payload_sha256
-      ) VALUES (?, ?, ?, 1, ?, 1, ?, ?, ?, 1, 'kojo.workflow-run-event/v1', ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, 1, ?, 1, ?, ?, ?, ?, 1, 'kojo.workflow-run-event/v1', ?, ?, ?, ?)`,
     )
     .run(
       options.eventId,
@@ -1467,6 +1473,7 @@ const appendEvent = (
       options.recordedAtMs,
       options.engineOperationId ?? null,
       options.activityAttemptId ?? null,
+      options.childRunId ?? null,
       payloadJson,
       SENSITIVITY_MAP_VERSION,
       encodeSensitivityMap(options.sensitivityMap),
@@ -2377,6 +2384,120 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
         }),
       ),
     ),
+  acceptChildStart: (start: WorkflowRunChildStartRecord) =>
+    Effect.sync(() =>
+      withWritableProjectStore(start.project, (connection) =>
+        transaction(connection, () => {
+          const parent = readStoredRun(connection, start.parentRunId);
+          if (parent === undefined || ["completed", "failed", "stopped"].includes(parent.state)) {
+            return { _tag: "invocation-key-conflict" as const };
+          }
+          const existing =
+            (connection
+              .query(
+                `SELECT run_id, start_request_sha256 FROM kojo_workflow_runs
+                 WHERE parent_run_id = ? AND workflow_key = ? AND child_invocation_key = ?`,
+              )
+              .get(start.parentRunId, start.workflowKey, start.invocationKey) as {
+              readonly run_id: string;
+              readonly start_request_sha256: Uint8Array;
+            } | null) ?? undefined;
+          if (existing !== undefined) {
+            if (!sameBytes(existing.start_request_sha256, start.requestHash)) {
+              return { _tag: "invocation-key-conflict" as const };
+            }
+            const run = readRunSnapshot(connection, existing.run_id);
+            if (run === undefined) throw new Error("Child Workflow Run has no stored snapshot");
+            return { _tag: "accepted" as const, run, alreadyApplied: true };
+          }
+
+          const engineReferenceJson = JSON.stringify({
+            kind: "effect-workflow",
+            runId: start.runId,
+            workflowKey: start.workflowKey,
+            workflowRevision: start.workflowRevision,
+          });
+          const operationJson = JSON.stringify({
+            input: start.encodedInput,
+            workflowKey: start.workflowKey,
+            workflowRevision: start.workflowRevision,
+          });
+          const childEventId = randomUUID();
+          const parentEventId = randomUUID();
+          const operationId = randomUUID();
+          connection
+            .query(
+              `INSERT INTO kojo_workflow_runs(
+                run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision,
+                engine_reference_version, engine_reference_json, engine_reference_sha256,
+                trigger_kind, parent_run_id, child_invocation_key, state, last_event_sequence,
+                row_version, accepted_at_ms, updated_at_ms
+              ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, 'child', ?, ?, 'running', 1, 1, ?, ?)`,
+            )
+            .run(
+              start.runId,
+              start.requestKey,
+              start.requestHash,
+              start.workflowKey,
+              start.workflowRevision,
+              engineReferenceJson,
+              hash(engineReferenceJson),
+              start.parentRunId,
+              start.invocationKey,
+              start.acceptedAtMs,
+              start.acceptedAtMs,
+            );
+          appendEvent(connection, {
+            eventId: childEventId,
+            kind: "run.accepted",
+            payload: start.startSnapshot,
+            recordedAtMs: start.acceptedAtMs,
+            runId: start.runId,
+            sequence: 1,
+            sensitivityMap: prefixedSensitivityMap("input", start.inputSensitivityPaths),
+          });
+          connection
+            .query(
+              `INSERT INTO kojo_engine_operations(
+                operation_id, run_id, kind, operation_key, request_encoding_version,
+                request_schema_identity, request_json, request_sensitivity_map_version,
+                request_sensitivity_map_json, request_sha256, state, attempt_count,
+                next_attempt_at_ms, created_at_ms, updated_at_ms
+              ) VALUES (?, ?, 'submit', 'initial', 1, 'kojo.workflow-run-submit/v1', ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`,
+            )
+            .run(
+              operationId,
+              start.runId,
+              operationJson,
+              SENSITIVITY_MAP_VERSION,
+              encodeSensitivityMap(prefixedSensitivityMap("input", start.inputSensitivityPaths)),
+              hash(operationJson),
+              start.acceptedAtMs,
+              start.acceptedAtMs,
+              start.acceptedAtMs,
+            );
+          const parentSequence = nextEventSequence(connection, start.parentRunId);
+          appendEvent(connection, {
+            eventId: parentEventId,
+            kind: "child.started",
+            childRunId: start.runId,
+            payload: {
+              invocationKey: start.invocationKey,
+              runId: start.runId,
+              workflowKey: start.workflowKey,
+            },
+            recordedAtMs: start.acceptedAtMs,
+            runId: start.parentRunId,
+            sequence: parentSequence,
+            sensitivityMap: sensitivityMap([]),
+          });
+          advanceRunTrace(connection, start.parentRunId, parentSequence, start.acceptedAtMs);
+          const run = readRunSnapshot(connection, start.runId);
+          if (run === undefined) throw new Error("Child Workflow Run was not stored");
+          return { _tag: "accepted" as const, run, alreadyApplied: false };
+        }),
+      ),
+    ),
   list: (project, input) =>
     Effect.sync(() =>
       withWritableProjectStore(project, (connection) => {
@@ -2390,13 +2511,17 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           clauses.push(`state IN (${input.states.map(() => "?").join(", ")})`);
           parameters.push(...input.states);
         }
+        if (input.parentRunId !== undefined) {
+          clauses.push(input.parentRunId === null ? "parent_run_id IS NULL" : "parent_run_id = ?");
+          if (input.parentRunId !== null) parameters.push(input.parentRunId);
+        }
         parameters.push(input.limit);
         const where = clauses.length === 0 ? "" : `WHERE ${clauses.join(" AND ")}`;
         const rows = connection
           .query(
             `SELECT run_id, start_request_key, workflow_key, workflow_revision, state,
               accepted_at_ms, engine_confirmed_at_ms, updated_at_ms, finalized_at_ms, outcome_summary_json,
-              outcome_event_id, suspension_kind, suspension_details_json
+              outcome_event_id, parent_run_id, child_invocation_key, suspension_kind, suspension_details_json
              FROM kojo_workflow_runs ${where}
              ORDER BY accepted_at_ms DESC, run_id DESC LIMIT ?`,
           )
@@ -2446,7 +2571,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
       withWritableProjectStore(project, (connection) => {
         const rows = connection
           .query(
-            `SELECT run_id, workflow_key, workflow_revision, state
+            `SELECT run_id, workflow_key, workflow_revision, state, suspension_kind
              FROM kojo_workflow_runs
              WHERE state IN ('running', 'suspended', 'stopping')
              ORDER BY accepted_at_ms ASC, run_id ASC`,
@@ -2454,6 +2579,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           .all() as ReadonlyArray<{
           readonly run_id: string;
           readonly state: "running" | "suspended" | "stopping";
+          readonly suspension_kind: "clock" | "manual" | "deferred" | null;
           readonly workflow_key: string;
           readonly workflow_revision: string;
         }>;
@@ -2463,6 +2589,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           workflowKey: row.workflow_key,
           workflowRevision: row.workflow_revision,
           state: row.state,
+          suspensionKind: row.suspension_kind,
         }));
       }),
     ),
@@ -3041,6 +3168,13 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
         transaction(connection, () => {
           const run = readStoredRun(connection, runId);
           if (run === undefined || !["running", "suspended"].includes(run.state)) return;
+          const nonFinalChild = connection
+            .query(
+              `SELECT run_id FROM kojo_workflow_runs
+               WHERE parent_run_id = ? AND state IN ('running', 'suspended', 'stopping') LIMIT 1`,
+            )
+            .get(runId) as { readonly run_id: string } | null;
+          if (nonFinalChild !== null) return;
           const sequence = connection
             .query("SELECT last_event_sequence FROM kojo_workflow_runs WHERE run_id = ?")
             .get(runId) as { readonly last_event_sequence: number };

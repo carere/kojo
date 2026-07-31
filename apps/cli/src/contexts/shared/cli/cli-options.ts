@@ -8,6 +8,7 @@ export interface ParsedOptions {
   readonly args: ReadonlyArray<string>;
   readonly projectId?: string;
   readonly projectPath?: string;
+  readonly parentRunId?: string;
   readonly requestKey?: string;
   readonly revision?: string;
   readonly reveal: boolean;
@@ -27,6 +28,7 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
   const remaining: Array<string> = [];
   let projectId: string | undefined;
   let projectPath: string | undefined;
+  let parentRunId: string | undefined;
   let requestKey: string | undefined;
   let revision: string | undefined;
   let reveal = false;
@@ -51,6 +53,7 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
       ![
         "--project",
         "--project-id",
+        "--parent-run",
         "--request-key",
         "--revision",
         "--condition",
@@ -105,6 +108,9 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
     } else if (argument === "--project-id") {
       if (projectId !== undefined) return undefined;
       projectId = optionValue;
+    } else if (argument === "--parent-run") {
+      if (parentRunId !== undefined) return undefined;
+      parentRunId = optionValue;
     } else {
       if (requestKey !== undefined) return undefined;
       requestKey = optionValue;
@@ -115,6 +121,7 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
     args: remaining,
     projectId,
     projectPath,
+    parentRunId,
     requestKey,
     revision,
     reveal,

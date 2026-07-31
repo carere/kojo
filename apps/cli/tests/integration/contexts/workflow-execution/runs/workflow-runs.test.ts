@@ -178,6 +178,16 @@ export default defineConfig({
 });
 `;
 
+const childConfiguration = `
+import { Effect, Schema } from "effect";
+import { Workflow, defineConfig, defineWorkflow } from "@kojo/workflow";
+const input = Schema.Struct({ message: Schema.String });
+export default defineConfig({ workflows: [
+  defineWorkflow({ workflowKey: "child", revision: "1", inputSchema: input, successSchema: Schema.String, failureSchema: Schema.String, handler: ({ message }) => Effect.succeed("child:" + message) }),
+  defineWorkflow({ workflowKey: "parent", revision: "1", inputSchema: input, successSchema: Schema.String, failureSchema: Schema.String, childWorkflowKeys: ["child"], handler: ({ message }) => Workflow.invokeChild({ invocationKey: "child", workflowKey: "child", input: { message } }).pipe(Effect.map(String)) })
+] });
+`;
+
 const durableWaitConfiguration = `
 import { Effect, Schema } from "effect";
 import { Workflow, defineConfig, defineWorkflow } from "@kojo/workflow";
@@ -460,6 +470,39 @@ it("starts, redelivers, lists, and shows one durable Workflow Run", async () => 
   );
   expect(shown.exitCode).toBe(0);
   expect(JSON.parse(shown.stdout).result).toMatchObject({ run: { runId: firstResult.run.runId } });
+});
+
+it("runs, inspects, and filters a durable Child Workflow Run", async () => {
+  const directory = await makeTemporaryDirectory("kojo-child-workflow-runs-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), childConfiguration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "parent", "--input", '{"message":"hello"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const parent = await waitForFinalRun(
+    host.socketPath,
+    project,
+    JSON.parse(started.stdout).result.run.runId,
+  );
+  expect(parent).toMatchObject({ state: "completed", outcome: { value: "child:hello" } });
+  const children = await runKojoCli(
+    ["run", "list", "--parent-run", parent.runId as string, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(children.exitCode, `${children.stdout}${children.stderr}`).toBe(0);
+  expect(JSON.parse(children.stdout).result).toMatchObject([
+    { parentRunId: parent.runId, childInvocationKey: "child", workflowKey: "child" },
+  ]);
 });
 
 it("reconciles a non-final Workflow Run after the Host restarts", async () => {

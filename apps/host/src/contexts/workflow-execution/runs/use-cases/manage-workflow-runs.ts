@@ -83,12 +83,18 @@ const projectLayoutError = (identity: ProjectIdentity, message: string, findingK
 
 export const asLocalDefinition = (
   definition: AnyWorkflowDefinition,
+  definitionSnapshotId?: string,
 ): AnyLocalWorkflowDefinition => ({
   workflowKey: definition.workflowKey,
   revision: definition.revision,
   inputSchema: definition.inputSchema,
   successSchema: definition.successSchema,
   failureSchema: definition.failureSchema,
+  childWorkflowKeys: definition.childWorkflowKeys,
+  sensitivity: definition.sensitivity,
+  sourceIdentity: definition.handler.toString(),
+  inputSchemaFingerprint: undefined,
+  definitionSnapshotId,
   execute: (input, operations) =>
     definition.handler(input).pipe(Effect.provideService(WorkflowOperations, operations)),
 });
@@ -278,7 +284,11 @@ const reconcilePendingWorkflowRuns = (
       validation.project,
       Effect.gen(function* () {
         const activeRuns = yield* repository.activeRuns(validation.project);
-        yield* backend.register(validation.project, executable.map(asLocalDefinition), repository);
+        yield* backend.register(
+          validation.project,
+          executable.map((definition) => asLocalDefinition(definition, definitions.snapshotId)),
+          repository,
+        );
         for (const activeRun of activeRuns) {
           const definition = executable.find(
             (candidate) =>
@@ -293,7 +303,23 @@ const reconcilePendingWorkflowRuns = (
               definition,
               activeRun.runId,
             );
-            if (activeRun.state === "suspended" && backend.rehydrate !== undefined) {
+          }
+        }
+        // Submit every durable child before probing parents. A parent may be
+        // waiting inside its Workflow engine for that child, so observing it
+        // first can delay ordinary Run inspection behind the child's submit.
+        for (const activeRun of yield* repository.activeRuns(validation.project)) {
+          const definition = executable.find(
+            (candidate) =>
+              candidate.workflowKey === activeRun.workflowKey &&
+              candidate.revision === activeRun.workflowRevision,
+          );
+          if (definition !== undefined) {
+            if (
+              activeRun.state === "suspended" &&
+              (activeRun.suspensionKind === "manual" || activeRun.suspensionKind === "deferred") &&
+              backend.rehydrate !== undefined
+            ) {
               yield* backend
                 .rehydrate(
                   validation.project,
@@ -511,7 +537,11 @@ export const startWorkflowRun = (input: {
     const accepted = yield* runtime.coordinateLifecycle(
       validation.project,
       Effect.gen(function* () {
-        yield* backend.register(validation.project, [asLocalDefinition(definition)], repository);
+        yield* backend.register(
+          validation.project,
+          executable.map((candidate) => asLocalDefinition(candidate, definitions.snapshotId)),
+          repository,
+        );
         return yield* repository.acceptManualStart({
           project: validation.project,
           requestKey: input.requestKey,
@@ -570,8 +600,15 @@ export const listWorkflowRuns = (
   Effect.gen(function* () {
     const resolved = yield* resolveProject(input.identity);
     if ("code" in resolved) return { ok: false, error: resolved };
-    yield* reconcilePendingWorkflowRuns(resolved);
     const repository = yield* WorkflowRunRepository;
+    const current = yield* repository.list(resolved.project, input);
+    if (
+      current.length === 0 ||
+      current.every((run) => ["completed", "failed", "stopped"].includes(run.state))
+    ) {
+      return { ok: true, runs: current };
+    }
+    yield* reconcilePendingWorkflowRuns(resolved);
     return { ok: true, runs: yield* repository.list(resolved.project, input) };
   });
 

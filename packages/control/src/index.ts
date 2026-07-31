@@ -435,6 +435,11 @@ export const WorkflowRunStartSnapshot = Schema.Struct({
   trigger: Schema.Union([
     Schema.Struct({ kind: Schema.Literal("manual"), requestKey: RequestKey }),
     Schema.Struct({
+      kind: Schema.Literal("child"),
+      parentRunId: WorkflowRunId,
+      invocationKey: Schema.String,
+    }),
+    Schema.Struct({
       kind: Schema.Literal("schedule"),
       requestKey: RequestKey,
       scheduleKey: Schema.String,
@@ -503,6 +508,8 @@ export const WorkflowRunListItem = Schema.Struct({
   engineConfirmedAtMs: Schema.NullOr(Schema.Number),
   updatedAtMs: Schema.Number,
   finalizedAtMs: Schema.NullOr(Schema.Number),
+  parentRunId: Schema.optionalKey(Schema.NullOr(WorkflowRunId)),
+  childInvocationKey: Schema.optionalKey(Schema.NullOr(Schema.String)),
   allowedActions: Schema.Array(WorkflowRunAction),
   activitySummary: WorkflowActivitySummary,
 });
@@ -592,6 +599,7 @@ export type WorkflowRunMutationResult = typeof WorkflowRunMutationResult.Type;
 
 export const WorkflowRunListInput = Schema.Struct({
   identity: ProjectIdentity,
+  parentRunId: Schema.optionalKey(Schema.NullOr(WorkflowRunId)),
   workflowKeys: Schema.Array(Schema.String),
   states: Schema.Array(WorkflowRunState),
   limit: Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 200 })),
