@@ -75,3 +75,20 @@ export const completeWorkflowDeferred = (
           .completeWorkflowDeferred(identity, runId, token, value, requestKey)
           .pipe(Effect.mapError(hostError)),
   );
+
+export const stopWorkflowRun = (
+  identity: ProjectIdentity,
+  runId: WorkflowRunId,
+  requestKey: RequestKey,
+) =>
+  Effect.flatMap(HostControlClient, (client) =>
+    client.stopWorkflowRun === undefined
+      ? Effect.fail(
+          new HostOverviewError({
+            code: "host-unavailable",
+            message: "The visualizer Host client cannot stop Workflow Runs.",
+            next: "Restart the visualizer and try again.",
+          }),
+        )
+      : client.stopWorkflowRun(identity, runId, requestKey).pipe(Effect.mapError(hostError)),
+  );

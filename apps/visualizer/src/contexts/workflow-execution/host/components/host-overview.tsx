@@ -96,6 +96,14 @@ export function HostOverview(props: HostOverviewProps) {
     );
     await refetch();
   };
+  const stop = async (identity: ProjectIdentity, runId: WorkflowRunId) => {
+    await visualizerApiRuntime.runPromise(
+      Effect.flatMap(VisualizerApiClient, (client) =>
+        client.StopWorkflowRun({ identity, runId, requestKey: crypto.randomUUID() as never }),
+      ),
+    );
+    await refetch();
+  };
 
   return (
     <main class="mx-auto flex min-h-screen max-w-3xl items-center px-6">
@@ -143,6 +151,7 @@ export function HostOverview(props: HostOverviewProps) {
                 snapshots={current().workflowRuns}
                 onResume={resume}
                 onCompleteDeferred={completeDeferred}
+                onStop={stop}
                 onShowRun={(identity, runId) =>
                   setNavigation(`Workflow Run ${runId} in Project ${identity}`)
                 }

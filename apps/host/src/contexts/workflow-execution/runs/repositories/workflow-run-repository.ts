@@ -52,6 +52,7 @@ export interface PendingWorkflowRunSubmission {
 }
 
 export interface ActiveWorkflowRun {
+  readonly parentRunId: string | null;
   readonly project: ProjectSnapshot;
   readonly runId: string;
   readonly workflowKey: string;
@@ -59,6 +60,19 @@ export interface ActiveWorkflowRun {
   readonly state: "running" | "suspended" | "stopping";
   readonly suspensionKind: WorkflowRunSuspension["kind"] | null;
 }
+
+export interface StoppingWorkflowRun extends ActiveWorkflowRun {}
+
+export type WorkflowRunStopAcceptance =
+  | {
+      readonly _tag: "accepted";
+      readonly run: StoredWorkflowRunSnapshot;
+      readonly runs: ReadonlyArray<StoppingWorkflowRun>;
+      readonly alreadyApplied: boolean;
+    }
+  | { readonly _tag: "request-key-conflict" }
+  | { readonly _tag: "not-found" }
+  | { readonly _tag: "not-stoppable"; readonly run: StoredWorkflowRunSnapshot };
 
 export interface WorkflowRunOutcome {
   readonly kind: "completed" | "failed";
@@ -204,6 +218,32 @@ export interface WorkflowRunRepositoryShape {
     runId: string,
     suspension: WorkflowRunSuspension,
     suspendedAtMs: number,
+  ) => Effect.Effect<void>;
+  /**
+   * Atomically records the first stop intent for a non-final Run and every
+   * non-final descendant before any backend interruption begins.
+   */
+  readonly acceptStop: (
+    project: ProjectSnapshot,
+    options: {
+      readonly requestHash: Uint8Array;
+      readonly requestKey: RequestKey;
+      readonly runId: string;
+      readonly requestedAtMs: number;
+    },
+  ) => Effect.Effect<WorkflowRunStopAcceptance>;
+  /** Finalizes one stopping Run only after all of its children are final. */
+  readonly recordStopped: (
+    project: ProjectSnapshot,
+    runId: string,
+    stoppedAtMs: number,
+  ) => Effect.Effect<void>;
+  /** Records an interrupt or cleanup failure while keeping the Run stopping. */
+  readonly recordStopAttention: (
+    project: ProjectSnapshot,
+    runId: string,
+    message: string,
+    recordedAtMs: number,
   ) => Effect.Effect<void>;
   readonly reserveControl: (
     project: ProjectSnapshot,

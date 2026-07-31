@@ -30,6 +30,7 @@ export const CONTROL_CAPABILITIES = [
   "runs:reveal",
   "runs:resume",
   "runs:deferred-complete",
+  "runs:stop",
 ] as const;
 
 export const ControlCapability = Schema.String.check(
@@ -422,7 +423,7 @@ export const WorkflowRunSuspension = Schema.Struct({
 });
 export type WorkflowRunSuspension = typeof WorkflowRunSuspension.Type;
 
-export const WorkflowRunAction = Schema.Literals(["resume", "deferred-complete"]);
+export const WorkflowRunAction = Schema.Literals(["resume", "deferred-complete", "stop"]);
 export type WorkflowRunAction = typeof WorkflowRunAction.Type;
 
 export const WorkflowRunStartSnapshot = Schema.Struct({
@@ -565,7 +566,7 @@ export const WorkflowRunSnapshot = Schema.Struct({
   outcome: Schema.Union([
     Schema.Null,
     Schema.Struct({
-      kind: Schema.Literals(["completed", "failed"]),
+      kind: Schema.Literals(["completed", "failed", "stopped"]),
       value: Schema.optionalKey(Schema.Unknown),
     }),
     MaskedWorkflowValue,
@@ -583,6 +584,8 @@ export const WorkflowRunOperationErrorCode = Schema.Literals([
   "workflow-input-invalid",
   "request-key-conflict",
   "run-not-found",
+  "run-stop-not-allowed",
+  "run-stop-needs-attention",
   "run-not-suspended",
   "run-resume-not-allowed",
   "workflow-deferred-not-found",
@@ -827,6 +830,19 @@ export const CompleteWorkflowDeferred = Rpc.make("CompleteWorkflowDeferred", {
   success: WorkflowRunMutationResult,
 });
 
+/**
+ * Records durable stop intent before the Host interrupts the Run tree. This is
+ * deliberately separate from client connection lifetime.
+ */
+export const StopWorkflowRun = Rpc.make("StopWorkflowRun", {
+  payload: {
+    identity: ProjectIdentity,
+    runId: WorkflowRunId,
+    requestKey: RequestKey,
+  },
+  success: WorkflowRunMutationResult,
+});
+
 export const RegisterProject = Rpc.make("RegisterProject", {
   payload: { path: Schema.String, requestKey: RequestKey },
   success: ProjectMutationResult,
@@ -863,6 +879,7 @@ export const KojoControl = RpcGroup.make(
   RevealWorkflowRun,
   ResumeWorkflowRun,
   CompleteWorkflowDeferred,
+  StopWorkflowRun,
   RegisterProject,
   ForgetProject,
   ReplayForgetProject,

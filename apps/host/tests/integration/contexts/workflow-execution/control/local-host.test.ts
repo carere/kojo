@@ -94,6 +94,7 @@ describe("local Kojo Host control", () => {
               "runs:reveal",
               "runs:resume",
               "runs:deferred-complete",
+              "runs:stop",
             ],
           },
           projects: [],

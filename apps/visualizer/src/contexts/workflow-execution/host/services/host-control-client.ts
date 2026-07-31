@@ -44,6 +44,14 @@ export interface HostControlClientShape {
     WorkflowRunMutationResult,
     LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
   >;
+  readonly stopWorkflowRun?: (
+    identity: ProjectIdentity,
+    runId: WorkflowRunId,
+    requestKey: RequestKey,
+  ) => Effect.Effect<
+    WorkflowRunMutationResult,
+    LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+  >;
 }
 
 export class HostControlClient extends Context.Service<HostControlClient, HostControlClientShape>()(
@@ -97,6 +105,17 @@ export const HostControlClientLive = Layer.succeed(HostControlClient, {
       makeDefaultLocalClient(
         process.env.KOJO_HOST_SOCKET ?? defaultSocketPath(),
       ).completeWorkflowDeferred(identity, runId, token, value, requestKey),
+    ) as unknown as Effect.Effect<
+      WorkflowRunMutationResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >,
+  stopWorkflowRun: (identity, runId, requestKey) =>
+    Effect.suspend(() =>
+      makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath()).stopWorkflowRun(
+        identity,
+        runId,
+        requestKey,
+      ),
     ) as unknown as Effect.Effect<
       WorkflowRunMutationResult,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError

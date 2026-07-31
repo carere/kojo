@@ -2228,3 +2228,208 @@ it("completes a Workflow Deferred only with its token and a schema-valid value",
     outcome: { kind: "completed", value: "deferred:approved" },
   });
 });
+
+it("durably stops a running Run before interruption, rejects restart controls, and survives redelivery", async () => {
+  const directory = await makeTemporaryDirectory("kojo-stop-running-run-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), configuration);
+  const hostStore = join(directory.path, "host");
+  const host = await startKojoHostProcess({ storePath: hostStore });
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "slow", "--input", '{"message":"stop"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = JSON.parse(started.stdout).result.run.runId as string;
+  const stopped = await runKojoCli(
+    ["run", "stop", runId, "--request-key", "stop-running-run", "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(stopped.exitCode, `${stopped.stdout}${stopped.stderr}`).toBe(0);
+  expect(JSON.parse(stopped.stdout).result).toMatchObject({
+    alreadyApplied: false,
+    run: { state: "stopped", outcome: { kind: "stopped" }, allowedActions: [] },
+  });
+
+  const redelivered = await runKojoCli(
+    ["run", "stop", runId, "--request-key", "stop-running-run", "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(redelivered.exitCode, `${redelivered.stdout}${redelivered.stderr}`).toBe(0);
+  expect(JSON.parse(redelivered.stdout).result.alreadyApplied).toBe(true);
+
+  const rejectedResume = await runKojoCli(
+    ["run", "resume", runId, "--value", '"ignored"', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(rejectedResume.exitCode).toBe(4);
+  expect(JSON.parse(rejectedResume.stdout).error.code).toBe("run-not-suspended");
+  const rejectedStop = await runKojoCli(
+    ["run", "stop", runId, "--request-key", "second-stop", "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(rejectedStop.exitCode).toBe(4);
+  expect(JSON.parse(rejectedStop.stdout).error.code).toBe("run-stop-not-allowed");
+
+  const database = new Database(join(project, ".kojo", "kojo.sqlite"), { readonly: true });
+  try {
+    const events = database
+      .query("SELECT kind FROM kojo_execution_events WHERE run_id = ? ORDER BY sequence")
+      .all(runId) as ReadonlyArray<{ readonly kind: string }>;
+    expect(events.map((event) => event.kind)).toEqual(
+      expect.arrayContaining(["run.stop-requested", "run.stopped"]),
+    );
+  } finally {
+    database.close();
+  }
+
+  await host.stop();
+  const restarted = await startKojoHostProcess({ storePath: hostStore });
+  cleanups.push(restarted.stop);
+  const afterRestart = await runKojoCli(
+    ["run", "show", runId, "--json"],
+    restarted.socketPath,
+    project,
+  );
+  expect(afterRestart.exitCode, `${afterRestart.stdout}${afterRestart.stderr}`).toBe(0);
+  expect(JSON.parse(afterRestart.stdout).result.run).toMatchObject({ state: "stopped" });
+});
+
+it("stops a suspended Run without requiring a resume value", async () => {
+  const directory = await makeTemporaryDirectory("kojo-stop-suspended-run-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), durableWaitConfiguration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "manual-wait", "--input", '{"message":"stop"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = JSON.parse(started.stdout).result.run.runId as string;
+  let shown = await runKojoCli(["run", "show", runId, "--json"], host.socketPath, project);
+  for (
+    let attempt = 0;
+    attempt < 100 && JSON.parse(shown.stdout).result.run.state !== "suspended";
+    attempt += 1
+  ) {
+    await Bun.sleep(25);
+    shown = await runKojoCli(["run", "show", runId, "--json"], host.socketPath, project);
+  }
+  expect(JSON.parse(shown.stdout).result.run).toMatchObject({
+    state: "suspended",
+    allowedActions: expect.arrayContaining(["resume", "stop"]),
+  });
+
+  const stopped = await runKojoCli(["run", "stop", runId, "--json"], host.socketPath, project);
+  expect(stopped.exitCode, `${stopped.stdout}${stopped.stderr}`).toBe(0);
+  expect(JSON.parse(stopped.stdout).result.run).toMatchObject({
+    state: "stopped",
+    outcome: { kind: "stopped" },
+    allowedActions: [],
+  });
+});
+
+it("does not stop a Run when the CLI transport is interrupted", async () => {
+  const directory = await makeTemporaryDirectory("kojo-stop-interrupted-cli-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), configuration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "slow", "--input", '{"message":"keep-running"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = JSON.parse(started.stdout).result.run.runId as string;
+  const interruptedClient = Bun.spawn(
+    [
+      "bun",
+      "run",
+      fileURLToPath(new URL("../../../../../../../apps/cli/main.ts", import.meta.url)),
+      "run",
+      "show",
+      runId,
+      "--json",
+    ],
+    {
+      cwd: project,
+      env: { ...process.env, KOJO_HOST_SOCKET: host.socketPath },
+      stderr: "ignore",
+      stdout: "ignore",
+    },
+  );
+  interruptedClient.kill("SIGTERM");
+  await interruptedClient.exited;
+
+  const shown = await runKojoCli(["run", "show", runId, "--json"], host.socketPath, project);
+  expect(shown.exitCode, `${shown.stdout}${shown.stderr}`).toBe(0);
+  expect(JSON.parse(shown.stdout).result.run).toMatchObject({ state: "running" });
+});
+
+it("propagates stop to non-final Child Workflow Runs before finalizing the parent", async () => {
+  const directory = await makeTemporaryDirectory("kojo-stop-child-tree-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), childConfiguration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "parent-waits-for-child", "--input", '{"message":"stop"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const parentRunId = JSON.parse(started.stdout).result.run.runId as string;
+  let children: ReadonlyArray<Record<string, unknown>> = [];
+  for (let attempt = 0; attempt < 100 && children.length === 0; attempt += 1) {
+    const listed = await runKojoCli(
+      ["run", "list", "--parent-run", parentRunId, "--json"],
+      host.socketPath,
+      project,
+    );
+    expect(listed.exitCode, `${listed.stdout}${listed.stderr}`).toBe(0);
+    children = JSON.parse(listed.stdout).result;
+    if (children.length === 0) await Bun.sleep(25);
+  }
+  expect(children).toHaveLength(1);
+  const childRunId = children[0]?.runId;
+  if (typeof childRunId !== "string") throw new Error("Child Workflow Run was not accepted");
+
+  const stopped = await runKojoCli(
+    ["run", "stop", parentRunId, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(stopped.exitCode, `${stopped.stdout}${stopped.stderr}`).toBe(0);
+  expect(JSON.parse(stopped.stdout).result.run).toMatchObject({ state: "stopped" });
+  const child = await runKojoCli(["run", "show", childRunId, "--json"], host.socketPath, project);
+  expect(child.exitCode, `${child.stdout}${child.stderr}`).toBe(0);
+  expect(JSON.parse(child.stdout).result.run).toMatchObject({ state: "stopped" });
+});
