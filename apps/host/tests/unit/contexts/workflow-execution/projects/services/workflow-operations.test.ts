@@ -1,6 +1,8 @@
 import { expect, it } from "@effect/vitest";
 import {
   Workflow,
+  WorkflowChildRuntime,
+  type WorkflowChildRuntimeShape,
   type WorkflowDeferred,
   WorkflowDeferredToken,
   WorkflowOperations,
@@ -52,4 +54,39 @@ it.effect("exposes durable waits through Kojo operations instead of Effect ident
     ).toBe("resumed");
     expect(calls).toEqual(["wake:1 second", "approval", token, "resume"]);
   }).pipe(Effect.provideService(WorkflowOperations, operations));
+});
+
+it.effect("delegates durable Child Workflow invocations to the Host runtime", () => {
+  const invocations: Array<{ readonly invocationKey: string; readonly workflowKey: string }> = [];
+  const children: WorkflowChildRuntimeShape = {
+    invoke: (invocation) =>
+      Effect.sync(() => {
+        invocations.push({
+          invocationKey: invocation.invocationKey,
+          workflowKey: invocation.workflowKey,
+        });
+        return `child:${String((invocation.input as { readonly message: string }).message)}`;
+      }),
+  };
+
+  return Effect.gen(function* () {
+    expect(
+      yield* Workflow.invokeChild({
+        invocationKey: "send-notification",
+        workflowKey: "notification",
+        input: { message: "hello" },
+      }),
+    ).toBe("child:hello");
+    expect(
+      yield* Workflow.startChild({
+        invocationKey: "archive-record",
+        workflowKey: "archive",
+        input: { message: "done" },
+      }),
+    ).toBe("child:done");
+    expect(invocations).toEqual([
+      { invocationKey: "send-notification", workflowKey: "notification" },
+      { invocationKey: "archive-record", workflowKey: "archive" },
+    ]);
+  }).pipe(Effect.provideService(WorkflowChildRuntime, children));
 });

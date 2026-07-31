@@ -182,10 +182,117 @@ const childConfiguration = `
 import { Effect, Schema } from "effect";
 import { Workflow, defineConfig, defineWorkflow } from "@kojo/workflow";
 const input = Schema.Struct({ message: Schema.String });
-export default defineConfig({ workflows: [
-  defineWorkflow({ workflowKey: "child", revision: "1", inputSchema: input, successSchema: Schema.String, failureSchema: Schema.String, handler: ({ message }) => Effect.succeed("child:" + message) }),
-  defineWorkflow({ workflowKey: "parent", revision: "1", inputSchema: input, successSchema: Schema.String, failureSchema: Schema.String, childWorkflowKeys: ["child"], handler: ({ message }) => Workflow.invokeChild({ invocationKey: "child", workflowKey: "child", input: { message } }).pipe(Effect.map(String)) })
-] });
+const invokeChild = (invocationKey, workflowKey, message) =>
+  Workflow.invokeChild({ invocationKey, workflowKey, input: { message } }).pipe(Effect.map(String));
+
+export default defineConfig({
+  workflows: [
+    defineWorkflow({
+      workflowKey: "child",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      handler: ({ message }) => Effect.succeed("child:" + message),
+    }),
+    defineWorkflow({
+      workflowKey: "failing-child",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      handler: () => Effect.fail("child failed"),
+    }),
+    defineWorkflow({
+      workflowKey: "slow-child",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      handler: ({ message }) => Effect.sleep("2 seconds").pipe(Effect.as("slow:" + message)),
+    }),
+    defineWorkflow({
+      workflowKey: "parent",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      childWorkflowKeys: ["child"],
+      handler: ({ message }) => invokeChild("child", "child", message),
+    }),
+    defineWorkflow({
+      workflowKey: "parent-reuses-child",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      childWorkflowKeys: ["child"],
+      handler: ({ message }) => Effect.gen(function* () {
+        const first = yield* invokeChild("reused", "child", message);
+        const second = yield* invokeChild("reused", "child", message);
+        return first + "," + second;
+      }),
+    }),
+    defineWorkflow({
+      workflowKey: "parent-conflicts-child",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      childWorkflowKeys: ["child"],
+      handler: ({ message }) => Effect.gen(function* () {
+        yield* invokeChild("conflicted", "child", message);
+        return yield* invokeChild("conflicted", "child", message + " again");
+      }),
+    }),
+    defineWorkflow({
+      workflowKey: "parent-handles-child-failure",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      childWorkflowKeys: ["failing-child"],
+      handler: ({ message }) => invokeChild("handled", "failing-child", message).pipe(
+        Effect.catchTag("WorkflowChildFailure", () => Effect.succeed("handled")),
+      ),
+    }),
+    defineWorkflow({
+      workflowKey: "parent-propagates-child-failure",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      childWorkflowKeys: ["failing-child"],
+      handler: ({ message }) => invokeChild("unhandled", "failing-child", message),
+    }),
+    defineWorkflow({
+      workflowKey: "parent-waits-for-child",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      childWorkflowKeys: ["slow-child"],
+      handler: ({ message }) => invokeChild("slow", "slow-child", message),
+    }),
+    defineWorkflow({
+      workflowKey: "parent-without-child-declaration",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      handler: ({ message }) => invokeChild("undeclared", "child", message),
+    }),
+    defineWorkflow({
+      workflowKey: "parent-without-invocation-key",
+      revision: "1",
+      inputSchema: input,
+      successSchema: Schema.String,
+      failureSchema: Schema.String,
+      childWorkflowKeys: ["child"],
+      handler: ({ message }) => invokeChild(" ", "child", message),
+    }),
+  ],
+});
 `;
 
 const durableWaitConfiguration = `
@@ -503,6 +610,257 @@ it("runs, inspects, and filters a durable Child Workflow Run", async () => {
   expect(JSON.parse(children.stdout).result).toMatchObject([
     { parentRunId: parent.runId, childInvocationKey: "child", workflowKey: "child" },
   ]);
+});
+
+it("lets a parent handle a failed Child Workflow Run", async () => {
+  const directory = await makeTemporaryDirectory("kojo-handled-child-workflow-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), childConfiguration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "parent-handles-child-failure", "--input", '{"message":"hello"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const parent = await waitForFinalRun(
+    host.socketPath,
+    project,
+    JSON.parse(started.stdout).result.run.runId,
+  );
+  expect(parent).toMatchObject({ state: "completed", outcome: { value: "handled" } });
+});
+
+it("keeps a parent non-final while a Child Workflow Run is active", async () => {
+  const directory = await makeTemporaryDirectory("kojo-active-child-workflow-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), childConfiguration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "parent-waits-for-child", "--input", '{"message":"hello"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const parentRunId = JSON.parse(started.stdout).result.run.runId as string;
+  const listed = await runKojoCli(
+    ["run", "list", "--parent-run", parentRunId, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(listed.exitCode, `${listed.stdout}${listed.stderr}`).toBe(0);
+  const parent = await runKojoCli(["run", "show", parentRunId, "--json"], host.socketPath, project);
+  expect(parent.exitCode, `${parent.stdout}${parent.stderr}`).toBe(0);
+  expect(JSON.parse(parent.stdout).result.run.state).not.toMatch(/completed|failed/);
+  const final = await waitForFinalRun(host.socketPath, project, parentRunId);
+  expect(final).toMatchObject({ state: "completed", outcome: { value: "slow:hello" } });
+});
+
+it("isolates Child Workflow Run identities and reuses the same invocation", async () => {
+  const directory = await makeTemporaryDirectory("kojo-child-workflow-outcomes-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), childConfiguration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+
+  const startAndWait = async (workflowKey: string, requestKey?: string) => {
+    const started = await runKojoCli(
+      [
+        "run",
+        "start",
+        workflowKey,
+        "--input",
+        '{"message":"hello"}',
+        ...(requestKey === undefined ? [] : ["--request-key", requestKey]),
+        "--json",
+      ],
+      host.socketPath,
+      project,
+    );
+    expect(started.exitCode, `${workflowKey}: ${started.stdout}${started.stderr}`).toBe(0);
+    return waitForFinalRun(host.socketPath, project, JSON.parse(started.stdout).result.run.runId);
+  };
+  const childrenOf = async (parentRunId: string) => {
+    const listed = await runKojoCli(
+      ["run", "list", "--parent-run", parentRunId, "--json"],
+      host.socketPath,
+      project,
+    );
+    expect(listed.exitCode, listed.stderr).toBe(0);
+    return JSON.parse(listed.stdout).result as Array<Record<string, unknown>>;
+  };
+
+  const firstParent = await startAndWait("parent", "first-parent");
+  const firstChild = (await childrenOf(firstParent.runId as string))[0];
+  expect(firstChild).toMatchObject({
+    state: "completed",
+    workflowKey: "child",
+    workflowRevision: "1",
+    parentRunId: firstParent.runId,
+    childInvocationKey: "child",
+  });
+  const firstChildId = firstChild?.runId;
+  if (typeof firstChildId !== "string")
+    throw new Error("The first parent did not start a Child Workflow Run");
+  const childDetails = await runKojoCli(
+    ["run", "show", firstChildId as string, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(childDetails.exitCode, childDetails.stderr).toBe(0);
+  expect(JSON.parse(childDetails.stdout).result.run).toMatchObject({
+    startSnapshot: {
+      workflow: { workflowKey: "child", workflowRevision: "1" },
+      trigger: { kind: "child", parentRunId: firstParent.runId, invocationKey: "child" },
+      input: { message: "hello" },
+    },
+  });
+  const childText = await runKojoCli(
+    ["run", "show", firstChildId as string],
+    host.socketPath,
+    project,
+  );
+  expect(childText.exitCode, childText.stderr).toBe(0);
+  expect(childText.stdout).toContain(`Run Identity: ${firstChildId}`);
+  expect(childText.stdout).toContain(`Parent Run Identity: ${firstParent.runId}`);
+  expect(childText.stdout).toContain("Child Invocation Key: child");
+
+  const secondParent = await startAndWait("parent", "second-parent");
+  const secondChild = (await childrenOf(secondParent.runId as string))[0];
+  expect(secondChild?.runId).toEqual(expect.any(String));
+  expect(secondChild?.runId).not.toBe(firstChildId);
+
+  const replayed = await startAndWait("parent-reuses-child");
+  expect(replayed).toMatchObject({
+    state: "completed",
+    outcome: { value: "child:hello,child:hello" },
+  });
+  expect(await childrenOf(replayed.runId as string)).toMatchObject([
+    { childInvocationKey: "reused", workflowKey: "child", parentRunId: replayed.runId },
+  ]);
+
+  const database = new Database(join(project, ".kojo", "kojo.sqlite"), {
+    readonly: true,
+    strict: true,
+  });
+  try {
+    const childEvents = database
+      .query("SELECT kind FROM kojo_execution_events WHERE run_id = ? ORDER BY sequence")
+      .all(firstChildId) as ReadonlyArray<{ readonly kind: string }>;
+    const parentEvents = database
+      .query(
+        "SELECT kind, child_run_id FROM kojo_execution_events WHERE run_id = ? ORDER BY sequence",
+      )
+      .all(firstParent.runId as string) as ReadonlyArray<{
+      readonly kind: string;
+      readonly child_run_id: string | null;
+    }>;
+    expect(childEvents.map((event) => event.kind)).toContain("run.accepted");
+    expect(childEvents.map((event) => event.kind)).toContain("run.completed");
+    expect(parentEvents).toContainEqual({ kind: "child.started", child_run_id: firstChildId });
+  } finally {
+    database.close();
+  }
+});
+
+it("fails a parent when a Child Workflow invocation key is reused with different input", async () => {
+  const directory = await makeTemporaryDirectory("kojo-conflicted-child-workflow-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), childConfiguration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "parent-conflicts-child", "--input", '{"message":"hello"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const parent = await waitForFinalRun(
+    host.socketPath,
+    project,
+    JSON.parse(started.stdout).result.run.runId,
+  );
+  expect(parent.state).toBe("failed");
+});
+
+it("fails a parent that leaves a Child Workflow failure unhandled", async () => {
+  const directory = await makeTemporaryDirectory("kojo-unhandled-child-workflow-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), childConfiguration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+  const started = await runKojoCli(
+    ["run", "start", "parent-propagates-child-failure", "--input", '{"message":"hello"}', "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const parent = await waitForFinalRun(
+    host.socketPath,
+    project,
+    JSON.parse(started.stdout).result.run.runId,
+  );
+  expect(parent.state).toBe("failed");
+});
+
+it("rejects undeclared Child Workflow targets and empty invocation keys", async () => {
+  const directory = await makeTemporaryDirectory("kojo-child-workflow-failures-");
+  cleanups.push(directory.cleanup);
+  const project = join(directory.path, "project");
+  await initializeGit(project);
+  await installWorkflowDependencies(project);
+  await writeFile(join(project, "kojo.config.ts"), childConfiguration);
+  const host = await startKojoHostProcess();
+  cleanups.push(host.stop);
+  expect((await runKojoCli(["init", project], host.socketPath)).exitCode).toBe(0);
+
+  const startAndWait = async (workflowKey: string) => {
+    const started = await runKojoCli(
+      ["run", "start", workflowKey, "--input", '{"message":"hello"}', "--json"],
+      host.socketPath,
+      project,
+    );
+    expect(started.exitCode, `${workflowKey}: ${started.stdout}${started.stderr}`).toBe(0);
+    return waitForFinalRun(host.socketPath, project, JSON.parse(started.stdout).result.run.runId);
+  };
+  const childrenOf = async (parentRunId: string) => {
+    const listed = await runKojoCli(
+      ["run", "list", "--parent-run", parentRunId, "--json"],
+      host.socketPath,
+      project,
+    );
+    expect(listed.exitCode, listed.stderr).toBe(0);
+    return JSON.parse(listed.stdout).result as Array<Record<string, unknown>>;
+  };
+
+  const undeclared = await startAndWait("parent-without-child-declaration");
+  const emptyKey = await startAndWait("parent-without-invocation-key");
+  expect(undeclared.state).toBe("failed");
+  expect(emptyKey.state).toBe("failed");
+  expect(await childrenOf(undeclared.runId as string)).toEqual([]);
+  expect(await childrenOf(emptyKey.runId as string)).toEqual([]);
 });
 
 it("reconciles a non-final Workflow Run after the Host restarts", async () => {

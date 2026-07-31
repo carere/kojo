@@ -509,6 +509,10 @@ const makeEntries = (
     }
     identities.add(identity);
 
+    // An unhandled child failure is still a valid terminal failure for the parent,
+    // even when the parent's declared failure schema does not describe it. Keep the
+    // structured error in the engine so callers may catch it in workflow code; once
+    // it reaches the workflow boundary, the Host records the parent as failed.
     const workflow = Workflow.make(`Kojo/${definition.workflowKey}/${workflowRevision}`, {
       payload: {
         engineGeneration: Schema.Number,
@@ -516,7 +520,15 @@ const makeEntries = (
         input: Schema.Unknown,
       },
       success: definition.successSchema,
-      error: definition.failureSchema ?? Schema.Never,
+      error: Schema.Union([
+        definition.failureSchema ?? Schema.Never,
+        Schema.Struct({
+          _tag: Schema.Literal("WorkflowChildFailure"),
+          invocationKey: Schema.String,
+          runId: Schema.String,
+          workflowKey: Schema.String,
+        }),
+      ]),
       idempotencyKey: ({ runId, engineGeneration }) => `${runId}:${engineGeneration}`,
     });
     const waits = new Map<string, RegisteredWait>();
