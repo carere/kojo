@@ -12,6 +12,9 @@ import {
   type ProjectOperationErrorCode,
   type ProjectReadinessQueryResult,
   type ProjectReadinessRepairResult,
+  type ProjectRetentionMutationResult,
+  type ProjectRetentionQueryResult,
+  type ProjectRetentionSetInput,
   type WorkflowRunListResult,
   type WorkflowRunMutationResult,
   type WorkflowRunQueryResult,
@@ -38,6 +41,13 @@ import {
   assessProjectReadiness,
   repairProjectReadiness,
 } from "../../readiness/use-cases/project-readiness";
+import { DrizzleRetentionRepositoryLive } from "../../retention/repositories/drizzle-retention-repository";
+import type { RetentionRepository } from "../../retention/repositories/retention-repository";
+import {
+  resetProjectRetention,
+  setProjectRetention,
+  showProjectRetention,
+} from "../../retention/use-cases/manage-retention";
 import { LocalExecutionArtifactStoreLive } from "../../runs/services/execution-artifact-store";
 import {
   completeWorkflowDeferred,
@@ -165,6 +175,13 @@ const readinessDiagnostic =
     ...(result.ok ? {} : { safeErrorCode: result.error.code }),
   });
 
+const retentionDiagnostic =
+  (identity: ProjectIdentity) =>
+  (result: ProjectRetentionQueryResult | ProjectRetentionMutationResult) => ({
+    projectIdentity: identity,
+    ...(result.ok ? {} : { safeErrorCode: result.error.code }),
+  });
+
 const workflowRunDiagnostic =
   (identity: ProjectIdentity) =>
   (
@@ -261,6 +278,30 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           String(options.requestId),
           showProject(identity),
           queryDiagnostic(identity),
+        ),
+      ShowProjectRetention: ({ identity }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ShowProjectRetention",
+          String(options.requestId),
+          showProjectRetention(identity),
+          retentionDiagnostic(identity),
+        ),
+      SetProjectRetention: (input: ProjectRetentionSetInput, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "SetProjectRetention",
+          String(options.requestId),
+          setProjectRetention(input),
+          retentionDiagnostic(input.identity),
+        ),
+      ResetProjectRetention: ({ identity, requestKey }, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ResetProjectRetention",
+          String(options.requestId),
+          resetProjectRetention(identity, requestKey),
+          retentionDiagnostic(identity),
         ),
       ShowProjectReadiness: ({ identity }, options) =>
         withHostRequestDiagnostic(
@@ -555,11 +596,17 @@ export const makeKojoControlServerLayer = <ProtocolError, ProtocolRequirements>(
   diagnosticLogger: Layer.Layer<HostDiagnosticLogger>,
   hostIdentity: HostIdentity,
   subscriptionReader: Layer.Layer<ControlSubscriptionReader> = ControlSubscriptionReaderLive,
+  retentionRepository: Layer.Layer<RetentionRepository> = DrizzleRetentionRepositoryLive(),
 ) =>
   RpcServer.layer(KojoControl).pipe(
     Layer.provide([
       makeKojoControlHandlers(hostIdentity).pipe(
-        Layer.provide([diagnosticLogger, subscriptionReader, LocalExecutionArtifactStoreLive]),
+        Layer.provide([
+          diagnosticLogger,
+          subscriptionReader,
+          LocalExecutionArtifactStoreLive,
+          retentionRepository,
+        ]),
       ),
       protocol,
     ]),

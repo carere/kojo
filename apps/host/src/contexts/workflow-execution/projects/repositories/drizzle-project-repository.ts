@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import {
   EXECUTION_EVENT_KINDS_V1,
   type ExecutionTraceFilters,
+  type ProjectSnapshot,
   type RequestKey,
   type WorkflowRunListItem,
   type WorkflowRunSnapshot,
@@ -30,7 +31,8 @@ import type { WorkflowScheduleSnapshot as WorkflowScheduleDefinitionSnapshot } f
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
-import { Effect, Layer, Schema } from "effect";
+import { Effect, Layer, Option, Schema } from "effect";
+import { RetentionRepository } from "../../retention/repositories/retention-repository";
 import {
   decodeSensitivityMap,
   encodeSensitivityMap,
@@ -172,7 +174,7 @@ const migrationChecksums = [
     .digest("hex"),
 );
 
-const databasePath = (projectPath: string) => join(projectPath, ".kojo", "kojo.sqlite");
+export const databasePath = (projectPath: string) => join(projectPath, ".kojo", "kojo.sqlite");
 
 const assertDatabaseFile = (path: string) => {
   const information = lstatSync(path);
@@ -1014,7 +1016,7 @@ const hash = (value: string) => createHash("sha256").update(value).digest();
 const sameBytes = (left: Uint8Array, right: Uint8Array) =>
   left.length === right.length && left.every((value, index) => value === right[index]);
 
-const transaction = <A>(connection: Database, operation: () => A): A => {
+export const transaction = <A>(connection: Database, operation: () => A): A => {
   connection.exec("BEGIN IMMEDIATE");
   try {
     const result = operation();
@@ -1030,7 +1032,7 @@ const transaction = <A>(connection: Database, operation: () => A): A => {
   }
 };
 
-const withWritableProjectStore = <A>(
+export const withWritableProjectStore = <A>(
   project: { readonly path: string },
   operation: (connection: Database) => A,
 ): A => {
@@ -1039,6 +1041,21 @@ const withWritableProjectStore = <A>(
   const connection = new Database(path, { strict: true });
   try {
     configureWritable(connection);
+    return operation(connection);
+  } finally {
+    connection.close();
+  }
+};
+
+export const withReadableProjectStore = <A>(
+  project: { readonly path: string },
+  operation: (connection: Database) => A,
+): A => {
+  const path = databasePath(project.path);
+  assertDatabaseFile(path);
+  const connection = new Database(path, { readonly: true, strict: true });
+  try {
+    configureReadOnly(connection);
     return operation(connection);
   } finally {
     connection.close();
@@ -2595,6 +2612,15 @@ const appendParentChildEvidence = (
   advanceRunTrace(connection, child.parent_run_id, sequence, recordedAtMs);
 };
 
+const cleanupAfterTraceWrite = (project: ProjectSnapshot) =>
+  Effect.serviceOption(RetentionRepository).pipe(
+    Effect.flatMap((retentionRepository) =>
+      Option.isSome(retentionRepository)
+        ? retentionRepository.value.cleanup(project).pipe(Effect.ignore)
+        : Effect.void,
+    ),
+  );
+
 export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository, () => ({
   acceptManualStart: (start: WorkflowRunStartRecord) =>
     Effect.sync(() =>
@@ -3988,7 +4014,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           advanceRunTrace(connection, runId, sequence, trace.recordedAtMs);
         }),
       ),
-    ),
+    ).pipe(Effect.andThen(cleanupAfterTraceWrite(project))),
   recordAgentTrace: (project, runId, trace) =>
     Effect.sync(() =>
       withWritableProjectStore(project, (connection) =>
@@ -4040,7 +4066,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           advanceRunTrace(connection, runId, sequence, trace.recordedAtMs);
         }),
       ),
-    ),
+    ).pipe(Effect.andThen(cleanupAfterTraceWrite(project))),
   recoverActivitySubmission: (project, runId, hostStartedAtMs) =>
     Effect.sync(() =>
       withWritableProjectStore(project, (connection) =>

@@ -20,6 +20,7 @@ import { ProjectReadiness } from "../../../readiness/components/project-readines
 import { VisualizerApiClient, visualizerApiRuntime } from "../../../shared/services/client";
 import { ProjectNavigator } from "../../../workflow-authoring/projects/components/project-navigator";
 import { WorkflowDefinitionSnapshots } from "../../../workflow-authoring/projects/components/workflow-definition-snapshots";
+import { ProjectRetention } from "../../retention/components/project-retention";
 import { WorkflowRuns } from "../../runs/components/workflow-runs";
 import { WorkflowScheduleOccurrences } from "../../schedules/components/workflow-schedule-occurrences";
 import { WorkflowSchedules } from "../../schedules/components/workflow-schedules";
@@ -191,6 +192,7 @@ export function HostOverview(props: HostOverviewProps) {
                 onRefresh={refreshReadiness}
                 onRepair={repairReadiness}
               />
+              <ProjectRetention snapshots={current().retention ?? []} />
               <WorkflowDefinitionSnapshots snapshots={current().projectDefinitions} />
               <WorkflowSchedules
                 snapshots={current().workflowSchedules}

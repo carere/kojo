@@ -1,5 +1,9 @@
 import { expect, it } from "@effect/vitest";
-import { ProjectIdentity, type ProjectSnapshot } from "@kojo/control";
+import {
+  ProjectIdentity,
+  type ProjectRetentionSnapshot,
+  type ProjectSnapshot,
+} from "@kojo/control";
 import { Effect, Layer, Schema } from "effect";
 import { ProjectRepository } from "../../../../../../src/contexts/workflow-execution/projects/repositories/project-repository";
 import {
@@ -7,6 +11,7 @@ import {
   ProjectRuntimeLive,
 } from "../../../../../../src/contexts/workflow-execution/projects/services/project-runtime";
 import { WorkflowBackend } from "../../../../../../src/contexts/workflow-execution/projects/services/workflow-backend";
+import { RetentionRepository } from "../../../../../../src/contexts/workflow-execution/retention/repositories/retention-repository";
 
 const project: ProjectSnapshot = {
   identity: Schema.decodeUnknownSync(ProjectIdentity)("00000000-0000-7000-8000-000000000001"),
@@ -214,6 +219,7 @@ it.effect("holds forget behind an active lifecycle mutation", () => {
 
 it.effect("commits migration only after the Workflow backend acquires ownership", () => {
   const order: Array<string> = [];
+  let retentionCleanups = 0;
   const store = Layer.succeed(ProjectRepository, {
     migrate: () =>
       Effect.sync(() => {
@@ -265,6 +271,16 @@ it.effect("commits migration only after the Workflow backend acquires ownership"
         order.push("backend-released");
       }),
   });
+  const retention = Layer.succeed(RetentionRepository, {
+    show: () => Effect.die("Retention show is not used by this test"),
+    set: () => Effect.die("Retention set is not used by this test"),
+    reset: () => Effect.die("Retention reset is not used by this test"),
+    cleanup: () =>
+      Effect.sync(() => {
+        retentionCleanups += 1;
+        return {} as ProjectRetentionSnapshot;
+      }),
+  });
 
   return Effect.gen(function* () {
     const runtime = yield* ProjectRuntime;
@@ -282,7 +298,10 @@ it.effect("commits migration only after the Workflow backend acquires ownership"
       "store-postflight",
       "migration-committed",
     ]);
-  }).pipe(Effect.provide(ProjectRuntimeLive.pipe(Layer.provide([store, initializingBackend]))));
+    expect(retentionCleanups).toBe(1);
+  }).pipe(
+    Effect.provide(ProjectRuntimeLive.pipe(Layer.provide([store, initializingBackend, retention]))),
+  );
 });
 
 it.effect("does not mutate the store when another Workflow backend owns the Project", () => {

@@ -15,11 +15,14 @@ import {
   ProjectIdentity,
   ProjectOperationErrorCode,
   ProjectReadinessOperationErrorCode,
+  RetentionOperationErrorCode,
   WorkflowRunOperationErrorCode,
   WorkflowScheduleOccurrenceOperationErrorCode,
   WorkflowScheduleOperationErrorCode,
 } from "@kojo/control";
-import { Context, Effect, Layer, Schema } from "effect";
+import { Context, Effect, Layer, Option, Schema } from "effect";
+import { ProjectIndexRepository } from "../../../workflow-authoring/projects/repositories/project-index-repository";
+import { RetentionRepository } from "../../retention/repositories/retention-repository";
 import { HostIdentity } from "../models/host-identity";
 
 export const DEFAULT_DIAGNOSTIC_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1_000;
@@ -39,6 +42,9 @@ export interface HostDiagnosticLoggerOptions {
   readonly now?: () => number;
   readonly path: string;
   readonly retention?: Partial<HostDiagnosticRetentionPolicy>;
+  readonly projectRetention?: (
+    projectIdentity: ProjectIdentity,
+  ) => Promise<{ readonly maxAgeMs: number | null; readonly maxBytes: number | null } | undefined>;
 }
 
 export const HostRequestDiagnosticEvent = Schema.Struct({
@@ -47,6 +53,7 @@ export const HostRequestDiagnosticEvent = Schema.Struct({
     "host-request.completed",
     "project-runtime.activation.completed",
     "workflow-run.reconciliation.completed",
+    "retention.cleanup.completed",
   ]),
   hostIdentity: HostIdentity,
   requestId: Schema.optionalKey(Schema.String),
@@ -56,6 +63,9 @@ export const HostRequestDiagnosticEvent = Schema.Struct({
     "ListProjects",
     "ListProjectPage",
     "ShowProject",
+    "ShowProjectRetention",
+    "SetProjectRetention",
+    "ResetProjectRetention",
     "ShowProjectReadiness",
     "RefreshProjectReadiness",
     "RepairProjectReadiness",
@@ -85,6 +95,7 @@ export const HostRequestDiagnosticEvent = Schema.Struct({
     "ReplayForgetProject",
     "ProjectRuntimeActivate",
     "ReconcileWorkflowRun",
+    "RetentionCleanup",
   ]),
   outcome: Schema.Literals(["success", "error"]),
   safeErrorCode: Schema.optionalKey(
@@ -94,7 +105,13 @@ export const HostRequestDiagnosticEvent = Schema.Struct({
       WorkflowScheduleOperationErrorCode,
       WorkflowScheduleOccurrenceOperationErrorCode,
       WorkflowRunOperationErrorCode,
-      Schema.Literals(["project-runtime-activation-failed", "workflow-run-reconciliation-failed"]),
+      RetentionOperationErrorCode,
+      Schema.Literals([
+        "project-runtime-activation-failed",
+        "workflow-run-reconciliation-failed",
+        "retention-protected-over-limit",
+        "retention-missing-retained-content",
+      ]),
     ]),
   ),
   durationMs: Schema.Number,
@@ -284,8 +301,25 @@ export const makeHostDiagnosticLogger = (
     const paths = await diagnosticFiles(options.path);
     if (paths.length === 0) return;
     const { lines, malformed } = await readStoredLines(paths);
-    const minimumTimestamp = now() - retention.maxAgeMs;
-    const ageEligible = lines.filter((line) => line.timestamp >= minimumTimestamp);
+    const projectPolicies = new Map<
+      ProjectIdentity,
+      { readonly maxAgeMs: number | null; readonly maxBytes: number | null } | undefined
+    >();
+    const policyFor = async (projectIdentity: ProjectIdentity | undefined) => {
+      if (projectIdentity === undefined || options.projectRetention === undefined) {
+        return undefined;
+      }
+      if (!projectPolicies.has(projectIdentity)) {
+        projectPolicies.set(projectIdentity, await options.projectRetention(projectIdentity));
+      }
+      return projectPolicies.get(projectIdentity);
+    };
+    const ageEligible: Array<StoredDiagnosticLine> = [];
+    for (const line of lines) {
+      const projectPolicy = await policyFor(line.event.projectIdentity);
+      const maxAgeMs = projectPolicy === undefined ? retention.maxAgeMs : projectPolicy.maxAgeMs;
+      if (maxAgeMs === null || line.timestamp >= now() - maxAgeMs) ageEligible.push(line);
+    }
     const retained: Array<StoredDiagnosticLine> = [];
     const projectBytes = new Map<ProjectIdentity, number>();
     let hostBytes = 0;
@@ -294,7 +328,10 @@ export const makeHostDiagnosticLogger = (
       const projectIdentity = line.event.projectIdentity;
       if (projectIdentity !== undefined) {
         const bytes = projectBytes.get(projectIdentity) ?? 0;
-        if (bytes + line.bytes > retention.maxProjectBytes) continue;
+        const projectPolicy = await policyFor(projectIdentity);
+        const maxProjectBytes =
+          projectPolicy === undefined ? retention.maxProjectBytes : projectPolicy.maxBytes;
+        if (maxProjectBytes !== null && bytes + line.bytes > maxProjectBytes) continue;
         projectBytes.set(projectIdentity, bytes + line.bytes);
       }
       retained.push(line);
@@ -326,7 +363,33 @@ export const makeHostDiagnosticLoggerLayer = (options: string | HostDiagnosticLo
   Layer.effect(
     HostDiagnosticLogger,
     Effect.gen(function* () {
-      const logger = makeHostDiagnosticLogger(options);
+      const projectIndex = yield* Effect.serviceOption(ProjectIndexRepository);
+      const retentionRepository = yield* Effect.serviceOption(RetentionRepository);
+      const withProjectRetention =
+        typeof options === "string" || options.projectRetention !== undefined
+          ? undefined
+          : Option.isSome(projectIndex) && Option.isSome(retentionRepository)
+            ? async (identity: ProjectIdentity) => {
+                try {
+                  const project = (await Effect.runPromise(projectIndex.value.read)).projects.find(
+                    (candidate) => candidate.identity === identity,
+                  );
+                  if (project === undefined) return undefined;
+                  const snapshot = await Effect.runPromise(retentionRepository.value.show(project));
+                  return {
+                    maxAgeMs: snapshot.policy.diagnosticMaxAgeMs,
+                    maxBytes: snapshot.policy.diagnosticMaxBytes,
+                  };
+                } catch {
+                  return undefined;
+                }
+              }
+            : undefined;
+      const configuredOptions =
+        typeof options === "string" || withProjectRetention === undefined
+          ? options
+          : { ...options, projectRetention: withProjectRetention };
+      const logger = makeHostDiagnosticLogger(configuredOptions);
       const configured = typeof options === "string" ? undefined : options.retention;
       const cleanupIntervalMs = configured?.cleanupIntervalMs ?? defaultRetention.cleanupIntervalMs;
       yield* logger.cleanup;

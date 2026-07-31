@@ -7,6 +7,7 @@ import { Context, Effect, Layer, Option } from "effect";
 import type { HostIdentity } from "../../control/models/host-identity";
 import { HOST_INFORMATION } from "../../control/models/host-information";
 import { HostDiagnosticLogger } from "../../control/services/host-diagnostic-logger";
+import { RetentionRepository } from "../../retention/repositories/retention-repository";
 import { type ProjectForgetBlockers, ProjectRepository } from "../repositories/project-repository";
 import { WorkflowBackend } from "./workflow-backend";
 
@@ -61,6 +62,7 @@ export const ProjectRuntimeLive = Layer.effect(
     const repository = yield* ProjectRepository;
     const backend = yield* WorkflowBackend;
     const diagnosticLogger = yield* Effect.serviceOption(HostDiagnosticLogger);
+    const retentionRepository = yield* Effect.serviceOption(RetentionRepository);
     const pending = new Map<string, Promise<void>>();
     const acceptedDefinitions = new Map<
       string,
@@ -127,6 +129,9 @@ export const ProjectRuntimeLive = Layer.effect(
           return false;
         }
         const completed = yield* repository.completeMigration(project, true);
+        if (completed && Option.isSome(retentionRepository)) {
+          yield* retentionRepository.value.cleanup(project).pipe(Effect.ignore);
+        }
         if (!completed) {
           yield* backend.quiesce(project);
           yield* repository.completeMigration(project, false);

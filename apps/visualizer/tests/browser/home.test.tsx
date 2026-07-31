@@ -98,6 +98,94 @@ test("shows Host connectivity and the authoritative empty Project state", async 
   await expect.element(page.getByText("No Kojo Projects yet.")).toBeVisible();
 });
 
+test("shows read-only retention policy, usage, and warnings", async () => {
+  setLocale("en", { reload: false });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+    "00000000-0000-7000-8000-000000000001",
+  );
+  dispose = render(
+    () => (
+      <ColorModeProvider initialColorMode="light">
+        <HostOverview
+          loadOverview={() =>
+            Promise.resolve({
+              host: {
+                protocol: { major: 1, minor: 12 },
+                hostVersion: "0.1.0",
+                capabilities: ["projects:list", "retention:show"],
+              },
+              projects: [{ identity, path: "/projects/demo" }],
+              retention: [
+                {
+                  project: { identity, path: "/projects/demo" },
+                  policy: {
+                    diagnosticMaxAgeMs: 14,
+                    diagnosticMaxBytes: 100,
+                    disposableMaxAgeMs: 30,
+                    disposableMaxBytes: 1,
+                  },
+                  usage: {
+                    diagnosticBytes: 10,
+                    disposableBytes: 20,
+                    protectedDisposableBytes: 12,
+                    eligibleDisposableBytes: 8,
+                    availableArtifactCount: 1,
+                    missingArtifactCount: 2,
+                    expiredArtifactCount: 3,
+                    lastCleanupAtMs: 1,
+                  },
+                  warnings: [
+                    {
+                      code: "protected-over-limit",
+                      kind: "disposable",
+                      message:
+                        "Protected non-final execution content exceeds the disposable retention limit.",
+                      next: "Keep the content protected.",
+                      observedAtMs: 1,
+                      currentBytes: 12,
+                      limitBytes: 1,
+                    },
+                    {
+                      code: "missing-retained-content",
+                      kind: "disposable",
+                      message:
+                        "Some retained Artifact content is missing, but its authoritative metadata remains.",
+                      next: "Inspect the Artifact trace evidence.",
+                      observedAtMs: 1,
+                      currentBytes: 2,
+                      limitBytes: null,
+                    },
+                  ],
+                  hostDiagnosticMaxAgeMs: 14,
+                  hostDiagnosticMaxBytes: 500,
+                  observedAtMs: 1,
+                },
+              ],
+              projectDefinitions: [],
+              workflowSchedules: [],
+              workflowOccurrences: [],
+              workflowRuns: [],
+            })
+          }
+        />
+      </ColorModeProvider>
+    ),
+    root,
+  );
+
+  await expect
+    .element(page.getByRole("region", { name: "Execution data retention" }))
+    .toBeVisible();
+  const retention = document.querySelector('[aria-label="Execution data retention"]');
+  expect(retention).not.toBeNull();
+  expect(retention?.textContent).toContain("Protected non-final execution content exceeds");
+  expect(retention?.textContent).toContain("Some retained Artifact content is missing");
+  expect(retention?.textContent).toContain("Destructive retention controls remain CLI-only.");
+  expect(retention?.querySelectorAll("button")).toHaveLength(0);
+});
+
 test("renders Host-produced readiness guidance without exposing hidden diagnostic details", async () => {
   setLocale("en", { reload: false });
   const root = document.createElement("div");

@@ -7,10 +7,11 @@ import { afterEach, describe, expect, it } from "@effect/vitest";
 import {
   EMPTY_EXECUTION_TRACE_FILTERS,
   ProjectIdentity,
+  type ProjectRetentionSnapshot,
   RequestKey,
   type WorkflowScheduleDefinition,
 } from "@kojo/control";
-import { Effect, Schema } from "effect";
+import { Effect, Layer, Schema } from "effect";
 import {
   completeProjectRepositoryMigration,
   DrizzleProjectRepositoryLive,
@@ -19,6 +20,7 @@ import {
   migrateProjectRepository,
 } from "../../../../../../src/contexts/workflow-execution/projects/repositories/drizzle-project-repository";
 import { ProjectRepository } from "../../../../../../src/contexts/workflow-execution/projects/repositories/project-repository";
+import { RetentionRepository } from "../../../../../../src/contexts/workflow-execution/retention/repositories/retention-repository";
 import { WorkflowRunRepository } from "../../../../../../src/contexts/workflow-execution/runs/repositories/workflow-run-repository";
 import { toExecutionTraceEvent } from "../../../../../../src/contexts/workflow-execution/runs/use-cases/manage-workflow-runs";
 import { WorkflowScheduleRepository } from "../../../../../../src/contexts/workflow-execution/schedules/repositories/workflow-schedule-repository";
@@ -833,8 +835,19 @@ describe("Drizzle Execution Trace reads", () => {
 
   it.effect(
     "persists and reconstructs active Sandbox and Agent evidence through the closed Event catalog",
-    () =>
-      Effect.gen(function* () {
+    () => {
+      let retentionCleanups = 0;
+      const retention = Layer.succeed(RetentionRepository, {
+        show: () => Effect.die("Retention show is not used by this test"),
+        set: () => Effect.die("Retention set is not used by this test"),
+        reset: () => Effect.die("Retention reset is not used by this test"),
+        cleanup: () =>
+          Effect.sync(() => {
+            retentionCleanups += 1;
+            return {} as ProjectRetentionSnapshot;
+          }),
+      });
+      return Effect.gen(function* () {
         const fixture = yield* Effect.promise(() =>
           initializedProject("kojo-execution-trace-boundary-evidence-"),
         );
@@ -871,7 +884,7 @@ describe("Drizzle Execution Trace reads", () => {
           artifacts: [
             {
               artifactId: "sandbox-artifact",
-              byteSize: 1,
+              byteSize: 1024 * 1024,
               displayName: "sandbox.json",
               mediaType: "application/json",
               sha256: new Uint8Array(32),
@@ -926,6 +939,7 @@ describe("Drizzle Execution Trace reads", () => {
           recordedAtMs: 5,
           sandboxIdentity: "sandbox",
         });
+        expect(retentionCleanups).toBe(4);
 
         const run = yield* repository.show(fixture.project, "boundary-evidence-run");
         expect(run?.run.sandboxTrace).toEqual([
@@ -999,7 +1013,8 @@ describe("Drizzle Execution Trace reads", () => {
             sequence: 5,
           }),
         ]);
-      }).pipe(Effect.provide(DrizzleWorkflowRunRepositoryLive)),
+      }).pipe(Effect.provide(Layer.mergeAll(DrizzleWorkflowRunRepositoryLive, retention)));
+    },
   );
 
   it.effect(

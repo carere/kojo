@@ -20,6 +20,8 @@ import {
 } from "../contexts/workflow-execution/projects/repositories/drizzle-project-repository";
 import { makeLocalWorkflowBackendLayer } from "../contexts/workflow-execution/projects/services/local-workflow-backend";
 import { ProjectRuntimeLive } from "../contexts/workflow-execution/projects/services/project-runtime";
+import { DrizzleRetentionRepositoryLive } from "../contexts/workflow-execution/retention/repositories/drizzle-retention-repository";
+import { RetentionSupervisorLive } from "../contexts/workflow-execution/retention/services/retention-supervisor";
 import { SandcastleProviderRuntimeLive } from "../contexts/workflow-execution/sandboxes/services/sandcastle-provider-runtime";
 import { ScheduleClockLive } from "../contexts/workflow-execution/schedules/services/schedule-clock";
 import { WorkflowScheduleSupervisorLive } from "../contexts/workflow-execution/schedules/services/workflow-schedule-supervisor";
@@ -33,7 +35,10 @@ export const startLiveKojoHost = async () => {
     Layer.provide(SubprocessProjectDefinitionLoaderLive),
   );
   const hostIdentity = await loadHostIdentity(join(hostStorePath, "identity"));
-  const diagnostics = makeHostDiagnosticLoggerLayer({ path: diagnosticPath, hostIdentity });
+  const retentionRepository = DrizzleRetentionRepositoryLive({ diagnosticPath });
+  const diagnostics = makeHostDiagnosticLoggerLayer({ path: diagnosticPath, hostIdentity }).pipe(
+    Layer.provide([projectIndex, retentionRepository]),
+  );
   const protocol = RpcServer.layerProtocolSocketServer.pipe(
     Layer.provide([BunSocketServer.layer({ path: socketPath }), RpcSerialization.layerNdjson]),
   );
@@ -41,7 +46,12 @@ export const startLiveKojoHost = async () => {
     Layer.provide(SandcastleProviderRuntimeLive),
   );
   const projectRuntime = ProjectRuntimeLive.pipe(
-    Layer.provide([DrizzleProjectRepositoryLive, workflowBackend, diagnostics]),
+    Layer.provide([
+      DrizzleProjectRepositoryLive,
+      workflowBackend,
+      diagnostics,
+      retentionRepository,
+    ]),
   );
   const runtimeDependencies = Layer.mergeAll(
     projectIndex,
@@ -49,6 +59,7 @@ export const startLiveKojoHost = async () => {
     DrizzleProjectRepositoryLive,
     DrizzleWorkflowRunRepositoryLive,
     DrizzleWorkflowScheduleRepositoryLive,
+    retentionRepository,
     ScheduleClockLive,
     workflowBackend,
     projectRuntime,
@@ -56,8 +67,15 @@ export const startLiveKojoHost = async () => {
   const scheduleSupervisor = WorkflowScheduleSupervisorLive.pipe(
     Layer.provide(runtimeDependencies),
   );
-  const serverLayer = makeKojoControlServerLayer(protocol, diagnostics, hostIdentity).pipe(
-    Layer.provide(Layer.merge(runtimeDependencies, scheduleSupervisor)),
+  const retentionSupervisor = RetentionSupervisorLive.pipe(Layer.provide(runtimeDependencies));
+  const serverLayer = makeKojoControlServerLayer(
+    protocol,
+    diagnostics,
+    hostIdentity,
+    undefined,
+    retentionRepository,
+  ).pipe(
+    Layer.provide(Layer.mergeAll(runtimeDependencies, scheduleSupervisor, retentionSupervisor)),
   ) as Layer.Layer<never, unknown>;
 
   return startKojoHost({ diagnosticPath, serverLayer, socketPath });

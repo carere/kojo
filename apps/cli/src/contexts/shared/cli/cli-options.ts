@@ -25,6 +25,10 @@ export interface ParsedOptions {
   readonly limit?: string;
   readonly states: ReadonlyArray<string>;
   readonly workflowKeys: ReadonlyArray<string>;
+  readonly diagnosticsAge?: string;
+  readonly diagnosticsSize?: string;
+  readonly disposableAge?: string;
+  readonly disposableSize?: string;
 }
 
 export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undefined => {
@@ -48,6 +52,10 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
   const states: Array<string> = [];
   const scheduleKeys: Array<string> = [];
   const workflowKeys: Array<string> = [];
+  let diagnosticsAge: string | undefined;
+  let diagnosticsSize: string | undefined;
+  let disposableAge: string | undefined;
+  let disposableSize: string | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === "--reveal") {
@@ -83,6 +91,10 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
         "--state",
         "--schedule",
         "--workflow",
+        "--diagnostics-age",
+        "--diagnostics-size",
+        "--disposable-age",
+        "--disposable-size",
       ].includes(argument)
     ) {
       remaining.push(argument);
@@ -131,6 +143,18 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
     } else if (argument === "--parent-run") {
       if (parentRunId !== undefined) return undefined;
       parentRunId = optionValue;
+    } else if (argument === "--diagnostics-age") {
+      if (diagnosticsAge !== undefined) return undefined;
+      diagnosticsAge = optionValue;
+    } else if (argument === "--diagnostics-size") {
+      if (diagnosticsSize !== undefined) return undefined;
+      diagnosticsSize = optionValue;
+    } else if (argument === "--disposable-age") {
+      if (disposableAge !== undefined) return undefined;
+      disposableAge = optionValue;
+    } else if (argument === "--disposable-size") {
+      if (disposableSize !== undefined) return undefined;
+      disposableSize = optionValue;
     } else {
       if (requestKey !== undefined) return undefined;
       requestKey = optionValue;
@@ -158,6 +182,10 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
     states,
     scheduleKeys,
     workflowKeys,
+    diagnosticsAge,
+    diagnosticsSize,
+    disposableAge,
+    disposableSize,
   };
 };
 

@@ -1,11 +1,14 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { Database } from "bun:sqlite";
+import { mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "@effect/vitest";
 import { EMPTY_EXECUTION_TRACE_FILTERS, ProjectIdentity, WorkflowRunId } from "@kojo/control";
 import { Effect, Schema, Stream } from "effect";
 import { FetchHttpClient } from "effect/unstable/http";
+import { runKojoCli } from "../../../../../../../tests/support/cli-process";
 import { startKojoHostProcess } from "../../../../../../../tests/support/host-process";
 import { HostOverviewError } from "../../../../../src/contexts/shared/models/contracts";
 import {
@@ -38,6 +41,10 @@ const abortingSameOriginFetch = ((input: RequestInfo | URL, init?: RequestInit) 
     return response;
   });
 }) as typeof fetch;
+
+const workflowPackagePath = fileURLToPath(
+  new URL("../../../../../../../packages/workflow", import.meta.url),
+);
 
 interface StalledControlServer {
   readonly connected: Promise<void>;
@@ -229,16 +236,98 @@ describe("Host overview", () => {
         const client = yield* VisualizerApiClient;
         const overview = yield* client.HostOverview();
         expect(overview.host).toMatchObject({
-          protocol: { major: 1, minor: 11 },
+          protocol: { major: 1, minor: 12 },
           capabilities: expect.arrayContaining([
             "traces:read",
             "traces:export",
             "artifacts:read",
+            "retention:show",
+            "retention:set",
             "control:subscribe",
             "control:acknowledge",
           ]),
         });
         expect(overview.projects).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("proxies real retention policy, usage, and warnings from the Host adapter", () =>
+    withHost((host) =>
+      Effect.gen(function* () {
+        const directory = yield* Effect.promise(() =>
+          mkdtemp(join(tmpdir(), "kojo-visualizer-retention-")),
+        );
+        const project = join(directory, "project");
+        const git = Bun.spawn(["git", "init", project], { stdout: "ignore", stderr: "ignore" });
+        expect(yield* Effect.promise(() => git.exited)).toBe(0);
+        yield* Effect.promise(() =>
+          mkdir(join(project, "node_modules", "@kojo"), { recursive: true }),
+        );
+        yield* Effect.promise(() =>
+          symlink(workflowPackagePath, join(project, "node_modules", "@kojo", "workflow"), "dir"),
+        );
+        const initialized = yield* Effect.promise(() =>
+          runKojoCli(["init", project], host.socketPath, directory),
+        );
+        expect(initialized.exitCode, `${initialized.stdout}${initialized.stderr}`).toBe(0);
+        const identity = JSON.parse(
+          yield* Effect.promise(() => readFile(join(project, ".kojo", "project.json"), "utf8")),
+        ).projectIdentity as string;
+        const runningRunId = Bun.randomUUIDv7();
+        const protectedArtifactId = Bun.randomUUIDv7();
+        const missingArtifactId = Bun.randomUUIDv7();
+        const database = new Database(join(project, ".kojo", "kojo.sqlite"));
+        insertRunningRetentionRun(database, runningRunId, protectedArtifactId);
+        insertRunningRetentionRun(database, Bun.randomUUIDv7(), missingArtifactId);
+        database.close();
+        const protectedPath = join(
+          project,
+          ".kojo",
+          "artifacts",
+          runningRunId,
+          `${protectedArtifactId}.json`,
+        );
+        yield* Effect.promise(() =>
+          mkdir(join(project, ".kojo", "artifacts", runningRunId), { recursive: true }),
+        );
+        yield* Effect.promise(() => Bun.write(protectedPath, "12345678"));
+        const changed = yield* Effect.promise(() =>
+          runKojoCli(
+            [
+              "retention",
+              "set",
+              "--project-id",
+              identity,
+              "--disposable-size",
+              "1B",
+              "--request-key",
+              "visualizer-retention-set",
+            ],
+            host.socketPath,
+            directory,
+          ),
+        );
+        expect(changed.exitCode, `${changed.stdout}${changed.stderr}`).toBe(0);
+
+        const client = yield* VisualizerApiClient;
+        const overview = yield* client.HostOverview();
+        const retention = overview.retention?.find(
+          (snapshot) => snapshot.project.identity === identity,
+        );
+        expect(retention).toMatchObject({
+          policy: { disposableMaxBytes: 1 },
+          usage: {
+            protectedDisposableBytes: 8,
+            missingArtifactCount: 1,
+          },
+          warnings: expect.arrayContaining([
+            expect.objectContaining({ code: "protected-over-limit" }),
+            expect.objectContaining({ code: "missing-retained-content" }),
+          ]),
+        });
+        expect(yield* Effect.promise(() => Bun.file(protectedPath).exists())).toBe(true);
+        yield* Effect.promise(() => rm(directory, { recursive: true }));
       }),
     ),
   );
@@ -263,3 +352,24 @@ describe("Host overview", () => {
     ),
   );
 });
+
+const insertRunningRetentionRun = (database: Database, runId: string, artifactId: string) => {
+  database
+    .query(
+      `INSERT INTO kojo_workflow_runs(
+         run_id, start_request_key, start_request_sha256, workflow_key, workflow_revision,
+         engine_reference_version, engine_reference_json, engine_reference_sha256, trigger_kind,
+         state, last_event_sequence, row_version, accepted_at_ms, updated_at_ms
+       ) VALUES (?, ?, zeroblob(32), 'workflow', 'revision', 1, '{}', randomblob(32), 'manual',
+         'running', 1, 1, 0, 0)`,
+    )
+    .run(runId, `start-${runId}`);
+  database
+    .query(
+      `INSERT INTO kojo_execution_artifacts(
+         artifact_id, run_id, storage_key, display_name, media_type, byte_size, sha256,
+         condition, created_at_ms
+       ) VALUES (?, ?, ?, 'retention', 'application/json', 8, zeroblob(32), 'available', 0)`,
+    )
+    .run(artifactId, runId, `${runId}/${artifactId}.json`);
+};
