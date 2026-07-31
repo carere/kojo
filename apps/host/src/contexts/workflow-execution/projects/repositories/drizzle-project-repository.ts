@@ -2634,7 +2634,8 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
                     operation.attempt_count
              FROM kojo_engine_operations operation
              JOIN kojo_workflow_runs run ON run.run_id = operation.run_id
-             WHERE operation.kind = 'submit' AND operation.state = 'pending' AND run.state = 'running'
+             WHERE operation.kind = 'submit' AND operation.state = 'pending'
+               AND run.state NOT IN ('stopping', 'stopped')
              ${runId === undefined ? "" : "AND operation.run_id = ?"}
              ORDER BY operation.created_at_ms ASC`,
           )
@@ -2701,7 +2702,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           const run = readStoredRun(connection, runId);
           if (run === undefined)
             throw new Error("Workflow Run disappeared before submission confirmation");
-          if (run.state !== "running") return;
+          if (["stopping", "stopped"].includes(run.state)) return;
           const eventId = randomUUID();
           const sequence = connection
             .query("SELECT last_event_sequence FROM kojo_workflow_runs WHERE run_id = ?")
