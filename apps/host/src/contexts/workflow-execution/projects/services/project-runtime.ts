@@ -7,6 +7,8 @@ import { Context, Effect, Layer, Option } from "effect";
 import type { HostIdentity } from "../../control/models/host-identity";
 import { HOST_INFORMATION } from "../../control/models/host-information";
 import { HostDiagnosticLogger } from "../../control/services/host-diagnostic-logger";
+import { RetentionRepository } from "../../retention/repositories/retention-repository";
+import { withRetentionCompletionDiagnostic } from "../../retention/services/retention-completion";
 import { type ProjectForgetBlockers, ProjectRepository } from "../repositories/project-repository";
 import { WorkflowBackend } from "./workflow-backend";
 
@@ -20,6 +22,10 @@ export interface ProjectRuntimeShape {
     operation: (migrated: boolean) => Effect.Effect<A>,
   ) => Effect.Effect<A>;
   readonly coordinateLifecycle: <A>(
+    project: ProjectSnapshot,
+    operation: Effect.Effect<A>,
+  ) => Effect.Effect<A>;
+  readonly coordinateRetention: <A>(
     project: ProjectSnapshot,
     operation: Effect.Effect<A>,
   ) => Effect.Effect<A>;
@@ -61,6 +67,7 @@ export const ProjectRuntimeLive = Layer.effect(
     const repository = yield* ProjectRepository;
     const backend = yield* WorkflowBackend;
     const diagnosticLogger = yield* Effect.serviceOption(HostDiagnosticLogger);
+    const retentionRepository = yield* Effect.serviceOption(RetentionRepository);
     const pending = new Map<string, Promise<void>>();
     const acceptedDefinitions = new Map<
       string,
@@ -127,6 +134,14 @@ export const ProjectRuntimeLive = Layer.effect(
           return false;
         }
         const completed = yield* repository.completeMigration(project, true);
+        if (completed && Option.isSome(retentionRepository)) {
+          // activate is already running inside the Project Runtime serialization.
+          yield* withRetentionCompletionDiagnostic(
+            project,
+            retentionRepository.value.cleanup(project),
+            Option.isSome(diagnosticLogger) ? diagnosticLogger.value : undefined,
+          ).pipe(Effect.catchCause(() => Effect.void));
+        }
         if (!completed) {
           yield* backend.quiesce(project);
           yield* repository.completeMigration(project, false);
@@ -194,6 +209,8 @@ export const ProjectRuntimeLive = Layer.effect(
           ),
         ),
       coordinateLifecycle: <A>(project: ProjectSnapshot, operation: Effect.Effect<A>) =>
+        serialize(project, operation),
+      coordinateRetention: <A>(project: ProjectSnapshot, operation: Effect.Effect<A>) =>
         serialize(project, operation),
       readiness: (
         indexedProject: ProjectSnapshot,

@@ -6,8 +6,11 @@ import type {
   ProjectOperationError,
   ProjectReadinessAssessment,
   ProjectReadinessOperationError,
+  ProjectRetentionMutationResult,
+  ProjectRetentionSnapshot,
   ProjectSnapshot,
   RequestKey,
+  RetentionOperationError,
   WorkflowRunOperationError,
   WorkflowRunSnapshot,
   WorkflowScheduleOccurrenceOperationError,
@@ -26,7 +29,8 @@ export interface CliFailure {
     | ProjectOperationError["affectedResource"]
     | WorkflowScheduleOperationError["affectedResource"]
     | WorkflowScheduleOccurrenceOperationError["affectedResource"]
-    | WorkflowRunOperationError["affectedResource"];
+    | WorkflowRunOperationError["affectedResource"]
+    | RetentionOperationError["affectedResource"];
   readonly code: string;
   readonly currentSchedule?: WorkflowScheduleSnapshot;
   readonly exitCode: number;
@@ -95,6 +99,72 @@ export const readinessFailure = (error: ProjectReadinessOperationError): CliFail
   ...error,
   exitCode: error.code === "stale-assessment" ? 4 : 1,
 });
+
+export const retentionFailure = (
+  error: RetentionOperationError,
+  requestKey?: RequestKey,
+): CliFailure => ({
+  ...error,
+  requestKey,
+  exitCode: error.code === "retention-invalid" ? 2 : 4,
+});
+
+const retentionValue = (value: number | null, render: (value: number) => string) =>
+  value === null ? "off" : render(value);
+
+const binarySize = (value: number) => {
+  if (value < 1024) return `${value} B`;
+  if (value % 1024 ** 3 === 0) return `${value / 1024 ** 3} GiB`;
+  if (value % 1024 ** 2 === 0) return `${value / 1024 ** 2} MiB`;
+  if (value % 1024 === 0) return `${value / 1024} KiB`;
+  return `${value} B`;
+};
+
+const milliseconds = (value: number) => {
+  const day = 24 * 60 * 60 * 1_000;
+  if (value % day === 0) return `${value / day}d`;
+  const hour = 60 * 60 * 1_000;
+  if (value % hour === 0) return `${value / hour}h`;
+  return `${value}ms`;
+};
+
+export const writeProjectRetention = (
+  command: string,
+  retention: ProjectRetentionSnapshot,
+  json: boolean,
+  mutation?: Extract<ProjectRetentionMutationResult, { ok: true }>,
+) => {
+  if (json) {
+    process.stdout.write(
+      `${JSON.stringify({
+        schemaVersion: 1,
+        command,
+        ...(mutation === undefined ? {} : { requestKey: mutation.requestKey }),
+        result: {
+          retention,
+          ...(mutation === undefined ? {} : { alreadyApplied: mutation.alreadyApplied }),
+        },
+        warnings: retention.warnings,
+      })}\n`,
+    );
+    return;
+  }
+  process.stdout.write(
+    `Project Identity: ${retention.project.identity}\n` +
+      `Diagnostics: ${binarySize(retention.usage.diagnosticBytes)}; age ${retentionValue(retention.policy.diagnosticMaxAgeMs, milliseconds)}; size ${retentionValue(retention.policy.diagnosticMaxBytes, binarySize)}\n` +
+      `Disposable content: ${binarySize(retention.usage.disposableBytes)}; protected ${binarySize(retention.usage.protectedDisposableBytes)}\n` +
+      `Disposable policy: age ${retentionValue(retention.policy.disposableMaxAgeMs, milliseconds)}; size ${retentionValue(retention.policy.disposableMaxBytes, binarySize)}\n` +
+      `Host-wide diagnostic limit: ${binarySize(retention.hostDiagnosticMaxBytes)}; age ${milliseconds(retention.hostDiagnosticMaxAgeMs)}\n` +
+      `Artifacts: ${retention.usage.availableArtifactCount} available, ${retention.usage.missingArtifactCount} missing, ${retention.usage.expiredArtifactCount} expired\n`,
+  );
+  if (mutation !== undefined) {
+    process.stdout.write(`Request Key: ${mutation.requestKey}\n`);
+    if (mutation.alreadyApplied) process.stdout.write("Reused the accepted retention request.\n");
+  }
+  for (const warning of retention.warnings) {
+    process.stderr.write(`Warning: ${warning.message}\nNext: ${warning.next}\n`);
+  }
+};
 
 export const writeProjectReadiness = (
   command: string,

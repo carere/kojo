@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import {
   EXECUTION_EVENT_KINDS_V1,
   type ExecutionTraceFilters,
+  type ProjectSnapshot,
   type RequestKey,
   type WorkflowRunListItem,
   type WorkflowRunSnapshot,
@@ -30,7 +31,10 @@ import type { WorkflowScheduleSnapshot as WorkflowScheduleDefinitionSnapshot } f
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
-import { Effect, Layer, Schema } from "effect";
+import { Effect, Layer, Option, Schema } from "effect";
+import { HostDiagnosticLogger } from "../../control/services/host-diagnostic-logger";
+import { RetentionRepository } from "../../retention/repositories/retention-repository";
+import { withRetentionCompletionDiagnostic } from "../../retention/services/retention-completion";
 import {
   decodeSensitivityMap,
   encodeSensitivityMap,
@@ -57,6 +61,8 @@ import {
   type WorkflowSandboxTraceRecord,
 } from "../../runs/repositories/workflow-run-repository";
 import { WorkflowScheduleRepository } from "../../schedules/repositories/workflow-schedule-repository";
+import { ProjectRuntime } from "../services/project-runtime";
+import { recordArtifactUnavailable } from "./execution-event-writer";
 import { ProjectRepository } from "./project-repository";
 import {
   deletionIntents,
@@ -67,6 +73,14 @@ import {
   workflowRuns,
   workflowScheduleStates,
 } from "./project-repository-schema";
+import {
+  assertDatabaseFile,
+  configureReadOnly,
+  configureWritable,
+  databasePath,
+  transaction,
+  withWritableProjectStore,
+} from "./project-store-adapter";
 
 const ScheduleBlockerRows = Schema.Array(Schema.Struct({ scheduleKey: Schema.String }));
 const RunBlockerRows = Schema.Array(Schema.Struct({ runId: Schema.String }));
@@ -172,22 +186,6 @@ const migrationChecksums = [
     .digest("hex"),
 );
 
-const databasePath = (projectPath: string) => join(projectPath, ".kojo", "kojo.sqlite");
-
-const assertDatabaseFile = (path: string) => {
-  const information = lstatSync(path);
-  const userId = process.getuid?.();
-  if (
-    information.isSymbolicLink() ||
-    !information.isFile() ||
-    (userId !== undefined && information.uid !== userId) ||
-    (information.mode & 0o777) !== 0o600
-  ) {
-    throw new Error("unsafe Project database");
-  }
-  return information;
-};
-
 const assertSidecar = (path: string) => {
   if (!existsSync(path)) return;
   const information = lstatSync(path);
@@ -254,11 +252,6 @@ const restoreBackup = (backupPath: string, path: string) => {
   }
 };
 
-const pragmaNumber = (connection: Database, name: string) => {
-  const row = connection.query(`PRAGMA ${name}`).get() as Record<string, number> | undefined;
-  return row?.[name];
-};
-
 const assertIntegrity = (connection: Database) => {
   const row = connection.query("PRAGMA quick_check").get() as
     | { readonly quick_check: string }
@@ -267,28 +260,6 @@ const assertIntegrity = (connection: Database) => {
   if (connection.query("PRAGMA foreign_key_check").get() !== null) {
     throw new Error("Project database foreign key check failed");
   }
-};
-
-const configureWritable = (connection: Database) => {
-  connection.exec("PRAGMA foreign_keys = ON");
-  connection.exec("PRAGMA busy_timeout = 5000");
-  connection.exec("PRAGMA synchronous = FULL");
-  const journal = connection.query("PRAGMA journal_mode = WAL").get() as
-    | { readonly journal_mode: string }
-    | undefined;
-  if (
-    journal?.journal_mode.toLowerCase() !== "wal" ||
-    pragmaNumber(connection, "foreign_keys") !== 1 ||
-    pragmaNumber(connection, "synchronous") !== 2
-  ) {
-    throw new Error("Project database safety settings are unavailable");
-  }
-};
-
-const configureReadOnly = (connection: Database) => {
-  connection.exec("PRAGMA foreign_keys = ON");
-  connection.exec("PRAGMA busy_timeout = 5000");
-  connection.exec("PRAGMA query_only = ON");
 };
 
 const version = (connection: Database) =>
@@ -1013,37 +984,6 @@ const hash = (value: string) => createHash("sha256").update(value).digest();
 
 const sameBytes = (left: Uint8Array, right: Uint8Array) =>
   left.length === right.length && left.every((value, index) => value === right[index]);
-
-const transaction = <A>(connection: Database, operation: () => A): A => {
-  connection.exec("BEGIN IMMEDIATE");
-  try {
-    const result = operation();
-    connection.exec("COMMIT");
-    return result;
-  } catch (error) {
-    try {
-      connection.exec("ROLLBACK");
-    } catch {
-      // The statement which failed may already have rolled the transaction back.
-    }
-    throw error;
-  }
-};
-
-const withWritableProjectStore = <A>(
-  project: { readonly path: string },
-  operation: (connection: Database) => A,
-): A => {
-  const path = databasePath(project.path);
-  assertDatabaseFile(path);
-  const connection = new Database(path, { strict: true });
-  try {
-    configureWritable(connection);
-    return operation(connection);
-  } finally {
-    connection.close();
-  }
-};
 
 type StoredSchedule = {
   readonly applied_cron: string | null;
@@ -2595,6 +2535,24 @@ const appendParentChildEvidence = (
   advanceRunTrace(connection, child.parent_run_id, sequence, recordedAtMs);
 };
 
+const cleanupAfterTraceWrite = (project: ProjectSnapshot) =>
+  Effect.gen(function* () {
+    const retentionRepository = yield* Effect.serviceOption(RetentionRepository);
+    const runtime = yield* Effect.serviceOption(ProjectRuntime);
+    if (Option.isNone(retentionRepository) || Option.isNone(runtime)) return;
+    const logger = yield* Effect.serviceOption(HostDiagnosticLogger);
+    yield* runtime.value
+      .coordinateRetention(
+        project,
+        withRetentionCompletionDiagnostic(
+          project,
+          retentionRepository.value.cleanup(project),
+          Option.isSome(logger) ? logger.value : undefined,
+        ),
+      )
+      .pipe(Effect.catchCause(() => Effect.void));
+  });
+
 export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository, () => ({
   acceptManualStart: (start: WorkflowRunStartRecord) =>
     Effect.sync(() =>
@@ -3052,44 +3010,9 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
   recordArtifactUnavailable: (project, runId, artifactId, reasonCode, recordedAtMs) =>
     Effect.sync(() =>
       withWritableProjectStore(project, (connection) =>
-        transaction(connection, () => {
-          const artifact =
-            (connection
-              .query(
-                `SELECT condition FROM kojo_execution_artifacts
-                 WHERE run_id = ? AND artifact_id = ?`,
-              )
-              .get(runId, artifactId) as {
-              readonly condition: "available" | "missing" | "expired";
-            } | null) ?? undefined;
-          if (artifact?.condition !== "available") return;
-          const condition = reasonCode === "artifact.expired" ? "expired" : "missing";
-          const sequence = nextEventSequence(connection, runId);
-          const eventId = randomUUID();
-          appendEvent(connection, {
-            eventId,
-            kind: "artifact.unavailable",
-            payload: { artifactId, condition, reasonCode },
-            recordedAtMs,
-            runId,
-            sequence,
-            sensitivityMap: sensitivityMap([]),
-          });
-          connection
-            .query(
-              `UPDATE kojo_execution_artifacts
-               SET condition = ?, unavailable_at_ms = ?, unavailable_reason_code = ?
-               WHERE run_id = ? AND artifact_id = ?`,
-            )
-            .run(condition, recordedAtMs, reasonCode, runId, artifactId);
-          connection
-            .query(
-              `INSERT INTO kojo_execution_event_artifacts(run_id, event_id, artifact_id, role)
-               VALUES (?, ?, ?, 'unavailable')`,
-            )
-            .run(runId, eventId, artifactId);
-          advanceRunTrace(connection, runId, sequence, recordedAtMs);
-        }),
+        transaction(connection, () =>
+          recordArtifactUnavailable(connection, runId, artifactId, reasonCode, recordedAtMs),
+        ),
       ),
     ),
   pendingSubmissions: (project, runId) =>
@@ -3988,7 +3911,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           advanceRunTrace(connection, runId, sequence, trace.recordedAtMs);
         }),
       ),
-    ),
+    ).pipe(Effect.andThen(cleanupAfterTraceWrite(project))),
   recordAgentTrace: (project, runId, trace) =>
     Effect.sync(() =>
       withWritableProjectStore(project, (connection) =>
@@ -4040,7 +3963,7 @@ export const DrizzleWorkflowRunRepositoryLive = Layer.sync(WorkflowRunRepository
           advanceRunTrace(connection, runId, sequence, trace.recordedAtMs);
         }),
       ),
-    ),
+    ).pipe(Effect.andThen(cleanupAfterTraceWrite(project))),
   recoverActivitySubmission: (project, runId, hostStartedAtMs) =>
     Effect.sync(() =>
       withWritableProjectStore(project, (connection) =>

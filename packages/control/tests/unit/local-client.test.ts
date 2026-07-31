@@ -69,6 +69,7 @@ it.effect("negotiates before reading the authoritative Project list", () =>
       host: handshake,
       projects: [],
       readiness: [],
+      retention: [],
       projectDefinitions: [],
       workflowSchedules: [],
       workflowOccurrences: [],

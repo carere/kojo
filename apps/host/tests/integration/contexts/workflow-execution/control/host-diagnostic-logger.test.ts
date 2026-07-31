@@ -3,8 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "@effect/vitest";
 import { ProjectIdentity } from "@kojo/control";
-import { Effect, Schema } from "effect";
+import { Effect, Layer, Schema } from "effect";
 import { TestClock } from "effect/testing";
+import {
+  ProjectIndexRepository,
+  type ProjectIndexRepositoryShape,
+} from "../../../../../src/contexts/workflow-authoring/projects/repositories/project-index-repository";
 import { HostIdentity } from "../../../../../src/contexts/workflow-execution/control/models/host-identity";
 import {
   HostDiagnosticLogger,
@@ -12,6 +16,10 @@ import {
   makeHostDiagnosticLogger,
   makeHostDiagnosticLoggerLayer,
 } from "../../../../../src/contexts/workflow-execution/control/services/host-diagnostic-logger";
+import {
+  RetentionRepository,
+  type RetentionRepositoryShape,
+} from "../../../../../src/contexts/workflow-execution/retention/repositories/retention-repository";
 
 const cleanups: Array<() => Promise<void>> = [];
 const TEST_HOST_IDENTITY = Schema.decodeUnknownSync(HostIdentity)(
@@ -236,6 +244,69 @@ describe("Host Diagnostic Store", () => {
           }),
         ),
       );
+    }),
+  );
+
+  it.effect("uses policy-only retention lookup while accounting Project diagnostics", () =>
+    Effect.gen(function* () {
+      const directory = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), "kojo-diagnostics-policy-only-")),
+      );
+      cleanups.push(() => rm(directory, { recursive: true }));
+      const project = {
+        identity: projectIdentity("00000000-0000-7000-8000-0000000000c1"),
+        path: join(directory, "project"),
+      };
+      const path = join(directory, "diagnostics.jsonl");
+      let policyCalls = 0;
+      let showCalls = 0;
+      const index: ProjectIndexRepositoryShape = {
+        read: Effect.succeed({ layoutVersion: 1, projects: [project], receipts: [] }),
+        update: () => Effect.die("Project Index updates are not used by this test"),
+      };
+      const retention: RetentionRepositoryShape = {
+        policy: () =>
+          Effect.sync(() => {
+            policyCalls += 1;
+            return {
+              diagnosticMaxAgeMs: null,
+              diagnosticMaxBytes: null,
+              disposableMaxAgeMs: null,
+              disposableMaxBytes: null,
+            };
+          }),
+        show: () =>
+          Effect.sync(() => {
+            showCalls += 1;
+            throw new Error("full retention snapshots are not allowed during logging");
+          }),
+        set: () => Effect.die("Retention mutations are not used by this test"),
+        reset: () => Effect.die("Retention mutations are not used by this test"),
+        cleanup: () => Effect.die("Retention cleanup is not used by this test"),
+      };
+
+      yield* Effect.gen(function* () {
+        const logger = yield* HostDiagnosticLogger;
+        yield* logger.emit(
+          diagnosticEvent("policy-only", "2026-07-15T00:00:00.000Z", project.identity),
+        );
+        yield* logger.cleanup;
+      }).pipe(
+        Effect.provide(
+          makeHostDiagnosticLoggerLayer({
+            now: () => Date.parse("2026-07-15T00:00:00.000Z"),
+            path,
+          }).pipe(
+            Layer.provide([
+              Layer.succeed(ProjectIndexRepository, index),
+              Layer.succeed(RetentionRepository, retention),
+            ]),
+          ),
+        ),
+      );
+
+      expect(policyCalls).toBe(1);
+      expect(showCalls).toBe(0);
     }),
   );
 });

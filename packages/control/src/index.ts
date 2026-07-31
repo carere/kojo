@@ -8,7 +8,7 @@ import {
 
 export { ProjectIdentity } from "@kojo/workflow";
 
-export const PROTOCOL_VERSION = { major: 1, minor: 11 } as const;
+export const PROTOCOL_VERSION = { major: 1, minor: 12 } as const;
 export const CONTROL_CAPABILITIES = [
   "projects:list",
   "projects:list-page",
@@ -37,6 +37,8 @@ export const CONTROL_CAPABILITIES = [
   "traces:read",
   "traces:export",
   "artifacts:read",
+  "retention:show",
+  "retention:set",
   "control:subscribe",
   "control:acknowledge",
 ] as const;
@@ -341,6 +343,114 @@ export const ProjectQueryResult = Schema.Union([
   Schema.Struct({ ok: Schema.Literal(false), error: ProjectOperationError }),
 ]);
 export type ProjectQueryResult = typeof ProjectQueryResult.Type;
+
+const RetentionLimit = Schema.NullOr(
+  Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+);
+
+export const ProjectRetentionPolicy = Schema.Struct({
+  diagnosticMaxAgeMs: RetentionLimit,
+  diagnosticMaxBytes: RetentionLimit,
+  disposableMaxAgeMs: RetentionLimit,
+  disposableMaxBytes: RetentionLimit,
+});
+export type ProjectRetentionPolicy = typeof ProjectRetentionPolicy.Type;
+
+export const ProjectRetentionUsage = Schema.Struct({
+  diagnosticBytes: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  disposableBytes: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  protectedDisposableBytes: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  eligibleDisposableBytes: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  availableArtifactCount: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  missingArtifactCount: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  expiredArtifactCount: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  lastCleanupAtMs: Schema.NullOr(Schema.Number),
+});
+export type ProjectRetentionUsage = typeof ProjectRetentionUsage.Type;
+
+export const ProjectRetentionWarningCode = Schema.Literals([
+  "protected-over-limit",
+  "missing-retained-content",
+]);
+export type ProjectRetentionWarningCode = typeof ProjectRetentionWarningCode.Type;
+
+export const ProjectRetentionWarning = Schema.Struct({
+  code: ProjectRetentionWarningCode,
+  kind: Schema.Literals(["diagnostics", "disposable"]),
+  message: Schema.String,
+  next: Schema.String,
+  observedAtMs: Schema.Number,
+  currentBytes: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  limitBytes: Schema.NullOr(Schema.Number),
+});
+export type ProjectRetentionWarning = typeof ProjectRetentionWarning.Type;
+
+export const ProjectRetentionSnapshot = Schema.Struct({
+  project: ProjectSnapshot,
+  policy: ProjectRetentionPolicy,
+  usage: ProjectRetentionUsage,
+  warnings: Schema.Array(ProjectRetentionWarning),
+  hostDiagnosticMaxAgeMs: Schema.Number,
+  hostDiagnosticMaxBytes: Schema.Number,
+  observedAtMs: Schema.Number,
+});
+export type ProjectRetentionSnapshot = typeof ProjectRetentionSnapshot.Type;
+
+export const RetentionOperationErrorCode = Schema.Literals([
+  "project-not-found",
+  "project-layout-invalid",
+  "project-runtime-not-ready",
+  "retention-invalid",
+  "request-key-conflict",
+]);
+export type RetentionOperationErrorCode = typeof RetentionOperationErrorCode.Type;
+
+export const RetentionOperationError = Schema.Struct({
+  code: RetentionOperationErrorCode,
+  message: Schema.String,
+  next: Schema.String,
+  affectedResource: Schema.Union([
+    Schema.Struct({ kind: Schema.Literal("project"), identity: ProjectIdentity }),
+    Schema.Struct({ kind: Schema.Literal("request-key"), requestKey: RequestKey }),
+  ]),
+  findingKeys: Schema.Array(Schema.String),
+});
+export type RetentionOperationError = typeof RetentionOperationError.Type;
+
+export const ProjectRetentionQueryResult = Schema.Union([
+  Schema.Struct({ ok: Schema.Literal(true), retention: ProjectRetentionSnapshot }),
+  Schema.Struct({ ok: Schema.Literal(false), error: RetentionOperationError }),
+]);
+export type ProjectRetentionQueryResult = typeof ProjectRetentionQueryResult.Type;
+
+const RetentionSetValue = Schema.optionalKey(
+  Schema.NullOr(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1))),
+);
+
+export const ProjectRetentionSetInput = Schema.Struct({
+  identity: ProjectIdentity,
+  requestKey: RequestKey,
+  diagnosticMaxAgeMs: RetentionSetValue,
+  diagnosticMaxBytes: RetentionSetValue,
+  disposableMaxAgeMs: RetentionSetValue,
+  disposableMaxBytes: RetentionSetValue,
+});
+export type ProjectRetentionSetInput = typeof ProjectRetentionSetInput.Type;
+
+export const ProjectRetentionMutationResult = Schema.Union([
+  Schema.Struct({
+    ok: Schema.Literal(true),
+    retention: ProjectRetentionSnapshot,
+    alreadyApplied: Schema.Boolean,
+    requestKey: RequestKey,
+  }),
+  Schema.Struct({
+    ok: Schema.Literal(false),
+    requestKey: RequestKey,
+    error: RetentionOperationError,
+  }),
+]);
+export type ProjectRetentionMutationResult = typeof ProjectRetentionMutationResult.Type;
 
 export const ProjectWorkflowSnapshot = Schema.Struct({
   project: ProjectSnapshot,
@@ -1239,6 +1349,8 @@ export const HostOverview = Schema.Struct({
   projects: Schema.Array(ProjectSnapshot),
   // Optional so older Hosts remain decodable by a newer visualizer overview.
   readiness: Schema.optionalKey(Schema.Array(ProjectReadinessAssessment)),
+  // Optional so an older Host can still serve a newer overview client.
+  retention: Schema.optionalKey(Schema.Array(ProjectRetentionSnapshot)),
   projectDefinitions: Schema.Array(ProjectWorkflowSnapshot),
   workflowSchedules: Schema.Array(ProjectWorkflowSchedulesSnapshot),
   workflowOccurrences: Schema.Array(ProjectWorkflowScheduleOccurrencesSnapshot),
@@ -1266,6 +1378,21 @@ export const ListProjectPage = Rpc.make("ListProjectPage", {
 export const ShowProject = Rpc.make("ShowProject", {
   payload: { identity: ProjectIdentity },
   success: ProjectQueryResult,
+});
+
+export const ShowProjectRetention = Rpc.make("ShowProjectRetention", {
+  payload: { identity: ProjectIdentity },
+  success: ProjectRetentionQueryResult,
+});
+
+export const SetProjectRetention = Rpc.make("SetProjectRetention", {
+  payload: ProjectRetentionSetInput.fields,
+  success: ProjectRetentionMutationResult,
+});
+
+export const ResetProjectRetention = Rpc.make("ResetProjectRetention", {
+  payload: { identity: ProjectIdentity, requestKey: RequestKey },
+  success: ProjectRetentionMutationResult,
 });
 
 export const ShowProjectReadiness = Rpc.make("ShowProjectReadiness", {
@@ -1460,6 +1587,9 @@ export const KojoControl = RpcGroup.make(
   ListProjects,
   ListProjectPage,
   ShowProject,
+  ShowProjectRetention,
+  SetProjectRetention,
+  ResetProjectRetention,
   ShowProjectReadiness,
   RefreshProjectReadiness,
   RepairProjectReadiness,

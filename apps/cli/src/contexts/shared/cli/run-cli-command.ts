@@ -4,6 +4,7 @@ import {
   type ProjectCondition,
   ProjectIdentity as ProjectIdentitySchema,
   type ProjectReadinessActionKey,
+  type ProjectRetentionSetInput,
   type ProjectSelector,
   type ProjectSnapshot,
   type RequestKey,
@@ -38,6 +39,7 @@ import {
   projectFailure,
   projectQueryFailure,
   readinessFailure,
+  retentionFailure,
   transportFailure,
   workflowRunFailure,
   workflowScheduleFailure,
@@ -45,14 +47,30 @@ import {
   writeFailure,
   writeProject,
   writeProjectReadiness,
+  writeProjectRetention,
   writeWorkflowRun,
   writeWorkflowSchedule,
   writeWorkflowScheduleOccurrence,
 } from "./cli-output";
+import { parseRetentionDuration, parseRetentionSize } from "./retention-values";
 
 export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
   const json = rawArgs.includes("--json");
   const args = rawArgs.filter((argument) => argument !== "--json");
+
+  const retentionFlags = new Set([
+    "--diagnostics-age",
+    "--diagnostics-size",
+    "--disposable-age",
+    "--disposable-size",
+  ]);
+  if (args[0] !== "retention" && args.some((argument) => retentionFlags.has(argument))) {
+    return writeFailure(
+      invalid("Use retention policy flags only with kojo retention set."),
+      json,
+      `${args[0] ?? "unknown"}.${args[1] ?? "unknown"}`,
+    );
+  }
 
   if (args[0] === "trace") return runTraceCliCommand(args, json);
 
@@ -66,6 +84,139 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
       json,
       `${args[0] ?? "unknown"}.unknown`,
     );
+  }
+
+  if (args[0] === "retention") {
+    const options = parseOptions(args.slice(2));
+    const operation = args[1];
+    const command = `retention.${operation ?? "unknown"}`;
+    if (options === undefined || !["show", "set", "reset"].includes(operation ?? "")) {
+      return writeFailure(invalid("Run: kojo retention show|set|reset"), json, command);
+    }
+    const hasPolicyOption =
+      options.diagnosticsAge !== undefined ||
+      options.diagnosticsSize !== undefined ||
+      options.disposableAge !== undefined ||
+      options.disposableSize !== undefined;
+    if (
+      options.args.length !== 0 ||
+      options.input !== undefined ||
+      options.value !== undefined ||
+      options.valueFile !== undefined ||
+      options.conditions.length > 0 ||
+      options.outcomes.length > 0 ||
+      options.states.length > 0 ||
+      options.workflowKeys.length > 0 ||
+      options.scheduleKeys.length > 0 ||
+      options.parentRunId !== undefined ||
+      options.cursor !== undefined ||
+      options.limit !== undefined ||
+      options.revision !== undefined ||
+      options.reveal ||
+      (operation === "show" && (hasPolicyOption || options.requestKey !== undefined)) ||
+      (operation === "reset" && hasPolicyOption) ||
+      (operation === "set" && !hasPolicyOption)
+    ) {
+      return writeFailure(
+        invalid(
+          "Run: kojo retention show|reset [--project <path>|--project-id <Project Identity>] or kojo retention set --diagnostics-age <duration|off> --diagnostics-size <bytes|off> --disposable-age <duration|off> --disposable-size <bytes|off> [--project <path>|--project-id <Project Identity>] [--request-key <Request Key>]",
+        ),
+        json,
+        command,
+      );
+    }
+    let identity: ProjectSnapshot["identity"];
+    if (options.projectId !== undefined) {
+      try {
+        identity = Schema.decodeUnknownSync(ProjectIdentitySchema)(options.projectId);
+      } catch {
+        return writeFailure(invalid("Use a full Project Identity."), json, command);
+      }
+    } else {
+      try {
+        identity = (await resolveInitializedProject(options.projectPath ?? process.cwd())).identity;
+      } catch (error) {
+        return writeFailure(
+          invalid(
+            error instanceof ProjectInitializationError
+              ? error.message
+              : "Choose an initialized Kojo Project.",
+          ),
+          json,
+          command,
+        );
+      }
+    }
+    const client = makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath());
+    if (operation === "show") {
+      const shown = await runEffect(client.showProjectRetention(identity));
+      if (!shown.succeeded) return writeFailure(transportFailure(shown.error), json, command);
+      if (!shown.value.ok) return writeFailure(retentionFailure(shown.value.error), json, command);
+      writeProjectRetention(command, shown.value.retention, json);
+      return 0;
+    }
+    const requestKey = decodeRequestKey(options.requestKey);
+    if (requestKey === undefined) {
+      return writeFailure(
+        invalid("Use a non-empty Request Key of at most 256 characters."),
+        json,
+        command,
+      );
+    }
+    if (operation === "reset") {
+      const reset = await runEffect(client.resetProjectRetention(identity, requestKey));
+      if (!reset.succeeded) return writeFailure(transportFailure(reset.error), json, command);
+      if (!reset.value.ok) {
+        return writeFailure(
+          retentionFailure(reset.value.error, reset.value.requestKey),
+          json,
+          command,
+        );
+      }
+      writeProjectRetention(command, reset.value.retention, json, reset.value);
+      return 0;
+    }
+    const durationOptions = [
+      ["--diagnostics-age", options.diagnosticsAge, parseRetentionDuration],
+      ["--disposable-age", options.disposableAge, parseRetentionDuration],
+    ] as const;
+    const sizeOptions = [
+      ["--diagnostics-size", options.diagnosticsSize, parseRetentionSize],
+      ["--disposable-size", options.disposableSize, parseRetentionSize],
+    ] as const;
+    const parsed: {
+      identity: ProjectRetentionSetInput["identity"];
+      requestKey: ProjectRetentionSetInput["requestKey"];
+      diagnosticMaxAgeMs?: number | null;
+      diagnosticMaxBytes?: number | null;
+      disposableMaxAgeMs?: number | null;
+      disposableMaxBytes?: number | null;
+    } = {
+      identity,
+      requestKey,
+    };
+    for (const [label, raw, parse] of [...durationOptions, ...sizeOptions]) {
+      if (raw === undefined) continue;
+      const value = parse(raw);
+      if (value === undefined) {
+        return writeFailure(
+          invalid(`Use ${label} with an explicit duration/size or off.`),
+          json,
+          command,
+        );
+      }
+      if (label === "--diagnostics-age") parsed.diagnosticMaxAgeMs = value;
+      if (label === "--disposable-age") parsed.disposableMaxAgeMs = value;
+      if (label === "--diagnostics-size") parsed.diagnosticMaxBytes = value;
+      if (label === "--disposable-size") parsed.disposableMaxBytes = value;
+    }
+    const set = await runEffect(client.setProjectRetention(parsed as ProjectRetentionSetInput));
+    if (!set.succeeded) return writeFailure(transportFailure(set.error), json, command);
+    if (!set.value.ok) {
+      return writeFailure(retentionFailure(set.value.error, set.value.requestKey), json, command);
+    }
+    writeProjectRetention(command, set.value.retention, json, set.value);
+    return 0;
   }
 
   if (args[0] === "readiness") {

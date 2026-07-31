@@ -1,12 +1,22 @@
 import { expect, it } from "@effect/vitest";
-import { ProjectIdentity, type ProjectSnapshot } from "@kojo/control";
+import {
+  ProjectIdentity,
+  type ProjectRetentionSnapshot,
+  type ProjectSnapshot,
+} from "@kojo/control";
 import { Effect, Layer, Schema } from "effect";
+import { HostIdentity } from "../../../../../../src/contexts/workflow-execution/control/models/host-identity";
+import {
+  HostDiagnosticLogger,
+  type HostRequestDiagnosticEvent,
+} from "../../../../../../src/contexts/workflow-execution/control/services/host-diagnostic-logger";
 import { ProjectRepository } from "../../../../../../src/contexts/workflow-execution/projects/repositories/project-repository";
 import {
   ProjectRuntime,
   ProjectRuntimeLive,
 } from "../../../../../../src/contexts/workflow-execution/projects/services/project-runtime";
 import { WorkflowBackend } from "../../../../../../src/contexts/workflow-execution/projects/services/workflow-backend";
+import { RetentionRepository } from "../../../../../../src/contexts/workflow-execution/retention/repositories/retention-repository";
 
 const project: ProjectSnapshot = {
   identity: Schema.decodeUnknownSync(ProjectIdentity)("00000000-0000-7000-8000-000000000001"),
@@ -61,6 +71,46 @@ it.effect("serializes lifecycle inspection for one Project", () => {
       { concurrency: "unbounded" },
     );
     expect(maximumActive).toBe(1);
+  }).pipe(Effect.provide(runtimeLayer(store)));
+});
+
+it.effect("serializes retention cleanup with a concurrent Project lifecycle write", () => {
+  const order: Array<string> = [];
+  const store = Layer.succeed(ProjectRepository, {
+    migrate: () => Effect.succeed(true),
+    postflight: () => Effect.succeed(true),
+    completeMigration: () => Effect.succeed(true),
+    readiness: () => Effect.succeed("ready" as const),
+    inspectForgetBlockers: () =>
+      Effect.succeed({
+        assessment: "available" as const,
+        enabledScheduleKeys: [],
+        nonFinalRunIds: [],
+      }),
+  });
+
+  return Effect.gen(function* () {
+    const runtime = yield* ProjectRuntime;
+    yield* Effect.all(
+      [
+        runtime.coordinateLifecycle(
+          project,
+          Effect.gen(function* () {
+            order.push("lifecycle-start");
+            yield* Effect.sleep("20 millis");
+            order.push("lifecycle-end");
+          }),
+        ),
+        runtime.coordinateRetention(
+          project,
+          Effect.sync(() => {
+            order.push("retention-cleanup");
+          }),
+        ),
+      ],
+      { concurrency: "unbounded" },
+    );
+    expect(order).toEqual(["lifecycle-start", "lifecycle-end", "retention-cleanup"]);
   }).pipe(Effect.provide(runtimeLayer(store)));
 });
 
@@ -214,6 +264,8 @@ it.effect("holds forget behind an active lifecycle mutation", () => {
 
 it.effect("commits migration only after the Workflow backend acquires ownership", () => {
   const order: Array<string> = [];
+  const retentionEvents: Array<HostRequestDiagnosticEvent> = [];
+  let retentionCleanups = 0;
   const store = Layer.succeed(ProjectRepository, {
     migrate: () =>
       Effect.sync(() => {
@@ -265,6 +317,27 @@ it.effect("commits migration only after the Workflow backend acquires ownership"
         order.push("backend-released");
       }),
   });
+  const retention = Layer.succeed(RetentionRepository, {
+    policy: () => Effect.die("Retention policy is not used by this test"),
+    show: () => Effect.die("Retention show is not used by this test"),
+    set: () => Effect.die("Retention set is not used by this test"),
+    reset: () => Effect.die("Retention reset is not used by this test"),
+    cleanup: () =>
+      Effect.sync(() => {
+        retentionCleanups += 1;
+        return { warnings: [] } as unknown as ProjectRetentionSnapshot;
+      }),
+  });
+  const logger = {
+    cleanup: Effect.void,
+    hostIdentity: Schema.decodeUnknownSync(HostIdentity)(
+      "host:00000000-0000-4000-8000-000000000002",
+    ),
+    emit: (event: HostRequestDiagnosticEvent) =>
+      Effect.sync(() => {
+        retentionEvents.push(event);
+      }),
+  };
 
   return Effect.gen(function* () {
     const runtime = yield* ProjectRuntime;
@@ -282,7 +355,25 @@ it.effect("commits migration only after the Workflow backend acquires ownership"
       "store-postflight",
       "migration-committed",
     ]);
-  }).pipe(Effect.provide(ProjectRuntimeLive.pipe(Layer.provide([store, initializingBackend]))));
+    expect(retentionCleanups).toBe(1);
+    expect(retentionEvents).toHaveLength(1);
+    expect(retentionEvents[0]).toMatchObject({
+      eventKind: "retention.cleanup.completed",
+      outcome: "success",
+      projectIdentity: project.identity,
+    });
+  }).pipe(
+    Effect.provide(
+      ProjectRuntimeLive.pipe(
+        Layer.provide([
+          store,
+          initializingBackend,
+          retention,
+          Layer.succeed(HostDiagnosticLogger, logger),
+        ]),
+      ),
+    ),
+  );
 });
 
 it.effect("does not mutate the store when another Workflow backend owns the Project", () => {
@@ -322,6 +413,75 @@ it.effect("does not mutate the store when another Workflow backend owns the Proj
     ).toBe(false);
     expect(migrations).toBe(0);
   }).pipe(Effect.provide(ProjectRuntimeLive.pipe(Layer.provide([store, ownedBackend]))));
+});
+
+it.effect("emits one safe failure completion when activation cleanup fails", () => {
+  const events: Array<HostRequestDiagnosticEvent> = [];
+  const store = Layer.succeed(ProjectRepository, {
+    migrate: () => Effect.succeed(true),
+    postflight: () => Effect.succeed(true),
+    completeMigration: () => Effect.succeed(true),
+    readiness: () => Effect.succeed("limited" as const),
+    inspectForgetBlockers: () =>
+      Effect.succeed({
+        assessment: "available" as const,
+        enabledScheduleKeys: [],
+        nonFinalRunIds: [],
+      }),
+  });
+  const activatingBackend = Layer.succeed(WorkflowBackend, {
+    ...unusedWorkflowExecution,
+    acquire: () => Effect.succeed(true),
+    quiesce: () => Effect.void,
+    readiness: () => Effect.succeed("uninitialized" as const),
+    initialize: () => Effect.succeed(true),
+    postflight: () => Effect.succeed(true),
+    release: () => Effect.void,
+  });
+  const retention = Layer.succeed(RetentionRepository, {
+    policy: () => Effect.die("Retention policy is not used by this test"),
+    show: () => Effect.die("Retention show is not used by this test"),
+    set: () => Effect.die("Retention set is not used by this test"),
+    reset: () => Effect.die("Retention reset is not used by this test"),
+    cleanup: () => Effect.die("native unlink is unavailable"),
+  });
+  const logger = {
+    cleanup: Effect.void,
+    hostIdentity: Schema.decodeUnknownSync(HostIdentity)(
+      "host:00000000-0000-4000-8000-000000000003",
+    ),
+    emit: (event: HostRequestDiagnosticEvent) =>
+      Effect.sync(() => {
+        events.push(event);
+      }),
+  };
+
+  return Effect.gen(function* () {
+    const runtime = yield* ProjectRuntime;
+    expect(
+      yield* runtime.coordinateRegistration(project, Effect.succeed({}), () =>
+        Effect.succeed(true),
+      ),
+    ).toBe(true);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      eventKind: "retention.cleanup.completed",
+      outcome: "error",
+      safeErrorCode: "retention-cleanup-failed",
+      projectIdentity: project.identity,
+    });
+  }).pipe(
+    Effect.provide(
+      ProjectRuntimeLive.pipe(
+        Layer.provide([
+          store,
+          activatingBackend,
+          retention,
+          Layer.succeed(HostDiagnosticLogger, logger),
+        ]),
+      ),
+    ),
+  );
 });
 
 it.effect("releases a ready Workflow backend when deep Project store postflight fails", () => {

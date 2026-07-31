@@ -39,6 +39,9 @@ import {
   type ProjectReadinessActionKey,
   type ProjectReadinessQueryResult,
   type ProjectReadinessRepairResult,
+  type ProjectRetentionMutationResult,
+  type ProjectRetentionQueryResult,
+  type ProjectRetentionSetInput,
   type ProjectSelector,
   type ProjectWorkflowQueryResult,
   type RequestKey,
@@ -443,6 +446,16 @@ export const makeLocalClient = (options: LocalClientOptions) => {
 
   const showProject = (identity: ProjectIdentity) =>
     activateAndRetry(request("projects:show", (client) => client.ShowProject({ identity })));
+  const showProjectRetention = (identity: ProjectIdentity) =>
+    activateAndRetry(
+      request("retention:show", (client) => client.ShowProjectRetention({ identity })),
+    );
+  const setProjectRetention = (input: ProjectRetentionSetInput) =>
+    activateAndRetry(request("retention:set", (client) => client.SetProjectRetention(input)));
+  const resetProjectRetention = (identity: ProjectIdentity, requestKey: RequestKey) =>
+    activateAndRetry(
+      request("retention:set", (client) => client.ResetProjectRetention({ identity, requestKey })),
+    );
   const showProjectReadiness = (identity: ProjectIdentity) =>
     activateAndRetry(
       request("readiness:show", (client) => client.ShowProjectReadiness({ identity })),
@@ -610,6 +623,13 @@ export const makeLocalClient = (options: LocalClientOptions) => {
               { concurrency: "unbounded" },
             )
           : [];
+        const retention = host.capabilities.includes("retention:show")
+          ? yield* Effect.forEach(
+              projects,
+              (project) => client.ShowProjectRetention({ identity: project.identity }),
+              { concurrency: "unbounded" },
+            )
+          : [];
         const runs = host.capabilities.includes("runs:list")
           ? yield* Effect.forEach(
               projects,
@@ -652,6 +672,7 @@ export const makeLocalClient = (options: LocalClientOptions) => {
           host,
           projects,
           readiness: readiness.flatMap((result) => (result.ok ? [result.assessment] : [])),
+          retention: retention.flatMap((result) => (result.ok ? [result.retention] : [])),
           projectDefinitions: definitions.flatMap((result) => (result.ok ? [result.snapshot] : [])),
           workflowSchedules: schedules.flatMap((result, index) => {
             const project = projects[index];
@@ -697,6 +718,9 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     listProjects,
     listProjectPage,
     showProject,
+    showProjectRetention,
+    setProjectRetention,
+    resetProjectRetention,
     showProjectReadiness,
     refreshProjectReadiness,
     repairProjectReadiness,
@@ -743,6 +767,25 @@ export const makeLocalClient = (options: LocalClientOptions) => {
       identity: ProjectIdentity,
     ) => Effect.Effect<
       ProjectQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly showProjectRetention: (
+      identity: ProjectIdentity,
+    ) => Effect.Effect<
+      ProjectRetentionQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly setProjectRetention: (
+      input: ProjectRetentionSetInput,
+    ) => Effect.Effect<
+      ProjectRetentionMutationResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly resetProjectRetention: (
+      identity: ProjectIdentity,
+      requestKey: RequestKey,
+    ) => Effect.Effect<
+      ProjectRetentionMutationResult,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;
     readonly showProjectReadiness: (
