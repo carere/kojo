@@ -225,7 +225,7 @@ const validateDatabase = (path: string, identity: ProjectSnapshot["identity"]) =
             | undefined);
     if (
       check?.quick_check !== "ok" ||
-      ![0, 1].includes(version?.user_version ?? -1) ||
+      ![0, 1, 2].includes(version?.user_version ?? -1) ||
       (version?.user_version === 0
         ? userObjects.length !== 1 ||
           bootstrap?.project_identity !== identity ||

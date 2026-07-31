@@ -172,11 +172,27 @@ export const deliverWorkflowScheduleOccurrences = (
           now,
           nextWorkflowScheduleOccurrence,
         );
-        const currentSchedules = yield* schedules.list(validation.project, {
+        let currentSchedules = yield* schedules.list(validation.project, {
           identity: validation.project.identity,
           workflowKeys: [],
           conditions: [],
         });
+        currentSchedules = yield* Effect.forEach(currentSchedules, (schedule) =>
+          !schedule.enabledIntent ||
+          schedule.condition !== "available" ||
+          schedule.definition === null ||
+          schedule.nextOccurrenceMs === null
+            ? Effect.succeed(schedule)
+            : Effect.map(
+                schedules.reconcileDueOccurrence({
+                  project: validation.project,
+                  scheduleKey: schedule.scheduleKey,
+                  observedAtMs: now,
+                  nextOccurrence: nextWorkflowScheduleOccurrence,
+                }),
+                (reconciled) => reconciled ?? schedule,
+              ),
+        );
         for (const schedule of currentSchedules) {
           const scheduleDefinition = schedule.definition;
           if (
@@ -199,12 +215,28 @@ export const deliverWorkflowScheduleOccurrences = (
             definition === undefined ||
             executableSchedule(definition, schedule.scheduleKey) === undefined
           ) {
+            yield* schedules.failOccurrence({
+              project: validation.project,
+              scheduleKey: schedule.scheduleKey,
+              scheduledAtMs: schedule.nextOccurrenceMs,
+              appliedRevision: scheduleDefinition.revision,
+              processedAtMs: clock.now(),
+              reasonCode: "schedule.definition-unavailable",
+            });
             continue;
           }
           let input: unknown;
           try {
             input = resolveInput(definition, schedule.scheduleKey, schedule.nextOccurrenceMs);
           } catch {
+            yield* schedules.failOccurrence({
+              project: validation.project,
+              scheduleKey: schedule.scheduleKey,
+              scheduledAtMs: schedule.nextOccurrenceMs,
+              appliedRevision: scheduleDefinition.revision,
+              processedAtMs: clock.now(),
+              reasonCode: "schedule.input-invalid",
+            });
             continue;
           }
           const planned = yield* schedules.planOccurrence({
@@ -240,11 +272,24 @@ export const deliverWorkflowScheduleOccurrences = (
               advanced.definition !== null &&
               advanced.nextOccurrenceMs !== null
             ) {
-              const nextInput = resolveInput(
-                definition,
-                planned.scheduleKey,
-                advanced.nextOccurrenceMs,
-              );
+              let nextInput: unknown;
+              try {
+                nextInput = resolveInput(
+                  definition,
+                  planned.scheduleKey,
+                  advanced.nextOccurrenceMs,
+                );
+              } catch {
+                yield* schedules.failOccurrence({
+                  project: validation.project,
+                  scheduleKey: planned.scheduleKey,
+                  scheduledAtMs: advanced.nextOccurrenceMs,
+                  appliedRevision: planned.appliedRevision,
+                  processedAtMs: clock.now(),
+                  reasonCode: "schedule.input-invalid",
+                });
+                continue;
+              }
               const next = yield* schedules.planOccurrence({
                 project: validation.project,
                 scheduleKey: planned.scheduleKey,
@@ -305,7 +350,66 @@ export const deliverWorkflowScheduleOccurrences = (
               candidate.workflowKey === scheduleDefinition.workflowKey &&
               candidate.revision === workflow?.revision,
           );
-          if (workflow === undefined || definition === undefined) continue;
+          if (workflow === undefined || definition === undefined) {
+            yield* schedules.failOccurrence({
+              project: validation.project,
+              scheduleKey: occurrence.scheduleKey,
+              scheduledAtMs: occurrence.scheduledAtMs,
+              appliedRevision: occurrence.appliedRevision,
+              processedAtMs: clock.now(),
+              reasonCode: "schedule.definition-unavailable",
+            });
+            continue;
+          }
+          const nextOccurrenceMs = nextWorkflowScheduleOccurrence(
+            scheduleDefinition,
+            occurrence.scheduledAtMs,
+          );
+          const skipped = yield* schedules.skipOccurrenceIfOverlapping({
+            project: validation.project,
+            scheduleKey: occurrence.scheduleKey,
+            scheduledAtMs: occurrence.scheduledAtMs,
+            appliedRevision: occurrence.appliedRevision,
+            nextOccurrenceMs,
+            processedAtMs: clock.now(),
+          });
+          if (skipped !== undefined) {
+            if (skipped.definition !== null && skipped.nextOccurrenceMs !== null) {
+              try {
+                const nextInput = resolveInput(
+                  definition,
+                  occurrence.scheduleKey,
+                  skipped.nextOccurrenceMs,
+                );
+                const next = yield* schedules.planOccurrence({
+                  project: validation.project,
+                  scheduleKey: occurrence.scheduleKey,
+                  scheduledAtMs: skipped.nextOccurrenceMs,
+                  appliedRevision: occurrence.appliedRevision,
+                  input: nextInput,
+                  inputSensitivityPaths: definition.sensitivity?.input ?? [],
+                  plannedAtMs: clock.now(),
+                });
+                if (next?.outcome === "planned") {
+                  yield* backend.armScheduleWakeup?.(validation.project, {
+                    scheduleKey: next.scheduleKey,
+                    scheduledAtMs: next.scheduledAtMs,
+                    scheduleRevision: next.appliedRevision,
+                  }) ?? Effect.void;
+                }
+              } catch {
+                yield* schedules.failOccurrence({
+                  project: validation.project,
+                  scheduleKey: occurrence.scheduleKey,
+                  scheduledAtMs: skipped.nextOccurrenceMs,
+                  appliedRevision: occurrence.appliedRevision,
+                  processedAtMs: clock.now(),
+                  reasonCode: "schedule.input-invalid",
+                });
+              }
+            }
+            continue;
+          }
           const requestKey = occurrenceRequestKey(occurrence.scheduleKey, occurrence.scheduledAtMs);
           const acceptedAtMs = clock.now();
           const accepted = yield* runs.acceptScheduledStart({
@@ -357,11 +461,19 @@ export const deliverWorkflowScheduleOccurrences = (
               inputSensitivityPaths: occurrence.inputSensitivityPaths,
             },
           });
-          if (accepted._tag !== "accepted") continue;
-          const nextOccurrenceMs = nextWorkflowScheduleOccurrence(
-            scheduleDefinition,
-            occurrence.scheduledAtMs,
-          );
+          if (accepted._tag !== "accepted") {
+            if (accepted._tag === "request-key-conflict") {
+              yield* schedules.failOccurrence({
+                project: validation.project,
+                scheduleKey: occurrence.scheduleKey,
+                scheduledAtMs: occurrence.scheduledAtMs,
+                appliedRevision: occurrence.appliedRevision,
+                processedAtMs: clock.now(),
+                reasonCode: "schedule.delivery-request-conflict",
+              });
+            }
+            continue;
+          }
           const advanced = yield* schedules.advanceAfterStart({
             project: validation.project,
             scheduleKey: occurrence.scheduleKey,
@@ -375,11 +487,24 @@ export const deliverWorkflowScheduleOccurrences = (
             advanced.definition !== null &&
             advanced.nextOccurrenceMs !== null
           ) {
-            const nextInput = resolveInput(
-              definition,
-              occurrence.scheduleKey,
-              advanced.nextOccurrenceMs,
-            );
+            let nextInput: unknown;
+            try {
+              nextInput = resolveInput(
+                definition,
+                occurrence.scheduleKey,
+                advanced.nextOccurrenceMs,
+              );
+            } catch {
+              yield* schedules.failOccurrence({
+                project: validation.project,
+                scheduleKey: occurrence.scheduleKey,
+                scheduledAtMs: advanced.nextOccurrenceMs,
+                appliedRevision: occurrence.appliedRevision,
+                processedAtMs: clock.now(),
+                reasonCode: "schedule.input-invalid",
+              });
+              continue;
+            }
             const next = yield* schedules.planOccurrence({
               project: validation.project,
               scheduleKey: occurrence.scheduleKey,

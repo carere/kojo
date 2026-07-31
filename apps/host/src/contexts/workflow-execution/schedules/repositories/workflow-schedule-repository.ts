@@ -79,6 +79,34 @@ export interface WorkflowScheduleRepositoryShape {
     readonly inputSensitivityPaths: ReadonlyArray<string>;
     readonly plannedAtMs: number;
   }) => Effect.Effect<WorkflowScheduleOccurrenceSnapshot | undefined>;
+  /** Collapses downtime to the newest due instant and records the older range. */
+  readonly reconcileDueOccurrence: (input: {
+    readonly project: ProjectSnapshot;
+    readonly scheduleKey: string;
+    readonly observedAtMs: number;
+    readonly nextOccurrence: (
+      definition: WorkflowScheduleDefinition,
+      strictlyAfterMs: number,
+    ) => number;
+  }) => Effect.Effect<WorkflowScheduleSnapshot | undefined>;
+  /** Finalizes a planned occurrence when the Schedule's skip policy is active. */
+  readonly skipOccurrenceIfOverlapping: (input: {
+    readonly project: ProjectSnapshot;
+    readonly scheduleKey: string;
+    readonly scheduledAtMs: number;
+    readonly appliedRevision: string;
+    readonly nextOccurrenceMs: number;
+    readonly processedAtMs: number;
+  }) => Effect.Effect<WorkflowScheduleSnapshot | undefined>;
+  /** Finalizes one occurrence and blocks future delivery until its definition changes. */
+  readonly failOccurrence: (input: {
+    readonly project: ProjectSnapshot;
+    readonly scheduleKey: string;
+    readonly scheduledAtMs: number;
+    readonly appliedRevision: string;
+    readonly processedAtMs: number;
+    readonly reasonCode: string;
+  }) => Effect.Effect<WorkflowScheduleSnapshot | undefined>;
   readonly advanceAfterStart: (input: {
     readonly project: ProjectSnapshot;
     readonly scheduleKey: string;

@@ -90,7 +90,7 @@ const ProjectMetadataFile = Schema.Struct({
   layoutVersion: Schema.Literal(1),
   projectIdentity: Schema.String,
 });
-const CURRENT_VERSION = 1;
+const CURRENT_VERSION = 2;
 const ENGINE_ADAPTER_KIND = "effect-workflow";
 const ENGINE_ADAPTER_SCHEMA_VERSION = 1;
 const EFFECT_FAMILY_VERSION = "4.0.0-beta.102";
@@ -144,7 +144,7 @@ const REQUIRED_OBJECTS = [
 const migrationFolder = fileURLToPath(new URL("./migrations", import.meta.url));
 
 const migration = readFileSync(
-  fileURLToPath(new URL("./migrations/0001_project_lifecycle.sql", import.meta.url)),
+  fileURLToPath(new URL("./migrations/0002_schedule_reconciliation.sql", import.meta.url)),
   "utf8",
 );
 const migrationChecksum = createHash("sha256").update(migration).digest("hex");
@@ -688,30 +688,32 @@ export const migrateProjectRepository = (project: {
       verifyBackup(backupPath, project);
     }
     if (current < CURRENT_VERSION) {
-      if (versionZeroDatabaseId === undefined) {
-        throw new Error("version-zero Project store identity is unavailable");
-      }
       const projectStore = drizzle(connection);
       migrate(projectStore, {
         migrationsFolder: migrationFolder,
         migrationsTable: "kojo_schema_migrations",
       });
       const migratedAt = Date.now();
-      projectStore
-        .insert(storeMetadata)
-        .values({
-          singletonKey: 1,
-          projectIdentity: project.identity,
-          databaseInstanceId: versionZeroDatabaseId,
-          storeFormatVersion: 0,
-          engineAdapterKind: ENGINE_ADAPTER_KIND,
-          engineAdapterSchemaVersion: ENGINE_ADAPTER_SCHEMA_VERSION,
-          effectFamilyVersion: EFFECT_FAMILY_VERSION,
-          createdAtMs: migratedAt,
-          lastMigratedAtMs: migratedAt,
-        })
-        .onConflictDoNothing()
-        .run();
+      if (current === 0) {
+        if (versionZeroDatabaseId === undefined) {
+          throw new Error("version-zero Project store identity is unavailable");
+        }
+        projectStore
+          .insert(storeMetadata)
+          .values({
+            singletonKey: 1,
+            projectIdentity: project.identity,
+            databaseInstanceId: versionZeroDatabaseId,
+            storeFormatVersion: 0,
+            engineAdapterKind: ENGINE_ADAPTER_KIND,
+            engineAdapterSchemaVersion: ENGINE_ADAPTER_SCHEMA_VERSION,
+            effectFamilyVersion: EFFECT_FAMILY_VERSION,
+            createdAtMs: migratedAt,
+            lastMigratedAtMs: migratedAt,
+          })
+          .onConflictDoNothing()
+          .run();
+      }
       projectStore
         .update(storeMetadata)
         .set({
@@ -1062,6 +1064,8 @@ type StoredOccurrence = {
   readonly delivery_attempt_count: number;
   readonly first_attempted_at_ms: number | null;
   readonly linked_run_id: string | null;
+  readonly missed_range_count: number | null;
+  readonly missed_range_last_scheduled_at_ms: number | null;
   readonly outcome: "planned" | "started" | "skipped" | "invalidated" | "failed";
   readonly planned_at_ms: number;
   readonly processed_at_ms: number | null;
@@ -1077,7 +1081,7 @@ const occurrenceSelect = `
   SELECT schedule_key, scheduled_at_ms, applied_revision, resolved_input_json,
     resolved_input_sensitivity_map_version, resolved_input_sensitivity_map_json,
     outcome, reason_code, delivery_attempt_count, planned_at_ms, first_attempted_at_ms,
-    processed_at_ms, linked_run_id
+    processed_at_ms, linked_run_id, missed_range_count, missed_range_last_scheduled_at_ms
   FROM kojo_workflow_schedule_occurrences`;
 
 const readStoredOccurrence = (
@@ -1109,6 +1113,14 @@ const toOccurrenceSnapshot = (row: StoredOccurrence): WorkflowScheduleOccurrence
     firstAttemptedAtMs: row.first_attempted_at_ms,
     processedAtMs: row.processed_at_ms,
     linkedRunId: row.linked_run_id,
+    missedRange:
+      row.missed_range_count === null || row.missed_range_last_scheduled_at_ms === null
+        ? null
+        : {
+            count: row.missed_range_count,
+            firstScheduledAtMs: row.scheduled_at_ms,
+            lastScheduledAtMs: row.missed_range_last_scheduled_at_ms,
+          },
   };
 };
 
@@ -1365,12 +1377,39 @@ export const DrizzleWorkflowScheduleRepositoryLive = Layer.sync(WorkflowSchedule
               continue;
             }
             const changed = !sameScheduleDefinition(existing, definition);
-            const restored = existing.condition !== "available";
+            const restored = existing.condition === "unavailable";
+            const repaired = existing.condition === "needs-attention" && changed;
             const needsNext =
               existing.enabled_intent === 1 &&
-              (changed || restored || existing.next_occurrence_ms === null);
-            if (!changed && !restored && !needsNext) continue;
-            const strictlyAfter = Math.max(appliedAt, existing.high_water_mark_ms ?? 0);
+              (changed ||
+                restored ||
+                repaired ||
+                (existing.condition === "available" && existing.next_occurrence_ms === null));
+            if (!changed && !restored && !repaired && !needsNext) continue;
+            let invalidatedThrough = 0;
+            if (changed) {
+              const planned = connection
+                .query(
+                  `SELECT MAX(scheduled_at_ms) AS scheduled_at_ms
+                   FROM kojo_workflow_schedule_occurrences
+                   WHERE schedule_key = ? AND outcome = 'planned'`,
+                )
+                .get(definition.scheduleKey) as { readonly scheduled_at_ms: number | null } | null;
+              invalidatedThrough = planned?.scheduled_at_ms ?? 0;
+              connection
+                .query(
+                  `UPDATE kojo_workflow_schedule_occurrences
+                     SET outcome = 'invalidated', reason_code = 'schedule.definition-changed',
+                       processed_at_ms = ?, row_version = row_version + 1
+                   WHERE schedule_key = ? AND outcome = 'planned'`,
+                )
+                .run(appliedAt, definition.scheduleKey);
+            }
+            const strictlyAfter = Math.max(
+              appliedAt,
+              existing.high_water_mark_ms ?? 0,
+              invalidatedThrough,
+            );
             const next =
               existing.enabled_intent === 1 ? nextOccurrence(definition, strictlyAfter) : null;
             connection
@@ -1420,6 +1459,14 @@ export const DrizzleWorkflowScheduleRepositoryLive = Layer.sync(WorkflowSchedule
                      current_input_rule_revision = NULL, next_occurrence_ms = NULL,
                      row_version = row_version + 1, updated_at_ms = ?
                    WHERE schedule_key = ?`,
+              )
+              .run(appliedAt, scheduleKey);
+            connection
+              .query(
+                `UPDATE kojo_workflow_schedule_occurrences
+                   SET outcome = 'invalidated', reason_code = 'schedule.definition-unavailable',
+                     processed_at_ms = ?, row_version = row_version + 1
+                 WHERE schedule_key = ? AND outcome = 'planned'`,
               )
               .run(appliedAt, scheduleKey);
           }
@@ -1625,6 +1672,223 @@ export const DrizzleWorkflowScheduleRepositoryLive = Layer.sync(WorkflowSchedule
           const planned = readStoredOccurrence(connection, input.scheduleKey, input.scheduledAtMs);
           if (planned === undefined) throw new Error("Workflow Schedule Occurrence was not stored");
           return toOccurrenceSnapshot(planned);
+        }),
+      ),
+    ),
+  reconcileDueOccurrence: (input) =>
+    Effect.sync(() =>
+      withWritableProjectStore(input.project, (connection) =>
+        transaction(connection, () => {
+          const schedule = readStoredSchedule(connection, input.scheduleKey);
+          const definition = schedule === undefined ? null : currentScheduleDefinition(schedule);
+          if (
+            schedule === undefined ||
+            definition === null ||
+            schedule.enabled_intent !== 1 ||
+            schedule.condition !== "available" ||
+            schedule.next_occurrence_ms === null
+          ) {
+            return schedule === undefined ? undefined : toScheduleSnapshot(schedule);
+          }
+          const observedAt = safeTimestamp(input.observedAtMs);
+          if (schedule.next_occurrence_ms > observedAt) return toScheduleSnapshot(schedule);
+
+          const firstMissedAt = schedule.next_occurrence_ms;
+          let latestDueAt = firstMissedAt;
+          let lastOlderMissedAt: number | undefined;
+          let olderMissedCount = 0;
+          for (;;) {
+            const followingAt = input.nextOccurrence(definition, latestDueAt);
+            if (followingAt > observedAt) break;
+            lastOlderMissedAt = latestDueAt;
+            olderMissedCount += 1;
+            latestDueAt = followingAt;
+          }
+          if (olderMissedCount === 0) return toScheduleSnapshot(schedule);
+          if (lastOlderMissedAt === undefined) {
+            throw new Error("Workflow Schedule missed range has no final instant");
+          }
+
+          const existing = readStoredOccurrence(connection, input.scheduleKey, firstMissedAt);
+          if (existing?.outcome === "planned") {
+            connection
+              .query(
+                `UPDATE kojo_workflow_schedule_occurrences
+                   SET outcome = 'skipped', reason_code = 'schedule.missed-range',
+                     processed_at_ms = ?, missed_range_count = ?,
+                     missed_range_last_scheduled_at_ms = ?, row_version = row_version + 1
+                   WHERE schedule_key = ? AND scheduled_at_ms = ? AND outcome = 'planned'`,
+              )
+              .run(
+                observedAt,
+                olderMissedCount,
+                lastOlderMissedAt,
+                input.scheduleKey,
+                firstMissedAt,
+              );
+          } else if (existing === undefined) {
+            const inputJson = "null";
+            connection
+              .query(
+                `INSERT INTO kojo_workflow_schedule_occurrences(
+                  schedule_key, scheduled_at_ms, applied_revision, resolved_input_encoding_version,
+                  resolved_input_schema_identity, resolved_input_json,
+                  resolved_input_sensitivity_map_version, resolved_input_sensitivity_map_json,
+                  resolved_input_sha256, outcome, reason_code, delivery_attempt_count,
+                  planned_at_ms, processed_at_ms, missed_range_count,
+                  missed_range_last_scheduled_at_ms, row_version
+                ) VALUES (?, ?, ?, 1, 'kojo.workflow-schedule-input/v1', ?, ?, ?, ?, 'skipped',
+                  'schedule.missed-range', 0, ?, ?, ?, ?, 1)`,
+              )
+              .run(
+                input.scheduleKey,
+                firstMissedAt,
+                definition.revision,
+                inputJson,
+                SENSITIVITY_MAP_VERSION,
+                encodeSensitivityMap(sensitivityMap([])),
+                hash(inputJson),
+                observedAt,
+                observedAt,
+                olderMissedCount,
+                lastOlderMissedAt,
+              );
+          } else {
+            return toScheduleSnapshot(schedule);
+          }
+          connection
+            .query(
+              `UPDATE kojo_workflow_schedule_states
+                 SET high_water_mark_ms = ?, next_occurrence_ms = ?,
+                   row_version = row_version + 1, updated_at_ms = ?
+               WHERE schedule_key = ?`,
+            )
+            .run(lastOlderMissedAt, latestDueAt, observedAt, input.scheduleKey);
+          const reconciled = readStoredSchedule(connection, input.scheduleKey);
+          if (reconciled === undefined)
+            throw new Error("Workflow Schedule disappeared after downtime");
+          return toScheduleSnapshot(reconciled);
+        }),
+      ),
+    ),
+  skipOccurrenceIfOverlapping: (input) =>
+    Effect.sync(() =>
+      withWritableProjectStore(input.project, (connection) =>
+        transaction(connection, () => {
+          const schedule = readStoredSchedule(connection, input.scheduleKey);
+          const definition = schedule === undefined ? null : currentScheduleDefinition(schedule);
+          if (
+            schedule === undefined ||
+            definition === null ||
+            definition.overlapPolicy !== "skip" ||
+            schedule.enabled_intent !== 1 ||
+            schedule.condition !== "available" ||
+            schedule.applied_revision !== input.appliedRevision ||
+            schedule.next_occurrence_ms !== input.scheduledAtMs
+          ) {
+            return undefined;
+          }
+          const active = connection
+            .query(
+              `SELECT run_id FROM kojo_workflow_runs
+               WHERE trigger_kind = 'schedule' AND schedule_key = ?
+                 AND state IN ('running', 'suspended', 'stopping')
+               LIMIT 1`,
+            )
+            .get(input.scheduleKey);
+          if (active === null || active === undefined) return undefined;
+          const processedAt = safeTimestamp(input.processedAtMs);
+          connection
+            .query(
+              `UPDATE kojo_workflow_schedule_occurrences
+                 SET outcome = 'skipped', reason_code = 'schedule.overlap', processed_at_ms = ?,
+                   row_version = row_version + 1
+               WHERE schedule_key = ? AND scheduled_at_ms = ? AND outcome = 'planned'`,
+            )
+            .run(processedAt, input.scheduleKey, input.scheduledAtMs);
+          connection
+            .query(
+              `UPDATE kojo_workflow_schedule_states
+                 SET high_water_mark_ms = ?, next_occurrence_ms = ?,
+                   row_version = row_version + 1, updated_at_ms = ?
+               WHERE schedule_key = ?`,
+            )
+            .run(input.scheduledAtMs, input.nextOccurrenceMs, processedAt, input.scheduleKey);
+          const skipped = readStoredSchedule(connection, input.scheduleKey);
+          if (skipped === undefined) throw new Error("Workflow Schedule disappeared after overlap");
+          return toScheduleSnapshot(skipped);
+        }),
+      ),
+    ),
+  failOccurrence: (input) =>
+    Effect.sync(() =>
+      withWritableProjectStore(input.project, (connection) =>
+        transaction(connection, () => {
+          const schedule = readStoredSchedule(connection, input.scheduleKey);
+          if (
+            schedule === undefined ||
+            schedule.enabled_intent !== 1 ||
+            schedule.condition !== "available" ||
+            schedule.applied_revision !== input.appliedRevision ||
+            schedule.next_occurrence_ms !== input.scheduledAtMs
+          ) {
+            return schedule === undefined ? undefined : toScheduleSnapshot(schedule);
+          }
+          const processedAt = safeTimestamp(input.processedAtMs);
+          const occurrence = readStoredOccurrence(
+            connection,
+            input.scheduleKey,
+            input.scheduledAtMs,
+          );
+          if (occurrence?.outcome === "planned") {
+            connection
+              .query(
+                `UPDATE kojo_workflow_schedule_occurrences
+                   SET outcome = 'failed', reason_code = ?, processed_at_ms = ?,
+                     row_version = row_version + 1
+                 WHERE schedule_key = ? AND scheduled_at_ms = ? AND outcome = 'planned'`,
+              )
+              .run(input.reasonCode, processedAt, input.scheduleKey, input.scheduledAtMs);
+          } else if (occurrence === undefined) {
+            const inputJson = "null";
+            connection
+              .query(
+                `INSERT INTO kojo_workflow_schedule_occurrences(
+                  schedule_key, scheduled_at_ms, applied_revision, resolved_input_encoding_version,
+                  resolved_input_schema_identity, resolved_input_json,
+                  resolved_input_sensitivity_map_version, resolved_input_sensitivity_map_json,
+                  resolved_input_sha256, outcome, reason_code, delivery_attempt_count,
+                  planned_at_ms, processed_at_ms, row_version
+                ) VALUES (?, ?, ?, 1, 'kojo.workflow-schedule-input/v1', ?, ?, ?, ?, 'failed', ?,
+                  0, ?, ?, 1)`,
+              )
+              .run(
+                input.scheduleKey,
+                input.scheduledAtMs,
+                input.appliedRevision,
+                inputJson,
+                SENSITIVITY_MAP_VERSION,
+                encodeSensitivityMap(sensitivityMap([])),
+                hash(inputJson),
+                input.reasonCode,
+                processedAt,
+                processedAt,
+              );
+          } else {
+            return toScheduleSnapshot(schedule);
+          }
+          connection
+            .query(
+              `UPDATE kojo_workflow_schedule_states
+                 SET condition = 'needs-attention', condition_reason_code = ?,
+                   high_water_mark_ms = ?, next_occurrence_ms = NULL,
+                   row_version = row_version + 1, updated_at_ms = ?
+               WHERE schedule_key = ?`,
+            )
+            .run(input.reasonCode, input.scheduledAtMs, processedAt, input.scheduleKey);
+          const failed = readStoredSchedule(connection, input.scheduleKey);
+          if (failed === undefined) throw new Error("Workflow Schedule disappeared after failure");
+          return toScheduleSnapshot(failed);
         }),
       ),
     ),

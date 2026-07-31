@@ -73,7 +73,7 @@ describe("kojo init", () => {
     expect((await stat(join(project, ".kojo", "sandboxes"))).mode & 0o777).toBe(0o700);
     const databasePath = join(project, ".kojo", "kojo.sqlite");
     const database = new Database(databasePath, { readonly: true, strict: true });
-    expect(database.query("PRAGMA user_version").get()).toEqual({ user_version: 1 });
+    expect(database.query("PRAGMA user_version").get()).toEqual({ user_version: 2 });
     expect(database.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
     expect(
       database
@@ -88,7 +88,7 @@ describe("kojo init", () => {
         .get(),
     ).toEqual({
       project_identity: metadata.projectIdentity,
-      store_format_version: 1,
+      store_format_version: 2,
       engine_adapter_kind: "effect-workflow",
       engine_adapter_schema_version: 1,
     });

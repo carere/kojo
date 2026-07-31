@@ -304,6 +304,7 @@ test("navigates between a Schedule Occurrence and its linked resources", async (
                       firstAttemptedAtMs: scheduledAtMs,
                       processedAtMs: scheduledAtMs,
                       linkedRunId: runId,
+                      missedRange: null,
                     },
                   ],
                 },

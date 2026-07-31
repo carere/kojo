@@ -28,6 +28,13 @@ const Occurrence = (props: {
     <p class="mt-1 text-muted-foreground">
       {props.occurrence.scheduleKey} · revision {props.occurrence.appliedRevision}
     </p>
+    <Show when={props.occurrence.missedRange}>
+      {(range) => (
+        <p class="mt-1 text-muted-foreground text-xs">
+          Missed {range().count} instants through {renderTime(range().lastScheduledAtMs)}
+        </p>
+      )}
+    </Show>
     <div class="mt-2 flex flex-wrap gap-2">
       <Button
         size="xs"
