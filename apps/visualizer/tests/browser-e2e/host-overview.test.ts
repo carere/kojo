@@ -2,7 +2,7 @@ import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type BrowserContext, chromium, type Download } from "playwright";
+import { type Browser, type BrowserContext, chromium } from "playwright";
 import { afterEach, expect, test } from "vitest";
 import { makeTemporaryDirectory, runKojoCli } from "../../../../tests/support/cli-process";
 import {
@@ -25,6 +25,7 @@ interface TemporaryDirectory {
 
 const fixtureStartupTimeoutMs = 30_000;
 const browserAssertionTimeoutMs = 30_000;
+const artifactDownloadTimeoutMs = 10_000;
 let fixture: Fixture | undefined;
 const temporaryDirectories: Array<() => Promise<void>> = [];
 const workflowPackagePath = fileURLToPath(
@@ -210,23 +211,98 @@ export default defineConfig({
   expect(await projects.nth(0).getAttribute("aria-current")).toBe("page");
 }, 60_000);
 
-test("force-reclaims a browser that misses its bounded shutdown", async () => {
+test("force-reclaims an owned browser process when bounded shutdown misses its deadline", async () => {
   const profile = await makeTemporaryDirectory("kojo-browser-profile-reclaim-");
-  let browser: BrowserContext | undefined;
+  const browser = Bun.spawn(
+    [
+      chromium.executablePath(),
+      "--headless",
+      "--no-default-browser-check",
+      "--no-first-run",
+      `--user-data-dir=${profile.path}`,
+      "about:blank",
+    ],
+    { stderr: "ignore", stdout: "ignore" },
+  );
   try {
-    browser = await chromium.launchPersistentContext(profile.path, { headless: true });
-    expect(await ownedBrowserPids(profile.path)).not.toHaveLength(0);
+    await waitFor(async () => (await ownedBrowserPids(profile.path)).length > 0, browser);
 
-    const neverClosingBrowser: Pick<BrowserContext, "close"> = {
-      close: () => new Promise<void>(() => undefined),
+    let closeSettled = false;
+    const eventuallyClosingBrowser: Pick<BrowserContext, "browser" | "close"> = {
+      browser: () => null,
+      close: () =>
+        new Promise<void>((resolve) => {
+          setTimeout(() => {
+            closeSettled = true;
+            resolve();
+          }, cleanupDeadlineMs + 100);
+        }),
     };
-    await expect(closeBrowser(neverClosingBrowser, profile.path)).resolves.toBeUndefined();
+    await expect(closeBrowser(eventuallyClosingBrowser, profile.path)).resolves.toBeUndefined();
+    expect(closeSettled).toBe(true);
     expect(await ownedBrowserPids(profile.path)).toEqual([]);
+    expect(await browser.exited).toBeTypeOf("number");
   } finally {
     await terminateOwnedBrowser(profile.path);
-    if (browser !== undefined) await settlesWithin(browser.close());
+    if (browser.exitCode === null) browser.kill("SIGKILL");
+    await settlesWithin(browser.exited);
     await profile.cleanup();
   }
+});
+
+test("force-reclaims an owned browser process when both Playwright closes fail", async () => {
+  const profile = await makeTemporaryDirectory("kojo-browser-profile-failed-reclaim-");
+  const browser = Bun.spawn(
+    [
+      chromium.executablePath(),
+      "--headless",
+      "--no-default-browser-check",
+      "--no-first-run",
+      `--user-data-dir=${profile.path}`,
+      "about:blank",
+    ],
+    { stderr: "ignore", stdout: "ignore" },
+  );
+  try {
+    await waitFor(async () => (await ownedBrowserPids(profile.path)).length > 0, browser);
+    let owningCloseCalled = false;
+    const failingBrowser: Pick<BrowserContext, "browser" | "close"> = {
+      browser: () =>
+        ({
+          close: () => {
+            owningCloseCalled = true;
+            return Promise.reject(new Error("Owning Browser close failed."));
+          },
+        }) as Browser,
+      close: () => Promise.reject(new Error("Browser context close failed.")),
+    };
+
+    await expect(closeBrowser(failingBrowser, profile.path)).rejects.toThrow(
+      "BrowserContext.close failed",
+    );
+    expect(owningCloseCalled).toBe(true);
+    expect(await ownedBrowserPids(profile.path)).toEqual([]);
+    expect(await browser.exited).toBeTypeOf("number");
+  } finally {
+    await terminateOwnedBrowser(profile.path);
+    if (browser.exitCode === null) browser.kill("SIGKILL");
+    await settlesWithin(browser.exited);
+    await profile.cleanup();
+  }
+});
+
+test("selects only Chromium processes with this fixture's exact profile argument", () => {
+  const profilePath = "/private/tmp/kojo-browser-profile-[exact]";
+  const browser = chromium.executablePath();
+  expect(
+    ownedBrowserPidsFromProcessEntries(profilePath, [
+      { commandLine: `${browser} --user-data-dir=${profilePath}`, pid: 101 },
+      { commandLine: `${browser} --user-data-dir=${profilePath}-near-match`, pid: 102 },
+      { commandLine: `${browser} --flag=--user-data-dir=${profilePath}`, pid: 103 },
+      { commandLine: `node run ${profilePath}`, pid: 104 },
+      { commandLine: `node --user-data-dir=${profilePath}`, pid: 105 },
+    ]),
+  ).toEqual([101]);
 });
 
 test("downloads a real Artifact as an inert attachment instead of rendering it", async () => {
@@ -310,7 +386,9 @@ test("downloads a real Artifact as an inert attachment instead of rendering it",
     .projectIdentity as string;
   const artifactUrl = `${origin}/api/artifacts?artifact=${artifactId}&project=${identity}&run=${runId}`;
 
-  const artifactResponse = await page.request.get(artifactUrl, { timeout: 10_000 });
+  const artifactResponse = await page.request.get(artifactUrl, {
+    timeout: artifactDownloadTimeoutMs,
+  });
   expect(artifactResponse.status()).toBe(200);
   expect(artifactResponse.headers()).toMatchObject({
     "cache-control": "no-store",
@@ -328,15 +406,18 @@ test("downloads a real Artifact as an inert attachment instead of rendering it",
   await runButton.click();
   const artifactLink = page.getByRole("link", { name: `Download Artifact ${artifactId}` });
   await artifactLink.waitFor({ state: "visible", timeout: browserAssertionTimeoutMs });
-  const download = page.waitForEvent("download", { timeout: 10_000 });
-  let artifactDownload: Download | undefined;
-  try {
-    await artifactLink.click();
-    artifactDownload = await download;
-  } finally {
-    await download.catch(() => undefined);
-  }
-  if (artifactDownload === undefined) throw new Error("Artifact download did not settle.");
+  const artifactDownloadControl = await within(
+    "Artifact download control handle",
+    artifactLink.elementHandle(),
+  );
+  if (artifactDownloadControl === null) throw new Error("Artifact download control disappeared.");
+  const [artifactDownload] = await Promise.all([
+    page.waitForEvent("download", { timeout: artifactDownloadTimeoutMs }),
+    artifactDownloadControl.click({
+      noWaitAfter: true,
+      timeout: artifactDownloadTimeoutMs,
+    }),
+  ]);
   const downloadPath = await artifactDownload.path();
   expect(downloadPath).not.toBeNull();
   if (downloadPath !== null) expect(await readFile(downloadPath, "utf8")).toContain("present:");
@@ -435,47 +516,150 @@ const settlesWithin = async (operation: Promise<unknown>) =>
     Bun.sleep(cleanupDeadlineMs).then(() => false),
   ]);
 
-const closeBrowser = async (browser: Pick<BrowserContext, "close">, profilePath: string) => {
-  const closed = await Promise.race([
-    browser.close().then(
-      () => "closed" as const,
-      () => "failed" as const,
-    ),
-    Bun.sleep(cleanupDeadlineMs).then(() => "timed-out" as const),
+type CloseOutcome =
+  | { readonly _tag: "failed"; readonly error: unknown }
+  | { readonly _tag: "succeeded" };
+
+type TimedCloseOutcome = CloseOutcome | { readonly _tag: "timed-out" };
+
+const observeClose = (operation: Promise<void>): Promise<CloseOutcome> =>
+  operation.then(
+    () => ({ _tag: "succeeded" }) as const,
+    (error) => ({ _tag: "failed", error }) as const,
+  );
+
+const closeWithin = async (operation: Promise<CloseOutcome>): Promise<TimedCloseOutcome> =>
+  Promise.race([
+    operation,
+    Bun.sleep(cleanupDeadlineMs).then(() => ({ _tag: "timed-out" }) as const),
   ]);
-  if (closed === "closed") return;
-  if (await terminateOwnedBrowser(profilePath)) return;
-  throw new Error(`Browser teardown ${closed} and force-reclaiming its owned process failed.`);
+
+const describeCloseOutcome = (
+  owner: "Browser.close" | "BrowserContext.close",
+  outcome: TimedCloseOutcome,
+) => `${owner} ${outcome._tag}`;
+
+const closeFailureCause = (...outcomes: ReadonlyArray<TimedCloseOutcome | undefined>) =>
+  outcomes.find(
+    (outcome): outcome is Extract<CloseOutcome, { readonly _tag: "failed" }> =>
+      outcome?._tag === "failed",
+  )?.error;
+
+const closeBrowser = async (
+  browser: Pick<BrowserContext, "browser" | "close">,
+  profilePath: string,
+) => {
+  const contextClose = observeClose(browser.close());
+  const initialContextOutcome = await closeWithin(contextClose);
+  if (initialContextOutcome._tag === "succeeded") return;
+
+  let owningBrowserClose: Promise<CloseOutcome> | undefined;
+  let owningBrowserOutcome: TimedCloseOutcome | undefined;
+  const owningBrowser = browser.browser();
+  if (owningBrowser !== null) {
+    owningBrowserClose = observeClose(owningBrowser.close());
+    const [contextOutcome, browserOutcome] = await Promise.all([
+      closeWithin(contextClose),
+      closeWithin(owningBrowserClose),
+    ]);
+    owningBrowserOutcome = browserOutcome;
+    if (contextOutcome._tag === "succeeded" && browserOutcome._tag === "succeeded") return;
+  }
+  if (!(await terminateOwnedBrowser(profilePath))) {
+    throw new Error(
+      `${describeCloseOutcome("BrowserContext.close", initialContextOutcome)} and force-reclaiming its owned process failed.`,
+      { cause: closeFailureCause(initialContextOutcome, owningBrowserOutcome) },
+    );
+  }
+  const finalContextOutcome = await closeWithin(contextClose);
+  const finalOwningBrowserOutcome =
+    owningBrowserClose === undefined ? undefined : await closeWithin(owningBrowserClose);
+  if (
+    finalContextOutcome._tag === "succeeded" &&
+    (finalOwningBrowserOutcome === undefined || finalOwningBrowserOutcome._tag === "succeeded")
+  ) {
+    return;
+  }
+  throw new Error(
+    `Browser process was reclaimed, but ${describeCloseOutcome("BrowserContext.close", finalContextOutcome)}${finalOwningBrowserOutcome === undefined ? "" : ` and ${describeCloseOutcome("Browser.close", finalOwningBrowserOutcome)}`}.`,
+    { cause: closeFailureCause(finalContextOutcome, finalOwningBrowserOutcome) },
+  );
 };
 
-const ownedBrowserPids = async (profilePath: string) => {
-  const search = Bun.spawn(["pgrep", "-f", profilePath], { stderr: "ignore", stdout: "pipe" });
+interface ProcessEntry {
+  readonly commandLine: string;
+  readonly pid: number;
+}
+
+const ownsBrowserProfile = (commandLine: string, profilePath: string) => {
+  const browser = chromium.executablePath();
+  const exactProfileArgument = `--user-data-dir=${profilePath}`;
+  return (
+    (commandLine === browser || commandLine.startsWith(`${browser} `)) &&
+    new RegExp(`(?:^|\\s)${escapeRegularExpression(exactProfileArgument)}(?=$|\\s)`).test(
+      commandLine,
+    )
+  );
+};
+
+const escapeRegularExpression = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const ownedBrowserPidsFromProcessEntries = (
+  profilePath: string,
+  processes: ReadonlyArray<ProcessEntry>,
+) =>
+  processes
+    .filter(({ commandLine }) => ownsBrowserProfile(commandLine, profilePath))
+    .map(({ pid }) => pid);
+
+const processEntries = async (): Promise<ReadonlyArray<ProcessEntry>> => {
+  const search = Bun.spawn(["ps", "-axww", "-o", "pid=", "-o", "command="], {
+    stderr: "ignore",
+    stdout: "pipe",
+  });
   const [exitCode, stdout] = await Promise.all([search.exited, new Response(search.stdout).text()]);
   if (exitCode !== 0) return [];
-  return stdout
-    .trim()
-    .split("\n")
-    .map((value) => Number.parseInt(value, 10))
-    .filter((value) => Number.isSafeInteger(value) && value > 0);
+  return stdout.split("\n").flatMap((line) => {
+    const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (match === null) return [];
+    const pid = Number.parseInt(match[1] ?? "", 10);
+    const commandLine = match[2] ?? "";
+    return Number.isSafeInteger(pid) && pid > 0 ? [{ commandLine, pid }] : [];
+  });
 };
 
-const signalOwnedBrowser = async (signal: "SIGKILL" | "SIGTERM", pids: ReadonlyArray<number>) => {
-  if (pids.length === 0) return;
-  const processHandle = Bun.spawn(["kill", `-${signal}`, ...pids.map(String)], {
+const ownedBrowserPids = async (profilePath: string) =>
+  ownedBrowserPidsFromProcessEntries(profilePath, await processEntries());
+
+const processCommandLine = async (pid: number) => {
+  const search = Bun.spawn(["ps", "-ww", "-p", String(pid), "-o", "command="], {
     stderr: "ignore",
-    stdout: "ignore",
+    stdout: "pipe",
   });
-  await processHandle.exited;
+  const [exitCode, stdout] = await Promise.all([search.exited, new Response(search.stdout).text()]);
+  return exitCode === 0 ? stdout.trim() : undefined;
+};
+
+const signalOwnedBrowser = async (signal: "SIGKILL" | "SIGTERM", profilePath: string) => {
+  for (const pid of await ownedBrowserPids(profilePath)) {
+    const commandLine = await processCommandLine(pid);
+    if (commandLine === undefined || !ownsBrowserProfile(commandLine, profilePath)) continue;
+    const processHandle = Bun.spawn(["kill", `-${signal}`, String(pid)], {
+      stderr: "ignore",
+      stdout: "ignore",
+    });
+    await processHandle.exited;
+  }
 };
 
 /** Reclaims only Chromium processes launched with this fixture's unique profile. */
 const terminateOwnedBrowser = async (profilePath: string) => {
-  await signalOwnedBrowser("SIGTERM", await ownedBrowserPids(profilePath));
+  await signalOwnedBrowser("SIGTERM", profilePath);
   for (let attempt = 0; attempt < 20; attempt += 1) {
     if ((await ownedBrowserPids(profilePath)).length === 0) return true;
     await Bun.sleep(25);
   }
-  await signalOwnedBrowser("SIGKILL", await ownedBrowserPids(profilePath));
+  await signalOwnedBrowser("SIGKILL", profilePath);
   for (let attempt = 0; attempt < 20; attempt += 1) {
     if ((await ownedBrowserPids(profilePath)).length === 0) return true;
     await Bun.sleep(25);
