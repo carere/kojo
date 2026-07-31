@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { type FileHandle, open, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import type { ProjectSnapshot } from "@kojo/control";
 import { Context, Effect, Layer } from "effect";
@@ -37,6 +38,18 @@ const isMissingFile = (error: unknown) =>
   (error as NodeJS.ErrnoException).code === "ENOENT" ||
   (error as NodeJS.ErrnoException).code === "ENOTDIR";
 
+const noFollowReadOnly = constants.O_RDONLY | constants.O_NOFOLLOW;
+const noFollowDirectory = noFollowReadOnly | constants.O_DIRECTORY;
+
+const unsafeDescriptorPath = (handle: FileHandle) =>
+  realpath(`/dev/fd/${handle.fd}`).catch(() => {
+    throw unsafe();
+  });
+
+const closeQuietly = async (handle: FileHandle | undefined) => {
+  if (handle !== undefined) await handle.close().catch(() => undefined);
+};
+
 /** Local Artifact adapter. It intentionally accepts the current JSON storage format only. */
 export const LocalExecutionArtifactStoreLive = Layer.succeed(ExecutionArtifactStore, {
   read: (project, runId, artifact) =>
@@ -49,32 +62,49 @@ export const LocalExecutionArtifactStoreLive = Layer.succeed(ExecutionArtifactSt
         ) {
           throw unsafe();
         }
-        const root = join(project.path, ".kojo", "artifacts");
-        const runDirectory = join(root, runId);
-        const path = join(runDirectory, `${artifact.artifactId}.json`);
-        const [rootStats, directoryStats, fileStats] = await Promise.all([
-          lstat(root),
-          lstat(runDirectory),
-          lstat(path),
-        ]);
-        if (
-          rootStats.isSymbolicLink() ||
-          !rootStats.isDirectory() ||
-          directoryStats.isSymbolicLink() ||
-          !directoryStats.isDirectory() ||
-          fileStats.isSymbolicLink() ||
-          !fileStats.isFile()
-        ) {
-          throw unsafe();
+        const projectDirectory = await realpath(project.path);
+        const expectedRoot = join(projectDirectory, ".kojo", "artifacts");
+        let root: FileHandle | undefined;
+        let runDirectory: FileHandle | undefined;
+        let file: FileHandle | undefined;
+        try {
+          root = await open(join(project.path, ".kojo", "artifacts"), noFollowDirectory);
+          const rootPath = await unsafeDescriptorPath(root);
+          if (!(await root.stat()).isDirectory() || rootPath !== expectedRoot) throw unsafe();
+
+          const expectedRunDirectory = join(rootPath, runId);
+          runDirectory = await open(expectedRunDirectory, noFollowDirectory);
+          const runDirectoryPath = await unsafeDescriptorPath(runDirectory);
+          if (
+            !(await runDirectory.stat()).isDirectory() ||
+            runDirectoryPath !== expectedRunDirectory
+          ) {
+            throw unsafe();
+          }
+
+          const expectedArtifactPath = join(runDirectoryPath, `${artifact.artifactId}.json`);
+          file = await open(expectedArtifactPath, noFollowReadOnly);
+          const [filePath, fileStats] = await Promise.all([
+            unsafeDescriptorPath(file),
+            file.stat(),
+          ]);
+          if (!fileStats.isFile() || filePath !== expectedArtifactPath) throw unsafe();
+
+          // The file descriptor stays pinned even if a same-user process
+          // replaces the path after open. Never reopen the path below.
+          const content = await file.readFile();
+          if (
+            content.byteLength !== artifact.byteSize ||
+            !createHash("sha256").update(content).digest().equals(Buffer.from(artifact.sha256))
+          ) {
+            throw { _tag: "artifact-content-changed" } satisfies ExecutionArtifactReadFailure;
+          }
+          return new Uint8Array(content);
+        } finally {
+          await closeQuietly(file);
+          await closeQuietly(runDirectory);
+          await closeQuietly(root);
         }
-        const content = await readFile(path);
-        if (
-          content.byteLength !== artifact.byteSize ||
-          !createHash("sha256").update(content).digest().equals(Buffer.from(artifact.sha256))
-        ) {
-          throw { _tag: "artifact-content-changed" } satisfies ExecutionArtifactReadFailure;
-        }
-        return new Uint8Array(content);
       },
       catch: (error): ExecutionArtifactReadFailure => {
         if (typeof error === "object" && error !== null && "_tag" in error) {

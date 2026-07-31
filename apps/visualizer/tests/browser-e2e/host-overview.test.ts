@@ -25,6 +25,40 @@ const workflowPackagePath = fileURLToPath(
   new URL("../../../../packages/workflow", import.meta.url),
 );
 const effectPackagePath = fileURLToPath(new URL("../../node_modules/effect", import.meta.url));
+const artifactDownloadConfiguration = `
+import { Effect, Schema } from "effect";
+import { Command, CommandFailure, CommandResult, Sandbox, defineCommand, defineConfig, defineSandbox, defineWorkflow } from "@kojo/workflow";
+import { unsafeHost } from "@kojo/workflow/sandboxes/unsafe-host";
+
+const sandbox = defineSandbox({
+  sandboxKey: "local-command",
+  revision: "1",
+  provider: unsafeHost({ providerKey: "trusted-local", revision: "1" }),
+});
+const command = defineCommand({
+  commandKey: "echo-environment",
+  revision: "1",
+  arguments: ["/bin/sh", "-lc", "printf '%s:%s' \\"$KOJO_SANDBOX_VALUE\\" \\"$PWD\\""],
+  environment: { KOJO_SANDBOX_VALUE: "present" },
+  workingDirectory: ".",
+});
+
+export default defineConfig({
+  workflows: [
+    defineWorkflow({
+      workflowKey: "sandbox-command",
+      revision: "1",
+      inputSchema: Schema.Struct({ message: Schema.String }),
+      successSchema: CommandResult,
+      failureSchema: CommandFailure,
+      handler: () => Effect.gen(function* () {
+        const acquired = yield* Sandbox.acquire({ operationKey: "sandbox", sandbox });
+        return yield* Command.run({ operationKey: "command", sandbox: acquired, command });
+      }),
+    }),
+  ],
+});
+`;
 
 afterEach(async () => {
   if (fixture !== undefined) {
@@ -162,6 +196,130 @@ export default defineConfig({
   expect(await projects.nth(0).getAttribute("aria-current")).toBe("page");
 }, 60_000);
 
+test("downloads a real Artifact as an inert attachment instead of rendering it", async () => {
+  fixture = await within("browser fixture startup", startFixture(), 30_000);
+  const page = await within("browser page startup", fixture.browser.newPage());
+  const origin = `http://127.0.0.1:${fixture.port}`;
+  await within("visualizer page navigation", page.goto(origin, { waitUntil: "domcontentloaded" }));
+
+  const directory = await makeTemporaryDirectory("kojo-artifact-download-browser-");
+  temporaryDirectories.push(directory.cleanup);
+  await mkdir(join(directory.path, "node_modules", "@kojo"), { recursive: true });
+  await symlink(
+    workflowPackagePath,
+    join(directory.path, "node_modules", "@kojo", "workflow"),
+    "dir",
+  );
+  await symlink(effectPackagePath, join(directory.path, "node_modules", "effect"), "dir");
+  const project = join(directory.path, "project");
+  await run(["git", "init", project]);
+  await run([
+    "git",
+    "-C",
+    project,
+    "-c",
+    "user.name=Kojo Test",
+    "-c",
+    "user.email=kojo@example.test",
+    "commit",
+    "--allow-empty",
+    "--message",
+    "initial",
+  ]);
+  await writeFile(join(project, "kojo.config.ts"), artifactDownloadConfiguration);
+  expect(
+    (
+      await within(
+        "Artifact project initialization",
+        runKojoCli(["init", project], fixture.host.socketPath),
+      )
+    ).exitCode,
+  ).toBe(0);
+
+  const started = await within(
+    "Artifact Workflow Run start",
+    runKojoCli(
+      ["run", "start", "sandbox-command", "--input", '{"message":"download"}', "--json"],
+      fixture.host.socketPath,
+      project,
+    ),
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = JSON.parse(started.stdout).result.run.runId as string;
+  let artifactId: string | undefined;
+  await within(
+    "Artifact record",
+    (async () => {
+      for (let attempt = 0; attempt < 100 && artifactId === undefined; attempt += 1) {
+        const shown = await within(
+          "Artifact Workflow Run inspection",
+          runKojoCli(["run", "show", runId, "--json"], fixture.host.socketPath, project),
+        );
+        if (shown.exitCode === 0) {
+          const run = JSON.parse(shown.stdout).result.run as {
+            readonly sandboxTrace?: ReadonlyArray<{
+              readonly artifactIds?: ReadonlyArray<string>;
+              readonly kind?: string;
+            }>;
+          };
+          artifactId = run.sandboxTrace?.find((entry) => entry.kind === "command.completed")
+            ?.artifactIds?.[0];
+        }
+        if (artifactId === undefined) await Bun.sleep(50);
+      }
+    })(),
+    15_000,
+  );
+  expect(artifactId).toEqual(expect.any(String));
+  if (artifactId === undefined) throw new Error("The browser fixture did not record an Artifact.");
+  const identity = JSON.parse(await readFile(join(project, ".kojo", "project.json"), "utf8"))
+    .projectIdentity as string;
+  const artifactUrl = `${origin}/api/artifacts?artifact=${artifactId}&project=${identity}&run=${runId}`;
+
+  const artifactResponse = await within(
+    "Artifact endpoint fetch",
+    page.evaluate(async (url) => {
+      const signal = AbortSignal.timeout(10_000);
+      try {
+        const response = await fetch(url, { signal });
+        return {
+          body: await response.text(),
+          headers: Object.fromEntries(response.headers),
+          status: response.status,
+        };
+      } catch (error) {
+        return { error: String(error) };
+      }
+    }, artifactUrl),
+  );
+  if ("error" in artifactResponse) {
+    throw new Error(`Artifact endpoint did not settle: ${artifactResponse.error}`);
+  }
+  expect(artifactResponse.status).toBe(200);
+  expect(artifactResponse.headers).toMatchObject({
+    "cache-control": "no-store",
+    "content-disposition": `attachment; filename="artifact-${artifactId}.json"`,
+    "content-type": "application/octet-stream",
+    "x-content-type-options": "nosniff",
+  });
+  expect(artifactResponse.body).toContain("present:");
+
+  const download = page.waitForEvent("download", { timeout: 10_000 });
+  await page.evaluate((url) => {
+    const link = document.createElement("a");
+    link.download = "";
+    link.href = url;
+    document.body.append(link);
+    link.click();
+    link.remove();
+  }, artifactUrl);
+  const artifactDownload = await within("Artifact attachment download", download);
+  expect(artifactDownload.suggestedFilename()).toBe(`artifact-${artifactId}.json`);
+  expect(await within("Artifact download completion", artifactDownload.failure())).toBeNull();
+  expect(page.url()).not.toBe(artifactUrl);
+  expect(await page.locator("body").innerText()).not.toContain("present:");
+}, 60_000);
+
 const startFixture = async (): Promise<Fixture> => {
   const visualizerDirectory = process.cwd().endsWith("apps/visualizer")
     ? process.cwd()
@@ -233,6 +391,23 @@ const waitFor = async (condition: () => Promise<boolean>, processHandle: Bun.Sub
     await Bun.sleep(25);
   }
   throw new Error("Timed out while starting the browser acceptance fixture.");
+};
+
+const within = async <Value>(label: string, operation: Promise<Value>, timeoutMs = 10_000) => {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`${label} exceeded ${timeoutMs}ms.`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
 };
 
 const readStderr = (processHandle: Bun.Subprocess) =>

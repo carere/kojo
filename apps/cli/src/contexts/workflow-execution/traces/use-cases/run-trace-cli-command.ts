@@ -22,9 +22,16 @@ import {
   resolveInitializedProject,
 } from "../../../workflow-authoring/projects/services/project-initializer";
 import {
+  TraceExportArchiveTooLargeError,
   TraceExportDestinationExistsError,
   writeExecutionTraceExport,
 } from "../services/write-execution-trace-export";
+
+const sensitiveExportWarning = {
+  code: "sensitive-content-not-scanned",
+  message: "Revealed payloads may contain arbitrary secrets; Kojo did not scan them.",
+  next: "Handle the ZIP as sensitive and avoid copying it into logs or issue trackers.",
+};
 
 /** The workflow-execution CLI boundary for chronological Trace inspection. */
 export const runTraceCliCommand = async (args: ReadonlyArray<string>, json: boolean) => {
@@ -136,7 +143,9 @@ export const runTraceCliCommand = async (args: ReadonlyArray<string>, json: bool
         invalid(
           error instanceof TraceExportDestinationExistsError
             ? error.message
-            : "Execution Trace export could not be written to that destination.",
+            : error instanceof TraceExportArchiveTooLargeError
+              ? error.message
+              : "Execution Trace export could not be written to that destination.",
         ),
         json,
         command,
@@ -155,19 +164,15 @@ export const runTraceCliCommand = async (args: ReadonlyArray<string>, json: bool
             ).length,
             payloadsRevealed: options.reveal,
           },
-          warnings: options.reveal
-            ? [
-                {
-                  code: "sensitive-content-not-scanned",
-                  message:
-                    "Revealed payloads may contain arbitrary secrets; Kojo did not scan them.",
-                  next: "Handle the ZIP as sensitive and avoid copying it into logs or issue trackers.",
-                },
-              ]
-            : [],
+          warnings: options.reveal ? [sensitiveExportWarning] : [],
         })}\n`,
       );
     } else {
+      if (options.reveal) {
+        process.stderr.write(
+          `Warning: ${sensitiveExportWarning.message} ${sensitiveExportWarning.next}\n`,
+        );
+      }
       process.stdout.write(
         `Exported Execution Trace through sequence ${exported.value.trace.highWaterSequence} to ${destination}\n`,
       );

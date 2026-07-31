@@ -6,12 +6,28 @@ export class TraceExportDestinationExistsError extends Error {
   override readonly name = "TraceExportDestinationExistsError";
 }
 
+/** The in-memory writer emits classic ZIP only, so it must never truncate ZIP fields. */
+export class TraceExportArchiveTooLargeError extends Error {
+  override readonly name = "TraceExportArchiveTooLargeError";
+
+  constructor() {
+    super(
+      "This Execution Trace export exceeds the 4 GiB classic ZIP limit. Reduce included Artifacts or export a smaller Trace.",
+    );
+  }
+}
+
 interface ZipEntry {
   readonly contents: Uint8Array;
   readonly name: string;
 }
 
 const encoder = new TextEncoder();
+const maxUint16 = 0xffff;
+const maxUint32 = 0xffffffff;
+const localHeaderByteSize = 30;
+const centralHeaderByteSize = 46;
+const endOfCentralDirectoryByteSize = 22;
 
 const crc32 = (contents: Uint8Array) => {
   let crc = 0xffffffff;
@@ -48,11 +64,49 @@ const concat = (chunks: ReadonlyArray<Uint8Array>) => {
 };
 
 /**
+ * Classic ZIP has no room for ZIP64 values. Validate every field before
+ * allocating the archive or touching its destination, rather than truncating
+ * a length or offset with DataView's 16/32-bit writes.
+ */
+export const assertClassicZipBounds = (entries: ReadonlyArray<ZipEntry>) => {
+  if (!Number.isSafeInteger(entries.length) || entries.length > maxUint16) {
+    throw new TraceExportArchiveTooLargeError();
+  }
+  let localOffset = 0;
+  let centralDirectoryByteSize = 0;
+  for (const entry of entries) {
+    const nameByteSize = encoder.encode(entry.name).byteLength;
+    if (
+      !Number.isSafeInteger(entry.contents.byteLength) ||
+      entry.contents.byteLength < 0 ||
+      nameByteSize > maxUint16 ||
+      entry.contents.byteLength > maxUint32
+    ) {
+      throw new TraceExportArchiveTooLargeError();
+    }
+    const localByteSize = localHeaderByteSize + nameByteSize + entry.contents.byteLength;
+    const centralByteSize = centralHeaderByteSize + nameByteSize;
+    if (
+      localOffset + localByteSize > maxUint32 ||
+      centralDirectoryByteSize + centralByteSize > maxUint32
+    ) {
+      throw new TraceExportArchiveTooLargeError();
+    }
+    localOffset += localByteSize;
+    centralDirectoryByteSize += centralByteSize;
+  }
+  if (localOffset + centralDirectoryByteSize + endOfCentralDirectoryByteSize > maxUint32) {
+    throw new TraceExportArchiveTooLargeError();
+  }
+};
+
+/**
  * Creates a standards-compliant, uncompressed ZIP without invoking a shell or
  * accepting entry paths from artifact display names. The Archive names are
  * derived solely from recorded Artifact identities.
  */
 const zip = (entries: ReadonlyArray<ZipEntry>) => {
+  assertClassicZipBounds(entries);
   const local: Array<Uint8Array> = [];
   const central: Array<Uint8Array> = [];
   let offset = 0;
@@ -115,6 +169,13 @@ const zip = (entries: ReadonlyArray<ZipEntry>) => {
   ]);
 };
 
+/**
+ * Export canonicalization stays local: the only other stable serializers are
+ * private to Workflow Definition hashing or Host request hashing, each with
+ * different failure semantics. Archive data must remain a total, deterministic
+ * representation of arbitrary recorded payloads without coupling this CLI
+ * writer to either internal contract.
+ */
 const stableJson = (value: unknown): string => {
   if (value === null) return "null";
   if (typeof value === "boolean" || typeof value === "string") return JSON.stringify(value);
@@ -129,6 +190,21 @@ const stableJson = (value: unknown): string => {
 
 const prettyJson = (value: unknown) => encoder.encode(`${stableJson(value)}\n`);
 const checksum = (contents: Uint8Array) => createHash("sha256").update(contents).digest("hex");
+
+/** @internal Kept separate so ZIP bounds can be regression-tested without allocating huge files. */
+export const writeClassicZip = async (destination: string, entries: ReadonlyArray<ZipEntry>) => {
+  assertClassicZipBounds(entries);
+  try {
+    await writeFile(destination, zip(entries), { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new TraceExportDestinationExistsError(
+        "The export destination already exists; choose a new ZIP path.",
+      );
+    }
+    throw error;
+  }
+};
 
 export const writeExecutionTraceExport = async (
   destination: string,
@@ -173,14 +249,5 @@ export const writeExecutionTraceExport = async (
       final: trace.final,
     }),
   });
-  try {
-    await writeFile(destination, zip(entries), { flag: "wx", mode: 0o600 });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      throw new TraceExportDestinationExistsError(
-        "The export destination already exists; choose a new ZIP path.",
-      );
-    }
-    throw error;
-  }
+  await writeClassicZip(destination, entries);
 };
