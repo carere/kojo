@@ -483,15 +483,10 @@ describe("Local Workflow backend ownership", () => {
           });
           try {
             expect(
-              database
-                .query("SELECT kind, payload_json FROM kojo_execution_events WHERE run_id = ?")
-                .all(runId),
-            ).toEqual(
+              database.query("SELECT kind FROM kojo_execution_events WHERE run_id = ?").all(runId),
+            ).not.toEqual(
               expect.arrayContaining([
-                expect.objectContaining({
-                  kind: "run.stop-needs-attention",
-                  payload_json: expect.stringContaining("controlled provider cleanup failed"),
-                }),
+                expect.objectContaining({ kind: "run.stop-needs-attention" }),
               ]),
             );
           } finally {
@@ -608,7 +603,7 @@ describe("Local Workflow backend ownership", () => {
               },
               timestamp,
             ),
-          ).toEqual({ _tag: "conflict" });
+          ).toEqual({ _tag: "run-not-running", state: "stopping" });
           expect(yield* repository.pendingSubmissions(fixture.project, parentRunId)).toEqual([]);
 
           yield* repository.recordOutcome(
@@ -666,11 +661,11 @@ describe("Local Workflow backend ownership", () => {
             expect(kinds).toEqual(
               expect.arrayContaining([
                 "run.stop-requested",
-                "run.engine-late-outcome",
+                "run.late-engine-outcome",
                 "run.stopped",
               ]),
             );
-            expect(kinds.filter((kind) => kind === "run.engine-late-outcome")).toHaveLength(2);
+            expect(kinds.filter((kind) => kind === "run.late-engine-outcome")).toHaveLength(2);
           } finally {
             database.close();
           }

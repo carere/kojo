@@ -47,7 +47,7 @@ const simulationSteps = [
     runState: "running",
   },
   {
-    event: "child.started",
+    event: "child.requested",
     sequence: 21,
     summary: "Review implementation started as an owned Child Workflow Run",
     runState: "running",

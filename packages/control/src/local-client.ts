@@ -1,15 +1,28 @@
+import { createConnection, type Socket as NetSocket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { BunSocket } from "@effect/platform-bun";
-import { Data, Effect } from "effect";
+import { Data, Deferred, Effect, Stream } from "effect";
 import type * as Duration from "effect/Duration";
-import type { Scope } from "effect/Scope";
+import type { Scope as ScopeType } from "effect/Scope";
 import type { RpcGroup } from "effect/unstable/rpc";
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import type { RpcClientError } from "effect/unstable/rpc/RpcClientError";
+import {
+  type FromClientEncoded,
+  type FromServerEncoded,
+  RequestId,
+  type RequestId as RpcRequestId,
+} from "effect/unstable/rpc/RpcMessage";
 import { Socket } from "effect/unstable/socket";
 import {
   type ControlCapability,
+  type ControlSubscriptionAcknowledgement,
+  type ControlSubscriptionDelivery,
+  type ControlSubscriptionInput,
+  type ControlSubscriptionUpdate,
+  type ExecutionTraceQueryResult,
+  type ExecutionTraceReadInput,
   type HostOverview,
   KojoControl,
   PROTOCOL_VERSION,
@@ -69,24 +82,315 @@ export type KojoControlClient = RpcClient.RpcClient<
   RpcClientError
 >;
 
+/** A client connection can detach its transport before its Effect Scope closes. */
+export interface LocalControlConnection {
+  readonly client: KojoControlClient;
+  readonly disconnect: Effect.Effect<void>;
+}
+
 export interface LocalClientOptions {
-  readonly connect: Effect.Effect<KojoControlClient, LocalTransportError, Scope>;
+  readonly connect: Effect.Effect<
+    KojoControlClient | LocalControlConnection,
+    LocalTransportError,
+    ScopeType
+  >;
   readonly activate?: Effect.Effect<void, LocalTransportError>;
   readonly maxAttempts?: number;
   readonly retryDelay?: Duration.Input;
 }
 
 export interface OperatingSystemHostActivationOptions {
+  readonly activationTimeout?: Duration.Input;
   readonly platform: NodeJS.Platform;
-  readonly run: (command: ReadonlyArray<string>) => Promise<number>;
+  readonly run: (command: ReadonlyArray<string>, signal: AbortSignal) => Promise<number>;
   readonly userId: number;
 }
 
 const safeUnavailable = () => new LocalTransportError({ message: "Kojo Host is unavailable." });
 
+const asLocalControlConnection = (
+  connection: KojoControlClient | LocalControlConnection,
+): LocalControlConnection =>
+  "client" in connection && "disconnect" in connection
+    ? connection
+    : { client: connection, disconnect: Effect.void };
+
+type DestroyableUnixSocket = Pick<NetSocket, "destroy" | "destroyed">;
+type DisconnectableUnixSocket = DestroyableUnixSocket & Pick<NetSocket, "end" | "off" | "once">;
+const controlConnectionEof: FromClientEncoded = { _tag: "Eof" };
+/** A real transport deadline: it must not depend on an application's Effect Clock. */
+export const UNIX_CONTROL_DISCONNECT_GRACE_MS = 100;
+
+interface UnixControlTerminalWait {
+  readonly await: Effect.Effect<void>;
+  readonly interruptRequestIds: ReadonlySet<RpcRequestId>;
+  readonly requestIds: ReadonlySet<RpcRequestId>;
+}
+
+interface UnixControlTerminalWaitState {
+  readonly deferred: Deferred.Deferred<void>;
+  readonly requestIds: Set<RpcRequestId>;
+  timeout: ReturnType<typeof setTimeout> | undefined;
+}
+
+/** @internal Tracks active requests and terminal replies for one Unix connection. */
+export interface UnixControlRequestRegistry {
+  readonly active: ReadonlySet<RpcRequestId>;
+  readonly add: (requestId: RpcRequestId) => void;
+  readonly clear: () => void;
+  readonly delete: (requestId: RpcRequestId) => void;
+  readonly interrupted: (requestId: RpcRequestId) => void;
+  readonly terminal: (requestId: RpcRequestId) => void;
+  readonly beginTerminalWait: () => Effect.Effect<UnixControlTerminalWait>;
+}
+
+/** @internal Keeps bounded disconnect acknowledgement state local to one protocol. */
+export const makeUnixControlRequestRegistry = (): UnixControlRequestRegistry => {
+  const active = new Set<RpcRequestId>();
+  const interrupted = new Set<RpcRequestId>();
+  const waits = new Set<UnixControlTerminalWaitState>();
+
+  const finish = (wait: UnixControlTerminalWaitState) => {
+    if (!waits.delete(wait)) return;
+    if (wait.timeout !== undefined) clearTimeout(wait.timeout);
+    Deferred.doneUnsafe(wait.deferred, Effect.void);
+  };
+
+  return {
+    active,
+    add: (requestId) => {
+      active.add(requestId);
+      interrupted.delete(requestId);
+    },
+    clear: () => {
+      active.clear();
+      interrupted.clear();
+      for (const wait of [...waits]) finish(wait);
+    },
+    delete: (requestId) => {
+      active.delete(requestId);
+      interrupted.delete(requestId);
+    },
+    interrupted: (requestId) => {
+      if (active.has(requestId)) interrupted.add(requestId);
+    },
+    terminal: (requestId) => {
+      active.delete(requestId);
+      interrupted.delete(requestId);
+      for (const wait of [...waits]) {
+        wait.requestIds.delete(requestId);
+        if (wait.requestIds.size === 0) finish(wait);
+      }
+    },
+    beginTerminalWait: () =>
+      Effect.sync(() => {
+        const requestIds = new Set(active);
+        const wait: UnixControlTerminalWaitState = {
+          deferred: Deferred.makeUnsafe<void>(),
+          requestIds,
+          timeout: undefined,
+        };
+        if (requestIds.size === 0) {
+          Deferred.doneUnsafe(wait.deferred, Effect.void);
+        } else {
+          waits.add(wait);
+          wait.timeout = setTimeout(() => finish(wait), UNIX_CONTROL_DISCONNECT_GRACE_MS);
+        }
+        return {
+          interruptRequestIds: new Set(
+            [...requestIds].filter((requestId) => !interrupted.has(requestId)),
+          ),
+          requestIds,
+          await: Deferred.await(wait.deferred).pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                finish(wait);
+              }),
+            ),
+          ),
+        };
+      }),
+  };
+};
+
+/** Let the peer schedule received interrupt frames before its socket sees Eof. */
+const yieldUnixControlInterrupts = Effect.promise(
+  () => new Promise<void>((resolve) => setImmediate(resolve)),
+);
+
+const destroyUnixControlConnection = (connection: DestroyableUnixSocket) =>
+  Effect.sync(() => {
+    if (!connection.destroyed) connection.destroy();
+  });
+
+/** Flush the terminal frame and wait a bounded time for the peer-visible close. */
+export const closeUnixControlSocket = (connection: DisconnectableUnixSocket) =>
+  Effect.callback<void>((resume, signal) => {
+    if (connection.destroyed) {
+      resume(Effect.void);
+      return;
+    }
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const settle = (force: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (timeout !== undefined) clearTimeout(timeout);
+      signal.removeEventListener("abort", onAbort);
+      connection.off("close", onClose);
+      if (force && !connection.destroyed) connection.destroy();
+      resume(Effect.void);
+    };
+    const onClose = () => settle(false);
+    const onAbort = () => settle(true);
+    connection.once("close", onClose);
+    signal.addEventListener("abort", onAbort, { once: true });
+    timeout = setTimeout(() => settle(true), UNIX_CONTROL_DISCONNECT_GRACE_MS);
+    connection.end();
+    return Effect.sync(() => {
+      if (timeout !== undefined) clearTimeout(timeout);
+      signal.removeEventListener("abort", onAbort);
+      connection.off("close", onClose);
+    });
+  });
+
+/** @internal Sends stream interrupts before graceful Eof and bounded close. */
+export const disconnectUnixControlConnection = (
+  connection: NetSocket,
+  protocol: RpcClient.Protocol["Service"],
+  requestRegistry: UnixControlRequestRegistry,
+) =>
+  Effect.gen(function* () {
+    const terminalWait = yield* requestRegistry.beginTerminalWait();
+    yield* Effect.forEach(
+      terminalWait.interruptRequestIds,
+      (requestId) => protocol.send(0, { _tag: "Interrupt", requestId }).pipe(Effect.ignore),
+      { discard: true },
+    );
+    yield* terminalWait.await;
+    yield* yieldUnixControlInterrupts;
+    yield* protocol.send(0, controlConnectionEof).pipe(Effect.ignore);
+    yield* closeUnixControlSocket(connection);
+  });
+
+/** @internal Tracks only live RPC requests for one Unix control connection. */
+export const trackUnixControlProtocol = (
+  protocol: RpcClient.Protocol["Service"],
+  requestRegistry: UnixControlRequestRegistry,
+): RpcClient.Protocol["Service"] => {
+  const completeResponse = (response: FromServerEncoded) =>
+    Effect.sync(() => {
+      if (response._tag === "Exit") requestRegistry.terminal(RequestId(response.requestId));
+      // `ClientEnd` is not emitted by beta.102's socket decoder, but accept
+      // it if a future/custom Protocol supplies it through this seam.
+      const tag: string = response._tag;
+      if (tag === "Defect" || tag === "ClientProtocolError" || tag === "ClientEnd") {
+        requestRegistry.clear();
+      }
+    });
+  return {
+    ...protocol,
+    run: (clientId, receive) =>
+      protocol.run(clientId, (response) =>
+        receive(response).pipe(Effect.ensuring(completeResponse(response))),
+      ),
+    send: (clientId, request, transferables) => {
+      switch (request._tag) {
+        case "Request": {
+          const requestId = RequestId(request.id);
+          requestRegistry.add(requestId);
+          return protocol
+            .send(clientId, request, transferables)
+            .pipe(Effect.onError(() => Effect.sync(() => requestRegistry.delete(requestId))));
+        }
+        case "Interrupt": {
+          const requestId = RequestId(request.requestId);
+          return protocol
+            .send(clientId, request, transferables)
+            .pipe(Effect.tap(() => Effect.sync(() => requestRegistry.interrupted(requestId))));
+        }
+        default:
+          return protocol.send(clientId, request, transferables);
+      }
+    },
+  };
+};
+
+/** @internal Registers an eager transport detach after RPC resources exist. */
+export const registerUnixControlDisconnectFinalizer = (connection: DestroyableUnixSocket) =>
+  Effect.addFinalizer(() => destroyUnixControlConnection(connection));
+
+/**
+ * The Unix control boundary has to detach an ended subscription immediately.
+ * The platform's generic net connector uses `destroySoon`, which leaves an
+ * idle read-side connection alive during Host shutdown. Own this narrow raw
+ * connection in the caller's Scope and destroy it on release instead.
+ */
+const openUnixControlConnection = (path: string) =>
+  Effect.acquireRelease(
+    Effect.callback<NetSocket, Socket.SocketError>((resume) => {
+      const connection = createConnection({ path });
+      const onConnect = () => {
+        connection.off("error", onError);
+        resume(Effect.succeed(connection));
+      };
+      const onError = (cause: Error) => {
+        connection.off("connect", onConnect);
+        resume(
+          Effect.fail(
+            new Socket.SocketError({
+              reason: new Socket.SocketOpenError({ kind: "Unknown", cause }),
+            }),
+          ),
+        );
+      };
+      connection.once("connect", onConnect);
+      connection.once("error", onError);
+      return Effect.andThen(
+        Effect.sync(() => {
+          connection.off("connect", onConnect);
+          connection.off("error", onError);
+        }),
+        destroyUnixControlConnection(connection),
+      );
+    }),
+    destroyUnixControlConnection,
+  );
+
 export const makeLocalClient = (options: LocalClientOptions) => {
   const maxAttempts = Math.max(1, options.maxAttempts ?? 5);
   const retryDelay = options.retryDelay ?? "50 millis";
+
+  const negotiateCapability = (
+    client: KojoControlClient,
+    capability: ControlCapability,
+  ): Effect.Effect<HostOverview["host"], LocalClientError> =>
+    Effect.gen(function* () {
+      const legacyHost = yield* client.Negotiate().pipe(Effect.mapError(safeUnavailable));
+      if (legacyHost.protocol.major !== PROTOCOL_VERSION.major) {
+        return yield* Effect.fail(
+          new IncompatibleProtocolError({
+            clientMajor: PROTOCOL_VERSION.major,
+            hostMajor: legacyHost.protocol.major,
+            message: `Kojo Host protocol ${legacyHost.protocol.major} is incompatible with client protocol ${PROTOCOL_VERSION.major}.`,
+          }),
+        );
+      }
+      const host =
+        legacyHost.protocol.minor >= 1
+          ? yield* client.NegotiateCapabilities().pipe(Effect.mapError(safeUnavailable))
+          : legacyHost;
+      if (!host.capabilities.includes(capability)) {
+        return yield* Effect.fail(
+          new UnsupportedControlCapabilityError({
+            capability,
+            hostVersion: host.hostVersion,
+            message: `Kojo Host ${host.hostVersion} does not support ${capability}. Upgrade the Host or use a supported client operation.`,
+          }),
+        );
+      }
+      return host;
+    });
 
   const request = <A>(
     capability: ControlCapability,
@@ -97,33 +401,11 @@ export const makeLocalClient = (options: LocalClientOptions) => {
   ) =>
     Effect.scoped(
       Effect.gen(function* () {
-        const client = yield* options.connect;
-        const legacyHost = yield* client.Negotiate().pipe(Effect.mapError(safeUnavailable));
-
-        if (legacyHost.protocol.major !== PROTOCOL_VERSION.major) {
-          return yield* Effect.fail(
-            new IncompatibleProtocolError({
-              clientMajor: PROTOCOL_VERSION.major,
-              hostMajor: legacyHost.protocol.major,
-              message: `Kojo Host protocol ${legacyHost.protocol.major} is incompatible with client protocol ${PROTOCOL_VERSION.major}.`,
-            }),
-          );
-        }
-        const host =
-          legacyHost.protocol.minor >= 1
-            ? yield* client.NegotiateCapabilities().pipe(Effect.mapError(safeUnavailable))
-            : legacyHost;
-        if (!host.capabilities.includes(capability)) {
-          return yield* Effect.fail(
-            new UnsupportedControlCapabilityError({
-              capability,
-              hostVersion: host.hostVersion,
-              message: `Kojo Host ${host.hostVersion} does not support ${capability}. Upgrade the Host or use a supported client operation.`,
-            }),
-          );
-        }
-
-        return yield* operation(client, host).pipe(Effect.mapError(safeUnavailable));
+        const connection = asLocalControlConnection(yield* options.connect);
+        return yield* Effect.gen(function* () {
+          const host = yield* negotiateCapability(connection.client, capability);
+          return yield* operation(connection.client, host).pipe(Effect.mapError(safeUnavailable));
+        }).pipe(Effect.ensuring(connection.disconnect));
       }),
     );
 
@@ -251,6 +533,24 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     activateAndRetry(
       request("runs:reveal", (client) => client.RevealWorkflowRun({ identity, runId })),
     );
+  const readExecutionTrace = (input: ExecutionTraceReadInput) =>
+    activateAndRetry(request("traces:read", (client) => client.ReadExecutionTrace(input)));
+  const subscribeControl = (input: ControlSubscriptionInput) =>
+    Stream.unwrap(
+      Effect.gen(function* () {
+        // Effect beta.102 gives unwrap the channel scope, so the RPC stream
+        // can register its interrupt finalizer in the same lifecycle.
+        const connection = asLocalControlConnection(yield* options.connect);
+        yield* negotiateCapability(connection.client, "control:subscribe");
+        return connection.client
+          .SubscribeControl(input, { streamBufferSize: 32 })
+          .pipe(Stream.mapError(safeUnavailable), Stream.ensuring(connection.disconnect));
+      }),
+    );
+  const acknowledgeControlSubscription = (delivery: ControlSubscriptionDelivery) =>
+    activateAndRetry(
+      request("control:acknowledge", (client) => client.AcknowledgeControlSubscription(delivery)),
+    ) satisfies Effect.Effect<ControlSubscriptionAcknowledgement, LocalClientError>;
   const resumeWorkflowRun = (
     identity: ProjectIdentity,
     runId: WorkflowRunId,
@@ -403,6 +703,9 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     listWorkflowRuns,
     showWorkflowRun,
     revealWorkflowRun,
+    readExecutionTrace,
+    subscribeControl,
+    acknowledgeControlSubscription,
     resumeWorkflowRun,
     completeWorkflowDeferred,
     stopWorkflowRun,
@@ -544,6 +847,24 @@ export const makeLocalClient = (options: LocalClientOptions) => {
       WorkflowRunQueryResult,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;
+    readonly readExecutionTrace: (
+      input: ExecutionTraceReadInput,
+    ) => Effect.Effect<
+      ExecutionTraceQueryResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly subscribeControl: (
+      input: ControlSubscriptionInput,
+    ) => Stream.Stream<
+      ControlSubscriptionUpdate,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly acknowledgeControlSubscription: (
+      delivery: ControlSubscriptionDelivery,
+    ) => Effect.Effect<
+      ControlSubscriptionAcknowledgement,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
     readonly resumeWorkflowRun: (
       identity: ProjectIdentity,
       runId: WorkflowRunId,
@@ -596,19 +917,33 @@ export const makeLocalClient = (options: LocalClientOptions) => {
   };
 };
 
-export const connectUnixControlClient = (socketPath: string) =>
+export const connectUnixControlConnection = (socketPath: string) =>
   Effect.gen(function* () {
-    const socket = yield* BunSocket.makeNet({ path: socketPath });
-    const protocol = yield* RpcClient.makeProtocolSocket({
+    const connection = yield* openUnixControlConnection(socketPath);
+    const socket = yield* BunSocket.fromDuplex(Effect.succeed(connection));
+    const socketProtocol = yield* RpcClient.makeProtocolSocket({
       retryTransientErrors: false,
     }).pipe(
       Effect.provideService(Socket.Socket, socket),
       Effect.provideService(RpcSerialization.RpcSerialization, RpcSerialization.ndjson),
     );
-    return yield* RpcClient.make(KojoControl).pipe(
+    const requestRegistry = makeUnixControlRequestRegistry();
+    const protocol = trackUnixControlProtocol(socketProtocol, requestRegistry);
+    const client = yield* RpcClient.make(KojoControl).pipe(
       Effect.provideService(RpcClient.Protocol, protocol),
     );
+    // This finalizer is registered after the RPC protocol and its background
+    // read fiber. Scope finalization is LIFO, so destroy unblocks that fiber
+    // before its own cleanup can wait on an idle Unix transport.
+    yield* registerUnixControlDisconnectFinalizer(connection);
+    return {
+      client,
+      disconnect: disconnectUnixControlConnection(connection, protocol, requestRegistry),
+    };
   }).pipe(Effect.mapError(safeUnavailable));
+
+export const connectUnixControlClient = (socketPath: string) =>
+  connectUnixControlConnection(socketPath).pipe(Effect.map((connection) => connection.client));
 
 export const defaultSocketPath = () => {
   const runtimeDirectory = process.env.XDG_RUNTIME_DIR;
@@ -631,7 +966,7 @@ export const makeOperatingSystemHostActivation = (
   options: OperatingSystemHostActivationOptions,
 ): Effect.Effect<void, LocalTransportError> =>
   Effect.tryPromise({
-    try: async () => {
+    try: async (signal) => {
       const command = activationCommand(options.platform, options.userId);
       if (command === undefined) {
         throw new LocalTransportError({
@@ -639,31 +974,43 @@ export const makeOperatingSystemHostActivation = (
         });
       }
       try {
-        await options.run(command);
+        await options.run(command, signal);
       } catch {
         // Activation is a best-effort wake-up. Discovery still performs its bounded retries.
       }
     },
     catch: (error) => (error instanceof LocalTransportError ? error : safeUnavailable()),
-  });
+  }).pipe(
+    Effect.timeoutOrElse({
+      duration: options.activationTimeout ?? "1 second",
+      orElse: () => Effect.void,
+    }),
+  );
 
 export const activateKojoHost = makeOperatingSystemHostActivation({
   platform: process.platform,
   userId: process.getuid?.() ?? 0,
-  run: async (command) => {
+  run: async (command, signal) => {
     const processHandle = Bun.spawn([...command], { stdout: "ignore", stderr: "ignore" });
+    signal.addEventListener(
+      "abort",
+      () => {
+        if (processHandle.exitCode === null) processHandle.kill("SIGTERM");
+      },
+      { once: true },
+    );
     return processHandle.exited;
   },
 });
 
 export const makeDefaultLocalClient = (socketPath = defaultSocketPath()) =>
   makeLocalClient({
-    connect: connectUnixControlClient(socketPath),
+    connect: connectUnixControlConnection(socketPath),
     activate: activateKojoHost,
   });
 
 export const makeNonActivatingLocalClient = (socketPath = defaultSocketPath()) =>
   makeLocalClient({
-    connect: connectUnixControlClient(socketPath),
+    connect: connectUnixControlConnection(socketPath),
     maxAttempts: 1,
   });

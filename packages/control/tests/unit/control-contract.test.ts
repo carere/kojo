@@ -2,7 +2,14 @@ import { expect, it } from "@effect/vitest";
 import { defineConfig, defineWorkflow } from "@kojo/workflow";
 import { executeWorkflow } from "@kojo/workflow/testing";
 import { Effect, Schema } from "effect";
-import { HostInformation, ProjectIdentity, RequestKey } from "../../src";
+import {
+  EXECUTION_EVENT_KINDS_V1,
+  ExecutionEventKindV1,
+  HostInformation,
+  LEGACY_PERSISTED_EXECUTION_EVENT_KINDS_V1,
+  ProjectIdentity,
+  RequestKey,
+} from "../../src";
 
 const LegacyHostInformation = Schema.Struct({
   protocol: Schema.Struct({ major: Schema.Number, minor: Schema.Number }),
@@ -49,6 +56,60 @@ it("accepts bounded opaque Request Keys", () => {
   expect(Schema.decodeUnknownSync(RequestKey)("settled-client-key")).toBe("settled-client-key");
   expect(() => Schema.decodeUnknownSync(RequestKey)("")).toThrow();
   expect(() => Schema.decodeUnknownSync(RequestKey)("x".repeat(257))).toThrow();
+});
+
+it("publishes one closed v1 Execution Event catalog", () => {
+  expect(EXECUTION_EVENT_KINDS_V1).toEqual([
+    "run.accepted",
+    "run.engine-confirmed",
+    "run.suspended",
+    "run.resumed",
+    "run.stop-requested",
+    "run.stopped",
+    "run.completed",
+    "run.failed",
+    "run.late-engine-outcome",
+    "child.requested",
+    "child.linked",
+    "child.finished",
+    "activity.attempt-started",
+    "activity.result-observed",
+    "activity.result-confirmed",
+    "activity.result-reused",
+    "deferred.created",
+    "deferred.completed",
+    "clock.scheduled",
+    "clock.fired",
+    "boundary.started",
+    "boundary.completed",
+    "artifact.recorded",
+    "artifact.unavailable",
+    "reconciliation.observation-restored",
+  ]);
+  expect(Schema.decodeUnknownSync(ExecutionEventKindV1)("activity.result-observed")).toBe(
+    "activity.result-observed",
+  );
+  expect(() => Schema.decodeUnknownSync(ExecutionEventKindV1)("activity.unversioned")).toThrow();
+  expect(() => Schema.decodeUnknownSync(ExecutionEventKindV1)("child.started")).toThrow();
+});
+
+it("publishes the complete reader-only pre-ADR compatibility catalog", () => {
+  expect(LEGACY_PERSISTED_EXECUTION_EVENT_KINDS_V1).toEqual([
+    "child.started",
+    "workflow-deferred.completed",
+    "run.engine-recovery-queued",
+    "run.engine-late-outcome",
+    "sandbox.acquired",
+    "sandbox.session-recreated",
+    "command.completed",
+    "command.failed",
+    "command.timed-out",
+    "agent.started",
+    "agent.completed",
+    "agent.failed",
+    "agent.session-continued",
+    "agent.replayed",
+  ]);
 });
 
 it.effect(

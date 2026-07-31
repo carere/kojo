@@ -9,6 +9,8 @@ export interface RunWorkInterrupter {
     | { readonly _tag: "interrupted" }
     | { readonly _tag: "needs-attention"; readonly message: string }
   >;
+  /** Signals every work item for a Project before its backend scope is closed. */
+  readonly interruptProject: (project: ProjectSnapshot) => Effect.Effect<void>;
   readonly interruptible: <Success, Failure, Requirements>(
     project: ProjectSnapshot,
     runId: string,
@@ -18,6 +20,7 @@ export interface RunWorkInterrupter {
 
 interface ActiveWork {
   readonly completed: Deferred.Deferred<void>;
+  readonly projectPath: string;
   readonly signal: Deferred.Deferred<void>;
 }
 
@@ -31,11 +34,19 @@ const key = (project: ProjectSnapshot, runId: string) => `${project.path}:${runI
 export const makeRunWorkInterrupter = (): RunWorkInterrupter => {
   const active = new Map<string, Set<ActiveWork>>();
 
+  const activeProjectWork = (project: ProjectSnapshot) =>
+    [...active.values()].flatMap((entries) =>
+      [...entries].filter((entry) => entry.projectPath === project.path),
+    );
+
+  const signal = (work: ReadonlyArray<ActiveWork>) =>
+    Effect.forEach(work, (entry) => Deferred.succeed(entry.signal, undefined), { discard: true });
+
   return {
     interrupt: (project, runId) =>
       Effect.gen(function* () {
         const work = [...(active.get(key(project, runId)) ?? [])];
-        for (const entry of work) yield* Deferred.succeed(entry.signal, undefined);
+        yield* signal(work);
 
         return yield* Effect.forEach(work, (entry) => Deferred.await(entry.completed)).pipe(
           Effect.timeout("5 seconds"),
@@ -48,12 +59,13 @@ export const makeRunWorkInterrupter = (): RunWorkInterrupter => {
           ),
         );
       }),
+    interruptProject: (project) => signal(activeProjectWork(project)),
     interruptible: (project, runId, external) =>
       Effect.gen(function* () {
         const signal = yield* Deferred.make<void>();
         const completed = yield* Deferred.make<void>();
         const runKey = key(project, runId);
-        const work = { completed, signal };
+        const work = { completed, projectPath: project.path, signal };
         yield* Effect.sync(() => {
           const entries = active.get(runKey) ?? new Set<ActiveWork>();
           entries.add(work);

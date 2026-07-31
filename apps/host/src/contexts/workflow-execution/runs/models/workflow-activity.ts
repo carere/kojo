@@ -14,6 +14,11 @@ export interface StoredWorkflowActivityOperation extends WorkflowActivityDefinit
   readonly resultJson: string | null;
 }
 
+export interface StoredWorkflowActivityAttempt {
+  readonly executionGeneration: number;
+  readonly state: StoredWorkflowActivityAttemptState;
+}
+
 export type WorkflowActivityReplayDecision =
   | { readonly _tag: "ready"; readonly executionGeneration: number }
   | { readonly _tag: "awaiting-confirmation" }
@@ -39,7 +44,7 @@ const sameDefinition = (
 export const decideWorkflowActivityReplay = (
   proposed: WorkflowActivityDefinitionIdentity,
   stored: StoredWorkflowActivityOperation | undefined,
-  latestAttemptState: StoredWorkflowActivityAttemptState | undefined,
+  latestAttempt: StoredWorkflowActivityAttempt | undefined,
 ): WorkflowActivityReplayDecision => {
   if (stored === undefined) return { _tag: "ready", executionGeneration: 1 };
   if (!sameDefinition(stored, proposed)) return { _tag: "conflict" };
@@ -52,7 +57,12 @@ export const decideWorkflowActivityReplay = (
       resultJson: stored.resultJson,
     };
   }
-  if (latestAttemptState === "result-observed") return { _tag: "awaiting-confirmation" };
+  if (
+    latestAttempt !== undefined &&
+    latestAttempt.executionGeneration === stored.executionGeneration
+  ) {
+    return { _tag: "awaiting-confirmation" };
+  }
   return { _tag: "ready", executionGeneration: stored.executionGeneration };
 };
 

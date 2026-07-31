@@ -3,6 +3,7 @@ import { chmod, open, readFile, unlink } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname } from "node:path";
 import {
+  type ExecutionTraceQueryResult,
   KojoControl,
   type ProjectIdentity,
   type ProjectMutationResult,
@@ -19,7 +20,7 @@ import {
   type WorkflowScheduleOccurrenceQueryResult,
   type WorkflowScheduleQueryResult,
 } from "@kojo/control";
-import { Effect, Exit, Layer, Scope } from "effect";
+import { Effect, Exit, Layer, Scope, Stream } from "effect";
 import { RpcServer } from "effect/unstable/rpc";
 import {
   forgetProject,
@@ -38,6 +39,8 @@ import {
 import {
   completeWorkflowDeferred,
   listWorkflowRuns,
+  readExecutionTrace,
+  readWorkflowRunsRevision,
   resumeWorkflowRun,
   revealWorkflowRun,
   showWorkflowRun,
@@ -57,7 +60,17 @@ import {
 } from "../../schedules/use-cases/manage-workflow-schedules";
 import type { HostIdentity } from "../models/host-identity";
 import { HOST_INFORMATION } from "../models/host-information";
+import { followControlSubscription } from "../use-cases/follow-control-subscription";
 import { getHostCapabilities, getHostInformation } from "../use-cases/get-host-information";
+import {
+  ControlSubscriptionDeliveryWindow,
+  type ControlSubscriptionDeliveryWindowShape,
+  makeControlSubscriptionDeliveryWindow,
+} from "./control-subscription-delivery-window";
+import {
+  ControlSubscriptionReader,
+  type ControlSubscriptionReaderShape,
+} from "./control-subscription-reader";
 import { HostDiagnosticLogger, type HostRequestDiagnosticEvent } from "./host-diagnostic-logger";
 import { prepareHostStoreDirectory } from "./host-store";
 
@@ -73,7 +86,7 @@ export interface KojoHostServer {
 export interface KojoHostOptions {
   readonly diagnosticPath: string;
   readonly lockPath?: string;
-  readonly serverLayer: Layer.Layer<never, unknown>;
+  readonly serverLayer: Layer.Layer<never, unknown, ControlSubscriptionDeliveryWindow>;
   readonly socketPath: string;
 }
 
@@ -154,7 +167,8 @@ const workflowRunDiagnostic =
       | WorkflowRunStartResult
       | WorkflowRunListResult
       | WorkflowRunMutationResult
-      | WorkflowRunQueryResult,
+      | WorkflowRunQueryResult
+      | ExecutionTraceQueryResult,
   ) => ({
     projectIdentity: identity,
     ...(result.ok ? {} : { safeErrorCode: result.error.code }),
@@ -173,6 +187,34 @@ const workflowScheduleDiagnostic =
     projectIdentity: identity,
     ...(result.ok ? {} : { safeErrorCode: result.error.code }),
   });
+
+const controlResourceFingerprint = (
+  identity: ProjectIdentity,
+  topic: "readiness" | "schedules" | "runs",
+) => {
+  switch (topic) {
+    case "readiness":
+      return Effect.map(assessProjectReadiness(identity), JSON.stringify);
+    case "schedules":
+      return Effect.map(
+        listWorkflowSchedules({ conditions: [], identity, workflowKeys: [] }),
+        JSON.stringify,
+      );
+    case "runs":
+      return readWorkflowRunsRevision(identity);
+  }
+};
+
+/** Transport-neutral subscription policy lives in the workflow-execution use case. */
+export const makeControlSubscription = (
+  reader: ControlSubscriptionReaderShape<unknown>,
+  deliveryWindow: ControlSubscriptionDeliveryWindowShape,
+) => followControlSubscription<unknown>(reader, deliveryWindow);
+
+const ControlSubscriptionReaderLive = Layer.succeed(ControlSubscriptionReader, {
+  readResourceFingerprint: controlResourceFingerprint,
+  readTrace: readExecutionTrace,
+});
 
 const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
   KojoControl.toLayer(
@@ -341,6 +383,36 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           revealWorkflowRun(identity, runId),
           workflowRunDiagnostic(identity),
         ),
+      ReadExecutionTrace: (input, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "ReadExecutionTrace",
+          String(options.requestId),
+          readExecutionTrace(input),
+          workflowRunDiagnostic(input.identity),
+        ),
+      SubscribeControl: (input, options) =>
+        Stream.unwrap(
+          withHostRequestDiagnostic(
+            hostIdentity,
+            "SubscribeControl",
+            String(options.requestId),
+            Effect.all([ControlSubscriptionReader, ControlSubscriptionDeliveryWindow]).pipe(
+              Effect.map(([reader, deliveryWindow]) =>
+                makeControlSubscription(reader, deliveryWindow)(input),
+              ),
+            ),
+          ),
+        ),
+      AcknowledgeControlSubscription: (delivery, options) =>
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "AcknowledgeControlSubscription",
+          String(options.requestId),
+          Effect.flatMap(ControlSubscriptionDeliveryWindow, (window) =>
+            window.acknowledge(delivery),
+          ),
+        ),
       ResumeWorkflowRun: ({ identity, runId, value, requestKey }, options) =>
         withHostRequestDiagnostic(
           hostIdentity,
@@ -459,10 +531,13 @@ export const makeKojoControlServerLayer = <ProtocolError, ProtocolRequirements>(
   protocol: Layer.Layer<RpcServer.Protocol, ProtocolError, ProtocolRequirements>,
   diagnosticLogger: Layer.Layer<HostDiagnosticLogger>,
   hostIdentity: HostIdentity,
+  subscriptionReader: Layer.Layer<ControlSubscriptionReader> = ControlSubscriptionReaderLive,
 ) =>
   RpcServer.layer(KojoControl).pipe(
     Layer.provide([
-      makeKojoControlHandlers(hostIdentity).pipe(Layer.provide(diagnosticLogger)),
+      makeKojoControlHandlers(hostIdentity).pipe(
+        Layer.provide([diagnosticLogger, subscriptionReader]),
+      ),
       protocol,
     ]),
   );
@@ -474,6 +549,7 @@ export const startKojoHost = async (options: KojoHostOptions): Promise<KojoHostS
   if (dirname(lockPath) !== socketDirectory) await prepareHostStoreDirectory(dirname(lockPath));
   const releaseLock = await acquireHostLock(lockPath);
   let scope: Scope.Closeable | undefined;
+  const deliveryWindow = makeControlSubscriptionDeliveryWindow();
   let mayOwnSocket = false;
   try {
     if (await socketAcceptsConnections(options.socketPath)) {
@@ -484,7 +560,14 @@ export const startKojoHost = async (options: KojoHostOptions): Promise<KojoHostS
     scope = Effect.runSync(Scope.make());
     const previousUmask = process.umask(0o077);
     try {
-      await Effect.runPromise(Layer.buildWithScope(options.serverLayer, scope));
+      await Effect.runPromise(
+        Layer.buildWithScope(
+          options.serverLayer.pipe(
+            Layer.provide(Layer.succeed(ControlSubscriptionDeliveryWindow, deliveryWindow)),
+          ),
+          scope,
+        ),
+      );
     } finally {
       process.umask(previousUmask);
     }
@@ -497,6 +580,7 @@ export const startKojoHost = async (options: KojoHostOptions): Promise<KojoHostS
       socketPath: options.socketPath,
       stop: async () => {
         try {
+          await Effect.runPromise(deliveryWindow.shutdown);
           await Effect.runPromise(Scope.close(serverScope, Exit.void));
         } finally {
           try {

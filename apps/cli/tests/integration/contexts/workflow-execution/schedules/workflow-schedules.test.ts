@@ -325,7 +325,7 @@ it("delivers one persisted occurrence after Host restart and preserves its linke
       scheduleRevision: revision,
     },
   });
-  expect(plannedFutureOccurrenceCount(databasePath)).toBe(1);
+  await waitFor(() => plannedFutureOccurrenceCount(databasePath) === 1);
 
   const occurrences = await runKojoCli(
     ["occurrence", "list", "--json"],

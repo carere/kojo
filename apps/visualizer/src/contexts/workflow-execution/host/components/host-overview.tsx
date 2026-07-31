@@ -1,4 +1,7 @@
 import {
+  type ControlSubscriptionDelivery,
+  type ControlSubscriptionUpdate,
+  type ExecutionTracePage,
   type HostOverview as HostOverviewSnapshot,
   type ProjectIdentity,
   type ProjectReadinessActionKey,
@@ -7,6 +10,7 @@ import {
   type WorkflowScheduleAllowedAction,
   type WorkflowScheduleSnapshot,
 } from "@kojo/control";
+import type { Stream } from "effect";
 import { Effect, Schema } from "effect";
 import { createResource, createSignal, Show } from "solid-js";
 import { m } from "../../../../i18n/messages";
@@ -19,9 +23,22 @@ import { WorkflowDefinitionSnapshots } from "../../../workflow-authoring/project
 import { WorkflowRuns } from "../../runs/components/workflow-runs";
 import { WorkflowScheduleOccurrences } from "../../schedules/components/workflow-schedule-occurrences";
 import { WorkflowSchedules } from "../../schedules/components/workflow-schedules";
+import {
+  ExecutionTrace,
+  type ExecutionTraceSelection,
+} from "../../traces/components/execution-trace";
 
 export interface HostOverviewProps {
+  readonly acknowledgeTrace?: (delivery: ControlSubscriptionDelivery) => Effect.Effect<void>;
+  readonly followTrace?: (
+    selection: ExecutionTraceSelection,
+    afterSequence: number,
+  ) => Stream.Stream<ControlSubscriptionUpdate>;
   readonly loadOverview?: () => Promise<HostOverviewSnapshot | undefined>;
+  readonly loadTrace?: (
+    selection: ExecutionTraceSelection,
+  ) => Promise<ExecutionTracePage | undefined>;
+  readonly traceRefreshIntervalMs?: number;
 }
 
 const loadHostOverview = async () => {
@@ -37,6 +54,9 @@ const loadHostOverview = async () => {
 export function HostOverview(props: HostOverviewProps) {
   const [overview, { refetch }] = createResource(() => (props.loadOverview ?? loadHostOverview)());
   const [navigation, setNavigation] = createSignal<string>();
+  const [selectedTrace, setSelectedTrace] = createSignal<
+    { readonly identity: ProjectIdentity; readonly runId: WorkflowRunId } | undefined
+  >();
   const controlSchedule = async (
     identity: HostOverviewSnapshot["projects"][number]["identity"],
     schedule: WorkflowScheduleSnapshot,
@@ -186,18 +206,31 @@ export function HostOverview(props: HostOverviewProps) {
                 onShowSchedule={(identity, scheduleKey) =>
                   setNavigation(`Schedule ${scheduleKey} in Project ${identity}`)
                 }
-                onShowRun={(identity, runId) =>
-                  setNavigation(`Workflow Run ${runId} in Project ${identity}`)
-                }
+                onShowRun={(identity, runId) => {
+                  setSelectedTrace({ identity, runId: runId as WorkflowRunId });
+                  setNavigation(`Workflow Run ${runId} in Project ${identity}`);
+                }}
               />
               <WorkflowRuns
                 snapshots={current().workflowRuns}
                 onResume={resume}
                 onCompleteDeferred={completeDeferred}
                 onStop={stop}
-                onShowRun={(identity, runId) =>
-                  setNavigation(`Workflow Run ${runId} in Project ${identity}`)
-                }
+                onShowRun={(identity, runId) => {
+                  setSelectedTrace({ identity, runId: runId as WorkflowRunId });
+                  setNavigation(`Workflow Run ${runId} in Project ${identity}`);
+                }}
+              />
+              <ExecutionTrace
+                {...(props.acknowledgeTrace === undefined
+                  ? {}
+                  : { acknowledgeTrace: props.acknowledgeTrace })}
+                {...(props.followTrace === undefined ? {} : { followTrace: props.followTrace })}
+                {...(props.loadTrace === undefined ? {} : { loadTrace: props.loadTrace })}
+                {...(props.traceRefreshIntervalMs === undefined
+                  ? {}
+                  : { refreshIntervalMs: props.traceRefreshIntervalMs })}
+                selection={selectedTrace()}
               />
               <Show when={navigation()}>
                 {(target) => (

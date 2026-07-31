@@ -1,29 +1,92 @@
+import { readFile } from "node:fs/promises";
 import { afterAll, describe, expect, it } from "@effect/vitest";
-import { LocalTransportError } from "@kojo/control/local-client";
-import { Effect } from "effect";
+import { EMPTY_EXECUTION_TRACE_FILTERS, ProjectIdentity, WorkflowRunId } from "@kojo/control";
+import { Effect, Schema, Stream } from "effect";
 import { FetchHttpClient } from "effect/unstable/http";
-import { RpcGroup, RpcTest } from "effect/unstable/rpc";
 import { startKojoHostProcess } from "../../../../../../../tests/support/host-process";
-import {
-  HostOverview,
-  HostOverviewError,
-} from "../../../../../src/contexts/shared/models/contracts";
+import { HostOverviewError } from "../../../../../src/contexts/shared/models/contracts";
 import { disposeApi, handleApiRequest } from "../../../../../src/contexts/shared/server";
 import {
   makeVisualizerApiClientLayer,
   VisualizerApiClient,
 } from "../../../../../src/contexts/shared/services/client";
-import { HostOverviewHandler } from "../../../../../src/contexts/workflow-execution/host/server/handlers";
-import { HostControlClient } from "../../../../../src/contexts/workflow-execution/host/services/host-control-client";
 
 afterAll(() => disposeApi());
 
-describe("Host overview", () => {
-  it.effect("preserves safe transport failures as typed browser-operation errors", () =>
-    Effect.gen(function* () {
-      const client = yield* RpcTest.makeClient(RpcGroup.make(HostOverview));
-      const error = yield* Effect.flip(client.HostOverview());
+const sameOriginFetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+  const request = new Request(input, init);
+  request.headers.set("origin", new URL(request.url).origin);
+  request.headers.set("sec-fetch-site", "same-origin");
+  return handleApiRequest(request);
+}) as typeof fetch;
 
+const abortingSameOriginFetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 100);
+  const request = new Request(input, { ...init, signal: controller.signal });
+  request.headers.set("origin", new URL(request.url).origin);
+  request.headers.set("sec-fetch-site", "same-origin");
+  return handleApiRequest(request).then((response) => {
+    if (response.body === null) clearTimeout(timeout);
+    return response;
+  });
+}) as typeof fetch;
+
+const withHost = <A>(
+  use: (
+    host: Awaited<ReturnType<typeof startKojoHostProcess>>,
+  ) => Effect.Effect<A, unknown, VisualizerApiClient>,
+  fetchImplementation: typeof fetch = sameOriginFetch,
+) =>
+  Effect.acquireUseRelease(
+    Effect.promise(async () => {
+      const previousSocketPath = process.env.KOJO_HOST_SOCKET;
+      const host = await startKojoHostProcess();
+      process.env.KOJO_HOST_SOCKET = host.socketPath;
+      return { host, previousSocketPath };
+    }),
+    ({ host }) => use(host),
+    ({ host, previousSocketPath }) =>
+      Effect.promise(async () => {
+        if (previousSocketPath === undefined) delete process.env.KOJO_HOST_SOCKET;
+        else process.env.KOJO_HOST_SOCKET = previousSocketPath;
+        await host.stop();
+      }),
+  ).pipe(
+    Effect.provide(makeVisualizerApiClientLayer("http://kojo.test/api/rpc")),
+    Effect.provideService(FetchHttpClient.Fetch, fetchImplementation),
+  );
+
+describe("Host overview", () => {
+  it.effect(
+    "proxies a Host-owned Trace query through the real same-origin and Unix-socket boundaries",
+    () =>
+      withHost(() =>
+        Effect.gen(function* () {
+          const client = yield* VisualizerApiClient;
+          const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+            "00000000-0000-7000-8000-000000000001",
+          );
+          const runId = Schema.decodeUnknownSync(WorkflowRunId)(
+            "00000000-0000-7000-8000-000000000002",
+          );
+          const result = yield* client.ReadExecutionTrace({
+            identity,
+            runId,
+            filters: EMPTY_EXECUTION_TRACE_FILTERS,
+            limit: 100,
+          });
+          expect(result).toMatchObject({ ok: false, error: { code: "project-not-found" } });
+        }),
+      ),
+  );
+
+  it.effect("maps an actual unavailable Host transport to a typed browser error", () => {
+    const previousSocketPath = process.env.KOJO_HOST_SOCKET;
+    process.env.KOJO_HOST_SOCKET = "/tmp/kojo-missing-visualizer-host.sock";
+    return Effect.gen(function* () {
+      const client = yield* VisualizerApiClient;
+      const error = yield* Effect.flip(client.HostOverview());
       expect(error).toEqual(
         new HostOverviewError({
           code: "host-unavailable",
@@ -32,85 +95,52 @@ describe("Host overview", () => {
         }),
       );
     }).pipe(
-      Effect.provide(HostOverviewHandler),
-      Effect.provideService(HostControlClient, {
-        getHostOverview: Effect.fail(
-          new LocalTransportError({ message: "Kojo Host is unavailable." }),
-        ),
-        enableWorkflowSchedule: () => Effect.die("Schedule control is not used by this test"),
-        disableWorkflowSchedule: () => Effect.die("Schedule control is not used by this test"),
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (previousSocketPath === undefined) delete process.env.KOJO_HOST_SOCKET;
+          else process.env.KOJO_HOST_SOCKET = previousSocketPath;
+        }),
+      ),
+      Effect.provide(makeVisualizerApiClientLayer("http://kojo.test/api/rpc")),
+      Effect.provideService(FetchHttpClient.Fetch, sameOriginFetch),
+    );
+  });
+
+  it.effect("is exposed through an explicit same-origin operation", () =>
+    withHost(() =>
+      Effect.gen(function* () {
+        const client = yield* VisualizerApiClient;
+        const overview = yield* client.HostOverview();
+        expect(overview.host).toMatchObject({
+          protocol: { major: 1, minor: 10 },
+          capabilities: expect.arrayContaining([
+            "traces:read",
+            "control:subscribe",
+            "control:acknowledge",
+          ]),
+        });
+        expect(overview.projects).toEqual([]);
       }),
     ),
   );
 
-  it.effect("is exposed through an explicit same-origin operation", () => {
-    const fetchThroughApi = ((input: RequestInfo | URL, init?: RequestInit) => {
-      const request = new Request(input, init);
-      request.headers.set("origin", new URL(request.url).origin);
-      request.headers.set("sec-fetch-site", "same-origin");
-      return handleApiRequest(request);
-    }) as typeof fetch;
-
-    return Effect.acquireUseRelease(
-      Effect.promise(async () => {
-        const previousSocketPath = process.env.KOJO_HOST_SOCKET;
-        const host = await startKojoHostProcess();
-        process.env.KOJO_HOST_SOCKET = host.socketPath;
-        return { host, previousSocketPath };
-      }),
-      () =>
+  it.effect("detaches an idle browser subscription from the Host socket on abort", () =>
+    withHost(
+      (host) =>
         Effect.gen(function* () {
           const client = yield* VisualizerApiClient;
-          const overview = yield* client.HostOverview();
-
-          expect(overview).toEqual({
-            host: {
-              protocol: { major: 1, minor: 7 },
-              hostVersion: "0.1.0",
-              capabilities: [
-                "projects:list",
-                "projects:list-page",
-                "projects:show",
-                "projects:register",
-                "projects:forget",
-                "readiness:show",
-                "readiness:refresh",
-                "readiness:repair",
-                "workflows:list",
-                "workflows:show",
-                "schedules:list",
-                "schedules:show",
-                "schedules:next",
-                "schedules:enable",
-                "schedules:disable",
-                "occurrences:list",
-                "occurrences:show",
-                "runs:start",
-                "runs:list",
-                "runs:show",
-                "runs:reveal",
-                "runs:resume",
-                "runs:deferred-complete",
-                "runs:stop",
-              ],
-            },
-            projects: [],
-            readiness: [],
-            projectDefinitions: [],
-            workflowSchedules: [],
-            workflowOccurrences: [],
-            workflowRuns: [],
-          });
+          yield* Stream.runDrain(
+            client.SubscribeControl({ projects: [], topics: [], traces: [] }),
+          ).pipe(Effect.catchCause(() => Effect.void));
+          const diagnostics = yield* Effect.promise(() => readFile(host.diagnosticPath, "utf8"));
+          expect(
+            diagnostics
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line).operation),
+          ).toContain("SubscribeControl");
         }),
-      ({ host, previousSocketPath }) =>
-        Effect.promise(async () => {
-          if (previousSocketPath === undefined) delete process.env.KOJO_HOST_SOCKET;
-          else process.env.KOJO_HOST_SOCKET = previousSocketPath;
-          await host.stop();
-        }),
-    ).pipe(
-      Effect.provide(makeVisualizerApiClientLayer("http://kojo.test/api/rpc")),
-      Effect.provideService(FetchHttpClient.Fetch, fetchThroughApi),
-    );
-  });
+      abortingSameOriginFetch,
+    ),
+  );
 });

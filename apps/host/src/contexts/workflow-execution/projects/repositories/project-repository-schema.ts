@@ -447,6 +447,12 @@ export const workflowActivityAttempts = sqliteTable(
       table.effectRetryNumber,
       table.invocationNumber,
     ),
+    index("kojo_activity_attempt_generation_retry_idx").on(
+      table.runId,
+      table.durableOperationKey,
+      table.executionGeneration,
+      table.effectRetryNumber,
+    ),
     check(
       "workflow_activity_attempt_state_valid",
       sql`${table.state} IN ('started', 'result-observed', 'engine-confirmed')`,

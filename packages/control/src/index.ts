@@ -1,5 +1,5 @@
 import { ProjectIdentity } from "@kojo/workflow";
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 import { Rpc, RpcGroup } from "effect/unstable/rpc";
 import {
   ProjectDefinitionSnapshot,
@@ -8,7 +8,7 @@ import {
 
 export { ProjectIdentity } from "@kojo/workflow";
 
-export const PROTOCOL_VERSION = { major: 1, minor: 7 } as const;
+export const PROTOCOL_VERSION = { major: 1, minor: 10 } as const;
 export const CONTROL_CAPABILITIES = [
   "projects:list",
   "projects:list-page",
@@ -34,6 +34,9 @@ export const CONTROL_CAPABILITIES = [
   "runs:resume",
   "runs:deferred-complete",
   "runs:stop",
+  "traces:read",
+  "control:subscribe",
+  "control:acknowledge",
 ] as const;
 
 export const ControlCapability = Schema.String.check(
@@ -747,6 +750,11 @@ export const WorkflowRunOperationErrorCode = Schema.Literals([
   "run-resume-not-allowed",
   "workflow-deferred-not-found",
   "workflow-deferred-value-invalid",
+  "execution-trace-cursor-malformed",
+  "execution-trace-cursor-version-unsupported",
+  "execution-trace-cursor-filter-mismatch",
+  "execution-trace-cursor-run-mismatch",
+  "execution-trace-query-invalid",
 ]);
 export type WorkflowRunOperationErrorCode = typeof WorkflowRunOperationErrorCode.Type;
 
@@ -819,6 +827,284 @@ export const WorkflowRunQueryResult = Schema.Union([
   Schema.Struct({ ok: Schema.Literal(false), error: WorkflowRunOperationError }),
 ]);
 export type WorkflowRunQueryResult = typeof WorkflowRunQueryResult.Type;
+
+/**
+ * The closed v1 catalog. A future Host may retain a newer Event, but a v1
+ * client receives it as an explicit compatibility placeholder rather than
+ * silently skipping evidence from the Execution Trace.
+ */
+export const EXECUTION_EVENT_KINDS_V1 = [
+  "run.accepted",
+  "run.engine-confirmed",
+  "run.suspended",
+  "run.resumed",
+  "run.stop-requested",
+  "run.stopped",
+  "run.completed",
+  "run.failed",
+  "run.late-engine-outcome",
+  "child.requested",
+  "child.linked",
+  "child.finished",
+  "activity.attempt-started",
+  "activity.result-observed",
+  "activity.result-confirmed",
+  "activity.result-reused",
+  "deferred.created",
+  "deferred.completed",
+  "clock.scheduled",
+  "clock.fired",
+  "boundary.started",
+  "boundary.completed",
+  "artifact.recorded",
+  "artifact.unavailable",
+  "reconciliation.observation-restored",
+] as const;
+
+export const ExecutionEventKindV1 = Schema.Literals(EXECUTION_EVENT_KINDS_V1);
+export type ExecutionEventKindV1 = typeof ExecutionEventKindV1.Type;
+
+/**
+ * Reader-only identities written before ADR 0011 named the final v1 catalog.
+ * ADR 0012 documents why they remain decodable, while every new write uses
+ * `EXECUTION_EVENT_KINDS_V1` above.
+ */
+export const LEGACY_PERSISTED_EXECUTION_EVENT_KINDS_V1 = [
+  "child.started",
+  "workflow-deferred.completed",
+  "run.engine-recovery-queued",
+  "run.engine-late-outcome",
+  // Sandbox and Agent adapters wrote these source-specific identities before
+  // ADR 0011 settled their durable representation as Boundary Events.
+  "sandbox.acquired",
+  "sandbox.session-recreated",
+  "command.completed",
+  "command.failed",
+  "command.timed-out",
+  "agent.started",
+  "agent.completed",
+  "agent.failed",
+  "agent.session-continued",
+  "agent.replayed",
+] as const;
+
+export const ExecutionTraceCompatibility = Schema.Literals([
+  "supported",
+  "envelope-version-unsupported",
+  "kind-version-unsupported",
+]);
+export type ExecutionTraceCompatibility = typeof ExecutionTraceCompatibility.Type;
+
+export const ExecutionTraceEventFamily = Schema.Literals([
+  "run",
+  "child",
+  "activity",
+  "deferred",
+  "clock",
+  "boundary",
+  "artifact",
+  "reconciliation",
+]);
+export type ExecutionTraceEventFamily = typeof ExecutionTraceEventFamily.Type;
+
+export const ExecutionTraceTriggerKind = Schema.Literals(["manual", "schedule", "child"]);
+export type ExecutionTraceTriggerKind = typeof ExecutionTraceTriggerKind.Type;
+
+export const ExecutionTraceArtifactCondition = Schema.Literals(["available", "missing", "expired"]);
+export type ExecutionTraceArtifactCondition = typeof ExecutionTraceArtifactCondition.Type;
+
+/** One safe, chronological entry in a Workflow Run's immutable trace. */
+export const ExecutionTraceEvent = Schema.Struct({
+  eventId: Schema.String,
+  runId: WorkflowRunId,
+  sequence: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  envelopeVersion: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  kind: Schema.String,
+  kindVersion: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  recordedAtMs: Schema.Number,
+  observedAtMs: Schema.NullOr(Schema.Number),
+  engineOperationId: Schema.NullOr(Schema.String),
+  activityAttemptId: Schema.NullOr(Schema.String),
+  boundaryId: Schema.NullOr(Schema.String),
+  childRunId: Schema.NullOr(WorkflowRunId),
+  compatibility: ExecutionTraceCompatibility,
+  /** Payloads remain masked by default, including every unsupported Event. */
+  payload: Schema.Unknown,
+});
+export type ExecutionTraceEvent = typeof ExecutionTraceEvent.Type;
+
+/**
+ * These are deliberately indexed metadata fields. Trace filtering never
+ * inspects opaque payload JSON, so index and cursor behavior stay stable.
+ */
+export const ExecutionTraceFilters = Schema.Struct({
+  activityNames: Schema.optionalKey(Schema.Array(Schema.String)),
+  kinds: Schema.Array(ExecutionEventKindV1),
+  eventFamilies: Schema.optionalKey(Schema.Array(ExecutionTraceEventFamily)),
+  boundaryIds: Schema.optionalKey(Schema.Array(Schema.String)),
+  artifactConditions: Schema.optionalKey(Schema.Array(ExecutionTraceArtifactCondition)),
+  engineOperationIds: Schema.Array(Schema.String),
+  activityAttemptIds: Schema.Array(Schema.String),
+  childRunIds: Schema.Array(WorkflowRunId),
+  runStates: Schema.optionalKey(Schema.Array(WorkflowRunState)),
+  workflowKeys: Schema.optionalKey(Schema.Array(Schema.String)),
+  triggerKinds: Schema.optionalKey(Schema.Array(ExecutionTraceTriggerKind)),
+  parentRunIds: Schema.optionalKey(Schema.Array(WorkflowRunId)),
+  scheduleKeys: Schema.optionalKey(Schema.Array(Schema.String)),
+  occurrenceOutcomes: Schema.optionalKey(Schema.Array(WorkflowScheduleOccurrenceOutcome)),
+  recordedAfterMs: Schema.optionalKey(
+    Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  ),
+  recordedBeforeMs: Schema.optionalKey(
+    Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  ),
+});
+export type ExecutionTraceFilters = typeof ExecutionTraceFilters.Type;
+
+/** The one settled empty-filter value shared by every Trace consumer. */
+export const EMPTY_EXECUTION_TRACE_FILTERS: ExecutionTraceFilters = {
+  activityNames: [],
+  artifactConditions: [],
+  boundaryIds: [],
+  activityAttemptIds: [],
+  childRunIds: [],
+  engineOperationIds: [],
+  eventFamilies: [],
+  kinds: [],
+  occurrenceOutcomes: [],
+  parentRunIds: [],
+  runStates: [],
+  scheduleKeys: [],
+  triggerKinds: [],
+  workflowKeys: [],
+};
+
+export const ExecutionTraceReadInput = Schema.Struct({
+  identity: ProjectIdentity,
+  runId: WorkflowRunId,
+  filters: ExecutionTraceFilters,
+  afterSequence: Schema.optionalKey(
+    Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  ),
+  beforeSequence: Schema.optionalKey(
+    Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  ),
+  cursor: Schema.optionalKey(Schema.String),
+  limit: Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 500 })).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed(100)),
+  ),
+});
+export type ExecutionTraceReadInput = typeof ExecutionTraceReadInput.Type;
+
+export const ExecutionTracePage = Schema.Struct({
+  events: Schema.Array(ExecutionTraceEvent),
+  firstSequence: Schema.NullOr(
+    Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  ),
+  hasMore: Schema.Boolean,
+  lastSequence: Schema.NullOr(
+    Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  ),
+  nextCursor: Schema.NullOr(Schema.String),
+  highWaterSequence: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  /** The state is a snapshot for follow clients; it is not derived from Events. */
+  runState: WorkflowRunState,
+  final: Schema.Boolean,
+});
+export type ExecutionTracePage = typeof ExecutionTracePage.Type;
+
+export const ExecutionTraceQueryResult = Schema.Union([
+  Schema.Struct({ ok: Schema.Literal(true), page: ExecutionTracePage }),
+  Schema.Struct({ ok: Schema.Literal(false), error: WorkflowRunOperationError }),
+]);
+export type ExecutionTraceQueryResult = typeof ExecutionTraceQueryResult.Type;
+
+export const ControlSubscriptionTopic = Schema.Literals([
+  "readiness",
+  "schedules",
+  "runs",
+  "traces",
+]);
+export type ControlSubscriptionTopic = typeof ControlSubscriptionTopic.Type;
+
+export const ExecutionTraceSubscription = Schema.Struct({
+  identity: ProjectIdentity,
+  runId: WorkflowRunId,
+  afterSequence: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+});
+export type ExecutionTraceSubscription = typeof ExecutionTraceSubscription.Type;
+
+/**
+ * This identifier and sequence are deliberately ephemeral. They acknowledge
+ * delivery within one live subscription only; they neither replace nor order
+ * the durable per-Run Execution Trace sequence.
+ */
+export const ControlSubscriptionId = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(128),
+).pipe(Schema.brand("ControlSubscriptionId"));
+export type ControlSubscriptionId = typeof ControlSubscriptionId.Type;
+
+export const ControlSubscriptionDelivery = Schema.Struct({
+  deliverySequence: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  subscriptionId: ControlSubscriptionId,
+});
+export type ControlSubscriptionDelivery = typeof ControlSubscriptionDelivery.Type;
+
+export const ControlSubscriptionResourceTopic = Schema.Literals(["readiness", "schedules", "runs"]);
+export type ControlSubscriptionResourceTopic = typeof ControlSubscriptionResourceTopic.Type;
+
+/** A subscription is advisory; durable trace sequences are the resume point. */
+export const ControlSubscriptionInput = Schema.Struct({
+  projects: Schema.Array(ProjectIdentity),
+  topics: Schema.Array(ControlSubscriptionTopic),
+  traces: Schema.Array(ExecutionTraceSubscription),
+});
+export type ControlSubscriptionInput = typeof ControlSubscriptionInput.Type;
+
+export const ControlSubscriptionUpdate = Schema.Union([
+  Schema.Struct({
+    ...ControlSubscriptionDelivery.fields,
+    kind: Schema.Literal("resource-changed"),
+    identity: ProjectIdentity,
+    /** A temporary notice; clients reload the authoritative resource snapshot. */
+    topic: ControlSubscriptionResourceTopic,
+  }),
+  Schema.Struct({
+    ...ControlSubscriptionDelivery.fields,
+    kind: Schema.Literal("trace-event"),
+    identity: ProjectIdentity,
+    runId: WorkflowRunId,
+    sequence: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+    event: ExecutionTraceEvent,
+  }),
+  Schema.Struct({
+    ...ControlSubscriptionDelivery.fields,
+    kind: Schema.Literal("resync-required"),
+    identity: ProjectIdentity,
+    runId: WorkflowRunId,
+    /** Last sequence retained by the Host at the point it requested a resync. */
+    highWaterSequence: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  }),
+  Schema.Struct({
+    ...ControlSubscriptionDelivery.fields,
+    kind: Schema.Literal("resync-required"),
+    identity: ProjectIdentity,
+    /**
+     * A selected resource changed faster than this advisory subscription could
+     * consume it. Reload that resource's authoritative snapshot; there is no
+     * Run identity or durable trace sequence in this resource-scoped notice.
+     */
+    topic: ControlSubscriptionResourceTopic,
+  }),
+]);
+export type ControlSubscriptionUpdate = typeof ControlSubscriptionUpdate.Type;
+
+/** Acknowledging an expired subscription is a safe, typed no-op. */
+export const ControlSubscriptionAcknowledgement = Schema.Struct({
+  acknowledged: Schema.Boolean,
+});
+export type ControlSubscriptionAcknowledgement = typeof ControlSubscriptionAcknowledgement.Type;
 
 export const ProjectWorkflowRunsSnapshot = Schema.Struct({
   project: ProjectSnapshot,
@@ -988,6 +1274,31 @@ export const RevealWorkflowRun = Rpc.make("RevealWorkflowRun", {
   success: WorkflowRunQueryResult,
 });
 
+/** Reads durable history only; it never drives Workflow Engine replay. */
+export const ReadExecutionTrace = Rpc.make("ReadExecutionTrace", {
+  payload: ExecutionTraceReadInput.fields,
+  success: ExecutionTraceQueryResult,
+});
+
+/**
+ * A bounded, advisory stream. Consumers resume trace delivery from the durable
+ * per-Run sequence after reconnecting or receiving `resync-required`.
+ */
+export const SubscribeControl = Rpc.make("SubscribeControl", {
+  payload: ControlSubscriptionInput.fields,
+  success: ControlSubscriptionUpdate,
+  stream: true,
+});
+
+/**
+ * Advances the ephemeral delivery window for one subscription. It has no
+ * durable effect and never advances a Workflow Run's trace sequence.
+ */
+export const AcknowledgeControlSubscription = Rpc.make("AcknowledgeControlSubscription", {
+  payload: ControlSubscriptionDelivery.fields,
+  success: ControlSubscriptionAcknowledgement,
+});
+
 export const ResumeWorkflowRun = Rpc.make("ResumeWorkflowRun", {
   payload: {
     identity: ProjectIdentity,
@@ -1059,6 +1370,9 @@ export const KojoControl = RpcGroup.make(
   ListWorkflowRuns,
   ShowWorkflowRun,
   RevealWorkflowRun,
+  ReadExecutionTrace,
+  SubscribeControl,
+  AcknowledgeControlSubscription,
   ResumeWorkflowRun,
   CompleteWorkflowDeferred,
   StopWorkflowRun,

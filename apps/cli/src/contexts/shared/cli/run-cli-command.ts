@@ -27,6 +27,7 @@ import {
 import { resolveProjectSelectionPath } from "../../workflow-authoring/projects/services/project-selection-path";
 import { validateProjectDefinition } from "../../workflow-authoring/projects/services/subprocess-project-definition-validator";
 import { selectProject } from "../../workflow-authoring/projects/use-cases/select-project";
+import { runTraceCliCommand } from "../../workflow-execution/traces/use-cases/run-trace-cli-command";
 import { runEffect } from "./cli-effect";
 import { canonicalSelectorPath, decodeRequestKey, parseOptions } from "./cli-options";
 import {
@@ -52,6 +53,8 @@ import {
 export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
   const json = rawArgs.includes("--json");
   const args = rawArgs.filter((argument) => argument !== "--json");
+
+  if (args[0] === "trace") return runTraceCliCommand(args, json);
 
   if (args[0] === "readiness") {
     const options = parseOptions(args.slice(2));

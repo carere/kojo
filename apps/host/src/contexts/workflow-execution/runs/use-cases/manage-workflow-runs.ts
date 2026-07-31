@@ -1,16 +1,21 @@
 import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
-import type {
-  ProjectIdentity,
-  ProjectSnapshot,
-  RequestKey,
-  WorkflowRunListInput,
-  WorkflowRunListResult,
-  WorkflowRunMutationResult,
-  WorkflowRunOperationError,
-  WorkflowRunQueryResult,
-  WorkflowRunSnapshot,
-  WorkflowRunStartResult,
+import {
+  EXECUTION_EVENT_KINDS_V1,
+  type ExecutionTraceEvent,
+  type ExecutionTraceQueryResult,
+  type ExecutionTraceReadInput,
+  LEGACY_PERSISTED_EXECUTION_EVENT_KINDS_V1,
+  type ProjectIdentity,
+  type ProjectSnapshot,
+  type RequestKey,
+  type WorkflowRunListInput,
+  type WorkflowRunListResult,
+  type WorkflowRunMutationResult,
+  type WorkflowRunOperationError,
+  type WorkflowRunQueryResult,
+  type WorkflowRunSnapshot,
+  type WorkflowRunStartResult,
 } from "@kojo/control";
 import type { WorkflowDefinitionSnapshot } from "@kojo/control/project-definition-validation";
 import { type AnyWorkflowDefinition, WorkflowOperations } from "@kojo/workflow";
@@ -33,6 +38,7 @@ import {
   type WorkflowRunOutcome,
   WorkflowRunRepository,
 } from "../repositories/workflow-run-repository";
+import { decodeExecutionTraceCursor, encodeExecutionTraceCursor } from "./execution-trace-cursor";
 
 const stableJson = (value: unknown): string => {
   if (value === null) return "null";
@@ -673,6 +679,17 @@ export const listWorkflowRuns = (
     return { ok: true, runs: yield* repository.list(resolved.project, input) };
   });
 
+/** Complete project revision for advisory `runs` subscriptions. */
+export const readWorkflowRunsRevision = (
+  identity: ProjectIdentity,
+): Effect.Effect<string, never, ProjectIndexRepository | ProjectLayout | WorkflowRunRepository> =>
+  Effect.gen(function* () {
+    const resolved = yield* resolveProject(identity);
+    if ("code" in resolved) return "missing-project";
+    const repository = yield* WorkflowRunRepository;
+    return yield* repository.revision(resolved.project);
+  });
+
 export const showWorkflowRun = (
   identity: ProjectIdentity,
   runId: string,
@@ -735,6 +752,173 @@ export const revealWorkflowRun = (
           ),
         }
       : { ok: true, run: run.run };
+  });
+
+const executionEventKindsV1 = new Set<string>(EXECUTION_EVENT_KINDS_V1);
+const legacyPersistedExecutionEventKindsV1 = new Set<string>(
+  LEGACY_PERSISTED_EXECUTION_EVENT_KINDS_V1,
+);
+
+export const toExecutionTraceEvent = (event: {
+  readonly activityAttemptId: string | null;
+  readonly boundaryId: string | null;
+  readonly childRunId: string | null;
+  readonly engineOperationId: string | null;
+  readonly envelopeVersion: number;
+  readonly eventId: string;
+  readonly kind: string;
+  readonly kindVersion: number;
+  readonly observedAtMs: number | null;
+  readonly payload: unknown;
+  readonly payloadSensitivityMap: Parameters<typeof maskPayload>[1];
+  readonly recordedAtMs: number;
+  readonly runId: string;
+  readonly sequence: number;
+}): ExecutionTraceEvent => {
+  const compatibility =
+    event.envelopeVersion !== 1
+      ? "envelope-version-unsupported"
+      : event.kindVersion !== 1 ||
+          (!executionEventKindsV1.has(event.kind) &&
+            !legacyPersistedExecutionEventKindsV1.has(event.kind))
+        ? "kind-version-unsupported"
+        : "supported";
+  return {
+    activityAttemptId: event.activityAttemptId,
+    boundaryId: event.boundaryId,
+    childRunId: event.childRunId as never,
+    compatibility,
+    engineOperationId: event.engineOperationId,
+    envelopeVersion: event.envelopeVersion,
+    eventId: event.eventId,
+    kind: event.kind,
+    kindVersion: event.kindVersion,
+    observedAtMs: event.observedAtMs,
+    // Unknown schema versions fail closed even if a stale map happened to decode.
+    payload:
+      compatibility === "supported"
+        ? maskPayload(event.payload, event.payloadSensitivityMap)
+        : { _tag: "sensitive-value-masked" },
+    recordedAtMs: event.recordedAtMs,
+    runId: event.runId as never,
+    sequence: event.sequence,
+  };
+};
+
+const traceError = (
+  identity: ProjectIdentity,
+  runId: string,
+  code: Extract<
+    WorkflowRunOperationError["code"],
+    | "execution-trace-cursor-malformed"
+    | "execution-trace-cursor-version-unsupported"
+    | "execution-trace-cursor-filter-mismatch"
+    | "execution-trace-cursor-run-mismatch"
+    | "execution-trace-query-invalid"
+    | "run-not-found"
+  >,
+  message: string,
+  next: string,
+) => error(code, message, next, { kind: "run", identity, runId: runId as never });
+
+/**
+ * Reads durable Execution Events without treating them as a current-state
+ * projection. Continuation is a strict, opaque keyset on one Run sequence.
+ */
+export const readExecutionTrace = (
+  input: ExecutionTraceReadInput,
+): Effect.Effect<
+  ExecutionTraceQueryResult,
+  never,
+  | ProjectIndexRepository
+  | ProjectLayout
+  | ProjectRuntime
+  | WorkflowBackend
+  | WorkflowRunRepository
+  | HostDiagnosticLogger
+> =>
+  Effect.gen(function* () {
+    const hasAfter = input.afterSequence !== undefined;
+    const hasBefore = input.beforeSequence !== undefined;
+    if ((hasAfter && hasBefore) || (input.cursor !== undefined && (hasAfter || hasBefore))) {
+      return {
+        ok: false,
+        error: traceError(
+          input.identity,
+          input.runId,
+          "execution-trace-query-invalid",
+          "Use one Execution Trace continuation: a cursor, after sequence, or before sequence.",
+          "Start a new trace query or continue with the returned cursor.",
+        ),
+      };
+    }
+    let afterSequence = input.afterSequence;
+    let beforeSequence = input.beforeSequence;
+    if (input.cursor !== undefined) {
+      const decoded = decodeExecutionTraceCursor(input.cursor, input.runId, input.filters);
+      if (!decoded.ok) {
+        return {
+          ok: false,
+          error: traceError(
+            input.identity,
+            input.runId,
+            decoded.code,
+            decoded.message,
+            "Start a new trace query or continue with a cursor from this same filtered trace.",
+          ),
+        };
+      }
+      if (decoded.cursor.direction === "after") afterSequence = decoded.cursor.sequence;
+      else beforeSequence = decoded.cursor.sequence;
+    }
+    const resolved = yield* resolveProject(input.identity);
+    if ("code" in resolved) return { ok: false, error: resolved };
+    // Trace follow is also a live Run observation. Reconcile the Host-owned
+    // state first, then read the durable sequence without deriving state from
+    // the Event history itself.
+    yield* reconcilePendingWorkflowRuns(resolved);
+    const repository = yield* WorkflowRunRepository;
+    const page = yield* repository.readTrace(resolved.project, input.runId, {
+      afterSequence,
+      beforeSequence,
+      filters: input.filters,
+      limit: input.limit,
+    });
+    if (page === undefined) {
+      return {
+        ok: false,
+        error: traceError(
+          input.identity,
+          input.runId,
+          "run-not-found",
+          "Workflow Run was not found in this Project.",
+          "List Workflow Runs and choose a Run Identity from that Project.",
+        ),
+      };
+    }
+    const events = page.events.map(toExecutionTraceEvent);
+    const nextCursor =
+      !page.hasMore || events.length === 0
+        ? null
+        : encodeExecutionTraceCursor(
+            input.runId,
+            beforeSequence === undefined ? "after" : "before",
+            beforeSequence === undefined ? events[events.length - 1].sequence : events[0].sequence,
+            input.filters,
+          );
+    return {
+      ok: true,
+      page: {
+        events,
+        final: ["completed", "failed", "stopped"].includes(page.runState),
+        firstSequence: events[0]?.sequence ?? null,
+        hasMore: page.hasMore,
+        highWaterSequence: page.highWaterSequence,
+        lastSequence: events.at(-1)?.sequence ?? null,
+        nextCursor,
+        runState: page.runState,
+      },
+    };
   });
 
 const runControlReference = (run: WorkflowRunSnapshot) =>
