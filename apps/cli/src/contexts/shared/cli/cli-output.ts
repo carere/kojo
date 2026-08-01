@@ -124,7 +124,7 @@ const deletionCounts = (
     | DeletionPreview
     | Extract<DeletionResult, { ok: true; kind: "completed" }>["receipt"],
 ) =>
-  `runs ${previewOrReceipt.counts.runs}, occurrences ${previewOrReceipt.counts.occurrences}, schedules ${previewOrReceipt.counts.schedules}, engine ${previewOrReceipt.counts.engine}, owned files ${previewOrReceipt.counts.ownedFiles}, providers ${previewOrReceipt.counts.providers}`;
+  `runs ${previewOrReceipt.counts.runs}, occurrences ${previewOrReceipt.counts.occurrences}, schedules ${previewOrReceipt.counts.schedules}, engine ${previewOrReceipt.counts.engine}, owned files ${previewOrReceipt.counts.ownedFiles}, providers ${previewOrReceipt.counts.providers}, diagnostics ${previewOrReceipt.counts.diagnostics}`;
 
 export const writeDeletionResult = (
   command: string,

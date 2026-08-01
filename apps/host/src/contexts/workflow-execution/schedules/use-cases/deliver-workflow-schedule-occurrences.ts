@@ -155,7 +155,7 @@ export const deliverWorkflowScheduleOccurrences = (
     ).pipe(Effect.catchCause(() => Effect.succeed(undefined)));
     if (executable === undefined) return;
 
-    yield* runtime.coordinateLifecycle(
+    const coordinated = yield* runtime.coordinateWork(
       validation.project,
       Effect.gen(function* () {
         const now = clock.now();
@@ -547,6 +547,7 @@ export const deliverWorkflowScheduleOccurrences = (
         }
       }),
     );
+    if (coordinated._tag === "blocked") return;
   }).pipe(Effect.catchCause(() => Effect.void));
 
 const resolveOccurrenceProject = (

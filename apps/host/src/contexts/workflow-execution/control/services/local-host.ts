@@ -4,6 +4,7 @@ import { createConnection } from "node:net";
 import { dirname } from "node:path";
 import {
   type DeletionResult,
+  type DeletionScope,
   type ExecutionArtifactDownloadResult,
   type ExecutionTraceExportResult,
   type ExecutionTraceQueryResult,
@@ -189,6 +190,11 @@ const deletionDiagnostic = (identity: ProjectIdentity) => (result: DeletionResul
   ...(result.ok ? {} : { safeErrorCode: result.error.code }),
 });
 
+const deletionRequestDiagnostic = (scope: DeletionScope) => (result: DeletionResult) =>
+  scope.kind === "project" && result.ok && result.kind === "completed"
+    ? {}
+    : deletionDiagnostic(scope.identity)(result);
+
 const workflowRunDiagnostic =
   (identity: ProjectIdentity) =>
   (
@@ -311,19 +317,13 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           retentionDiagnostic(identity),
         ),
       DeleteExecutionData: ({ scope, planKey }, options) =>
-        Effect.gen(function* () {
-          const result = yield* withHostRequestDiagnostic(
-            hostIdentity,
-            "DeleteExecutionData",
-            String(options.requestId),
-            deleteExecutionData(scope, planKey),
-            deletionDiagnostic(scope.identity),
-          );
-          if (scope.kind === "project" && result.ok && result.kind === "completed") {
-            yield* (yield* HostDiagnosticLogger).removeProject(scope.identity);
-          }
-          return result;
-        }),
+        withHostRequestDiagnostic(
+          hostIdentity,
+          "DeleteExecutionData",
+          String(options.requestId),
+          deleteExecutionData(scope, planKey),
+          deletionRequestDiagnostic(scope),
+        ),
       ShowProjectReadiness: ({ identity }, options) =>
         withHostRequestDiagnostic(
           hostIdentity,

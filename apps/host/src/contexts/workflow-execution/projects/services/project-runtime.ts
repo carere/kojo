@@ -13,6 +13,12 @@ import { type ProjectForgetBlockers, ProjectRepository } from "../repositories/p
 import { WorkflowBackend } from "./workflow-backend";
 
 export interface ProjectRuntimeShape {
+  readonly coordinateWork: <A>(
+    project: ProjectSnapshot,
+    operation: Effect.Effect<A>,
+  ) => Effect.Effect<
+    { readonly _tag: "allowed"; readonly value: A } | { readonly _tag: "blocked" }
+  >;
   readonly coordinateRegistration: <A>(
     project: ProjectSnapshot,
     beforeMigration: Effect.Effect<{
@@ -210,6 +216,17 @@ export const ProjectRuntimeLive = Layer.effect(
         ),
       coordinateLifecycle: <A>(project: ProjectSnapshot, operation: Effect.Effect<A>) =>
         serialize(project, operation),
+      coordinateWork: <A>(project: ProjectSnapshot, operation: Effect.Effect<A>) =>
+        serialize(
+          project,
+          Effect.gen(function* () {
+            const pendingDeletion = repository.hasPendingDeletion
+              ? yield* repository.hasPendingDeletion(project)
+              : (yield* repository.readiness(project)) === "needs-attention";
+            if (pendingDeletion) return { _tag: "blocked" as const };
+            return { _tag: "allowed" as const, value: yield* operation };
+          }),
+        ),
       coordinateRetention: <A>(project: ProjectSnapshot, operation: Effect.Effect<A>) =>
         serialize(project, operation),
       readiness: (

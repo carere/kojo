@@ -593,6 +593,20 @@ const occurrenceItem = (occurrence: StoredOccurrence): DeletionWorkItem => ({
   scheduleRevision: occurrence.applied_revision,
 });
 
+const occurrencePrecondition = (occurrence: StoredOccurrence) => ({
+  key: occurrenceItem(occurrence).key,
+  value: stableJson({
+    scheduleKey: occurrence.schedule_key,
+    scheduledAtMs: occurrence.scheduled_at_ms,
+    appliedRevision: occurrence.applied_revision,
+    outcome: occurrence.outcome,
+    linkedRunId: occurrence.linked_run_id,
+    deletedRunId: occurrence.deleted_run_id,
+    processedAtMs: occurrence.processed_at_ms,
+    rowVersion: occurrence.row_version,
+  }),
+});
+
 const scheduleItem = (schedule: StoredSchedule): DeletionWorkItem => ({
   kind: "schedule",
   key: `schedule:${schedule.schedule_key}`,
@@ -695,6 +709,9 @@ const makeTarget = async (
       selectedRuns.some((run) => run.run_id === occurrence.linked_run_id),
     );
     for (const occurrence of selectedOccurrences) items.push(occurrenceItem(occurrence));
+    for (const occurrence of selectedOccurrences) {
+      preconditions.push(occurrencePrecondition(occurrence));
+    }
     for (const run of selectedRuns) {
       preconditions.push({
         key: `run:${run.run_id}`,
@@ -745,10 +762,7 @@ const makeTarget = async (
     }
     for (const occurrence of selectedOccurrences) {
       items.push(occurrenceItem(occurrence));
-      preconditions.push({
-        key: occurrenceItem(occurrence).key,
-        value: `${occurrence.row_version}:${occurrence.outcome}:${occurrence.linked_run_id ?? ""}:${occurrence.deleted_run_id ?? ""}`,
-      });
+      preconditions.push(occurrencePrecondition(occurrence));
     }
   } else if (scope.kind === "schedule") {
     const schedule = read.schedulesByKey.get(scope.scheduleKey);
@@ -802,10 +816,7 @@ const makeTarget = async (
       value: `${schedule.row_version}:${schedule.enabled_intent}:${schedule.condition}:${schedule.updated_at_ms}`,
     });
     for (const occurrence of selectedOccurrences) {
-      preconditions.push({
-        key: occurrenceItem(occurrence).key,
-        value: `${occurrence.row_version}:${occurrence.outcome}:${occurrence.linked_run_id ?? ""}`,
-      });
+      preconditions.push(occurrencePrecondition(occurrence));
       if (occurrence.linked_run_id !== null) {
         const run = read.runsById.get(occurrence.linked_run_id);
         if (run === undefined) {
@@ -842,6 +853,7 @@ const makeTarget = async (
       ...selectedSchedules.map(scheduleItem),
       ...selectedOccurrences.map(occurrenceItem),
       ...runItems(selectedRuns, read.generations, read.providerCleanup),
+      { kind: "diagnostic", key: "diagnostic:project", projectIdentity: scope.identity },
     );
     for (const schedule of selectedSchedules) {
       preconditions.push({
@@ -854,6 +866,9 @@ const makeTarget = async (
         key: `run:${run.run_id}`,
         value: `${run.row_version}:${run.state}:${run.last_event_sequence}:${run.parent_run_id ?? ""}`,
       });
+    }
+    for (const occurrence of selectedOccurrences) {
+      preconditions.push(occurrencePrecondition(occurrence));
     }
   }
 
@@ -997,6 +1012,7 @@ const readTargetForScope = (store: DrizzleProjectStore, scope: DeletionScope) =>
       tree.some((run) => run.run_id === row.linked_run_id),
     )) {
       items.push(occurrenceItem(occurrence));
+      preconditions.push(occurrencePrecondition(occurrence));
     }
     for (const run of tree) {
       preconditions.push({
@@ -1013,10 +1029,7 @@ const readTargetForScope = (store: DrizzleProjectStore, scope: DeletionScope) =>
     );
     items.push(...selected.map(occurrenceItem));
     for (const occurrence of selected) {
-      preconditions.push({
-        key: occurrenceItem(occurrence).key,
-        value: `${occurrence.row_version}:${occurrence.outcome}:${occurrence.linked_run_id ?? ""}:${occurrence.deleted_run_id ?? ""}`,
-      });
+      preconditions.push(occurrencePrecondition(occurrence));
     }
   } else if (scope.kind === "schedule") {
     const schedule = schedulesByKey.get(scope.scheduleKey);
@@ -1038,10 +1051,7 @@ const readTargetForScope = (store: DrizzleProjectStore, scope: DeletionScope) =>
       value: `${schedule.row_version}:${schedule.enabled_intent}:${schedule.condition}:${schedule.updated_at_ms}`,
     });
     for (const occurrence of scheduleOccurrences) {
-      preconditions.push({
-        key: occurrenceItem(occurrence).key,
-        value: `${occurrence.row_version}:${occurrence.outcome}:${occurrence.linked_run_id ?? ""}`,
-      });
+      preconditions.push(occurrencePrecondition(occurrence));
       if (occurrence.linked_run_id !== null) {
         const run = runsById.get(occurrence.linked_run_id);
         if (run === undefined) return undefined;
@@ -1056,6 +1066,7 @@ const readTargetForScope = (store: DrizzleProjectStore, scope: DeletionScope) =>
       ...schedules.map(scheduleItem),
       ...occurrences.map(occurrenceItem),
       ...runItems(runs, generations, providerCleanup),
+      { kind: "diagnostic", key: "diagnostic:project", projectIdentity: scope.identity },
     );
     for (const schedule of schedules)
       preconditions.push({
@@ -1067,6 +1078,7 @@ const readTargetForScope = (store: DrizzleProjectStore, scope: DeletionScope) =>
         key: `run:${run.run_id}`,
         value: `${run.row_version}:${run.state}:${run.last_event_sequence}:${run.parent_run_id ?? ""}`,
       });
+    for (const occurrence of occurrences) preconditions.push(occurrencePrecondition(occurrence));
   }
   const sortedItems = [...items].sort(
     (left, right) => left.kind.localeCompare(right.kind) || left.key.localeCompare(right.key),

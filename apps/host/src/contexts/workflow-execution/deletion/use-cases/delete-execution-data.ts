@@ -12,6 +12,7 @@ import type {
 import { Cause, Effect, Exit } from "effect";
 import { ProjectIndexRepository } from "../../../workflow-authoring/projects/repositories/project-index-repository";
 import { ProjectLayout } from "../../../workflow-authoring/projects/services/project-layout";
+import { HostDiagnosticLogger } from "../../control/services/host-diagnostic-logger";
 import { ProjectRuntime } from "../../projects/services/project-runtime";
 import { WorkflowBackend } from "../../projects/services/workflow-backend";
 import type { DisposableFileUnlinker } from "../../retention/repositories/disposable-file-unlinker";
@@ -179,6 +180,7 @@ const resumeDeletion = (
   provider: ProviderRuntime["Service"],
   unlinker: DisposableFileUnlinker,
   hooks: DeletionHooks["Service"],
+  diagnosticLogger: HostDiagnosticLogger["Service"],
 ) =>
   Effect.gen(function* () {
     yield* repository.setPhase(project, deletionId, "clearing-engine");
@@ -481,6 +483,39 @@ const resumeDeletion = (
 
     yield* repository.setPhase(project, deletionId, "deleting-records");
     yield* hooks.afterPhase("deleting-records");
+    for (const entry of pendingWork(
+      yield* repository.readItems(project, deletionId),
+      "diagnostic",
+    )) {
+      const removed = yield* Effect.exit(
+        diagnosticLogger.removeProject(entry.item.projectIdentity),
+      );
+      if (Exit.isFailure(removed)) {
+        yield* repository.markItem(
+          project,
+          deletionId,
+          entry.item,
+          "needs-attention",
+          "diagnostic-cleanup-failed",
+        );
+        yield* repository.setPhase(
+          project,
+          deletionId,
+          "needs-attention",
+          "diagnostic-cleanup-failed",
+        );
+        return yield* Effect.succeed(
+          errorFor(
+            "deletion-needs-attention",
+            "Project diagnostics could not be removed safely.",
+            "Repair the diagnostic store and retry the same confirmed deletion command.",
+            plan.target.scope,
+            plan.planKey,
+          ),
+        );
+      }
+      yield* repository.markItem(project, deletionId, entry.item, "completed");
+    }
     if (plan.target.scope.kind === "project") {
       // Stop the Effect runner and release Project ownership before the reset
       // transaction clears its private durable tables. Otherwise a live
@@ -525,6 +560,7 @@ export const deleteExecutionData = (
   | ScheduleClock
   | WorkflowBackend
   | ProviderRuntime
+  | HostDiagnosticLogger
 > =>
   Effect.gen(function* () {
     const planKey = suppliedPlanKey ?? newDeletionPlanKey();
@@ -595,6 +631,7 @@ export const deleteExecutionData = (
     const scheduleClock = yield* ScheduleClock;
     const backend = yield* WorkflowBackend;
     const provider = yield* ProviderRuntime;
+    const diagnosticLogger = yield* HostDiagnosticLogger;
     const result = yield* runtime.coordinateLifecycle(
       project,
       Effect.gen(function* () {
@@ -644,6 +681,7 @@ export const deleteExecutionData = (
           provider,
           NoFollowDisposableFileUnlinker,
           hooks,
+          diagnosticLogger,
         );
       }),
     );

@@ -5,6 +5,7 @@ import {
   type DeletionPlanItem,
   type DeletionScope,
   DeletionScope as DeletionScopeSchema,
+  ProjectIdentity as ProjectIdentitySchema,
   RequestKey,
 } from "@kojo/control";
 import { Schema } from "effect";
@@ -18,7 +19,8 @@ export type DeletionWorkKind =
   | "schedule"
   | "engine"
   | "owned-file"
-  | "provider";
+  | "provider"
+  | "diagnostic";
 
 const PositiveInteger = Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0));
 
@@ -60,6 +62,11 @@ export const DeletionWorkItemSchema = Schema.Union([
     key: Schema.String,
     runId: Schema.String,
     providerCleanup: Schema.optionalKey(Schema.Literals(["supported", "unsupported"])),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("diagnostic"),
+    key: Schema.String,
+    projectIdentity: ProjectIdentitySchema,
   }),
 ]);
 export type DeletionWorkItem = typeof DeletionWorkItemSchema.Type;
@@ -129,6 +136,7 @@ export const countsFor = (
   engine: items.filter((item) => item.kind === "engine").length,
   ownedFiles: items.filter((item) => item.kind === "owned-file").length,
   providers: items.filter((item) => item.kind === "provider").length,
+  diagnostics: items.filter((item) => item.kind === "diagnostic").length,
 });
 
 export const makeDeletionPlan = (

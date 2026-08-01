@@ -330,9 +330,11 @@ it("enforces the exact two-step project protocol, drift protection, lost-respons
   expect(plan.version).toBe(1);
   expect(plan.expiresAtMs - plan.observedAtMs).toBe(15 * 60 * 1_000);
   expect(plan.counts.runs).toBe(1);
+  expect(plan.counts.diagnostics).toBe(1);
   expect(plan.items).toEqual(
     expect.arrayContaining([
       expect.objectContaining({ kind: "run", key: `run:${runId}` }),
+      expect.objectContaining({ kind: "diagnostic", key: "diagnostic:project" }),
       expect.objectContaining({
         kind: "owned-file",
         key: "file:.kojo/sandboxes/orphaned-file.txt",
@@ -913,6 +915,93 @@ it("deletes only final occurrences before the boundary and rejects wildcard sele
   }
 });
 
+it("rejects Project deletion when an occurrence changes after preview and recovers with a fresh preview", async () => {
+  const { host, identity, project } = await setupProject(scheduledConfiguration);
+  const listed = await runKojoCli(
+    ["schedule", "list", "--project-id", identity, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(listed.exitCode, `${listed.stdout}${listed.stderr}`).toBe(0);
+  const revision = readJson(listed.stdout).result[0].definition.revision as string;
+  const scheduledAtMs = Date.parse("2025-01-01T09:00:00.000Z");
+  const database = new Database(join(project, ".kojo", "kojo.sqlite"), { strict: true });
+  try {
+    database
+      .query(
+        `INSERT INTO kojo_workflow_schedule_occurrences(
+          schedule_key, scheduled_at_ms, applied_revision,
+          resolved_input_encoding_version, resolved_input_schema_identity, resolved_input_json,
+          resolved_input_sensitivity_map_version, resolved_input_sensitivity_map_json,
+          resolved_input_sha256, outcome, reason_code, delivery_attempt_count,
+          planned_at_ms, first_attempted_at_ms, processed_at_ms, row_version
+        ) VALUES (?, ?, ?, 1, 'test', '{}', 1, '{}', ?, 'failed', 'test', 1, ?, ?, ?, 1)`,
+      )
+      .run(
+        "morning-report",
+        scheduledAtMs,
+        revision,
+        createHash("sha256").update("{}").digest(),
+        scheduledAtMs,
+        scheduledAtMs,
+        scheduledAtMs,
+      );
+  } finally {
+    database.close();
+  }
+
+  const preview = await runKojoCli(
+    ["delete", "project", "--project-id", identity, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(preview.exitCode, `${preview.stdout}${preview.stderr}`).toBe(0);
+  const plan = readJson(preview.stdout).result.preview;
+  expect(plan.counts.occurrences).toBe(1);
+  expect(plan.items).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        kind: "occurrence",
+        key: `occurrence:morning-report:${scheduledAtMs}`,
+      }),
+    ]),
+  );
+
+  const changed = new Database(join(project, ".kojo", "kojo.sqlite"), { strict: true });
+  try {
+    changed
+      .query(
+        "UPDATE kojo_workflow_schedule_occurrences SET row_version = row_version + 1, linked_run_id = NULL WHERE schedule_key = ? AND scheduled_at_ms = ?",
+      )
+      .run("morning-report", scheduledAtMs);
+  } finally {
+    changed.close();
+  }
+  const staleConfirmation = await runKojoCli(
+    ["delete", "project", "--project-id", identity, "--plan-key", plan.planKey, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(staleConfirmation.exitCode).toBe(4);
+  expect(readJson(staleConfirmation.stdout).error.code).toBe("plan-drifted");
+
+  const freshPreview = await runKojoCli(
+    ["delete", "project", "--project-id", identity, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(freshPreview.exitCode, `${freshPreview.stdout}${freshPreview.stderr}`).toBe(0);
+  const freshPlan = readJson(freshPreview.stdout).result.preview;
+  expect(freshPlan.planKey).not.toBe(plan.planKey);
+  const recovered = await runKojoCli(
+    ["delete", "project", "--project-id", identity, "--plan-key", freshPlan.planKey, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(recovered.exitCode, `${recovered.stdout}${recovered.stderr}`).toBe(0);
+  expect(readJson(recovered.stdout).result.receipt.counts).toEqual(freshPlan.counts);
+});
+
 it("requires an unavailable disabled Schedule and removes its operational history", async () => {
   const { host, identity, project } = await setupProject(scheduledConfiguration);
   const listed = await runKojoCli(
@@ -1222,6 +1311,7 @@ it("resumes the same confirmed Project deletion after a crash at every ordered p
       project,
     );
     expect(schedules.exitCode, `${schedules.stdout}${schedules.stderr}`).toBe(0);
+    const scheduleRevision = readJson(schedules.stdout).result[0].definition.revision as string;
     const ownedFile = join(project, ".kojo", "sandboxes", "crash-window.txt");
     await mkdir(join(project, ".kojo", "sandboxes"), { recursive: true });
     await writeFile(ownedFile, `owned content for ${phase}`);
@@ -1233,6 +1323,12 @@ it("resumes the same confirmed Project deletion after a crash at every ordered p
     );
     expect(preview.exitCode, `${preview.stdout}${preview.stderr}`).toBe(0);
     const plan = readJson(preview.stdout).result.preview;
+    expect(plan.counts.diagnostics).toBe(1);
+    expect(plan.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "diagnostic", key: "diagnostic:project" }),
+      ]),
+    );
     expect(plan.items).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ kind: "run", key: `run:${runId}` }),
@@ -1266,6 +1362,13 @@ it("resumes the same confirmed Project deletion after a crash at every ordered p
       expect(
         interrupted
           .query(
+            "SELECT kojo_deletion_items.state FROM kojo_deletion_items JOIN kojo_deletion_intents USING(deletion_id) WHERE kojo_deletion_intents.request_key = ? AND kojo_deletion_items.item_kind = 'diagnostic'",
+          )
+          .get(plan.planKey),
+      ).toEqual({ state: "pending" });
+      expect(
+        interrupted
+          .query(
             "SELECT enabled_intent, condition FROM kojo_workflow_schedule_states WHERE schedule_key = 'morning-report'",
           )
           .get(),
@@ -1276,6 +1379,42 @@ it("resumes the same confirmed Project deletion after a crash at every ordered p
 
     const recoveredHost = await startKojoHostProcess({ storePath: hostStore.path });
     cleanups.push(recoveredHost.stop);
+    const blockedRun = await runKojoCli(
+      [
+        "run",
+        "start",
+        "echo",
+        "--input",
+        `{"message":"blocked-${phase}"}`,
+        "--request-key",
+        `blocked-after-deletion-${phase}`,
+        "--project-id",
+        identity,
+        "--json",
+      ],
+      recoveredHost.socketPath,
+      project,
+    );
+    expect(blockedRun.exitCode).toBe(4);
+    expect(readJson(blockedRun.stdout).error.code).toBe("project-runtime-not-ready");
+    const blockedSchedule = await runKojoCli(
+      [
+        "schedule",
+        "enable",
+        "morning-report",
+        "--revision",
+        scheduleRevision,
+        "--request-key",
+        `blocked-schedule-after-deletion-${phase}`,
+        "--project-id",
+        identity,
+        "--json",
+      ],
+      recoveredHost.socketPath,
+      project,
+    );
+    expect(blockedSchedule.exitCode).toBe(4);
+    expect(readJson(blockedSchedule.stdout).error.code).toBe("project-runtime-not-ready");
     const replay = await runKojoCli(
       ["delete", "project", "--project-id", identity, "--plan-key", plan.planKey, "--json"],
       recoveredHost.socketPath,
@@ -1285,6 +1424,7 @@ it("resumes the same confirmed Project deletion after a crash at every ordered p
     expect(readJson(replay.stdout).result.receipt).toMatchObject({
       requestKey: plan.planKey,
       version: 1,
+      counts: { diagnostics: 1 },
     });
     expect(await fileExists(ownedFile)).toBe(false);
 
@@ -1307,5 +1447,22 @@ it("resumes the same confirmed Project deletion after a crash at every ordered p
     } finally {
       completed.close();
     }
+    const resumed = await runKojoCli(
+      [
+        "run",
+        "start",
+        "echo",
+        "--input",
+        `{"message":"resumed-${phase}"}`,
+        "--request-key",
+        `resumed-after-deletion-${phase}`,
+        "--project-id",
+        identity,
+        "--json",
+      ],
+      recoveredHost.socketPath,
+      project,
+    );
+    expect(resumed.exitCode, `${resumed.stdout}${resumed.stderr}`).toBe(0);
   }
 });

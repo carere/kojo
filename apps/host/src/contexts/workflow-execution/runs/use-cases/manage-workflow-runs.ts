@@ -94,6 +94,16 @@ const projectLayoutError = (identity: ProjectIdentity, message: string, findingK
     [findingKey as never],
   );
 
+const pendingDeletionError = (identity: ProjectIdentity, runId?: string) =>
+  error(
+    "project-runtime-not-ready",
+    "This Project is unavailable while its confirmed deletion is being recovered.",
+    "Wait for the original confirmed deletion to complete, then retry this operation.",
+    runId === undefined
+      ? { kind: "project", identity }
+      : { kind: "run", identity, runId: runId as never },
+  );
+
 export const asLocalDefinition = (
   definition: AnyWorkflowDefinition,
   definitionSnapshotId?: string,
@@ -353,7 +363,7 @@ const reconcilePendingWorkflowRuns = (
       ),
     ).pipe(Effect.catchCause(() => Effect.succeed(undefined)));
     if (executable === undefined) return;
-    yield* runtime.coordinateLifecycle(
+    const coordinated = yield* runtime.coordinateWork(
       validation.project,
       Effect.gen(function* () {
         const activeRuns = yield* repository.activeRuns(validation.project);
@@ -410,6 +420,7 @@ const reconcilePendingWorkflowRuns = (
         }
       }),
     );
+    if (coordinated._tag === "blocked") return;
     for (const activeRun of yield* repository.activeRuns(validation.project)) {
       if (
         executable.some(
@@ -608,7 +619,7 @@ export const startWorkflowRun = (input: {
       input: encodedInput,
       inputSensitivityPaths: workflow.sensitivity.input,
     };
-    const accepted = yield* runtime.coordinateLifecycle(
+    const coordinated = yield* runtime.coordinateWork(
       validation.project,
       Effect.gen(function* () {
         yield* backend.register(
@@ -630,6 +641,14 @@ export const startWorkflowRun = (input: {
         });
       }),
     );
+    if (coordinated._tag === "blocked") {
+      return {
+        ok: false,
+        requestKey: input.requestKey,
+        error: pendingDeletionError(input.identity),
+      };
+    }
+    const accepted = coordinated.value;
     if (accepted._tag === "request-key-conflict") {
       return {
         ok: false,
@@ -1180,147 +1199,159 @@ export const resumeWorkflowRun = (input: {
     const resolved = yield* resolveProject(input.identity);
     if ("code" in resolved) return { ok: false, requestKey: input.requestKey, error: resolved };
     yield* reconcilePendingWorkflowRuns(resolved);
+    const runtime = yield* ProjectRuntime;
     const repository = yield* WorkflowRunRepository;
-    const stored = yield* repository.show(resolved.project, input.runId);
-    if (stored === undefined) {
-      return {
-        ok: false,
+    const backend = yield* WorkflowBackend;
+    const operation: Effect.Effect<WorkflowRunMutationResult> = Effect.gen(function* () {
+      const stored = yield* repository.show(resolved.project, input.runId);
+      if (stored === undefined) {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: error(
+            "run-not-found",
+            "Workflow Run was not found in this Project.",
+            "List Workflow Runs and choose a Run Identity from that Project.",
+            { kind: "run", identity: input.identity, runId: input.runId as never },
+          ),
+        };
+      }
+      const requestHash = hash(
+        stableJson({ kind: "run.resume", runId: input.runId, value: input.value }),
+      );
+      const reserved = yield* repository.reserveControl(resolved.project, {
+        kind: "run.resume",
+        requestHash,
         requestKey: input.requestKey,
-        error: error(
-          "run-not-found",
-          "Workflow Run was not found in this Project.",
-          "List Workflow Runs and choose a Run Identity from that Project.",
-          { kind: "run", identity: input.identity, runId: input.runId as never },
-        ),
-      };
-    }
-    const requestHash = hash(
-      stableJson({ kind: "run.resume", runId: input.runId, value: input.value }),
-    );
-    const reserved = yield* repository.reserveControl(resolved.project, {
-      kind: "run.resume",
-      requestHash,
-      requestKey: input.requestKey,
-      requestedAtMs: Date.now(),
-      runId: input.runId,
-    });
-    if (reserved._tag === "request-key-conflict") {
-      return {
-        ok: false,
+        requestedAtMs: Date.now(),
+        runId: input.runId,
+      });
+      if (reserved._tag === "request-key-conflict") {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: error(
+            "request-key-conflict",
+            "This Request Key was already used for a different Workflow Run control request.",
+            "Retry with the original request contents or use a new Request Key.",
+            { kind: "request-key", requestKey: input.requestKey },
+          ),
+        };
+      }
+      if (reserved._tag === "already-applied") {
+        return {
+          ok: true,
+          run: maskedWorkflowRun(reserved.run),
+          alreadyApplied: true,
+          requestKey: input.requestKey,
+        };
+      }
+      if (stored.run.state !== "suspended") {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: runControlError(
+            input.identity,
+            input.runId,
+            "run-not-suspended",
+            "Only a suspended Workflow Run can be resumed.",
+            "Wait for the Run to suspend, or inspect its current state.",
+          ),
+        };
+      }
+      if (stored.run.suspension?.kind !== "manual") {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: runControlError(
+            input.identity,
+            input.runId,
+            "run-resume-not-allowed",
+            "This suspension is continued by a durable clock or Workflow Deferred, not Run resume.",
+            "Wait for the clock or complete the Workflow Deferred with its token.",
+          ),
+        };
+      }
+      if (backend.resume === undefined) {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: runControlError(
+            input.identity,
+            input.runId,
+            "project-runtime-not-ready",
+            "Kojo Project Runtime cannot resume Workflow Runs.",
+            "Repair the Project Runtime and retry.",
+          ),
+        };
+      }
+      const resumed = yield* backend.resume(
+        resolved.project,
+        runControlReference(stored.run),
+        input.value,
+      );
+      if (resumed._tag === "invalid-value") {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: runControlError(
+            input.identity,
+            input.runId,
+            "workflow-deferred-value-invalid",
+            "The resume value does not match this Workflow Run's declared schema.",
+            "Provide a schema-valid value and retry.",
+          ),
+        };
+      }
+      if (resumed._tag === "not-manually-suspended") {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: runControlError(
+            input.identity,
+            input.runId,
+            "run-resume-not-allowed",
+            "This Workflow Run is no longer manually suspended.",
+            "Refresh the Run and use one of its allowed actions.",
+          ),
+        };
+      }
+      const completed = yield* repository.completeControl(resolved.project, {
+        kind: "run.resume",
         requestKey: input.requestKey,
-        error: error(
-          "request-key-conflict",
-          "This Request Key was already used for a different Workflow Run control request.",
-          "Retry with the original request contents or use a new Request Key.",
-          { kind: "request-key", requestKey: input.requestKey },
-        ),
-      };
-    }
-    if (reserved._tag === "already-applied") {
+        runId: input.runId,
+        resumedAtMs: Date.now(),
+        expectedSuspension: "manual",
+      });
+      if (completed === undefined) {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: runControlError(
+            input.identity,
+            input.runId,
+            "run-resume-not-allowed",
+            "This Workflow Run changed before resume was committed.",
+            "Refresh the Run and retry only an allowed action.",
+          ),
+        };
+      }
       return {
         ok: true,
-        run: maskedWorkflowRun(reserved.run),
-        alreadyApplied: true,
+        run: maskedWorkflowRun(completed),
+        alreadyApplied: false,
         requestKey: input.requestKey,
       };
-    }
-    if (stored.run.state !== "suspended") {
-      return {
-        ok: false,
-        requestKey: input.requestKey,
-        error: runControlError(
-          input.identity,
-          input.runId,
-          "run-not-suspended",
-          "Only a suspended Workflow Run can be resumed.",
-          "Wait for the Run to suspend, or inspect its current state.",
-        ),
-      };
-    }
-    if (stored.run.suspension?.kind !== "manual") {
-      return {
-        ok: false,
-        requestKey: input.requestKey,
-        error: runControlError(
-          input.identity,
-          input.runId,
-          "run-resume-not-allowed",
-          "This suspension is continued by a durable clock or Workflow Deferred, not Run resume.",
-          "Wait for the clock or complete the Workflow Deferred with its token.",
-        ),
-      };
-    }
-    const backend = yield* WorkflowBackend;
-    if (backend.resume === undefined) {
-      return {
-        ok: false,
-        requestKey: input.requestKey,
-        error: runControlError(
-          input.identity,
-          input.runId,
-          "project-runtime-not-ready",
-          "Kojo Project Runtime cannot resume Workflow Runs.",
-          "Repair the Project Runtime and retry.",
-        ),
-      };
-    }
-    const resumed = yield* backend.resume(
-      resolved.project,
-      runControlReference(stored.run),
-      input.value,
-    );
-    if (resumed._tag === "invalid-value") {
-      return {
-        ok: false,
-        requestKey: input.requestKey,
-        error: runControlError(
-          input.identity,
-          input.runId,
-          "workflow-deferred-value-invalid",
-          "The resume value does not match this Workflow Run's declared schema.",
-          "Provide a schema-valid value and retry.",
-        ),
-      };
-    }
-    if (resumed._tag === "not-manually-suspended") {
-      return {
-        ok: false,
-        requestKey: input.requestKey,
-        error: runControlError(
-          input.identity,
-          input.runId,
-          "run-resume-not-allowed",
-          "This Workflow Run is no longer manually suspended.",
-          "Refresh the Run and use one of its allowed actions.",
-        ),
-      };
-    }
-    const completed = yield* repository.completeControl(resolved.project, {
-      kind: "run.resume",
-      requestKey: input.requestKey,
-      runId: input.runId,
-      resumedAtMs: Date.now(),
-      expectedSuspension: "manual",
     });
-    if (completed === undefined) {
+    const coordinated = yield* runtime.coordinateWork(resolved.project, operation);
+    if (coordinated._tag === "blocked") {
       return {
         ok: false,
         requestKey: input.requestKey,
-        error: runControlError(
-          input.identity,
-          input.runId,
-          "run-resume-not-allowed",
-          "This Workflow Run changed before resume was committed.",
-          "Refresh the Run and retry only an allowed action.",
-        ),
+        error: pendingDeletionError(input.identity, input.runId),
       };
     }
-    return {
-      ok: true,
-      run: maskedWorkflowRun(completed),
-      alreadyApplied: false,
-      requestKey: input.requestKey,
-    };
+    return coordinated.value;
   });
 
 export const completeWorkflowDeferred = (input: {
@@ -1343,140 +1374,152 @@ export const completeWorkflowDeferred = (input: {
     const resolved = yield* resolveProject(input.identity);
     if ("code" in resolved) return { ok: false, requestKey: input.requestKey, error: resolved };
     yield* reconcilePendingWorkflowRuns(resolved);
+    const runtime = yield* ProjectRuntime;
     const repository = yield* WorkflowRunRepository;
-    const stored = yield* repository.show(resolved.project, input.runId);
-    if (stored === undefined) {
-      return {
-        ok: false,
-        requestKey: input.requestKey,
-        error: error(
-          "run-not-found",
-          "Workflow Run was not found in this Project.",
-          "List Workflow Runs and choose a Run Identity from that Project.",
-          { kind: "run", identity: input.identity, runId: input.runId as never },
-        ),
-      };
-    }
-    const requestHash = hash(
-      stableJson({
+    const backend = yield* WorkflowBackend;
+    const operation: Effect.Effect<WorkflowRunMutationResult> = Effect.gen(function* () {
+      const stored = yield* repository.show(resolved.project, input.runId);
+      if (stored === undefined) {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: error(
+            "run-not-found",
+            "Workflow Run was not found in this Project.",
+            "List Workflow Runs and choose a Run Identity from that Project.",
+            { kind: "run", identity: input.identity, runId: input.runId as never },
+          ),
+        };
+      }
+      const requestHash = hash(
+        stableJson({
+          kind: "run.deferred-complete",
+          runId: input.runId,
+          token: input.token,
+          value: input.value,
+        }),
+      );
+      const reserved = yield* repository.reserveControl(resolved.project, {
         kind: "run.deferred-complete",
-        runId: input.runId,
-        token: input.token,
-        value: input.value,
-      }),
-    );
-    const reserved = yield* repository.reserveControl(resolved.project, {
-      kind: "run.deferred-complete",
-      requestHash,
-      requestKey: input.requestKey,
-      requestedAtMs: Date.now(),
-      runId: input.runId,
-    });
-    if (reserved._tag === "request-key-conflict") {
-      return {
-        ok: false,
+        requestHash,
         requestKey: input.requestKey,
-        error: error(
-          "request-key-conflict",
-          "This Request Key was already used for a different Workflow Run control request.",
-          "Retry with the original request contents or use a new Request Key.",
-          { kind: "request-key", requestKey: input.requestKey },
-        ),
-      };
-    }
-    if (reserved._tag === "already-applied") {
+        requestedAtMs: Date.now(),
+        runId: input.runId,
+      });
+      if (reserved._tag === "request-key-conflict") {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: error(
+            "request-key-conflict",
+            "This Request Key was already used for a different Workflow Run control request.",
+            "Retry with the original request contents or use a new Request Key.",
+            { kind: "request-key", requestKey: input.requestKey },
+          ),
+        };
+      }
+      if (reserved._tag === "already-applied") {
+        return {
+          ok: true,
+          run: maskedWorkflowRun(reserved.run),
+          alreadyApplied: true,
+          requestKey: input.requestKey,
+        };
+      }
+      if (stored.run.state !== "suspended" || stored.run.suspension?.kind !== "deferred") {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: runControlError(
+            input.identity,
+            input.runId,
+            "workflow-deferred-not-found",
+            "This Workflow Run is not waiting for a Workflow Deferred.",
+            "Refresh the Run and provide a completion token for its current Deferred wait.",
+          ),
+        };
+      }
+      if (backend.completeDeferred === undefined) {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: runControlError(
+            input.identity,
+            input.runId,
+            "project-runtime-not-ready",
+            "Kojo Project Runtime cannot complete Workflow Deferreds.",
+            "Repair the Project Runtime and retry.",
+          ),
+        };
+      }
+      const completedDeferred = yield* backend.completeDeferred(
+        resolved.project,
+        runControlReference(stored.run),
+        input.token,
+        input.value,
+      );
+      if (completedDeferred._tag === "invalid-value") {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: runControlError(
+            input.identity,
+            input.runId,
+            "workflow-deferred-value-invalid",
+            "The Workflow Deferred value does not match its declared schema.",
+            "Provide a schema-valid value and retry.",
+          ),
+        };
+      }
+      if (completedDeferred._tag === "not-deferred") {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: runControlError(
+            input.identity,
+            input.runId,
+            "workflow-deferred-not-found",
+            "The supplied Workflow Deferred token does not identify this Run's current wait.",
+            "Use the token returned by this Run's Workflow Deferred.",
+          ),
+        };
+      }
+      const completed = yield* repository.completeControl(resolved.project, {
+        kind: "run.deferred-complete",
+        requestKey: input.requestKey,
+        runId: input.runId,
+        resumedAtMs: Date.now(),
+        expectedSuspension: "deferred",
+      });
+      if (completed === undefined) {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: runControlError(
+            input.identity,
+            input.runId,
+            "workflow-deferred-not-found",
+            "This Workflow Deferred changed before completion was committed.",
+            "Refresh the Run and retry with its current Deferred token.",
+          ),
+        };
+      }
       return {
         ok: true,
-        run: maskedWorkflowRun(reserved.run),
-        alreadyApplied: true,
+        run: maskedWorkflowRun(completed),
+        alreadyApplied: false,
         requestKey: input.requestKey,
       };
-    }
-    if (stored.run.state !== "suspended" || stored.run.suspension?.kind !== "deferred") {
-      return {
-        ok: false,
-        requestKey: input.requestKey,
-        error: runControlError(
-          input.identity,
-          input.runId,
-          "workflow-deferred-not-found",
-          "This Workflow Run is not waiting for a Workflow Deferred.",
-          "Refresh the Run and provide a completion token for its current Deferred wait.",
-        ),
-      };
-    }
-    const backend = yield* WorkflowBackend;
-    if (backend.completeDeferred === undefined) {
-      return {
-        ok: false,
-        requestKey: input.requestKey,
-        error: runControlError(
-          input.identity,
-          input.runId,
-          "project-runtime-not-ready",
-          "Kojo Project Runtime cannot complete Workflow Deferreds.",
-          "Repair the Project Runtime and retry.",
-        ),
-      };
-    }
-    const completedDeferred = yield* backend.completeDeferred(
-      resolved.project,
-      runControlReference(stored.run),
-      input.token,
-      input.value,
-    );
-    if (completedDeferred._tag === "invalid-value") {
-      return {
-        ok: false,
-        requestKey: input.requestKey,
-        error: runControlError(
-          input.identity,
-          input.runId,
-          "workflow-deferred-value-invalid",
-          "The Workflow Deferred value does not match its declared schema.",
-          "Provide a schema-valid value and retry.",
-        ),
-      };
-    }
-    if (completedDeferred._tag === "not-deferred") {
-      return {
-        ok: false,
-        requestKey: input.requestKey,
-        error: runControlError(
-          input.identity,
-          input.runId,
-          "workflow-deferred-not-found",
-          "The supplied Workflow Deferred token does not identify this Run's current wait.",
-          "Use the token returned by this Run's Workflow Deferred.",
-        ),
-      };
-    }
-    const completed = yield* repository.completeControl(resolved.project, {
-      kind: "run.deferred-complete",
-      requestKey: input.requestKey,
-      runId: input.runId,
-      resumedAtMs: Date.now(),
-      expectedSuspension: "deferred",
     });
-    if (completed === undefined) {
+    const coordinated = yield* runtime.coordinateWork(resolved.project, operation);
+    if (coordinated._tag === "blocked") {
       return {
         ok: false,
         requestKey: input.requestKey,
-        error: runControlError(
-          input.identity,
-          input.runId,
-          "workflow-deferred-not-found",
-          "This Workflow Deferred changed before completion was committed.",
-          "Refresh the Run and retry with its current Deferred token.",
-        ),
+        error: pendingDeletionError(input.identity, input.runId),
       };
     }
-    return {
-      ok: true,
-      run: maskedWorkflowRun(completed),
-      alreadyApplied: false,
-      requestKey: input.requestKey,
-    };
+    return coordinated.value;
   });
 
 export const stopWorkflowRun = (input: {
@@ -1496,135 +1539,147 @@ export const stopWorkflowRun = (input: {
   Effect.gen(function* () {
     const resolved = yield* resolveProject(input.identity);
     if ("code" in resolved) return { ok: false, requestKey: input.requestKey, error: resolved };
+    const runtime = yield* ProjectRuntime;
     const repository = yield* WorkflowRunRepository;
-    const accepted = yield* repository.acceptStop(resolved.project, {
-      requestHash: hash(stableJson({ kind: "run.stop", runId: input.runId })),
-      requestKey: input.requestKey,
-      requestedAtMs: Date.now(),
-      runId: input.runId,
-    });
-    if (accepted._tag === "request-key-conflict") {
-      return {
-        ok: false,
+    const backend = yield* WorkflowBackend;
+    const operation: Effect.Effect<WorkflowRunMutationResult> = Effect.gen(function* () {
+      const accepted = yield* repository.acceptStop(resolved.project, {
+        requestHash: hash(stableJson({ kind: "run.stop", runId: input.runId })),
         requestKey: input.requestKey,
-        error: error(
-          "request-key-conflict",
-          "This Request Key was already used for a different Workflow Run control request.",
-          "Retry with the original request contents or use a new Request Key.",
-          { kind: "request-key", requestKey: input.requestKey },
-        ),
+        requestedAtMs: Date.now(),
+        runId: input.runId,
+      });
+      if (accepted._tag === "request-key-conflict") {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: error(
+            "request-key-conflict",
+            "This Request Key was already used for a different Workflow Run control request.",
+            "Retry with the original request contents or use a new Request Key.",
+            { kind: "request-key", requestKey: input.requestKey },
+          ),
+        };
+      }
+      if (accepted._tag === "not-found") {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: error(
+            "run-not-found",
+            "Workflow Run was not found in this Project.",
+            "List Workflow Runs and choose a Run Identity from that Project.",
+            { kind: "run", identity: input.identity, runId: input.runId as never },
+          ),
+        };
+      }
+      if (accepted._tag === "not-stoppable") {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: runControlError(
+            input.identity,
+            input.runId,
+            "run-stop-not-allowed",
+            "Only a running or suspended Workflow Run can accept a stop request.",
+            "Refresh the Run and use one of its allowed actions.",
+          ),
+        };
+      }
+      if (accepted.alreadyApplied && accepted.runs.length === 0) {
+        return {
+          ok: true,
+          run: maskedWorkflowRun(accepted.run),
+          alreadyApplied: true,
+          requestKey: input.requestKey,
+        };
+      }
+      const stopping = [...accepted.runs];
+      const byRunId = new Map(stopping.map((run) => [run.runId, run]));
+      const depth = (runId: string): number => {
+        let value = 0;
+        let parent = byRunId.get(runId)?.parentRunId;
+        while (parent !== null && parent !== undefined) {
+          value += 1;
+          parent = byRunId.get(parent)?.parentRunId;
+        }
+        return value;
       };
-    }
-    if (accepted._tag === "not-found") {
-      return {
-        ok: false,
-        requestKey: input.requestKey,
-        error: error(
-          "run-not-found",
-          "Workflow Run was not found in this Project.",
-          "List Workflow Runs and choose a Run Identity from that Project.",
-          { kind: "run", identity: input.identity, runId: input.runId as never },
-        ),
-      };
-    }
-    if (accepted._tag === "not-stoppable") {
-      return {
-        ok: false,
-        requestKey: input.requestKey,
-        error: runControlError(
-          input.identity,
-          input.runId,
-          "run-stop-not-allowed",
-          "Only a running or suspended Workflow Run can accept a stop request.",
-          "Refresh the Run and use one of its allowed actions.",
-        ),
-      };
-    }
-    if (accepted.alreadyApplied && accepted.runs.length === 0) {
+      stopping.sort((left, right) => depth(right.runId) - depth(left.runId));
+      let needsAttention = false;
+      for (const run of stopping) {
+        if (backend.interrupt === undefined) {
+          needsAttention = true;
+          yield* repository.recordStopAttention(
+            resolved.project,
+            run.runId,
+            "Kojo Project Runtime cannot interrupt this Workflow Run.",
+            Date.now(),
+          );
+          continue;
+        }
+        const interrupted = yield* backend
+          .interrupt(
+            resolved.project,
+            workflowBackendReference(run.workflowKey, run.workflowRevision, run.runId),
+          )
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.succeed({ _tag: "needs-attention" as const, message: cause.toString() }),
+            ),
+          );
+        if (interrupted._tag === "needs-attention") {
+          needsAttention = true;
+          yield* repository.recordStopAttention(
+            resolved.project,
+            run.runId,
+            interrupted.message,
+            Date.now(),
+          );
+          continue;
+        }
+        yield* repository.recordStopped(resolved.project, run.runId, Date.now());
+      }
+      const current = yield* repository.show(resolved.project, input.runId);
+      if (current === undefined) {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: error(
+            "run-not-found",
+            "Workflow Run disappeared while stopping.",
+            "Inspect the Project Runtime diagnostic log and retry after it is ready.",
+            { kind: "run", identity: input.identity, runId: input.runId as never },
+          ),
+        };
+      }
+      if (needsAttention) {
+        return {
+          ok: false,
+          requestKey: input.requestKey,
+          error: runControlError(
+            input.identity,
+            input.runId,
+            "run-stop-needs-attention",
+            "Stop intent is durable, but one or more Run cleanup steps need attention.",
+            "Inspect this stopping Run's execution trace and repair the provider or cleanup failure.",
+          ),
+        };
+      }
       return {
         ok: true,
-        run: maskedWorkflowRun(accepted.run),
-        alreadyApplied: true,
+        run: maskedWorkflowRun(current),
+        alreadyApplied: accepted.alreadyApplied,
         requestKey: input.requestKey,
       };
-    }
-    const backend = yield* WorkflowBackend;
-    const stopping = [...accepted.runs];
-    const byRunId = new Map(stopping.map((run) => [run.runId, run]));
-    const depth = (runId: string): number => {
-      let value = 0;
-      let parent = byRunId.get(runId)?.parentRunId;
-      while (parent !== null && parent !== undefined) {
-        value += 1;
-        parent = byRunId.get(parent)?.parentRunId;
-      }
-      return value;
-    };
-    stopping.sort((left, right) => depth(right.runId) - depth(left.runId));
-    let needsAttention = false;
-    for (const run of stopping) {
-      if (backend.interrupt === undefined) {
-        needsAttention = true;
-        yield* repository.recordStopAttention(
-          resolved.project,
-          run.runId,
-          "Kojo Project Runtime cannot interrupt this Workflow Run.",
-          Date.now(),
-        );
-        continue;
-      }
-      const interrupted = yield* backend
-        .interrupt(
-          resolved.project,
-          workflowBackendReference(run.workflowKey, run.workflowRevision, run.runId),
-        )
-        .pipe(
-          Effect.catchCause((cause) =>
-            Effect.succeed({ _tag: "needs-attention" as const, message: cause.toString() }),
-          ),
-        );
-      if (interrupted._tag === "needs-attention") {
-        needsAttention = true;
-        yield* repository.recordStopAttention(
-          resolved.project,
-          run.runId,
-          interrupted.message,
-          Date.now(),
-        );
-        continue;
-      }
-      yield* repository.recordStopped(resolved.project, run.runId, Date.now());
-    }
-    const current = yield* repository.show(resolved.project, input.runId);
-    if (current === undefined) {
+    });
+    const coordinated = yield* runtime.coordinateWork(resolved.project, operation);
+    if (coordinated._tag === "blocked") {
       return {
         ok: false,
         requestKey: input.requestKey,
-        error: error(
-          "run-not-found",
-          "Workflow Run disappeared while stopping.",
-          "Inspect the Project Runtime diagnostic log and retry after it is ready.",
-          { kind: "run", identity: input.identity, runId: input.runId as never },
-        ),
+        error: pendingDeletionError(input.identity, input.runId),
       };
     }
-    if (needsAttention) {
-      return {
-        ok: false,
-        requestKey: input.requestKey,
-        error: runControlError(
-          input.identity,
-          input.runId,
-          "run-stop-needs-attention",
-          "Stop intent is durable, but one or more Run cleanup steps need attention.",
-          "Inspect this stopping Run's execution trace and repair the provider or cleanup failure.",
-        ),
-      };
-    }
-    return {
-      ok: true,
-      run: maskedWorkflowRun(current),
-      alreadyApplied: accepted.alreadyApplied,
-      requestKey: input.requestKey,
-    };
+    return coordinated.value;
   });

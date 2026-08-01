@@ -8,6 +8,7 @@ import {
 import { Effect, Layer, Schema } from "effect";
 import { ProjectIndexRepository } from "../../../../../../src/contexts/workflow-authoring/projects/repositories/project-index-repository";
 import { ProjectLayout } from "../../../../../../src/contexts/workflow-authoring/projects/services/project-layout";
+import { HostDiagnosticLogger } from "../../../../../../src/contexts/workflow-execution/control/services/host-diagnostic-logger";
 import {
   countsFor,
   type DeletionTargetSnapshot,
@@ -121,6 +122,11 @@ it.effect("maps failed Provider cleanup to a warning while completing local dele
     Layer.succeed(ProjectRuntime, runtime),
     Layer.succeed(WorkflowBackend, backend),
     Layer.succeed(ProviderRuntime, provider),
+    Layer.succeed(HostDiagnosticLogger, {
+      cleanup: Effect.void,
+      emit: () => Effect.void,
+      removeProject: () => Effect.void,
+    }),
     Layer.succeed(WorkflowScheduleRepository, {} as WorkflowScheduleRepository["Service"]),
     Layer.succeed(ScheduleClock, { now: () => 0 }),
   );

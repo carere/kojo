@@ -1383,6 +1383,7 @@ export const DeletionPlanItemKind = Schema.Literals([
   "engine",
   "owned-file",
   "provider",
+  "diagnostic",
 ]);
 export type DeletionPlanItemKind = typeof DeletionPlanItemKind.Type;
 
@@ -1400,6 +1401,7 @@ export const DeletionPlanCounts = Schema.Struct({
   engine: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
   ownedFiles: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
   providers: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  diagnostics: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
 });
 export type DeletionPlanCounts = typeof DeletionPlanCounts.Type;
 

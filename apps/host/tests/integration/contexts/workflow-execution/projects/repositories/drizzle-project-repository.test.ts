@@ -55,7 +55,15 @@ describe("Drizzle Project store recovery", () => {
         scope: { kind: "project", identity: fixture.project.identity },
         scopeDigest: "scope-digest",
         items: [{ kind: "engine", key: "engine:malformed" }],
-        counts: { runs: 0, occurrences: 0, schedules: 0, engine: 1, ownedFiles: 0, providers: 0 },
+        counts: {
+          runs: 0,
+          occurrences: 0,
+          schedules: 0,
+          engine: 1,
+          ownedFiles: 0,
+          providers: 0,
+          diagnostics: 0,
+        },
         preconditions: [],
       };
       yield* Effect.sync(() => {
