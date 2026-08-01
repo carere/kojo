@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { Effect, Layer } from "effect";
 import { startLiveKojoHost } from "../src/composition/live";
 import { DeletionClock } from "../src/contexts/workflow-execution/deletion/services/deletion-clock";
@@ -24,11 +24,14 @@ const deletionClock = (() => {
 
 const deletionHooks = (() => {
   const crashPhase = process.env.KOJO_TEST_DELETION_CRASH_PHASE;
-  if (crashPhase === undefined) return undefined;
+  const lateFilePath = process.env.KOJO_TEST_DELETION_LATE_FILE;
+  if (crashPhase === undefined && lateFilePath === undefined) return undefined;
   return Layer.succeed(DeletionHooks, {
     afterPhase: (phase) =>
       Effect.sync(() => {
-        if (phase === crashPhase) process.kill(process.pid, "SIGKILL");
+        if (phase !== crashPhase) return;
+        if (lateFilePath !== undefined) writeFileSync(lateFilePath, "created after intent");
+        process.kill(process.pid, "SIGKILL");
       }),
   });
 })();

@@ -236,7 +236,7 @@ describe("Host overview", () => {
         const client = yield* VisualizerApiClient;
         const overview = yield* client.HostOverview();
         expect(overview.host).toMatchObject({
-          protocol: { major: 1, minor: 12 },
+          protocol: { major: 1, minor: 13 },
           capabilities: expect.arrayContaining([
             "traces:read",
             "traces:export",

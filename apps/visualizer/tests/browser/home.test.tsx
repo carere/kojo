@@ -112,7 +112,7 @@ test("shows read-only retention policy, usage, and warnings", async () => {
           loadOverview={() =>
             Promise.resolve({
               host: {
-                protocol: { major: 1, minor: 12 },
+                protocol: { major: 1, minor: 13 },
                 hostVersion: "0.1.0",
                 capabilities: ["projects:list", "retention:show"],
               },

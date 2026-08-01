@@ -31,6 +31,10 @@ export interface ProviderAgentExecution extends AgentProviderResult {
   readonly worktreeBranch: string;
 }
 
+export interface ProviderCleanupExpectation {
+  readonly capability?: "supported" | "unsupported";
+}
+
 /**
  * Host-owned seam around live Sandbox Provider sessions. Its results are safe
  * values; concrete provider handles remain exclusively in its adapter.
@@ -62,7 +66,11 @@ export interface ProviderRuntimeShape {
   /** Interrupts provider work that is still owned by a Run. */
   readonly interruptRun: (project: ProjectSnapshot, runId: string) => Effect.Effect<void>;
   /** Requests best-effort remote cleanup for one Run, when the provider supports it. */
-  readonly cleanupRun?: (project: ProjectSnapshot, runId: string) => Effect.Effect<void>;
+  readonly cleanupRun?: (
+    project: ProjectSnapshot,
+    runId: string,
+    expectation?: ProviderCleanupExpectation,
+  ) => Effect.Effect<void>;
   readonly releaseProject: (project: ProjectSnapshot) => Effect.Effect<void>;
 }
 

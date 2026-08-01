@@ -3,10 +3,12 @@ import { defineConfig, defineWorkflow } from "@kojo/workflow";
 import { executeWorkflow } from "@kojo/workflow/testing";
 import { Effect, Schema } from "effect";
 import {
+  CONTROL_CAPABILITIES,
   EXECUTION_EVENT_KINDS_V1,
   ExecutionEventKindV1,
   HostInformation,
   LEGACY_PERSISTED_EXECUTION_EVENT_KINDS_V1,
+  PROTOCOL_VERSION,
   ProjectIdentity,
   RequestKey,
 } from "../../src";
@@ -42,6 +44,13 @@ it.effect("preserves unknown capabilities for forward-compatible negotiation", (
     expect(decoded.capabilities).toEqual(["projects:delete-everything"]);
   }),
 );
+
+it("bumps the minor protocol for the deletion capabilities", () => {
+  expect(PROTOCOL_VERSION).toEqual({ major: 1, minor: 13 });
+  expect(CONTROL_CAPABILITIES).toEqual(
+    expect.arrayContaining(["deletion:plan", "deletion:confirm"]),
+  );
+});
 
 it("accepts canonical UUIDv7 Project Identities and rejects UUIDv4", () => {
   expect(Schema.decodeUnknownSync(ProjectIdentity)("019fabda-76fe-7000-a948-c929fc96b3e8")).toBe(

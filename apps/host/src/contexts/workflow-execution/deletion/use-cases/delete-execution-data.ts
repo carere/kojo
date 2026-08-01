@@ -88,9 +88,16 @@ const targetFreeReceipt = (receipt: DeletionReceipt): DeletionResult => ({
   receipt,
 });
 
-const pendingWork = (items: ReadonlyArray<DeletionItemState>, kind: DeletionWorkItem["kind"]) =>
+type PendingWorkEntry<K extends DeletionWorkItem["kind"]> = DeletionItemState & {
+  readonly item: Extract<DeletionWorkItem, { readonly kind: K }>;
+};
+
+const pendingWork = <K extends DeletionWorkItem["kind"]>(
+  items: ReadonlyArray<DeletionItemState>,
+  kind: K,
+): ReadonlyArray<PendingWorkEntry<K>> =>
   items.filter(
-    (entry) =>
+    (entry): entry is PendingWorkEntry<K> =>
       entry.item.kind === kind && (entry.state === "pending" || entry.state === "needs-attention"),
   );
 
@@ -138,10 +145,9 @@ const ensureBackendForDeletion = (project: ProjectSnapshot, backend: WorkflowBac
 
 const cleanupOwnedFile = async (
   project: ProjectSnapshot,
-  item: DeletionWorkItem,
+  item: Extract<DeletionWorkItem, { readonly kind: "owned-file" }>,
   unlinker: DisposableFileUnlinker,
 ) => {
-  if (item.relativePath === undefined) return "unsafe" as const;
   const result = await unlinker.unlinkRegularFile(project, join(project.path, item.relativePath));
   return result;
 };
@@ -206,10 +212,10 @@ const resumeDeletion = (
       }
       const result = yield* Effect.exit(
         backend.clearExecution(project, {
-          workflowKey: entry.item.workflowKey ?? "",
-          workflowRevision: entry.item.workflowRevision ?? "",
-          runId: entry.item.runId ?? "",
-          engineGeneration: entry.item.engineGeneration ?? 1,
+          workflowKey: entry.item.workflowKey,
+          workflowRevision: entry.item.workflowRevision,
+          runId: entry.item.runId,
+          engineGeneration: entry.item.engineGeneration,
         }),
       );
       if (Exit.isFailure(result)) {
@@ -317,66 +323,118 @@ const resumeDeletion = (
     yield* backend.quiesce(project);
     yield* repository.setPhase(project, deletionId, "clearing-owned-content");
     yield* hooks.afterPhase("clearing-owned-content");
-    items = yield* repository.readItems(project, deletionId);
-    for (const entry of pendingWork(items, "owned-file")) {
-      const result = yield* Effect.tryPromise({
-        try: () => cleanupOwnedFile(project, entry.item, unlinker),
-        catch: (cause) => cause,
-      }).pipe(Effect.exit);
-      if (Exit.isFailure(result)) {
-        yield* repository.markItem(
-          project,
-          deletionId,
-          entry.item,
-          "needs-attention",
-          safeFailureCode(result.cause),
-        );
+    let reconciliationComplete = false;
+    for (let pass = 0; pass < 3 && !reconciliationComplete; pass += 1) {
+      const reconciliation = yield* repository.reconcileOwnedFiles(project, deletionId, now());
+      if (reconciliation._tag === "needs-attention") {
         yield* repository.setPhase(
           project,
           deletionId,
           "needs-attention",
-          "owned-file-cleanup-failed",
+          "owned-file-scope-drift",
         );
         return yield* Effect.succeed(
           errorFor(
             "owned-file-cleanup-failed",
-            "A Kojo-owned execution file could not be removed safely.",
-            "Leave the file in place, repair its ownership or symlink state, and retry the same confirmed deletion command.",
+            "The Kojo-owned execution file scope changed during deletion.",
+            "Repair or remove the late Kojo-owned execution file, then retry the original confirmed Plan Key; a new Plan Key cannot supersede this pending deletion.",
             plan.target.scope,
             plan.planKey,
           ),
         );
       }
-      if (result.value === "unsafe") {
-        yield* repository.markItem(
+      items = yield* repository.readItems(project, deletionId);
+      for (const entry of pendingWork(items, "owned-file")) {
+        const result = yield* Effect.tryPromise({
+          try: () => cleanupOwnedFile(project, entry.item, unlinker),
+          catch: (cause) => cause,
+        }).pipe(Effect.exit);
+        if (Exit.isFailure(result)) {
+          yield* repository.markItem(
+            project,
+            deletionId,
+            entry.item,
+            "needs-attention",
+            safeFailureCode(result.cause),
+          );
+          yield* repository.setPhase(
+            project,
+            deletionId,
+            "needs-attention",
+            "owned-file-cleanup-failed",
+          );
+          return yield* Effect.succeed(
+            errorFor(
+              "owned-file-cleanup-failed",
+              "A Kojo-owned execution file could not be removed safely.",
+              "Leave the file in place, repair its ownership or symlink state, and retry the same confirmed deletion command.",
+              plan.target.scope,
+              plan.planKey,
+            ),
+          );
+        }
+        if (result.value === "unsafe") {
+          yield* repository.markItem(
+            project,
+            deletionId,
+            entry.item,
+            "needs-attention",
+            "owned-file-unsafe",
+          );
+          yield* repository.setPhase(project, deletionId, "needs-attention", "owned-file-unsafe");
+          return yield* Effect.succeed(
+            errorFor(
+              "owned-file-cleanup-failed",
+              "A Kojo-owned execution path changed to an unsafe file or symlink.",
+              "Repair the path without following it, then retry the same confirmed deletion command.",
+              plan.target.scope,
+              plan.planKey,
+            ),
+          );
+        }
+        if (result.value === "missing") {
+          yield* repository.markItem(
+            project,
+            deletionId,
+            entry.item,
+            "warning",
+            "owned-file-missing",
+          );
+        } else {
+          yield* repository.markItem(project, deletionId, entry.item, "completed");
+        }
+      }
+      const settled = yield* repository.reconcileOwnedFiles(project, deletionId, now());
+      if (settled._tag === "needs-attention") {
+        yield* repository.setPhase(
           project,
           deletionId,
-          entry.item,
           "needs-attention",
-          "owned-file-unsafe",
+          "owned-file-scope-drift",
         );
-        yield* repository.setPhase(project, deletionId, "needs-attention", "owned-file-unsafe");
         return yield* Effect.succeed(
           errorFor(
             "owned-file-cleanup-failed",
-            "A Kojo-owned execution path changed to an unsafe file or symlink.",
-            "Repair the path without following it, then retry the same confirmed deletion command.",
+            "The Kojo-owned execution file scope changed during deletion.",
+            "Repair or remove the late Kojo-owned execution file, then retry the original confirmed Plan Key; a new Plan Key cannot supersede this pending deletion.",
             plan.target.scope,
             plan.planKey,
           ),
         );
       }
-      if (result.value === "missing") {
-        yield* repository.markItem(
-          project,
-          deletionId,
-          entry.item,
-          "warning",
-          "owned-file-missing",
-        );
-      } else {
-        yield* repository.markItem(project, deletionId, entry.item, "completed");
-      }
+      reconciliationComplete = settled._tag === "unchanged";
+    }
+    if (!reconciliationComplete) {
+      yield* repository.setPhase(project, deletionId, "needs-attention", "owned-file-scope-drift");
+      return yield* Effect.succeed(
+        errorFor(
+          "owned-file-cleanup-failed",
+          "Kojo-owned execution files kept changing during deletion.",
+          "Repair the Project Runtime and retry the same confirmed deletion command.",
+          plan.target.scope,
+          plan.planKey,
+        ),
+      );
     }
     for (const entry of pendingWork(yield* repository.readItems(project, deletionId), "provider")) {
       if (entry.item.providerCleanup === "unsupported") {
@@ -399,7 +457,15 @@ const resumeDeletion = (
         );
         continue;
       }
-      const result = yield* Effect.exit(provider.cleanupRun(project, entry.item.runId ?? ""));
+      const result = yield* Effect.exit(
+        provider.cleanupRun(
+          project,
+          entry.item.runId,
+          entry.item.providerCleanup === undefined
+            ? undefined
+            : { capability: entry.item.providerCleanup },
+        ),
+      );
       if (Exit.isFailure(result)) {
         yield* repository.markItem(
           project,

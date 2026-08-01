@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   type DeletionPlanCounts,
+  DeletionPlanCounts as DeletionPlanCountsSchema,
   type DeletionPlanItem,
   type DeletionScope,
+  DeletionScope as DeletionScopeSchema,
   RequestKey,
 } from "@kojo/control";
 import { Schema } from "effect";
@@ -18,21 +20,49 @@ export type DeletionWorkKind =
   | "owned-file"
   | "provider";
 
-export interface DeletionWorkItem {
-  readonly kind: DeletionWorkKind;
-  readonly key: string;
-  readonly runId?: string;
-  readonly workflowKey?: string;
-  readonly workflowRevision?: string;
-  readonly engineGeneration?: number;
-  readonly scheduleKey?: string;
-  readonly scheduledAtMs?: number;
-  readonly scheduleRevision?: string;
-  /** Durable capability observed from the Run's Provider evidence. */
-  readonly providerCleanup?: "supported" | "unsupported";
-  /** Project-relative, never absolute, and only used by the Host adapter. */
-  readonly relativePath?: string;
-}
+const PositiveInteger = Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0));
+
+export const DeletionWorkItemSchema = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("run"),
+    key: Schema.String,
+    runId: Schema.String,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("occurrence"),
+    key: Schema.String,
+    scheduleKey: Schema.String,
+    scheduledAtMs: Schema.Number,
+    scheduleRevision: Schema.String,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("schedule"),
+    key: Schema.String,
+    scheduleKey: Schema.String,
+    scheduledAtMs: Schema.optionalKey(Schema.Number),
+    scheduleRevision: Schema.optionalKey(Schema.String),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("engine"),
+    key: Schema.String,
+    runId: Schema.String,
+    workflowKey: Schema.String,
+    workflowRevision: Schema.String,
+    engineGeneration: PositiveInteger,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("owned-file"),
+    key: Schema.String,
+    relativePath: Schema.String,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("provider"),
+    key: Schema.String,
+    runId: Schema.String,
+    providerCleanup: Schema.optionalKey(Schema.Literals(["supported", "unsupported"])),
+  }),
+]);
+export type DeletionWorkItem = typeof DeletionWorkItemSchema.Type;
 
 export interface DeletionTargetSnapshot {
   readonly version: typeof DELETION_PLAN_VERSION;
@@ -45,6 +75,15 @@ export interface DeletionTargetSnapshot {
     readonly value: string;
   }>;
 }
+
+export const DeletionTargetSnapshotSchema = Schema.Struct({
+  version: Schema.Literal(DELETION_PLAN_VERSION),
+  scope: DeletionScopeSchema,
+  scopeDigest: Schema.String,
+  items: Schema.Array(DeletionWorkItemSchema),
+  counts: DeletionPlanCountsSchema,
+  preconditions: Schema.Array(Schema.Struct({ key: Schema.String, value: Schema.String })),
+});
 
 export interface DeletionPlanRecord {
   readonly planKey: RequestKey;

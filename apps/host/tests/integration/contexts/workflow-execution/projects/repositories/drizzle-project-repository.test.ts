@@ -12,12 +12,13 @@ import {
   RequestKey,
   type WorkflowScheduleDefinition,
 } from "@kojo/control";
-import { Effect, Layer, Schema } from "effect";
+import { Effect, Exit, Layer, Schema } from "effect";
 import { HostIdentity } from "../../../../../../src/contexts/workflow-execution/control/models/host-identity";
 import {
   HostDiagnosticLogger,
   type HostRequestDiagnosticEvent,
 } from "../../../../../../src/contexts/workflow-execution/control/services/host-diagnostic-logger";
+import { makeDrizzleDeletionRepository } from "../../../../../../src/contexts/workflow-execution/deletion/repositories/deletion-repository";
 import {
   completeProjectRepositoryMigration,
   DrizzleProjectRepositoryLive,
@@ -43,6 +44,45 @@ afterEach(async () => {
 });
 
 describe("Drizzle Project store recovery", () => {
+  it.effect("rejects malformed persisted deletion targets through Effect Schema decoding", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() =>
+        initializedProject("kojo-store-deletion-schema-boundary-"),
+      );
+      const requestKey = Schema.decodeUnknownSync(RequestKey)("deletion-schema-boundary");
+      const malformedTarget = {
+        version: 1,
+        scope: { kind: "project", identity: fixture.project.identity },
+        scopeDigest: "scope-digest",
+        items: [{ kind: "engine", key: "engine:malformed" }],
+        counts: { runs: 0, occurrences: 0, schedules: 0, engine: 1, ownedFiles: 0, providers: 0 },
+        preconditions: [],
+      };
+      yield* Effect.sync(() => {
+        const database = new Database(fixture.databasePath);
+        try {
+          database
+            .query(
+              "INSERT INTO kojo_control_requests(request_key, operation_kind, request_sha256, target_kind, state, created_at_ms) VALUES (?, 'execution.delete', zeroblob(32), 'none', 'pending', 1)",
+            )
+            .run(requestKey);
+          database
+            .query(
+              "INSERT INTO kojo_deletion_intents(deletion_id, request_key, target_kind, target_sha256, target_snapshot_json, phase, created_at_ms, updated_at_ms) VALUES ('deletion-schema-boundary', ?, 'project', zeroblob(32), ?, 'quiescing', 1, 1)",
+            )
+            .run(requestKey, JSON.stringify(malformedTarget));
+        } finally {
+          database.close();
+        }
+      });
+
+      const result = yield* Effect.exit(
+        makeDrizzleDeletionRepository().readRequest(fixture.project, requestKey, 2),
+      );
+      expect(Exit.isFailure(result)).toBe(true);
+    }),
+  );
+
   it.effect("blocks activation while deletion recovery is pending", () =>
     Effect.gen(function* () {
       const fixture = yield* Effect.promise(() =>

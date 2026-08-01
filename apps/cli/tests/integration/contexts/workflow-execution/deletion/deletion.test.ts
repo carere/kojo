@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, realpath, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, it } from "vitest";
@@ -179,14 +179,25 @@ const tolerateMissingCleanup = async (cleanup: () => Promise<void>) => {
   }
 };
 
-const setupProject = async (configuration: string, hostOptions: KojoHostProcessOptions = {}) => {
+const setupProject = async (
+  configuration: string,
+  hostOptions: KojoHostProcessOptions & { readonly deletionLateFileRelativePath?: string } = {},
+) => {
   const directory = await makeTemporaryDirectory("kojo-deletion-project-");
   cleanups.push(() => tolerateMissingCleanup(directory.cleanup));
   const project = join(directory.path, "project");
   await initializeGit(project);
   await installWorkflowDependencies(project);
   await writeFile(join(project, "kojo.config.ts"), configuration);
-  const host = await startKojoHostProcess(hostOptions);
+  const { deletionLateFileRelativePath, ...processOptions } = hostOptions;
+  const host = await startKojoHostProcess({
+    ...processOptions,
+    ...(deletionLateFileRelativePath === undefined
+      ? {}
+      : {
+          deletionLateFilePath: join(project, deletionLateFileRelativePath),
+        }),
+  });
   cleanups.push(host.stop);
   const initialized = await runKojoCli(["init", project, "--json"], host.socketPath);
   expect(initialized.exitCode, `${initialized.stdout}${initialized.stderr}`).toBe(0);
@@ -492,7 +503,7 @@ it("deletes a final Run and returns an honest unsupported-provider warning", asy
   await waitForFinalRun(host.socketPath, project, runId);
 
   const preview = await runKojoCli(
-    ["delete", "run", runId, "--project-id", identity, "--json"],
+    ["delete", "project", "--project-id", identity, "--json"],
     host.socketPath,
     project,
   );
@@ -500,7 +511,7 @@ it("deletes a final Run and returns an honest unsupported-provider warning", asy
   expect(readJson(preview.stdout).result.preview.counts.runs).toBe(1);
   const planKey = readJson(preview.stdout).result.preview.planKey as string;
   const confirmed = await runKojoCli(
-    ["delete", "run", runId, "--project-id", identity, "--plan-key", planKey, "--json"],
+    ["delete", "project", "--project-id", identity, "--plan-key", planKey, "--json"],
     host.socketPath,
     project,
   );
@@ -575,6 +586,133 @@ it("persists Provider cleanup capability across a crash and Host recovery", asyn
   expect(readJson(replay.stdout).result.receipt.warnings).toEqual([
     expect.objectContaining({ code: "provider-unsupported" }),
   ]);
+});
+
+it("blocks and preserves an owned file created after immutable confirmation across recovery", async () => {
+  const hostStore = await makeTemporaryDirectory("kojo-deletion-late-file-");
+  cleanups.push(() => tolerateMissingCleanup(hostStore.cleanup));
+  const { host, identity, project } = await setupProject(unavailableScheduleConfiguration, {
+    deletionCrashPhase: "clearing-owned-content",
+    deletionLateFileRelativePath: ".kojo/sandboxes/late-after-intent.txt",
+    storePath: hostStore.path,
+  });
+  const lateFilePath = join(project, ".kojo", "sandboxes", "late-after-intent.txt");
+  const started = await runKojoCli(
+    [
+      "run",
+      "start",
+      "echo",
+      "--input",
+      '{"message":"late-file"}',
+      "--project-id",
+      identity,
+      "--json",
+    ],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = readJson(started.stdout).result.run.runId as string;
+  await waitForFinalRun(host.socketPath, project, runId);
+
+  const preview = await runKojoCli(
+    ["delete", "project", "--project-id", identity, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(preview.exitCode, `${preview.stdout}${preview.stderr}`).toBe(0);
+  const plan = readJson(preview.stdout).result.preview;
+
+  const crashed = await runKojoCli(
+    ["delete", "project", "--project-id", identity, "--plan-key", plan.planKey, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(crashed.exitCode).not.toBe(0);
+  expect(await fileExists(lateFilePath)).toBe(true);
+  await host.crash();
+
+  const readIntent = () => {
+    const database = new Database(join(project, ".kojo", "kojo.sqlite"), {
+      readonly: true,
+      strict: true,
+    });
+    try {
+      return database
+        .query(
+          "SELECT phase, safe_error_code, target_snapshot_json FROM kojo_deletion_intents WHERE request_key = ?",
+        )
+        .get(plan.planKey) as {
+        readonly phase: string;
+        readonly safe_error_code: string | null;
+        readonly target_snapshot_json: string;
+      };
+    } finally {
+      database.close();
+    }
+  };
+  const beforeReplay = readIntent();
+  expect(beforeReplay.target_snapshot_json).not.toContain("late-after-intent.txt");
+
+  const recoveredHost = await startKojoHostProcess({ storePath: hostStore.path });
+  cleanups.push(recoveredHost.stop);
+  const replay = await runKojoCli(
+    ["delete", "project", "--project-id", identity, "--plan-key", plan.planKey, "--json"],
+    recoveredHost.socketPath,
+    project,
+  );
+  expect(replay.exitCode, `${replay.stdout}${replay.stderr}`).toBe(4);
+  expect(readJson(replay.stdout).error.code).toBe("owned-file-cleanup-failed");
+  expect(readJson(replay.stdout).error.next).toBe(
+    "Repair or remove the late Kojo-owned execution file, then retry the original confirmed Plan Key; a new Plan Key cannot supersede this pending deletion.",
+  );
+  const afterReplay = readIntent();
+  expect(afterReplay.phase).toBe("needs-attention");
+  expect(afterReplay.safe_error_code).toBe("owned-file-scope-drift");
+  expect(afterReplay.target_snapshot_json).toBe(beforeReplay.target_snapshot_json);
+  expect(await fileExists(lateFilePath)).toBe(true);
+
+  const repeated = await runKojoCli(
+    ["delete", "project", "--project-id", identity, "--plan-key", plan.planKey, "--json"],
+    recoveredHost.socketPath,
+    project,
+  );
+  expect(repeated.exitCode, `${repeated.stdout}${repeated.stderr}`).toBe(4);
+  expect(readJson(repeated.stdout).error.code).toBe("owned-file-cleanup-failed");
+  expect(readIntent().target_snapshot_json).toBe(beforeReplay.target_snapshot_json);
+  expect(await fileExists(lateFilePath)).toBe(true);
+
+  const supersedingPreview = await runKojoCli(
+    ["delete", "project", "--project-id", identity, "--json"],
+    recoveredHost.socketPath,
+    project,
+  );
+  expect(
+    supersedingPreview.exitCode,
+    `${supersedingPreview.stdout}${supersedingPreview.stderr}`,
+  ).toBe(0);
+  const supersedingPlanKey = readJson(supersedingPreview.stdout).result.preview.planKey as string;
+  expect(supersedingPlanKey).not.toBe(plan.planKey);
+  const supersedingConfirmation = await runKojoCli(
+    ["delete", "project", "--project-id", identity, "--plan-key", supersedingPlanKey, "--json"],
+    recoveredHost.socketPath,
+    project,
+  );
+  expect(supersedingConfirmation.exitCode).toBe(4);
+  expect(readJson(supersedingConfirmation.stdout).error.code).toBe("deletion-in-progress");
+
+  await unlink(lateFilePath);
+  const recovered = await runKojoCli(
+    ["delete", "project", "--project-id", identity, "--plan-key", plan.planKey, "--json"],
+    recoveredHost.socketPath,
+    project,
+  );
+  expect(recovered.exitCode, `${recovered.stdout}${recovered.stderr}`).toBe(0);
+  expect(readJson(recovered.stdout).result.receipt.counts).toEqual(
+    readJson(preview.stdout).result.preview.counts,
+  );
+  expect(readIntent()).toBeNull();
+  expect(await fileExists(lateFilePath)).toBe(false);
 });
 
 it("deletes a top-level Run together with its complete Child Run tree", async () => {

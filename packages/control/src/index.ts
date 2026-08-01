@@ -8,7 +8,7 @@ import {
 
 export { ProjectIdentity } from "@kojo/workflow";
 
-export const PROTOCOL_VERSION = { major: 1, minor: 12 } as const;
+export const PROTOCOL_VERSION = { major: 1, minor: 13 } as const;
 export const CONTROL_CAPABILITIES = [
   "projects:list",
   "projects:list-page",

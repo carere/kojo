@@ -14,6 +14,7 @@ export interface KojoHostProcessFixture {
 export interface KojoHostProcessOptions {
   readonly deletionClockPath?: string;
   readonly deletionCrashPhase?: string;
+  readonly deletionLateFilePath?: string;
   readonly storePath?: string;
 }
 
@@ -40,6 +41,9 @@ export const startKojoHostProcess = async (
       ...(options.deletionCrashPhase === undefined
         ? {}
         : { KOJO_TEST_DELETION_CRASH_PHASE: options.deletionCrashPhase }),
+      ...(options.deletionLateFilePath === undefined
+        ? {}
+        : { KOJO_TEST_DELETION_LATE_FILE: options.deletionLateFilePath }),
     },
     stdout: "ignore",
     stderr: "pipe",

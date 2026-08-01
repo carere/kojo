@@ -70,6 +70,7 @@ it.effect("maps failed Provider cleanup to a warning while completing local dele
         itemState = state;
         safeErrorCode = code ?? null;
       }),
+    reconcileOwnedFiles: () => Effect.succeed({ _tag: "unchanged" as const }),
     setPhase: () => Effect.void,
     complete: () =>
       Effect.succeed({

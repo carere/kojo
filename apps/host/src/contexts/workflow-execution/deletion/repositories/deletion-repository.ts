@@ -1,4 +1,3 @@
-import type { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readdir } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
@@ -9,18 +8,40 @@ import type {
   ProjectSnapshot,
   RequestKey,
 } from "@kojo/control";
-import { Context, Effect, Layer } from "effect";
+import {
+  DeletionReceipt as DeletionReceiptSchema,
+  RequestKey as RequestKeySchema,
+} from "@kojo/control";
+import { and, asc, eq, gt, inArray, isNotNull, lte, ne, sql } from "drizzle-orm";
+import { Context, Effect, Layer, Schema } from "effect";
+import type { ConstraintDecoder } from "effect/Schema";
+import {
+  controlRequests,
+  deletionIntents,
+  deletionItems,
+  engineOperations,
+  executionArtifacts,
+  executionEventArtifacts,
+  executionEvents,
+  retentionPolicy,
+  workflowActivityAttempts,
+  workflowActivityOperations,
+  workflowRuns,
+  workflowScheduleOccurrences,
+  workflowScheduleStates,
+} from "../../projects/repositories/project-repository-schema";
 import {
   assertDatabaseFile,
+  type DrizzleProjectStore,
   databasePath,
-  transaction,
-  withReadableProjectStore,
-  withWritableProjectStore,
+  withDrizzleReadableProjectStore,
+  withDrizzleWritableProjectStoreTransaction,
 } from "../../projects/repositories/project-store-adapter";
 import {
   countsFor,
   type DeletionPlanRecord,
   type DeletionTargetSnapshot,
+  DeletionTargetSnapshotSchema,
   type DeletionWorkItem,
   deletionScopeDigest,
   stableJson,
@@ -37,6 +58,11 @@ type DeletionPhase =
   | "deleting-records"
   | "needs-attention";
 export type DeletionItemStatus = "pending" | "completed" | "warning" | "needs-attention";
+
+export type DeletionOwnedFileReconciliation =
+  | { readonly _tag: "unchanged" }
+  | { readonly _tag: "added"; readonly count: number }
+  | { readonly _tag: "needs-attention" };
 
 export interface DeletionInspectionAccepted {
   readonly _tag: "accepted";
@@ -102,6 +128,11 @@ export interface DeletionRepositoryShape {
     state: Exclude<DeletionItemStatus, "pending">,
     safeErrorCode?: string,
   ) => Effect.Effect<void>;
+  readonly reconcileOwnedFiles: (
+    project: ProjectSnapshot,
+    deletionId: string,
+    nowMs: number,
+  ) => Effect.Effect<DeletionOwnedFileReconciliation>;
   readonly setPhase: (
     project: ProjectSnapshot,
     deletionId: string,
@@ -179,6 +210,18 @@ interface StoredRun {
   readonly last_event_sequence: number;
 }
 
+const StoredRunRows = Schema.Array(
+  Schema.Struct({
+    run_id: Schema.String,
+    parent_run_id: Schema.NullOr(Schema.String),
+    workflow_key: Schema.String,
+    workflow_revision: Schema.String,
+    state: Schema.String,
+    row_version: Schema.Number,
+    last_event_sequence: Schema.Number,
+  }),
+);
+
 interface StoredOccurrence {
   readonly schedule_key: string;
   readonly scheduled_at_ms: number;
@@ -189,6 +232,19 @@ interface StoredOccurrence {
   readonly row_version: number;
   readonly processed_at_ms: number | null;
 }
+
+const StoredOccurrenceRows = Schema.Array(
+  Schema.Struct({
+    schedule_key: Schema.String,
+    scheduled_at_ms: Schema.Number,
+    applied_revision: Schema.String,
+    outcome: Schema.String,
+    linked_run_id: Schema.NullOr(Schema.String),
+    deleted_run_id: Schema.NullOr(Schema.String),
+    row_version: Schema.Number,
+    processed_at_ms: Schema.NullOr(Schema.Number),
+  }),
+);
 
 interface StoredSchedule {
   readonly applied_revision: string | null;
@@ -201,65 +257,171 @@ interface StoredSchedule {
   readonly updated_at_ms: number;
 }
 
-const readRuns = (connection: Database): ReadonlyArray<StoredRun> =>
-  connection
-    .query(
-      `SELECT run_id, parent_run_id, workflow_key, workflow_revision, state,
-              row_version, last_event_sequence
-       FROM kojo_workflow_runs
-       ORDER BY accepted_at_ms ASC, run_id ASC`,
-    )
-    .all() as ReadonlyArray<StoredRun>;
+const StoredScheduleRows = Schema.Array(
+  Schema.Struct({
+    applied_revision: Schema.NullOr(Schema.String),
+    schedule_key: Schema.String,
+    enabled_intent: Schema.Number,
+    condition: Schema.String,
+    condition_reason_code: Schema.NullOr(Schema.String),
+    next_occurrence_ms: Schema.NullOr(Schema.Number),
+    row_version: Schema.Number,
+    updated_at_ms: Schema.Number,
+  }),
+);
 
-const readOccurrences = (connection: Database): ReadonlyArray<StoredOccurrence> =>
-  connection
-    .query(
-      `SELECT schedule_key, scheduled_at_ms, applied_revision, outcome,
-              linked_run_id, deleted_run_id, row_version, processed_at_ms
-       FROM kojo_workflow_schedule_occurrences
-       ORDER BY schedule_key ASC, scheduled_at_ms ASC`,
-    )
-    .all() as ReadonlyArray<StoredOccurrence>;
+const SubmitOperationRows = Schema.Array(
+  Schema.Struct({ run_id: Schema.String, attempt_count: Schema.Number }),
+);
 
-const readSchedules = (connection: Database): ReadonlyArray<StoredSchedule> =>
-  connection
-    .query(
-      `SELECT schedule_key, enabled_intent, condition, condition_reason_code,
-              applied_revision, next_occurrence_ms, row_version, updated_at_ms
-       FROM kojo_workflow_schedule_states
-       ORDER BY schedule_key ASC`,
-    )
-    .all() as ReadonlyArray<StoredSchedule>;
+const ArtifactRows = Schema.Array(
+  Schema.Struct({
+    run_id: Schema.String,
+    artifact_id: Schema.String,
+    condition: Schema.String,
+    storage_key: Schema.String,
+  }),
+);
 
-const readSubmitGenerations = (connection: Database, runIds: ReadonlyArray<string>) => {
+const ProviderTraceRows = Schema.Array(
+  Schema.Struct({ run_id: Schema.String, kind: Schema.String, payload_json: Schema.String }),
+);
+
+const ProviderTracePayload = Schema.Struct({
+  providerKind: Schema.optionalKey(Schema.String),
+  evidence: Schema.optionalKey(Schema.Struct({ providerKind: Schema.optionalKey(Schema.String) })),
+});
+
+const ControlRequestRow = Schema.Struct({
+  operation_kind: Schema.String,
+  request_sha256: Schema.Uint8Array,
+  state: Schema.Literals(["pending", "completed", "needs-attention"]),
+  result_json: Schema.NullOr(Schema.String),
+});
+
+const IntentRow = Schema.Struct({
+  deletion_id: Schema.String,
+  request_key: Schema.String,
+  phase: Schema.Literals([
+    "quiescing",
+    "clearing-engine",
+    "clearing-owned-content",
+    "deleting-records",
+    "needs-attention",
+  ]),
+  target_snapshot_json: Schema.String,
+});
+
+const DeletionItemRows = Schema.Array(
+  Schema.Struct({
+    item_kind: Schema.String,
+    item_key: Schema.String,
+    state: Schema.Literals(["pending", "completed", "warning", "needs-attention"]),
+    safe_error_code: Schema.NullOr(Schema.String),
+  }),
+);
+
+const WarningRows = Schema.Array(Schema.Struct({ safe_error_code: Schema.NullOr(Schema.String) }));
+
+const ScheduleKeyRows = Schema.Array(Schema.Struct({ schedule_key: Schema.String }));
+
+const decodeRows = <S extends ConstraintDecoder<unknown>>(schema: S, rows: unknown): S["Type"] =>
+  Schema.decodeUnknownSync(schema)(rows);
+
+const readRuns = (store: DrizzleProjectStore): ReadonlyArray<StoredRun> =>
+  decodeRows(
+    StoredRunRows,
+    store
+      .select({
+        run_id: workflowRuns.runId,
+        parent_run_id: workflowRuns.parentRunId,
+        workflow_key: workflowRuns.workflowKey,
+        workflow_revision: workflowRuns.workflowRevision,
+        state: workflowRuns.state,
+        row_version: workflowRuns.rowVersion,
+        last_event_sequence: workflowRuns.lastEventSequence,
+      })
+      .from(workflowRuns)
+      .orderBy(asc(workflowRuns.acceptedAtMs), asc(workflowRuns.runId))
+      .all(),
+  );
+
+const readOccurrences = (store: DrizzleProjectStore): ReadonlyArray<StoredOccurrence> =>
+  decodeRows(
+    StoredOccurrenceRows,
+    store
+      .select({
+        schedule_key: workflowScheduleOccurrences.scheduleKey,
+        scheduled_at_ms: workflowScheduleOccurrences.scheduledAtMs,
+        applied_revision: workflowScheduleOccurrences.appliedRevision,
+        outcome: workflowScheduleOccurrences.outcome,
+        linked_run_id: workflowScheduleOccurrences.linkedRunId,
+        deleted_run_id: workflowScheduleOccurrences.deletedRunId,
+        row_version: workflowScheduleOccurrences.rowVersion,
+        processed_at_ms: workflowScheduleOccurrences.processedAtMs,
+      })
+      .from(workflowScheduleOccurrences)
+      .orderBy(
+        asc(workflowScheduleOccurrences.scheduleKey),
+        asc(workflowScheduleOccurrences.scheduledAtMs),
+      )
+      .all(),
+  );
+
+const readSchedules = (store: DrizzleProjectStore): ReadonlyArray<StoredSchedule> =>
+  decodeRows(
+    StoredScheduleRows,
+    store
+      .select({
+        schedule_key: workflowScheduleStates.scheduleKey,
+        enabled_intent: workflowScheduleStates.enabledIntent,
+        condition: workflowScheduleStates.condition,
+        condition_reason_code: workflowScheduleStates.conditionReasonCode,
+        applied_revision: workflowScheduleStates.appliedRevision,
+        next_occurrence_ms: workflowScheduleStates.nextOccurrenceMs,
+        row_version: workflowScheduleStates.rowVersion,
+        updated_at_ms: workflowScheduleStates.updatedAtMs,
+      })
+      .from(workflowScheduleStates)
+      .orderBy(asc(workflowScheduleStates.scheduleKey))
+      .all(),
+  );
+
+const readSubmitGenerations = (store: DrizzleProjectStore, runIds: ReadonlyArray<string>) => {
   if (runIds.length === 0) return new Map<string, number>();
-  const placeholders = runIds.map(() => "?").join(", ");
-  const rows = connection
-    .query(
-      `SELECT run_id, MAX(attempt_count) AS attempt_count
-       FROM kojo_engine_operations
-       WHERE kind = 'submit' AND run_id IN (${placeholders})
-       GROUP BY run_id`,
-    )
-    .all(...runIds) as ReadonlyArray<{ readonly run_id: string; readonly attempt_count: number }>;
-  return new Map(rows.map((row) => [row.run_id, Math.max(1, row.attempt_count + 1)]));
+  const rows = decodeRows(
+    SubmitOperationRows,
+    store
+      .select({ run_id: engineOperations.runId, attempt_count: engineOperations.attemptCount })
+      .from(engineOperations)
+      .where(and(eq(engineOperations.kind, "submit"), inArray(engineOperations.runId, runIds)))
+      .all(),
+  );
+  const maximums = new Map<string, number>();
+  for (const row of rows) {
+    maximums.set(row.run_id, Math.max(maximums.get(row.run_id) ?? 0, row.attempt_count));
+  }
+  return new Map(
+    [...maximums].map(([runId, attemptCount]) => [runId, Math.max(1, attemptCount + 1)]),
+  );
 };
 
-const readArtifactRows = (connection: Database, runIds: ReadonlyArray<string>) => {
+const readArtifactRows = (store: DrizzleProjectStore, runIds: ReadonlyArray<string>) => {
   if (runIds.length === 0) return [];
-  const placeholders = runIds.map(() => "?").join(", ");
-  return connection
-    .query(
-      `SELECT run_id, artifact_id, condition, storage_key
-       FROM kojo_execution_artifacts WHERE run_id IN (${placeholders})
-       ORDER BY run_id ASC, artifact_id ASC`,
-    )
-    .all(...runIds) as ReadonlyArray<{
-    readonly run_id: string;
-    readonly artifact_id: string;
-    readonly condition: string;
-    readonly storage_key: string;
-  }>;
+  return decodeRows(
+    ArtifactRows,
+    store
+      .select({
+        run_id: executionArtifacts.runId,
+        artifact_id: executionArtifacts.artifactId,
+        condition: executionArtifacts.condition,
+        storage_key: executionArtifacts.storageKey,
+      })
+      .from(executionArtifacts)
+      .where(inArray(executionArtifacts.runId, runIds))
+      .orderBy(asc(executionArtifacts.runId), asc(executionArtifacts.artifactId))
+      .all(),
+  );
 };
 
 const providerTraceKinds = [
@@ -277,26 +439,32 @@ const providerTraceKinds = [
   "agent.replayed",
 ] as const;
 
-const readProviderCleanupExpectations = (connection: Database, runIds: ReadonlyArray<string>) => {
+const readProviderCleanupExpectations = (
+  store: DrizzleProjectStore,
+  runIds: ReadonlyArray<string>,
+) => {
   const expectations = new Map<string, "supported" | "unsupported">();
   if (runIds.length === 0) return expectations;
-  const placeholders = runIds.map(() => "?").join(", ");
-  const rows = connection
-    .query(
-      `SELECT run_id, payload_json
-       FROM kojo_execution_events
-       WHERE run_id IN (${placeholders}) AND kind IN (${providerTraceKinds.map(() => "?").join(", ")})`,
-    )
-    .all(...runIds, ...providerTraceKinds) as ReadonlyArray<{
-    readonly run_id: string;
-    readonly payload_json: string;
-  }>;
+  const rows = decodeRows(
+    ProviderTraceRows,
+    store
+      .select({
+        run_id: executionEvents.runId,
+        kind: executionEvents.kind,
+        payload_json: executionEvents.payloadJson,
+      })
+      .from(executionEvents)
+      .where(
+        and(
+          inArray(executionEvents.runId, runIds),
+          inArray(executionEvents.kind, [...providerTraceKinds]),
+        ),
+      )
+      .all(),
+  );
   for (const row of rows) {
     try {
-      const payload = JSON.parse(row.payload_json) as {
-        readonly providerKind?: unknown;
-        readonly evidence?: { readonly providerKind?: unknown };
-      };
+      const payload = Schema.decodeUnknownSync(ProviderTracePayload)(JSON.parse(row.payload_json));
       const providerKind =
         typeof payload.providerKind === "string"
           ? payload.providerKind
@@ -454,18 +622,18 @@ const makeTarget = async (
   project: ProjectSnapshot,
   scope: DeletionScope,
 ): Promise<DeletionInspection> => {
-  const read = withReadableProjectStore(project, (connection) => {
-    const runs = readRuns(connection);
-    const occurrences = readOccurrences(connection);
-    const schedules = readSchedules(connection);
+  const read = withDrizzleReadableProjectStore(project, (store) => {
+    const runs = readRuns(store);
+    const occurrences = readOccurrences(store);
+    const schedules = readSchedules(store);
     const runsById = new Map(runs.map((run) => [run.run_id, run]));
     const schedulesByKey = new Map(schedules.map((schedule) => [schedule.schedule_key, schedule]));
     const generations = readSubmitGenerations(
-      connection,
+      store,
       runs.map((run) => run.run_id),
     );
     const providerCleanup = readProviderCleanupExpectations(
-      connection,
+      store,
       runs.map((run) => run.run_id),
     );
     return { runs, occurrences, schedules, runsById, schedulesByKey, generations, providerCleanup };
@@ -704,9 +872,9 @@ const makeTarget = async (
   // appear in the scope. The completion path treats the missing leaf as an
   // idempotent warning rather than silently changing the requested scope.
   if (scope.kind === "run" || scope.kind === "project") {
-    const artifactRows = withReadableProjectStore(project, (connection) =>
+    const artifactRows = withDrizzleReadableProjectStore(project, (store) =>
       readArtifactRows(
-        connection,
+        store,
         selectedRuns.map((run) => run.run_id),
       ),
     );
@@ -753,56 +921,58 @@ const requestHash = (target: DeletionTargetSnapshot) =>
     }),
   );
 
-const readControlRequest = (connection: Database, requestKey: RequestKey) =>
-  connection
-    .query(
-      `SELECT operation_kind, request_sha256, state, result_json
-       FROM kojo_control_requests WHERE request_key = ?`,
-    )
-    .get(requestKey) as {
-    readonly operation_kind: string;
-    readonly request_sha256: Uint8Array;
-    readonly state: "pending" | "completed" | "needs-attention";
-    readonly result_json: string | null;
-  } | null;
+const readControlRequest = (store: DrizzleProjectStore, requestKey: RequestKey) =>
+  decodeRows(
+    Schema.Array(ControlRequestRow),
+    store
+      .select({
+        operation_kind: controlRequests.operationKind,
+        request_sha256: controlRequests.requestSha256,
+        state: controlRequests.state,
+        result_json: controlRequests.resultJson,
+      })
+      .from(controlRequests)
+      .where(eq(controlRequests.requestKey, requestKey))
+      .limit(1)
+      .all(),
+  )[0] ?? null;
 
-const readIntent = (connection: Database, requestKey: RequestKey) =>
-  connection
-    .query(
-      `SELECT deletion_id, request_key, phase, target_snapshot_json
-       FROM kojo_deletion_intents WHERE request_key = ?`,
-    )
-    .get(requestKey) as {
-    readonly deletion_id: string;
-    readonly request_key: RequestKey;
-    readonly phase: DeletionPhase;
-    readonly target_snapshot_json: string;
-  } | null;
+const readIntent = (store: DrizzleProjectStore, requestKey: RequestKey) =>
+  decodeRows(
+    Schema.Array(IntentRow),
+    store
+      .select({
+        deletion_id: deletionIntents.deletionId,
+        request_key: deletionIntents.requestKey,
+        phase: deletionIntents.phase,
+        target_snapshot_json: deletionIntents.targetSnapshotJson,
+      })
+      .from(deletionIntents)
+      .where(eq(deletionIntents.requestKey, requestKey))
+      .limit(1)
+      .all(),
+  )[0] ?? null;
 
 const decodeTarget = (json: string): DeletionTargetSnapshot => {
-  const decoded = JSON.parse(json) as DeletionTargetSnapshot;
-  if (decoded.version !== 1 || typeof decoded.scopeDigest !== "string") {
-    throw new Error("Project deletion target snapshot is invalid");
-  }
-  return decoded;
+  return Schema.decodeUnknownSync(DeletionTargetSnapshotSchema)(JSON.parse(json));
 };
 
-const readTargetForScope = (connection: Database, scope: DeletionScope) => {
+const readTargetForScope = (store: DrizzleProjectStore, scope: DeletionScope) => {
   // The transaction-level drift check reuses the same authoritative reader.
   // Its async owned-file walk is intentionally omitted here: the database
   // preconditions protect records, while the no-follow unlinker protects each
   // discovered file at the final external boundary.
-  const runs = readRuns(connection);
-  const occurrences = readOccurrences(connection);
-  const schedules = readSchedules(connection);
+  const runs = readRuns(store);
+  const occurrences = readOccurrences(store);
+  const schedules = readSchedules(store);
   const runsById = new Map(runs.map((run) => [run.run_id, run]));
   const schedulesByKey = new Map(schedules.map((schedule) => [schedule.schedule_key, schedule]));
   const generations = readSubmitGenerations(
-    connection,
+    store,
     runs.map((run) => run.run_id),
   );
   const providerCleanup = readProviderCleanupExpectations(
-    connection,
+    store,
     runs.map((run) => run.run_id),
   );
   const items: Array<DeletionWorkItem> = [];
@@ -921,6 +1091,14 @@ const ownedFileItems = (target: DeletionTargetSnapshot) =>
 const ownedFilesMatch = (expected: DeletionTargetSnapshot, actual: DeletionTargetSnapshot) =>
   stableJson(ownedFileItems(expected)) === stableJson(ownedFileItems(actual));
 
+const addOwnedFiles = (
+  expected: DeletionTargetSnapshot,
+  actual: DeletionTargetSnapshot,
+): ReadonlyArray<DeletionWorkItem> => {
+  const known = new Set(ownedFileItems(expected).map((item) => item.key));
+  return ownedFileItems(actual).filter((item) => !known.has(item.key));
+};
+
 const warningFor = (safeErrorCode: string | null) => {
   switch (safeErrorCode) {
     case "provider-unsupported":
@@ -959,38 +1137,57 @@ const makeReceipt = (
   warnings,
 });
 
-const clearProjectExecutionRecords = (connection: Database, requestKey: RequestKey) => {
+const decodeReceipt = (json: string): DeletionReceipt =>
+  Schema.decodeUnknownSync(DeletionReceiptSchema)(JSON.parse(json));
+
+const IntentSnapshotRow = Schema.Struct({ target_snapshot_json: Schema.String });
+
+const readIntentSnapshot = (store: DrizzleProjectStore, deletionId: string) =>
+  decodeRows(
+    Schema.Array(IntentSnapshotRow),
+    store
+      .select({ target_snapshot_json: deletionIntents.targetSnapshotJson })
+      .from(deletionIntents)
+      .where(eq(deletionIntents.deletionId, deletionId))
+      .limit(1)
+      .all(),
+  )[0] ?? null;
+
+const clearProjectExecutionRecords = (store: DrizzleProjectStore, requestKey: RequestKey) => {
   // Keep only the schema, store identity, and the current target-free receipt.
   // These are Kojo-owned records. Effect Workflow state is private to the
   // LocalWorkflowBackend and is cleared through its adapter seam before this
   // transaction runs.
-  connection.query("DELETE FROM kojo_execution_event_artifacts").run();
-  connection.query("DELETE FROM kojo_execution_artifacts").run();
-  connection.query("DELETE FROM kojo_execution_events").run();
-  connection.query("DELETE FROM kojo_workflow_activity_attempts").run();
-  connection.query("DELETE FROM kojo_workflow_activity_operations").run();
-  connection.query("DELETE FROM kojo_engine_operations").run();
-  connection.query("DELETE FROM kojo_workflow_schedule_occurrences").run();
-  connection.query("DELETE FROM kojo_workflow_runs").run();
-  connection.query("DELETE FROM kojo_workflow_schedule_states").run();
-  connection.query("DELETE FROM kojo_retention_policy").run();
-  connection.query("DELETE FROM kojo_deletion_items").run();
-  connection.query("DELETE FROM kojo_deletion_intents").run();
-  connection.query("DELETE FROM kojo_control_requests WHERE request_key != ?").run(requestKey);
+  store.delete(executionEventArtifacts).run();
+  store.delete(executionArtifacts).run();
+  store.delete(executionEvents).run();
+  store.delete(workflowActivityAttempts).run();
+  store.delete(workflowActivityOperations).run();
+  store.delete(engineOperations).run();
+  store.delete(workflowScheduleOccurrences).run();
+  store.delete(workflowRuns).run();
+  store.delete(workflowScheduleStates).run();
+  store.delete(retentionPolicy).run();
+  store.delete(deletionItems).run();
+  store.delete(deletionIntents).run();
+  store.delete(controlRequests).where(ne(controlRequests.requestKey, requestKey)).run();
 };
 
-const purgeExpiredReceipts = (connection: Database, nowMs: number) => {
-  connection
-    .query(
-      `DELETE FROM kojo_control_requests
-       WHERE operation_kind = ? AND state = 'completed'
-         AND expires_at_ms IS NOT NULL AND expires_at_ms <= ?`,
+const purgeExpiredReceipts = (store: DrizzleProjectStore, nowMs: number) =>
+  store
+    .delete(controlRequests)
+    .where(
+      and(
+        eq(controlRequests.operationKind, deletionOperationKind),
+        eq(controlRequests.state, "completed"),
+        isNotNull(controlRequests.expiresAtMs),
+        lte(controlRequests.expiresAtMs, nowMs),
+      ),
     )
-    .run(deletionOperationKind, nowMs);
-};
+    .run();
 
 const completeRecordDeletion = (
-  connection: Database,
+  store: DrizzleProjectStore,
   deletionId: string,
   requestKey: RequestKey,
   target: DeletionTargetSnapshot,
@@ -998,30 +1195,38 @@ const completeRecordDeletion = (
 ) => {
   const scope = target.scope;
   const runIds = target.items
-    .filter((item) => item.kind === "run" && item.runId !== undefined)
-    .map((item) => item.runId as string);
-  const warningRows = connection
-    .query(
-      `SELECT safe_error_code FROM kojo_deletion_items
-       WHERE deletion_id = ? AND state = 'warning' ORDER BY stable_order ASC`,
+    .filter(
+      (item): item is Extract<DeletionWorkItem, { readonly kind: "run" }> => item.kind === "run",
     )
-    .all(deletionId) as ReadonlyArray<{ readonly safe_error_code: string | null }>;
+    .map((item) => item.runId);
+  const warningRows = decodeRows(
+    WarningRows,
+    store
+      .select({ safe_error_code: deletionItems.safeErrorCode })
+      .from(deletionItems)
+      .where(and(eq(deletionItems.deletionId, deletionId), eq(deletionItems.state, "warning")))
+      .orderBy(asc(deletionItems.stableOrder))
+      .all(),
+  );
   const warnings = warningRows.flatMap((row) => {
     const warning = warningFor(row.safe_error_code);
     return warning === undefined ? [] : [warning];
   });
   if (scope.kind === "run") {
     for (const runId of runIds) {
-      connection
-        .query(
-          `UPDATE kojo_workflow_schedule_occurrences
-           SET linked_run_id = NULL, deleted_run_id = ?, deleted_run_at_ms = ?, row_version = row_version + 1
-           WHERE linked_run_id = ?`,
-        )
-        .run(runId, nowMs, runId);
+      store
+        .update(workflowScheduleOccurrences)
+        .set({
+          linkedRunId: null,
+          deletedRunId: runId,
+          deletedRunAtMs: nowMs,
+          rowVersion: sql`${workflowScheduleOccurrences.rowVersion} + 1`,
+        })
+        .where(eq(workflowScheduleOccurrences.linkedRunId, runId))
+        .run();
     }
     for (const runId of [...runIds].sort((left, right) => right.localeCompare(left))) {
-      connection.query("DELETE FROM kojo_workflow_runs WHERE run_id = ?").run(runId);
+      store.delete(workflowRuns).where(eq(workflowRuns.runId, runId)).run();
     }
   } else if (scope.kind === "occurrences") {
     for (const item of target.items.filter((candidate) => candidate.kind === "occurrence")) {
@@ -1030,49 +1235,56 @@ const completeRecordDeletion = (
       if (scheduleKey === undefined || scheduledAtMs === undefined) {
         throw new Error("Project deletion occurrence item is invalid");
       }
-      connection
-        .query(
-          "DELETE FROM kojo_workflow_schedule_occurrences WHERE schedule_key = ? AND scheduled_at_ms = ?",
+      store
+        .delete(workflowScheduleOccurrences)
+        .where(
+          and(
+            eq(workflowScheduleOccurrences.scheduleKey, scheduleKey),
+            eq(workflowScheduleOccurrences.scheduledAtMs, scheduledAtMs),
+          ),
         )
-        .run(scheduleKey, scheduledAtMs);
+        .run();
     }
   } else if (scope.kind === "schedule") {
-    connection
-      .query("DELETE FROM kojo_workflow_schedule_states WHERE schedule_key = ?")
-      .run(scope.scheduleKey);
-    connection
-      .query("DELETE FROM kojo_workflow_schedule_occurrences WHERE schedule_key = ?")
-      .run(scope.scheduleKey);
+    store
+      .delete(workflowScheduleOccurrences)
+      .where(eq(workflowScheduleOccurrences.scheduleKey, scope.scheduleKey))
+      .run();
+    store
+      .delete(workflowScheduleStates)
+      .where(eq(workflowScheduleStates.scheduleKey, scope.scheduleKey))
+      .run();
   } else {
     // Keep the Project Identity and store metadata. Everything else is
     // execution/operational state and is removed in dependency order.
-    clearProjectExecutionRecords(connection, requestKey);
+    clearProjectExecutionRecords(store, requestKey);
   }
 
   const receipt = makeReceipt(requestKey, target.counts, warnings, nowMs);
   const resultJson = JSON.stringify(receipt);
-  connection
-    .query(
-      `UPDATE kojo_control_requests
-       SET target_kind = 'none', target_run_id = NULL, target_schedule_key = NULL,
-           state = 'completed', result_code = ?, result_encoding_version = 1,
-           result_schema_identity = 'kojo.execution-deletion-receipt.v1', result_json = ?,
-           result_sensitivity_map_version = 1, result_sensitivity_map_json = '{}',
-           result_sha256 = ?, completed_at_ms = ?, expires_at_ms = ?
-       WHERE request_key = ?`,
-    )
-    .run(
-      scope.kind === "project" ? "project-reset" : null,
+  store
+    .update(controlRequests)
+    .set({
+      targetKind: "none",
+      targetRunId: null,
+      targetScheduleKey: null,
+      state: "completed",
+      resultCode: scope.kind === "project" ? "project-reset" : null,
+      resultEncodingVersion: 1,
+      resultSchemaIdentity: "kojo.execution-deletion-receipt.v1",
       resultJson,
-      hash(resultJson),
-      nowMs,
-      nowMs + receiptExpiryMs,
-      requestKey,
-    );
+      resultSensitivityMapVersion: 1,
+      resultSensitivityMapJson: "{}",
+      resultSha256: hash(resultJson),
+      completedAtMs: nowMs,
+      expiresAtMs: nowMs + receiptExpiryMs,
+    })
+    .where(eq(controlRequests.requestKey, requestKey))
+    .run();
   // Project reset clears the item rows above; the other scopes retain their
   // item history only until this intent is removed.
-  connection.query("DELETE FROM kojo_deletion_items WHERE deletion_id = ?").run(deletionId);
-  connection.query("DELETE FROM kojo_deletion_intents WHERE deletion_id = ?").run(deletionId);
+  store.delete(deletionItems).where(eq(deletionItems.deletionId, deletionId)).run();
+  store.delete(deletionIntents).where(eq(deletionIntents.deletionId, deletionId)).run();
   return receipt;
 };
 
@@ -1080,159 +1292,170 @@ export const makeDrizzleDeletionRepository = (): DeletionRepositoryShape => ({
   inspect: (project, scope) => Effect.promise(() => makeTarget(project, scope)),
   readRequest: (project, requestKey, nowMs = Date.now()) =>
     Effect.sync(() =>
-      withWritableProjectStore(project, (connection) =>
-        transaction(connection, () => {
-          purgeExpiredReceipts(connection, nowMs);
-          const control = readControlRequest(connection, requestKey);
-          if (control === null || control.operation_kind !== deletionOperationKind)
-            return undefined;
-          if (control.state === "completed" && control.result_json !== null) {
-            return {
-              _tag: "completed" as const,
-              receipt: JSON.parse(control.result_json) as DeletionReceipt,
-            };
-          }
-          const intent = readIntent(connection, requestKey);
-          if (intent === null) return undefined;
+      withDrizzleWritableProjectStoreTransaction(project, (store) => {
+        purgeExpiredReceipts(store, nowMs);
+        const control = readControlRequest(store, requestKey);
+        if (control === null || control.operation_kind !== deletionOperationKind) return undefined;
+        if (control.state === "completed" && control.result_json !== null) {
           return {
-            _tag: "pending" as const,
-            deletionId: intent.deletion_id,
-            phase: intent.phase,
-            target: decodeTarget(intent.target_snapshot_json),
+            _tag: "completed" as const,
+            receipt: decodeReceipt(control.result_json),
           };
-        }),
-      ),
+        }
+        const intent = readIntent(store, requestKey);
+        if (intent === null) return undefined;
+        return {
+          _tag: "pending" as const,
+          deletionId: intent.deletion_id,
+          phase: intent.phase,
+          target: decodeTarget(intent.target_snapshot_json),
+        };
+      }),
     ),
   begin: (project, plan, nowMs) =>
     Effect.gen(function* () {
       const inspected = yield* Effect.promise(() => makeTarget(project, plan.target.scope));
       return yield* Effect.sync(() =>
-        withWritableProjectStore(project, (connection) =>
-          transaction(connection, () => {
-            purgeExpiredReceipts(connection, nowMs);
-            const fingerprint = requestHash(plan.target);
-            const existingControl = readControlRequest(connection, plan.planKey);
-            if (existingControl !== null) {
-              if (
-                existingControl.operation_kind !== deletionOperationKind ||
-                existingControl.request_sha256.length !== fingerprint.length ||
-                !existingControl.request_sha256.every(
-                  (value, index) => value === fingerprint[index],
-                )
-              ) {
-                return { _tag: "conflict" as const };
-              }
-              if (existingControl.state === "completed" && existingControl.result_json !== null) {
-                return {
-                  _tag: "completed" as const,
-                  receipt: JSON.parse(existingControl.result_json) as DeletionReceipt,
-                };
-              }
-              const existingIntent = readIntent(connection, plan.planKey);
-              if (existingIntent === null) return { _tag: "in-progress" as const };
-              return {
-                _tag: "started" as const,
-                deletionId: existingIntent.deletion_id,
-                resumed: true,
-              };
-            }
-
-            const activeIntent = connection
-              .query("SELECT deletion_id FROM kojo_deletion_intents LIMIT 1")
-              .get() as { readonly deletion_id: string } | null;
-            if (activeIntent !== null) return { _tag: "in-progress" as const };
-
-            const actual = readTargetForScope(connection, plan.target.scope);
+        withDrizzleWritableProjectStoreTransaction(project, (store) => {
+          purgeExpiredReceipts(store, nowMs);
+          const fingerprint = requestHash(plan.target);
+          const existingControl = readControlRequest(store, plan.planKey);
+          if (existingControl !== null) {
             if (
-              inspected._tag !== "accepted" ||
-              actual === undefined ||
-              !preconditionsMatch(plan.target, actual) ||
-              !ownedFilesMatch(plan.target, inspected.target)
+              existingControl.operation_kind !== deletionOperationKind ||
+              existingControl.request_sha256.length !== fingerprint.length ||
+              !existingControl.request_sha256.every((value, index) => value === fingerprint[index])
             ) {
               return { _tag: "conflict" as const };
             }
-            const deletionId = randomUUID();
-            connection
-              .query(
-                `INSERT INTO kojo_control_requests(
-                request_key, operation_kind, request_sha256, target_kind, state, created_at_ms
-              ) VALUES (?, ?, ?, 'none', 'pending', ?)`,
-              )
-              .run(plan.planKey, deletionOperationKind, fingerprint, nowMs);
-            const snapshotJson = JSON.stringify(plan.target);
-            connection
-              .query(
-                `INSERT INTO kojo_deletion_intents(
-                deletion_id, request_key, target_kind, target_sha256, target_snapshot_json,
-                phase, created_at_ms, updated_at_ms
-              ) VALUES (?, ?, ?, ?, ?, 'quiescing', ?, ?)`,
-              )
-              .run(
-                deletionId,
-                plan.planKey,
-                plan.target.scope.kind,
-                digestBytes(plan.target.scopeDigest),
-                snapshotJson,
-                nowMs,
-                nowMs,
-              );
-            for (const [stableOrder, item] of plan.target.items.entries()) {
-              connection
-                .query(
-                  `INSERT INTO kojo_deletion_items(
-                  deletion_id, item_kind, item_key, stable_order, state, attempt_count
-                ) VALUES (?, ?, ?, ?, 'pending', 0)`,
-                )
-                .run(deletionId, item.kind, item.key, stableOrder);
+            if (existingControl.state === "completed" && existingControl.result_json !== null) {
+              return {
+                _tag: "completed" as const,
+                receipt: decodeReceipt(existingControl.result_json),
+              };
             }
-            const schedules =
-              plan.target.scope.kind === "schedule"
-                ? [plan.target.scope.scheduleKey]
-                : plan.target.scope.kind === "project"
-                  ? (
-                      connection
-                        .query("SELECT schedule_key FROM kojo_workflow_schedule_states")
-                        .all() as ReadonlyArray<{ readonly schedule_key: string }>
-                    ).map((row) => row.schedule_key)
-                  : [];
-            for (const scheduleKey of schedules) {
-              connection
-                .query(
-                  `UPDATE kojo_workflow_schedule_states
-                 SET enabled_intent = 0, condition = 'unavailable',
-                     condition_reason_code = 'project.deletion', next_occurrence_ms = NULL,
-                     row_version = row_version + 1, updated_at_ms = ?
-                 WHERE schedule_key = ?`,
-                )
-                .run(nowMs, scheduleKey);
-            }
-            return { _tag: "started" as const, deletionId, resumed: false };
-          }),
-        ),
+            const existingIntent = readIntent(store, plan.planKey);
+            if (existingIntent === null) return { _tag: "in-progress" as const };
+            return {
+              _tag: "started" as const,
+              deletionId: existingIntent.deletion_id,
+              resumed: true,
+            };
+          }
+
+          const activeIntent = decodeRows(
+            Schema.Array(Schema.Struct({ deletion_id: Schema.String })),
+            store
+              .select({ deletion_id: deletionIntents.deletionId })
+              .from(deletionIntents)
+              .limit(1)
+              .all(),
+          )[0];
+          if (activeIntent !== undefined) return { _tag: "in-progress" as const };
+
+          const actual = readTargetForScope(store, plan.target.scope);
+          if (
+            inspected._tag !== "accepted" ||
+            actual === undefined ||
+            !preconditionsMatch(plan.target, actual) ||
+            !ownedFilesMatch(plan.target, inspected.target)
+          ) {
+            return { _tag: "conflict" as const };
+          }
+          const deletionId = randomUUID();
+          const snapshotJson = JSON.stringify(plan.target);
+          store
+            .insert(controlRequests)
+            .values({
+              requestKey: plan.planKey,
+              operationKind: deletionOperationKind,
+              requestSha256: fingerprint,
+              targetKind: "none",
+              targetRunId: null,
+              targetScheduleKey: null,
+              state: "pending",
+              createdAtMs: nowMs,
+            })
+            .run();
+          store
+            .insert(deletionIntents)
+            .values({
+              deletionId,
+              requestKey: plan.planKey,
+              targetKind: plan.target.scope.kind,
+              targetSha256: digestBytes(plan.target.scopeDigest),
+              targetSnapshotJson: snapshotJson,
+              phase: "quiescing",
+              createdAtMs: nowMs,
+              updatedAtMs: nowMs,
+            })
+            .run();
+          if (plan.target.items.length > 0) {
+            store
+              .insert(deletionItems)
+              .values(
+                plan.target.items.map((item, stableOrder) => ({
+                  deletionId,
+                  itemKind: item.kind,
+                  itemKey: item.key,
+                  stableOrder,
+                  state: "pending" as const,
+                  attemptCount: 0,
+                })),
+              )
+              .run();
+          }
+          const schedules =
+            plan.target.scope.kind === "schedule"
+              ? [plan.target.scope.scheduleKey]
+              : plan.target.scope.kind === "project"
+                ? decodeRows(
+                    ScheduleKeyRows,
+                    store
+                      .select({ schedule_key: workflowScheduleStates.scheduleKey })
+                      .from(workflowScheduleStates)
+                      .all(),
+                  ).map((row) => row.schedule_key)
+                : [];
+          for (const scheduleKey of schedules) {
+            store
+              .update(workflowScheduleStates)
+              .set({
+                enabledIntent: 0,
+                condition: "unavailable",
+                conditionReasonCode: "project.deletion",
+                nextOccurrenceMs: null,
+                rowVersion: sql`${workflowScheduleStates.rowVersion} + 1`,
+                updatedAtMs: nowMs,
+              })
+              .where(eq(workflowScheduleStates.scheduleKey, scheduleKey))
+              .run();
+          }
+          return { _tag: "started" as const, deletionId, resumed: false };
+        }),
       );
     }),
   readItems: (project, deletionId) =>
     Effect.sync(() =>
-      withReadableProjectStore(project, (connection) => {
-        const intent = connection
-          .query("SELECT target_snapshot_json FROM kojo_deletion_intents WHERE deletion_id = ?")
-          .get(deletionId) as { readonly target_snapshot_json: string } | null;
+      withDrizzleReadableProjectStore(project, (store) => {
+        const intent = readIntentSnapshot(store, deletionId);
         if (intent === null) return [];
         const target = decodeTarget(intent.target_snapshot_json);
+        const decodedStates = decodeRows(
+          DeletionItemRows,
+          store
+            .select({
+              item_kind: deletionItems.itemKind,
+              item_key: deletionItems.itemKey,
+              state: deletionItems.state,
+              safe_error_code: deletionItems.safeErrorCode,
+            })
+            .from(deletionItems)
+            .where(eq(deletionItems.deletionId, deletionId))
+            .all(),
+        );
         const states = new Map(
-          (
-            connection
-              .query(
-                `SELECT item_kind, item_key, state, safe_error_code
-               FROM kojo_deletion_items WHERE deletion_id = ?`,
-              )
-              .all(deletionId) as ReadonlyArray<{
-              readonly item_kind: DeletionWorkItem["kind"];
-              readonly item_key: string;
-              readonly state: DeletionItemStatus;
-              readonly safe_error_code: string | null;
-            }>
-          ).map((row) => [`${row.item_kind}:${row.item_key}`, row]),
+          decodedStates.map((row) => [`${row.item_kind}:${row.item_key}`, row] as const),
         );
         return target.items.map((item) => {
           const state = states.get(`${item.kind}:${item.key}`);
@@ -1246,81 +1469,116 @@ export const makeDrizzleDeletionRepository = (): DeletionRepositoryShape => ({
     ),
   markItem: (project, deletionId, item, state, safeErrorCode) =>
     Effect.sync(() =>
-      withWritableProjectStore(project, (connection) =>
-        transaction(connection, () => {
-          if (state === "completed") {
-            connection
-              .query(
-                `UPDATE kojo_deletion_items
-                 SET state = 'completed', completed_at_ms = ?, safe_error_code = NULL,
-                     attempt_count = attempt_count + 1
-                 WHERE deletion_id = ? AND item_kind = ? AND item_key = ? AND state != 'completed'`,
-              )
-              .run(Date.now(), deletionId, item.kind, item.key);
-          } else {
-            connection
-              .query(
-                `UPDATE kojo_deletion_items
-                 SET state = ?, completed_at_ms = NULL, safe_error_code = ?,
-                     attempt_count = attempt_count + 1
-                 WHERE deletion_id = ? AND item_kind = ? AND item_key = ?`,
-              )
-              .run(state, safeErrorCode ?? null, deletionId, item.kind, item.key);
-          }
-        }),
-      ),
+      withDrizzleWritableProjectStoreTransaction(project, (store) => {
+        const where = and(
+          eq(deletionItems.deletionId, deletionId),
+          eq(deletionItems.itemKind, item.kind),
+          eq(deletionItems.itemKey, item.key),
+        );
+        if (state === "completed") {
+          store
+            .update(deletionItems)
+            .set({
+              state: "completed",
+              completedAtMs: Date.now(),
+              safeErrorCode: null,
+              attemptCount: sql`${deletionItems.attemptCount} + 1`,
+            })
+            .where(and(where, ne(deletionItems.state, "completed")))
+            .run();
+        } else {
+          store
+            .update(deletionItems)
+            .set({
+              state,
+              completedAtMs: null,
+              safeErrorCode: safeErrorCode ?? null,
+              attemptCount: sql`${deletionItems.attemptCount} + 1`,
+            })
+            .where(where)
+            .run();
+        }
+      }),
     ),
+  reconcileOwnedFiles: (project, deletionId) =>
+    Effect.gen(function* () {
+      const persisted = yield* Effect.sync(() =>
+        withDrizzleReadableProjectStore(project, (store) => {
+          const intent = readIntentSnapshot(store, deletionId);
+          return intent === null ? undefined : decodeTarget(intent.target_snapshot_json);
+        }),
+      );
+      if (persisted === undefined) return { _tag: "needs-attention" as const };
+      const inspected = yield* Effect.promise(() => makeTarget(project, persisted.scope));
+      if (inspected._tag === "rejected") return { _tag: "needs-attention" as const };
+      const additions = addOwnedFiles(persisted, inspected.target);
+      // Confirmation is an immutable capability boundary. A file discovered
+      // after intent was recorded was never authorized by the confirmed
+      // snapshot, so it must remain untouched and force deterministic
+      // needs-attention recovery. The caller persists that phase/code without
+      // changing the target snapshot or item rows.
+      return additions.length === 0
+        ? { _tag: "unchanged" as const }
+        : { _tag: "needs-attention" as const };
+    }),
   setPhase: (project, deletionId, phase, safeErrorCode) =>
     Effect.sync(() =>
-      withWritableProjectStore(project, (connection) =>
-        transaction(connection, () => {
-          connection
-            .query(
-              `UPDATE kojo_deletion_intents
-               SET phase = ?, safe_error_code = ?, updated_at_ms = ? WHERE deletion_id = ?`,
-            )
-            .run(phase, safeErrorCode ?? null, Date.now(), deletionId);
-        }),
-      ),
+      withDrizzleWritableProjectStoreTransaction(project, (store) => {
+        store
+          .update(deletionIntents)
+          .set({ phase, safeErrorCode: safeErrorCode ?? null, updatedAtMs: Date.now() })
+          .where(eq(deletionIntents.deletionId, deletionId))
+          .run();
+      }),
     ),
   complete: (project, deletionId, nowMs) =>
     Effect.sync(() =>
-      withWritableProjectStore(project, (connection) =>
-        transaction(connection, () => {
-          const intent = connection
-            .query(
-              `SELECT request_key, target_snapshot_json FROM kojo_deletion_intents WHERE deletion_id = ?`,
-            )
-            .get(deletionId) as {
-            readonly request_key: RequestKey;
-            readonly target_snapshot_json: string;
-          } | null;
-          if (intent === null) throw new Error("Project deletion intent is missing");
-          return completeRecordDeletion(
-            connection,
-            deletionId,
-            intent.request_key,
-            decodeTarget(intent.target_snapshot_json),
-            nowMs,
-          );
-        }),
-      ),
+      withDrizzleWritableProjectStoreTransaction(project, (store) => {
+        const intent = decodeRows(
+          Schema.Array(
+            Schema.Struct({ request_key: Schema.String, target_snapshot_json: Schema.String }),
+          ),
+          store
+            .select({
+              request_key: deletionIntents.requestKey,
+              target_snapshot_json: deletionIntents.targetSnapshotJson,
+            })
+            .from(deletionIntents)
+            .where(eq(deletionIntents.deletionId, deletionId))
+            .limit(1)
+            .all(),
+        )[0];
+        if (intent === undefined) throw new Error("Project deletion intent is missing");
+        return completeRecordDeletion(
+          store,
+          deletionId,
+          Schema.decodeUnknownSync(RequestKeySchema)(intent.request_key),
+          decodeTarget(intent.target_snapshot_json),
+          nowMs,
+        );
+      }),
     ),
   hasCompletedProjectReset: (project) =>
     Effect.sync(() =>
-      withReadableProjectStore(
+      withDrizzleReadableProjectStore(
         project,
-        (connection) =>
-          connection
-            .query(
-              `SELECT 1 FROM kojo_control_requests
-             WHERE operation_kind = 'execution.delete'
-               AND state = 'completed'
-               AND result_code = 'project-reset'
-               AND expires_at_ms > ?
-             LIMIT 1`,
-            )
-            .get(Date.now()) !== null,
+        (store) =>
+          decodeRows(
+            Schema.Array(Schema.Struct({ request_key: Schema.String })),
+            store
+              .select({ request_key: controlRequests.requestKey })
+              .from(controlRequests)
+              .where(
+                and(
+                  eq(controlRequests.operationKind, deletionOperationKind),
+                  eq(controlRequests.state, "completed"),
+                  eq(controlRequests.resultCode, "project-reset"),
+                  gt(controlRequests.expiresAtMs, Date.now()),
+                ),
+              )
+              .limit(1)
+              .all(),
+          ).length > 0,
       ),
     ),
 });

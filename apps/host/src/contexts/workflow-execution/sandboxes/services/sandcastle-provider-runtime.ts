@@ -129,7 +129,7 @@ export const SandcastleProviderRuntimeLive = Layer.sync(ProviderRuntime, () => {
       await session.sandbox?.close();
       sessions.delete(key);
     }
-    return unsupported;
+    return { found: owned.length > 0, unsupported };
   };
 
   const acquire = (input: {
@@ -265,9 +265,13 @@ export const SandcastleProviderRuntimeLive = Layer.sync(ProviderRuntime, () => {
       }),
     interruptRun: (project, runId) =>
       Effect.promise(() => releaseRun(project, runId)).pipe(Effect.asVoid),
-    cleanupRun: (project, runId) =>
+    cleanupRun: (project, runId, expectation) =>
       Effect.promise(async () => {
-        if (await releaseRun(project, runId)) {
+        const result = await releaseRun(project, runId);
+        if (!result.found && expectation?.capability === "supported") {
+          throw new Error("Provider cleanup state was unavailable after Host recovery.");
+        }
+        if (result.unsupported) {
           throw new Error("Provider cleanup is unsupported for this custom Provider.");
         }
       }),
