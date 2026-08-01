@@ -84,6 +84,7 @@ export interface DeletionRepositoryShape {
   readonly readRequest: (
     project: ProjectSnapshot,
     requestKey: RequestKey,
+    nowMs?: number,
   ) => Effect.Effect<DeletionExistingRequest | undefined>;
   readonly begin: (
     project: ProjectSnapshot,
@@ -190,10 +191,12 @@ interface StoredOccurrence {
 }
 
 interface StoredSchedule {
+  readonly applied_revision: string | null;
   readonly schedule_key: string;
   readonly enabled_intent: number;
   readonly condition: string;
   readonly condition_reason_code: string | null;
+  readonly next_occurrence_ms: number | null;
   readonly row_version: number;
   readonly updated_at_ms: number;
 }
@@ -222,7 +225,7 @@ const readSchedules = (connection: Database): ReadonlyArray<StoredSchedule> =>
   connection
     .query(
       `SELECT schedule_key, enabled_intent, condition, condition_reason_code,
-              row_version, updated_at_ms
+              applied_revision, next_occurrence_ms, row_version, updated_at_ms
        FROM kojo_workflow_schedule_states
        ORDER BY schedule_key ASC`,
     )
@@ -257,6 +260,60 @@ const readArtifactRows = (connection: Database, runIds: ReadonlyArray<string>) =
     readonly condition: string;
     readonly storage_key: string;
   }>;
+};
+
+const providerTraceKinds = [
+  "sandbox.acquired",
+  "sandbox.session-recreated",
+  "command.completed",
+  "command.failed",
+  "command.timed-out",
+  "boundary.started",
+  "boundary.completed",
+  "agent.started",
+  "agent.completed",
+  "agent.failed",
+  "agent.session-continued",
+  "agent.replayed",
+] as const;
+
+const readProviderCleanupExpectations = (connection: Database, runIds: ReadonlyArray<string>) => {
+  const expectations = new Map<string, "supported" | "unsupported">();
+  if (runIds.length === 0) return expectations;
+  const placeholders = runIds.map(() => "?").join(", ");
+  const rows = connection
+    .query(
+      `SELECT run_id, payload_json
+       FROM kojo_execution_events
+       WHERE run_id IN (${placeholders}) AND kind IN (${providerTraceKinds.map(() => "?").join(", ")})`,
+    )
+    .all(...runIds, ...providerTraceKinds) as ReadonlyArray<{
+    readonly run_id: string;
+    readonly payload_json: string;
+  }>;
+  for (const row of rows) {
+    try {
+      const payload = JSON.parse(row.payload_json) as {
+        readonly providerKind?: unknown;
+        readonly evidence?: { readonly providerKind?: unknown };
+      };
+      const providerKind =
+        typeof payload.providerKind === "string"
+          ? payload.providerKind
+          : typeof payload.evidence?.providerKind === "string"
+            ? payload.evidence.providerKind
+            : undefined;
+      if (providerKind === undefined) continue;
+      const expected = providerKind === "custom" ? "unsupported" : "supported";
+      if (expectations.get(row.run_id) !== "unsupported") {
+        expectations.set(row.run_id, expected);
+      }
+    } catch {
+      // Invalid payloads are already treated as sensitive by the trace reader;
+      // they cannot prove a Provider cleanup capability here.
+    }
+  }
+  return expectations;
 };
 
 const isSafeRelativePath = (value: string) => {
@@ -331,6 +388,7 @@ const walkOwnedFiles = async (
 const runItems = (
   runs: ReadonlyArray<StoredRun>,
   generations: ReadonlyMap<string, number>,
+  providerCleanup: ReadonlyMap<string, "supported" | "unsupported"> = new Map(),
 ): Array<DeletionWorkItem> => {
   const items: Array<DeletionWorkItem> = [];
   for (const run of runs) {
@@ -348,7 +406,13 @@ const runItems = (
     }
     // A provider item is explicit so an adapter can report unsupported or
     // failed remote cleanup without blocking local logical deletion.
-    items.push({ kind: "provider", key: `provider:${run.run_id}`, runId: run.run_id });
+    const expectedCleanup = providerCleanup.get(run.run_id);
+    items.push({
+      kind: "provider",
+      key: `provider:${run.run_id}`,
+      runId: run.run_id,
+      ...(expectedCleanup === undefined ? {} : { providerCleanup: expectedCleanup }),
+    });
   }
   return items;
 };
@@ -358,12 +422,19 @@ const occurrenceItem = (occurrence: StoredOccurrence): DeletionWorkItem => ({
   key: `occurrence:${occurrence.schedule_key}:${occurrence.scheduled_at_ms}`,
   scheduleKey: occurrence.schedule_key,
   scheduledAtMs: occurrence.scheduled_at_ms,
+  scheduleRevision: occurrence.applied_revision,
 });
 
 const scheduleItem = (schedule: StoredSchedule): DeletionWorkItem => ({
   kind: "schedule",
   key: `schedule:${schedule.schedule_key}`,
   scheduleKey: schedule.schedule_key,
+  ...(schedule.next_occurrence_ms === null || schedule.applied_revision === null
+    ? {}
+    : {
+        scheduledAtMs: schedule.next_occurrence_ms,
+        scheduleRevision: schedule.applied_revision,
+      }),
 });
 
 const occurrenceIsFinal = (
@@ -393,7 +464,11 @@ const makeTarget = async (
       connection,
       runs.map((run) => run.run_id),
     );
-    return { runs, occurrences, schedules, runsById, schedulesByKey, generations };
+    const providerCleanup = readProviderCleanupExpectations(
+      connection,
+      runs.map((run) => run.run_id),
+    );
+    return { runs, occurrences, schedules, runsById, schedulesByKey, generations, providerCleanup };
   });
 
   const items: Array<DeletionWorkItem> = [];
@@ -447,7 +522,7 @@ const makeTarget = async (
       };
     }
     selectedRuns = tree.sort((left, right) => left.run_id.localeCompare(right.run_id));
-    items.push(...runItems(selectedRuns, read.generations));
+    items.push(...runItems(selectedRuns, read.generations, read.providerCleanup));
     selectedOccurrences = read.occurrences.filter((occurrence) =>
       selectedRuns.some((run) => run.run_id === occurrence.linked_run_id),
     );
@@ -598,7 +673,7 @@ const makeTarget = async (
     items.push(
       ...selectedSchedules.map(scheduleItem),
       ...selectedOccurrences.map(occurrenceItem),
-      ...runItems(selectedRuns, read.generations),
+      ...runItems(selectedRuns, read.generations, read.providerCleanup),
     );
     for (const schedule of selectedSchedules) {
       preconditions.push({
@@ -726,6 +801,10 @@ const readTargetForScope = (connection: Database, scope: DeletionScope) => {
     connection,
     runs.map((run) => run.run_id),
   );
+  const providerCleanup = readProviderCleanupExpectations(
+    connection,
+    runs.map((run) => run.run_id),
+  );
   const items: Array<DeletionWorkItem> = [];
   const preconditions: Array<{ readonly key: string; readonly value: string }> = [];
   if (scope.kind === "run") {
@@ -743,7 +822,7 @@ const readTargetForScope = (connection: Database, scope: DeletionScope) => {
       }
     }
     if (tree.some((run) => !finalRunStates.has(run.state))) return undefined;
-    items.push(...runItems(tree, generations));
+    items.push(...runItems(tree, generations, providerCleanup));
     for (const occurrence of occurrences.filter((row) =>
       tree.some((run) => run.run_id === row.linked_run_id),
     )) {
@@ -806,7 +885,7 @@ const readTargetForScope = (connection: Database, scope: DeletionScope) => {
     items.push(
       ...schedules.map(scheduleItem),
       ...occurrences.map(occurrenceItem),
-      ...runItems(runs, generations),
+      ...runItems(runs, generations, providerCleanup),
     );
     for (const schedule of schedules)
       preconditions.push({
@@ -835,6 +914,12 @@ const readTargetForScope = (connection: Database, scope: DeletionScope) => {
 const preconditionsMatch = (expected: DeletionTargetSnapshot, actual: DeletionTargetSnapshot) =>
   expected.scopeDigest === actual.scopeDigest &&
   stableJson(expected.preconditions) === stableJson(actual.preconditions);
+
+const ownedFileItems = (target: DeletionTargetSnapshot) =>
+  target.items.filter((item) => item.kind === "owned-file");
+
+const ownedFilesMatch = (expected: DeletionTargetSnapshot, actual: DeletionTargetSnapshot) =>
+  stableJson(ownedFileItems(expected)) === stableJson(ownedFileItems(actual));
 
 const warningFor = (safeErrorCode: string | null) => {
   switch (safeErrorCode) {
@@ -874,12 +959,11 @@ const makeReceipt = (
   warnings,
 });
 
-const quoteIdentifier = (value: string) => `"${value.replaceAll('"', '""')}"`;
-
-const clearProjectExecutionRows = (connection: Database, requestKey: RequestKey) => {
+const clearProjectExecutionRecords = (connection: Database, requestKey: RequestKey) => {
   // Keep only the schema, store identity, and the current target-free receipt.
-  // The Effect Workflow tables are private implementation state, but they are
-  // still part of the Project database and must not survive a Project reset.
+  // These are Kojo-owned records. Effect Workflow state is private to the
+  // LocalWorkflowBackend and is cleared through its adapter seam before this
+  // transaction runs.
   connection.query("DELETE FROM kojo_execution_event_artifacts").run();
   connection.query("DELETE FROM kojo_execution_artifacts").run();
   connection.query("DELETE FROM kojo_execution_events").run();
@@ -893,23 +977,16 @@ const clearProjectExecutionRows = (connection: Database, requestKey: RequestKey)
   connection.query("DELETE FROM kojo_deletion_items").run();
   connection.query("DELETE FROM kojo_deletion_intents").run();
   connection.query("DELETE FROM kojo_control_requests WHERE request_key != ?").run(requestKey);
+};
 
-  // Effect's current adapter uses cluster_* tables. Clear rows from every
-  // private operational table except its migration ledger so a future Host
-  // can reopen the same schema and rebuild a clean runner.
-  const protectedTables = new Set([
-    "cluster_migrations",
-    "kojo_schema_migrations",
-    "kojo_store_metadata",
-    "kojo_control_requests",
-  ]);
-  const tables = connection
-    .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
-    .all() as ReadonlyArray<{ readonly name: string }>;
-  for (const { name } of tables) {
-    if (protectedTables.has(name)) continue;
-    connection.query(`DELETE FROM ${quoteIdentifier(name)}`).run();
-  }
+const purgeExpiredReceipts = (connection: Database, nowMs: number) => {
+  connection
+    .query(
+      `DELETE FROM kojo_control_requests
+       WHERE operation_kind = ? AND state = 'completed'
+         AND expires_at_ms IS NOT NULL AND expires_at_ms <= ?`,
+    )
+    .run(deletionOperationKind, nowMs);
 };
 
 const completeRecordDeletion = (
@@ -969,7 +1046,7 @@ const completeRecordDeletion = (
   } else {
     // Keep the Project Identity and store metadata. Everything else is
     // execution/operational state and is removed in dependency order.
-    clearProjectExecutionRows(connection, requestKey);
+    clearProjectExecutionRecords(connection, requestKey);
   }
 
   const receipt = makeReceipt(requestKey, target.counts, warnings, nowMs);
@@ -1001,124 +1078,139 @@ const completeRecordDeletion = (
 
 export const makeDrizzleDeletionRepository = (): DeletionRepositoryShape => ({
   inspect: (project, scope) => Effect.promise(() => makeTarget(project, scope)),
-  readRequest: (project, requestKey) =>
-    Effect.sync(() =>
-      withReadableProjectStore(project, (connection) => {
-        const control = readControlRequest(connection, requestKey);
-        if (control === null || control.operation_kind !== deletionOperationKind) return undefined;
-        if (control.state === "completed" && control.result_json !== null) {
-          return {
-            _tag: "completed" as const,
-            receipt: JSON.parse(control.result_json) as DeletionReceipt,
-          };
-        }
-        const intent = readIntent(connection, requestKey);
-        if (intent === null) return undefined;
-        return {
-          _tag: "pending" as const,
-          deletionId: intent.deletion_id,
-          phase: intent.phase,
-          target: decodeTarget(intent.target_snapshot_json),
-        };
-      }),
-    ),
-  begin: (project, plan, nowMs) =>
+  readRequest: (project, requestKey, nowMs = Date.now()) =>
     Effect.sync(() =>
       withWritableProjectStore(project, (connection) =>
         transaction(connection, () => {
-          const fingerprint = requestHash(plan.target);
-          const existingControl = readControlRequest(connection, plan.planKey);
-          if (existingControl !== null) {
+          purgeExpiredReceipts(connection, nowMs);
+          const control = readControlRequest(connection, requestKey);
+          if (control === null || control.operation_kind !== deletionOperationKind)
+            return undefined;
+          if (control.state === "completed" && control.result_json !== null) {
+            return {
+              _tag: "completed" as const,
+              receipt: JSON.parse(control.result_json) as DeletionReceipt,
+            };
+          }
+          const intent = readIntent(connection, requestKey);
+          if (intent === null) return undefined;
+          return {
+            _tag: "pending" as const,
+            deletionId: intent.deletion_id,
+            phase: intent.phase,
+            target: decodeTarget(intent.target_snapshot_json),
+          };
+        }),
+      ),
+    ),
+  begin: (project, plan, nowMs) =>
+    Effect.gen(function* () {
+      const inspected = yield* Effect.promise(() => makeTarget(project, plan.target.scope));
+      return yield* Effect.sync(() =>
+        withWritableProjectStore(project, (connection) =>
+          transaction(connection, () => {
+            purgeExpiredReceipts(connection, nowMs);
+            const fingerprint = requestHash(plan.target);
+            const existingControl = readControlRequest(connection, plan.planKey);
+            if (existingControl !== null) {
+              if (
+                existingControl.operation_kind !== deletionOperationKind ||
+                existingControl.request_sha256.length !== fingerprint.length ||
+                !existingControl.request_sha256.every(
+                  (value, index) => value === fingerprint[index],
+                )
+              ) {
+                return { _tag: "conflict" as const };
+              }
+              if (existingControl.state === "completed" && existingControl.result_json !== null) {
+                return {
+                  _tag: "completed" as const,
+                  receipt: JSON.parse(existingControl.result_json) as DeletionReceipt,
+                };
+              }
+              const existingIntent = readIntent(connection, plan.planKey);
+              if (existingIntent === null) return { _tag: "in-progress" as const };
+              return {
+                _tag: "started" as const,
+                deletionId: existingIntent.deletion_id,
+                resumed: true,
+              };
+            }
+
+            const activeIntent = connection
+              .query("SELECT deletion_id FROM kojo_deletion_intents LIMIT 1")
+              .get() as { readonly deletion_id: string } | null;
+            if (activeIntent !== null) return { _tag: "in-progress" as const };
+
+            const actual = readTargetForScope(connection, plan.target.scope);
             if (
-              existingControl.operation_kind !== deletionOperationKind ||
-              existingControl.request_sha256.length !== fingerprint.length ||
-              !existingControl.request_sha256.every((value, index) => value === fingerprint[index])
+              inspected._tag !== "accepted" ||
+              actual === undefined ||
+              !preconditionsMatch(plan.target, actual) ||
+              !ownedFilesMatch(plan.target, inspected.target)
             ) {
               return { _tag: "conflict" as const };
             }
-            if (existingControl.state === "completed" && existingControl.result_json !== null) {
-              return {
-                _tag: "completed" as const,
-                receipt: JSON.parse(existingControl.result_json) as DeletionReceipt,
-              };
-            }
-            const existingIntent = readIntent(connection, plan.planKey);
-            if (existingIntent === null) return { _tag: "in-progress" as const };
-            return {
-              _tag: "started" as const,
-              deletionId: existingIntent.deletion_id,
-              resumed: true,
-            };
-          }
-
-          const activeIntent = connection
-            .query("SELECT deletion_id FROM kojo_deletion_intents LIMIT 1")
-            .get() as { readonly deletion_id: string } | null;
-          if (activeIntent !== null) return { _tag: "in-progress" as const };
-
-          const actual = readTargetForScope(connection, plan.target.scope);
-          if (actual === undefined || !preconditionsMatch(plan.target, actual)) {
-            return { _tag: "conflict" as const };
-          }
-          const deletionId = randomUUID();
-          connection
-            .query(
-              `INSERT INTO kojo_control_requests(
+            const deletionId = randomUUID();
+            connection
+              .query(
+                `INSERT INTO kojo_control_requests(
                 request_key, operation_kind, request_sha256, target_kind, state, created_at_ms
               ) VALUES (?, ?, ?, 'none', 'pending', ?)`,
-            )
-            .run(plan.planKey, deletionOperationKind, fingerprint, nowMs);
-          const snapshotJson = JSON.stringify(plan.target);
-          connection
-            .query(
-              `INSERT INTO kojo_deletion_intents(
+              )
+              .run(plan.planKey, deletionOperationKind, fingerprint, nowMs);
+            const snapshotJson = JSON.stringify(plan.target);
+            connection
+              .query(
+                `INSERT INTO kojo_deletion_intents(
                 deletion_id, request_key, target_kind, target_sha256, target_snapshot_json,
                 phase, created_at_ms, updated_at_ms
               ) VALUES (?, ?, ?, ?, ?, 'quiescing', ?, ?)`,
-            )
-            .run(
-              deletionId,
-              plan.planKey,
-              plan.target.scope.kind,
-              digestBytes(plan.target.scopeDigest),
-              snapshotJson,
-              nowMs,
-              nowMs,
-            );
-          for (const [stableOrder, item] of plan.target.items.entries()) {
-            connection
-              .query(
-                `INSERT INTO kojo_deletion_items(
+              )
+              .run(
+                deletionId,
+                plan.planKey,
+                plan.target.scope.kind,
+                digestBytes(plan.target.scopeDigest),
+                snapshotJson,
+                nowMs,
+                nowMs,
+              );
+            for (const [stableOrder, item] of plan.target.items.entries()) {
+              connection
+                .query(
+                  `INSERT INTO kojo_deletion_items(
                   deletion_id, item_kind, item_key, stable_order, state, attempt_count
                 ) VALUES (?, ?, ?, ?, 'pending', 0)`,
-              )
-              .run(deletionId, item.kind, item.key, stableOrder);
-          }
-          const schedules =
-            plan.target.scope.kind === "schedule"
-              ? [plan.target.scope.scheduleKey]
-              : plan.target.scope.kind === "project"
-                ? (
-                    connection
-                      .query("SELECT schedule_key FROM kojo_workflow_schedule_states")
-                      .all() as ReadonlyArray<{ readonly schedule_key: string }>
-                  ).map((row) => row.schedule_key)
-                : [];
-          for (const scheduleKey of schedules) {
-            connection
-              .query(
-                `UPDATE kojo_workflow_schedule_states
+                )
+                .run(deletionId, item.kind, item.key, stableOrder);
+            }
+            const schedules =
+              plan.target.scope.kind === "schedule"
+                ? [plan.target.scope.scheduleKey]
+                : plan.target.scope.kind === "project"
+                  ? (
+                      connection
+                        .query("SELECT schedule_key FROM kojo_workflow_schedule_states")
+                        .all() as ReadonlyArray<{ readonly schedule_key: string }>
+                    ).map((row) => row.schedule_key)
+                  : [];
+            for (const scheduleKey of schedules) {
+              connection
+                .query(
+                  `UPDATE kojo_workflow_schedule_states
                  SET enabled_intent = 0, condition = 'unavailable',
                      condition_reason_code = 'project.deletion', next_occurrence_ms = NULL,
                      row_version = row_version + 1, updated_at_ms = ?
                  WHERE schedule_key = ?`,
-              )
-              .run(nowMs, scheduleKey);
-          }
-          return { _tag: "started" as const, deletionId, resumed: false };
-        }),
-      ),
-    ),
+                )
+                .run(nowMs, scheduleKey);
+            }
+            return { _tag: "started" as const, deletionId, resumed: false };
+          }),
+        ),
+      );
+    }),
   readItems: (project, deletionId) =>
     Effect.sync(() =>
       withReadableProjectStore(project, (connection) => {

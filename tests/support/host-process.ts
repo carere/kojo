@@ -18,6 +18,7 @@ export interface KojoHostProcessOptions {
 }
 
 const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
+const hostMainPath = join(workspaceRoot, "apps/host/tests/process-main.ts");
 const hostStartupTimeoutMs = 15_000;
 const socketPollIntervalMs = 25;
 
@@ -27,7 +28,7 @@ export const startKojoHostProcess = async (
   const ownsDirectory = options.storePath === undefined;
   const directory = options.storePath ?? (await mkdtemp(join(tmpdir(), "kojo-host-process-")));
   const socketPath = join(directory, "host.sock");
-  const processHandle = Bun.spawn([process.execPath, join(workspaceRoot, "apps/host/main.ts")], {
+  const processHandle = Bun.spawn([process.execPath, hostMainPath], {
     cwd: workspaceRoot,
     env: {
       ...process.env,

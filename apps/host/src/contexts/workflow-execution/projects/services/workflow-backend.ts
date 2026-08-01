@@ -144,6 +144,11 @@ export interface WorkflowBackendShape {
     project: ProjectSnapshot,
     wakeup: WorkflowScheduleWakeup,
   ) => Effect.Effect<void>;
+  /** Clears one known durable Schedule wake-up through the backend owner. */
+  readonly clearScheduleWakeup?: (
+    project: ProjectSnapshot,
+    wakeup: WorkflowScheduleWakeup,
+  ) => Effect.Effect<void>;
   readonly takeDueScheduleWakeups?: (
     project: ProjectSnapshot,
   ) => Effect.Effect<ReadonlyArray<WorkflowScheduleWakeup>>;

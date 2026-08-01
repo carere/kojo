@@ -23,12 +23,6 @@ export class DeletionHooks extends Context.Service<DeletionHooks, DeletionHooksS
   "kojo/host/DeletionHooks",
 ) {}
 
-export const DeletionHooksLive = Layer.sync(DeletionHooks, () => {
-  const crashPhase = process.env.KOJO_TEST_DELETION_CRASH_PHASE;
-  return {
-    afterPhase: (phase) =>
-      Effect.sync(() => {
-        if (crashPhase === phase) process.kill(process.pid, "SIGKILL");
-      }),
-  } satisfies DeletionHooksShape;
-});
+export const DeletionHooksLive = Layer.succeed(DeletionHooks, {
+  afterPhase: () => Effect.void,
+} satisfies DeletionHooksShape);

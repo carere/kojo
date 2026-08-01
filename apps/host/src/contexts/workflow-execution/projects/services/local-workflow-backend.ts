@@ -88,6 +88,33 @@ const ownershipPath = (project: ProjectSnapshot) =>
   join(project.path, ".kojo", "project-runtime-lock.sqlite");
 const ownershipWaitAttempts = 80;
 
+export const clearWorkflowAndClockAddresses = (
+  messageStorage: MessageStorage["Service"],
+  input: {
+    readonly entityId: EntityId.EntityId;
+    readonly entityType: EntityType.EntityType;
+    readonly shardId: ShardId.ShardId;
+  },
+) =>
+  messageStorage.withTransaction(
+    Effect.all([
+      messageStorage.clearAddress(
+        EntityAddress.make({
+          entityId: input.entityId,
+          entityType: input.entityType,
+          shardId: input.shardId,
+        }),
+      ),
+      messageStorage.clearAddress(
+        EntityAddress.make({
+          entityId: input.entityId,
+          entityType: EntityType.make("Workflow/-/DurableClock"),
+          shardId: input.shardId,
+        }),
+      ),
+    ]),
+  );
+
 const clearKnownExecutionAddresses = (
   backend: ActiveBackend,
   input: {
@@ -117,28 +144,15 @@ const clearKnownExecutionAddresses = (
       Effect.map((executionId) => {
         const entityId = EntityId.make(executionId);
         const shardId = backend.sharding.getShardId(entityId, "default");
-        return { entityId, shardId };
+        return {
+          entityId,
+          entityType: EntityType.make(
+            `Workflow/Kojo/${input.workflowKey}/${input.workflowRevision}`,
+          ),
+          shardId,
+        };
       }),
-      Effect.flatMap(({ entityId, shardId }) =>
-        Effect.all([
-          backend.messageStorage.clearAddress(
-            EntityAddress.make({
-              entityId,
-              entityType: EntityType.make(
-                `Workflow/Kojo/${input.workflowKey}/${input.workflowRevision}`,
-              ),
-              shardId,
-            }),
-          ),
-          backend.messageStorage.clearAddress(
-            EntityAddress.make({
-              entityId,
-              entityType: EntityType.make("Workflow/-/DurableClock"),
-              shardId,
-            }),
-          ),
-        ]),
-      ),
+      Effect.flatMap((address) => clearWorkflowAndClockAddresses(backend.messageStorage, address)),
       Effect.orDie,
       Effect.asVoid,
     );
@@ -513,6 +527,34 @@ export const makeLocalWorkflowBackendLayer = (
               Effect.orDie,
               Effect.asVoid,
             ) as unknown as Effect.Effect<void>;
+          }),
+        clearScheduleWakeup: (project, wakeup) =>
+          Effect.suspend(() => {
+            const backend = getActiveBackend(active, project);
+            const payload = {
+              projectIdentity: project.identity,
+              scheduleKey: wakeup.scheduleKey,
+              scheduledAtMs: wakeup.scheduledAtMs,
+              scheduleRevision: wakeup.scheduleRevision,
+            };
+            return scheduleWakeupWorkflow.executionId(payload).pipe(
+              Effect.map((executionId) => {
+                const entityId = EntityId.make(executionId);
+                const shardGroup = Context.get(
+                  scheduleWakeupWorkflow.annotations,
+                  ClusterSchema.ShardGroup,
+                )(entityId);
+                return {
+                  entityId,
+                  entityType: EntityType.make(`Workflow/${scheduleWakeupWorkflow._tag}`),
+                  shardId: backend.sharding.getShardId(entityId, shardGroup),
+                };
+              }),
+              Effect.flatMap((address) =>
+                clearWorkflowAndClockAddresses(backend.messageStorage, address),
+              ),
+              Effect.orDie,
+            );
           }),
         takeDueScheduleWakeups: (project) =>
           Effect.sync(() => {

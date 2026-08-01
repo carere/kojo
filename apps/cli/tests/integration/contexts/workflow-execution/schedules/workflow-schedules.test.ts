@@ -265,6 +265,9 @@ it("delivers one persisted occurrence after Host restart and preserves its linke
   await firstHost.stop();
 
   const scheduledAtMs = Date.now() - 1_000;
+  const boundaryObservedAtMs = Date.now();
+  const currentCronBoundaryMs = boundaryObservedAtMs - (boundaryObservedAtMs % 60_000);
+  const adjacentCronBoundariesMs = [currentCronBoundaryMs, currentCronBoundaryMs + 60_000];
   const expectedInput = { kind: `morning-report:${new Date(scheduledAtMs).toISOString()}` };
   const database = new Database(databasePath, { strict: true });
   try {
@@ -286,10 +289,10 @@ it("delivers one persisted occurrence after Host restart and preserves its linke
       deliveryAttemptCount: 0,
       outcome: "planned",
     });
-    // The Host can persist the next minute immediately before the wall clock
-    // crosses that minute. Keep the assertion about freshness without making
-    // the test depend on which side of the boundary this read observes.
-    expect(current.scheduledAtMs).toBeGreaterThan(Date.now() - 60_000);
+    // The Host can persist either boundary while the wall clock crosses a
+    // minute. Capture those exact adjacent cron boundaries before reading;
+    // avoid accepting an arbitrary overdue value.
+    expect(adjacentCronBoundariesMs).toContain(current.scheduledAtMs);
     database
       .query(
         "UPDATE kojo_workflow_schedule_occurrences SET scheduled_at_ms = ?, resolved_input_json = ? WHERE schedule_key = 'morning-report' AND scheduled_at_ms = ?",

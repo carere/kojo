@@ -319,7 +319,7 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
             deleteExecutionData(scope, planKey),
             deletionDiagnostic(scope.identity),
           );
-          if (scope.kind === "project" && result.ok) {
+          if (scope.kind === "project" && result.ok && result.kind === "completed") {
             yield* (yield* HostDiagnosticLogger).removeProject(scope.identity);
           }
           return result;

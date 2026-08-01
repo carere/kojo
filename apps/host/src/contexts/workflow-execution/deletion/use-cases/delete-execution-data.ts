@@ -234,6 +234,83 @@ const resumeDeletion = (
       yield* repository.markItem(project, deletionId, entry.item, "completed");
     }
 
+    if (backend.clearScheduleWakeup !== undefined) {
+      const wakeupItems = [...pendingWork(items, "schedule"), ...pendingWork(items, "occurrence")];
+      const clearedWakeups = new Set<string>();
+      for (const entry of wakeupItems) {
+        const hasWakeup =
+          entry.item.scheduledAtMs !== undefined || entry.item.scheduleRevision !== undefined;
+        if (!hasWakeup) {
+          yield* repository.markItem(project, deletionId, entry.item, "completed");
+          continue;
+        }
+        if (
+          entry.item.scheduleKey === undefined ||
+          entry.item.scheduledAtMs === undefined ||
+          entry.item.scheduleRevision === undefined
+        ) {
+          yield* repository.markItem(
+            project,
+            deletionId,
+            entry.item,
+            "needs-attention",
+            "engine-cleanup-failed",
+          );
+          yield* repository.setPhase(
+            project,
+            deletionId,
+            "needs-attention",
+            "engine-cleanup-failed",
+          );
+          return yield* Effect.succeed(
+            errorFor(
+              "deletion-needs-attention",
+              "A known Schedule wake-up is missing its durable identity.",
+              "Repair the Project Runtime and retry the same confirmed deletion command.",
+              plan.target.scope,
+              plan.planKey,
+            ),
+          );
+        }
+        const wakeupKey = `${entry.item.scheduleKey}:${entry.item.scheduledAtMs}`;
+        const cleared = clearedWakeups.has(wakeupKey)
+          ? Exit.succeed(undefined)
+          : yield* Effect.exit(
+              backend.clearScheduleWakeup(project, {
+                scheduleKey: entry.item.scheduleKey,
+                scheduledAtMs: entry.item.scheduledAtMs,
+                scheduleRevision: entry.item.scheduleRevision,
+              }),
+            );
+        if (Exit.isFailure(cleared)) {
+          yield* repository.markItem(
+            project,
+            deletionId,
+            entry.item,
+            "needs-attention",
+            "engine-cleanup-failed",
+          );
+          yield* repository.setPhase(
+            project,
+            deletionId,
+            "needs-attention",
+            "engine-cleanup-failed",
+          );
+          return yield* Effect.succeed(
+            errorFor(
+              "deletion-needs-attention",
+              "A known Schedule wake-up could not be cleared safely.",
+              "Repair the Project Runtime and retry the same confirmed deletion command.",
+              plan.target.scope,
+              plan.planKey,
+            ),
+          );
+        }
+        clearedWakeups.add(wakeupKey);
+        yield* repository.markItem(project, deletionId, entry.item, "completed");
+      }
+    }
+
     // Engine mailboxes are cleared while the active backend still owns the
     // MessageStorage service. The durable intent already made the target
     // unavailable before this external step began.
@@ -302,6 +379,16 @@ const resumeDeletion = (
       }
     }
     for (const entry of pendingWork(yield* repository.readItems(project, deletionId), "provider")) {
+      if (entry.item.providerCleanup === "unsupported") {
+        yield* repository.markItem(
+          project,
+          deletionId,
+          entry.item,
+          "warning",
+          "provider-unsupported",
+        );
+        continue;
+      }
       if (provider.cleanupRun === undefined) {
         yield* repository.markItem(
           project,
@@ -394,7 +481,7 @@ export const deleteExecutionData = (
       return { ok: true, kind: "preview", preview: preview(plan) };
     }
 
-    const persisted = yield* repository.readRequest(project, suppliedPlanKey);
+    const persisted = yield* repository.readRequest(project, suppliedPlanKey, now);
     if (persisted?._tag === "completed") return targetFreeReceipt(persisted.receipt);
 
     let plan = yield* plans.read(suppliedPlanKey);

@@ -279,6 +279,7 @@ it("enforces the exact two-step project protocol, drift protection, lost-respons
   const orphanPath = join(project, ".kojo", "sandboxes", "orphaned-file.txt");
   const externalPath = join(project, "..", "outside-execution.txt");
   const symlinkPath = join(project, ".kojo", "sandboxes", "external-link");
+  const addedAfterPreview = join(project, ".kojo", "sandboxes", "added-after-preview.txt");
   await mkdir(join(project, ".kojo", "sandboxes"), { recursive: true });
   await writeFile(orphanPath, "orphaned execution content");
   await writeFile(externalPath, "keep this external content");
@@ -333,6 +334,17 @@ it("enforces the exact two-step project protocol, drift protection, lost-respons
       expect.objectContaining({ kind: "owned-file", key: "file:.kojo/sandboxes/external-link" }),
     ]),
   );
+  const previewDiagnostics = await readFile(host.diagnosticPath, "utf8").catch(() => "");
+  expect(previewDiagnostics).toContain(identity);
+
+  await writeFile(addedAfterPreview, "added after the preview");
+  const filesystemDrift = await runKojoCli(
+    ["delete", "project", "--project-id", identity, "--plan-key", plan.planKey, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(filesystemDrift.exitCode).toBe(4);
+  expect(readJson(filesystemDrift.stdout).error.code).toBe("plan-drifted");
 
   for (const bypassFlag of ["--yes", "--force"]) {
     const bypass = await runKojoCli(
@@ -381,6 +393,14 @@ it("enforces the exact two-step project protocol, drift protection, lost-respons
     project,
   );
   const currentPlan = readJson(currentPreview.stdout).result.preview;
+  expect(currentPlan.items).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        kind: "owned-file",
+        key: "file:.kojo/sandboxes/added-after-preview.txt",
+      }),
+    ]),
+  );
   await confirmWithLostResponse(project, host.socketPath, identity, currentPlan.planKey);
   const replay = await runKojoCli(
     ["delete", "project", "--project-id", identity, "--plan-key", currentPlan.planKey, "--json"],
@@ -440,6 +460,7 @@ it("enforces the exact two-step project protocol, drift protection, lost-respons
   }
 
   expect(await fileExists(orphanPath)).toBe(false);
+  expect(await fileExists(addedAfterPreview)).toBe(false);
   expect(await fileExists(symlinkPath)).toBe(true);
   expect(await readFile(externalPath, "utf8")).toBe("keep this external content");
   expect(await readFile(metadataPath, "utf8")).toBe(metadataBefore);
@@ -500,6 +521,60 @@ it("deletes a final Run and returns an honest unsupported-provider warning", asy
   } finally {
     database.close();
   }
+});
+
+it("persists Provider cleanup capability across a crash and Host recovery", async () => {
+  const hostStore = await makeTemporaryDirectory("kojo-deletion-provider-recovery-");
+  cleanups.push(() => tolerateMissingCleanup(hostStore.cleanup));
+  const { host, identity, project } = await setupProject(unscheduledConfiguration, {
+    deletionCrashPhase: "clearing-owned-content",
+    storePath: hostStore.path,
+  });
+  const started = await runKojoCli(
+    [
+      "run",
+      "start",
+      "echo",
+      "--input",
+      '{"message":"provider-recovery"}',
+      "--project-id",
+      identity,
+      "--json",
+    ],
+    host.socketPath,
+    project,
+  );
+  expect(started.exitCode, `${started.stdout}${started.stderr}`).toBe(0);
+  const runId = readJson(started.stdout).result.run.runId as string;
+  await waitForFinalRun(host.socketPath, project, runId);
+
+  const preview = await runKojoCli(
+    ["delete", "run", runId, "--project-id", identity, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(preview.exitCode, `${preview.stdout}${preview.stderr}`).toBe(0);
+  const plan = readJson(preview.stdout).result.preview;
+
+  const crashed = await runKojoCli(
+    ["delete", "run", runId, "--project-id", identity, "--plan-key", plan.planKey, "--json"],
+    host.socketPath,
+    project,
+  );
+  expect(crashed.exitCode).not.toBe(0);
+  await host.crash();
+
+  const recoveredHost = await startKojoHostProcess({ storePath: hostStore.path });
+  cleanups.push(recoveredHost.stop);
+  const replay = await runKojoCli(
+    ["delete", "run", runId, "--project-id", identity, "--plan-key", plan.planKey, "--json"],
+    recoveredHost.socketPath,
+    project,
+  );
+  expect(replay.exitCode, `${replay.stdout}${replay.stderr}`).toBe(0);
+  expect(readJson(replay.stdout).result.receipt.warnings).toEqual([
+    expect.objectContaining({ code: "provider-unsupported" }),
+  ]);
 });
 
 it("deletes a top-level Run together with its complete Child Run tree", async () => {
@@ -583,6 +658,19 @@ it("expires a CLI Plan Key at exactly fifteen minutes", async () => {
   );
   expect(expired.exitCode).toBe(4);
   expect(readJson(expired.stdout).error.code).toBe("plan-expired");
+  const database = new Database(join(project, ".kojo", "kojo.sqlite"), {
+    readonly: true,
+    strict: true,
+  });
+  try {
+    expect(
+      database
+        .query("SELECT count(*) AS count FROM kojo_control_requests WHERE request_key = ?")
+        .get(plan.planKey),
+    ).toEqual({ count: 0 });
+  } finally {
+    database.close();
+  }
 });
 
 it("deletes only final occurrences before the boundary and rejects wildcard selection", async () => {

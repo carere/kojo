@@ -27,6 +27,9 @@ export interface DeletionWorkItem {
   readonly engineGeneration?: number;
   readonly scheduleKey?: string;
   readonly scheduledAtMs?: number;
+  readonly scheduleRevision?: string;
+  /** Durable capability observed from the Run's Provider evidence. */
+  readonly providerCleanup?: "supported" | "unsupported";
   /** Project-relative, never absolute, and only used by the Host adapter. */
   readonly relativePath?: string;
 }
