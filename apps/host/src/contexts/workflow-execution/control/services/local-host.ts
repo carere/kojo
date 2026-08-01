@@ -17,6 +17,7 @@ import {
   type ProjectRetentionMutationResult,
   type ProjectRetentionQueryResult,
   type ProjectRetentionSetInput,
+  type RequestKey,
   type WorkflowRunListResult,
   type WorkflowRunMutationResult,
   type WorkflowRunQueryResult,
@@ -197,13 +198,19 @@ const deletionRequestDiagnostic = (scope: DeletionScope) => (result: DeletionRes
     ? {}
     : deletionDiagnostic(scope.identity)(result);
 
-const blockedDeletionPreview = (scope: DeletionScope): DeletionResult => ({
+const blockedDeletionRequest = (
+  scope: DeletionScope,
+  planKey: RequestKey | undefined,
+): DeletionResult => ({
   ok: false,
-  requestKey: newDeletionPlanKey(),
+  requestKey: planKey ?? newDeletionPlanKey(),
   error: {
     code: "deletion-in-progress",
     message: "Another deletion is already making this Project unavailable.",
-    next: "Retry this deletion preview after the original pending confirmed deletion completes.",
+    next:
+      planKey === undefined
+        ? "Retry this deletion preview after the original pending confirmed deletion completes."
+        : "Retry the original pending confirmed Plan Key after the Host resumes the pending deletion; do not retry this superseding Plan Key.",
     affectedResource:
       scope.kind === "run"
         ? { kind: "run", identity: scope.identity, runId: scope.runId }
@@ -343,16 +350,18 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
             hostIdentity,
             "DeleteExecutionData",
             String(options.requestId),
-            deleteExecutionData(scope, planKey),
+            deleteExecutionData(scope, planKey, {
+              diagnosticLockHeld: planKey !== undefined,
+            }),
             deletionRequestDiagnostic(scope),
           );
-          if (planKey !== undefined) return yield* request;
           const runtime = yield* ProjectRuntime;
           if (runtime.coordinateProjectDiagnosticRequest === undefined) return yield* request;
           return yield* runtime.coordinateProjectDiagnosticRequest(
             scope.identity,
             request,
-            Effect.succeed(blockedDeletionPreview(scope)),
+            Effect.succeed(blockedDeletionRequest(scope, planKey)),
+            { reserveDeletionFence: planKey !== undefined },
           );
         }),
       ShowProjectReadiness: ({ identity }, options) =>

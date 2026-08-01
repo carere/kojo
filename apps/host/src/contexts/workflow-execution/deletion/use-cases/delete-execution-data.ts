@@ -547,9 +547,15 @@ const resumeDeletion = (
     return yield* Effect.succeed(targetFreeReceipt(receipt));
   });
 
+export interface DeleteExecutionDataOptions {
+  /** The local-host request already owns the Project diagnostic semaphore. */
+  readonly diagnosticLockHeld?: boolean;
+}
+
 export const deleteExecutionData = (
   scope: DeletionScope,
   suppliedPlanKey?: RequestKey,
+  options: DeleteExecutionDataOptions = {},
 ): Effect.Effect<
   DeletionResult,
   never,
@@ -636,60 +642,62 @@ export const deleteExecutionData = (
     const backend = yield* WorkflowBackend;
     const provider = yield* ProviderRuntime;
     const diagnosticLogger = yield* HostDiagnosticLogger;
-    const coordinateDeletion = runtime.coordinateDeletion ?? runtime.coordinateLifecycle;
-    const result = yield* coordinateDeletion(
-      project,
-      Effect.gen(function* () {
-        const started = yield* repository.begin(project, plan as DeletionPlanRecord, clock.now());
-        if (started._tag === "completed") return targetFreeReceipt(started.receipt);
-        if (started._tag === "conflict") {
-          return errorFor(
-            "plan-drifted",
-            "A checked deletion scope or precondition changed before confirmation.",
-            "Create a new deletion preview using the current complete scope.",
-            scope,
-            suppliedPlanKey,
-          );
-        }
-        if (started._tag === "in-progress") {
-          return errorFor(
-            "deletion-in-progress",
-            "Another deletion is already making this Project unavailable.",
-            "Retry the original pending confirmed Plan Key after the Host resumes the pending deletion; do not retry this superseding Plan Key.",
-            scope,
-            suppliedPlanKey,
-          );
-        }
-        yield* hooks.afterPhase("quiescing");
-        if (!(yield* ensureBackendForDeletion(project, backend))) {
-          yield* repository.setPhase(
-            project,
-            started.deletionId,
-            "needs-attention",
-            "engine-owner-unavailable",
-          );
-          return errorFor(
-            "deletion-needs-attention",
-            "The Project Runtime could not be reacquired for deletion recovery.",
-            "Restart or repair the Project Runtime and retry the same confirmed deletion command.",
-            scope,
-            suppliedPlanKey,
-          );
-        }
-        return yield* resumeDeletion(
-          project,
-          plan as DeletionPlanRecord,
-          started.deletionId,
-          clock.now,
-          repository,
-          backend,
-          provider,
-          NoFollowDisposableFileUnlinker,
-          hooks,
-          diagnosticLogger,
+    const deletionOperation = Effect.gen(function* () {
+      const started = yield* repository.begin(project, plan as DeletionPlanRecord, clock.now());
+      if (started._tag === "completed") return targetFreeReceipt(started.receipt);
+      if (started._tag === "conflict") {
+        return errorFor(
+          "plan-drifted",
+          "A checked deletion scope or precondition changed before confirmation.",
+          "Create a new deletion preview using the current complete scope.",
+          scope,
+          suppliedPlanKey,
         );
-      }),
-    );
+      }
+      if (started._tag === "in-progress") {
+        return errorFor(
+          "deletion-in-progress",
+          "Another deletion is already making this Project unavailable.",
+          "Retry the original pending confirmed Plan Key after the Host resumes the pending deletion; do not retry this superseding Plan Key.",
+          scope,
+          suppliedPlanKey,
+        );
+      }
+      yield* hooks.afterPhase("quiescing");
+      if (!(yield* ensureBackendForDeletion(project, backend))) {
+        yield* repository.setPhase(
+          project,
+          started.deletionId,
+          "needs-attention",
+          "engine-owner-unavailable",
+        );
+        return errorFor(
+          "deletion-needs-attention",
+          "The Project Runtime could not be reacquired for deletion recovery.",
+          "Restart or repair the Project Runtime and retry the same confirmed deletion command.",
+          scope,
+          suppliedPlanKey,
+        );
+      }
+      return yield* resumeDeletion(
+        project,
+        plan as DeletionPlanRecord,
+        started.deletionId,
+        clock.now,
+        repository,
+        backend,
+        provider,
+        NoFollowDisposableFileUnlinker,
+        hooks,
+        diagnosticLogger,
+      );
+    });
+    const result =
+      runtime.coordinateDeletion === undefined
+        ? yield* runtime.coordinateLifecycle(project, deletionOperation)
+        : yield* runtime.coordinateDeletion(project, deletionOperation, {
+            diagnosticLockHeld: options.diagnosticLockHeld === true,
+          });
     if (result.ok && result.kind === "completed" && scope.kind === "project") {
       // Rebuild only the declared schedule rows. Reconciliation inserts them
       // disabled, preserving source and identity while keeping the reset

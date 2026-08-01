@@ -20,6 +20,7 @@ export interface ProjectRuntimeShape {
   readonly coordinateDeletion?: <A>(
     project: ProjectSnapshot,
     operation: Effect.Effect<A>,
+    options?: { readonly diagnosticLockHeld?: boolean },
   ) => Effect.Effect<A>;
   /**
    * Runs a diagnostic-producing request in the Project serialization slot.
@@ -30,6 +31,7 @@ export interface ProjectRuntimeShape {
     identity: ProjectIdentity,
     operation: Effect.Effect<A, E, R>,
     blocked: Effect.Effect<A, E, R>,
+    options?: { readonly reserveDeletionFence?: boolean },
   ) => Effect.Effect<A, E, R>;
   readonly coordinateWork: <A>(
     project: ProjectSnapshot,
@@ -214,10 +216,18 @@ export const ProjectRuntimeLive = Layer.effect(
       );
     };
     return {
-      coordinateDeletion: <A>(project: ProjectSnapshot, operation: Effect.Effect<A>) =>
+      coordinateDeletion: <A>(
+        project: ProjectSnapshot,
+        operation: Effect.Effect<A>,
+        options?: { readonly diagnosticLockHeld?: boolean },
+      ) =>
         Effect.suspend(() => {
           incrementDeletionFence(project.identity);
-          return serialize(project, diagnosticLockFor(project.identity).withPermit(operation)).pipe(
+          const coordinated =
+            options?.diagnosticLockHeld === true
+              ? operation
+              : diagnosticLockFor(project.identity).withPermit(operation);
+          return serialize(project, coordinated).pipe(
             Effect.ensuring(Effect.sync(() => decrementDeletionFence(project.identity))),
           );
         }),
@@ -225,12 +235,18 @@ export const ProjectRuntimeLive = Layer.effect(
         identity: ProjectIdentity,
         operation: Effect.Effect<A, E, R>,
         blocked: Effect.Effect<A, E, R>,
+        options?: { readonly reserveDeletionFence?: boolean },
       ) =>
-        Effect.suspend(() =>
-          (deletionFences.get(identity) ?? 0) > 0
-            ? blocked
-            : diagnosticLockFor(identity).withPermit(operation),
-        ),
+        Effect.suspend(() => {
+          if ((deletionFences.get(identity) ?? 0) > 0) return blocked;
+          if (options?.reserveDeletionFence !== true) {
+            return diagnosticLockFor(identity).withPermit(operation);
+          }
+          incrementDeletionFence(identity);
+          return diagnosticLockFor(identity)
+            .withPermit(operation)
+            .pipe(Effect.ensuring(Effect.sync(() => decrementDeletionFence(identity))));
+        }),
       coordinateRegistration: <A>(
         project: ProjectSnapshot,
         beforeMigration: Effect.Effect<{
