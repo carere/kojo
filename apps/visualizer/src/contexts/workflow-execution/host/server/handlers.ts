@@ -11,6 +11,8 @@ import {
   refreshProjectReadiness,
   repairProjectReadiness,
   resumeWorkflowRun,
+  revealWorkflowRun,
+  startWorkflowRun,
   stopWorkflowRun,
   subscribeControl,
 } from "../use-cases/get-host-overview";
@@ -55,6 +57,17 @@ export const CompleteWorkflowDeferredHandler = VisualizerApi.toLayerHandler(
 export const StopWorkflowRunHandler = VisualizerApi.toLayerHandler(
   "StopWorkflowRun",
   ({ identity, runId, requestKey }) => stopWorkflowRun(identity, runId, requestKey),
+);
+
+export const StartWorkflowRunHandler = VisualizerApi.toLayerHandler(
+  "StartWorkflowRun",
+  ({ identity, workflowKey, workflowRevision, input, requestKey }) =>
+    startWorkflowRun(identity, workflowKey, workflowRevision, input, requestKey),
+);
+
+export const RevealWorkflowRunHandler = VisualizerApi.toLayerHandler(
+  "RevealWorkflowRun",
+  ({ identity, runId }) => revealWorkflowRun(identity, runId),
 );
 
 export const ReadExecutionTraceHandler = VisualizerApi.toLayerHandler(

@@ -88,6 +88,24 @@ const artifactDownloadHref = (selection: ExecutionTraceSelection, artifactId: st
   return `/api/artifacts?${search}`;
 };
 
+const eventEvidenceLabel = (kind: string) => {
+  if (kind === "artifact.unavailable")
+    return "Artifact unavailable or pruned; trace evidence retained";
+  if (kind === "reconciliation.observation-restored") return "Recovery evidence restored";
+  if (kind === "run.stop-requested") return "Safe stop requested";
+  if (kind === "run.suspended") return "Workflow Run suspended";
+  if (kind === "run.resumed") return "Workflow Run resumed";
+  if (kind === "activity.attempt-started") return "Activity attempt started";
+  if (kind === "activity.result-reused") return "Activity replay reused a durable result";
+  if (kind.startsWith("activity.")) return "Activity attempt evidence";
+  if (kind.startsWith("clock.")) return "Schedule timing evidence";
+  if (kind.startsWith("boundary.")) return "Execution boundary evidence";
+  if (kind.startsWith("child.")) return "Child Workflow Run relationship evidence";
+  if (kind.startsWith("deferred.")) return "Workflow Deferred evidence";
+  if (kind.startsWith("artifact.")) return "Artifact evidence";
+  return kind.replaceAll(".", " ");
+};
+
 /** Chronological evidence is deliberately rendered apart from the Run tree. */
 export function ExecutionTrace(props: ExecutionTraceProps) {
   const [liveTrace, setLiveTrace] = createSignal<ExecutionTracePage | undefined>();
@@ -249,9 +267,23 @@ export function ExecutionTrace(props: ExecutionTraceProps) {
                 <ol class="space-y-1 font-mono text-xs">
                   <For each={page().events}>
                     {(event) => (
-                      <li data-event-sequence={event.sequence} data-run-id={event.runId}>
-                        <span class="text-muted-foreground">{event.sequence}</span> {event.kind}@
-                        {event.kindVersion}
+                      <li
+                        data-event-sequence={event.sequence}
+                        data-event-family={event.kind.split(".")[0]}
+                        data-run-id={event.runId}
+                        aria-label={`Event ${event.sequence}: ${eventEvidenceLabel(event.kind)}`}
+                      >
+                        <span class="text-muted-foreground">{event.sequence}</span>{" "}
+                        <span class="text-primary">{eventEvidenceLabel(event.kind)}</span>{" "}
+                        <span class="text-muted-foreground">
+                          ({event.kind}@{event.kindVersion})
+                        </span>{" "}
+                        <time
+                          class="text-muted-foreground"
+                          dateTime={new Date(event.recordedAtMs).toISOString()}
+                        >
+                          {new Date(event.recordedAtMs).toLocaleTimeString()}
+                        </time>
                         <Show when={event.compatibility !== "supported"}>
                           <span class="text-amber-600"> · {event.compatibility}</span>
                         </Show>
@@ -268,6 +300,12 @@ export function ExecutionTrace(props: ExecutionTraceProps) {
                               </a>
                             )}
                           </For>
+                        </Show>
+                        <Show when={event.kind === "artifact.unavailable"}>
+                          <span class="text-amber-600">
+                            {" "}
+                            · bytes unavailable; no inline content rendered
+                          </span>
                         </Show>
                       </li>
                     )}

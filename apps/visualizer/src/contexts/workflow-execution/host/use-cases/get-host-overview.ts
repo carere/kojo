@@ -11,6 +11,8 @@ import type {
   ProjectReadinessActionKey,
   RequestKey,
   WorkflowRunId,
+  WorkflowRunQueryResult,
+  WorkflowRunStartResult,
 } from "@kojo/control";
 import { Effect, Stream } from "effect";
 import { HostOverviewError } from "../../../shared/models/contracts";
@@ -149,6 +151,48 @@ export const stopWorkflowRun = (
           }),
         )
       : client.stopWorkflowRun(identity, runId, requestKey).pipe(Effect.mapError(hostError)),
+  );
+
+export const startWorkflowRun = (
+  identity: ProjectIdentity,
+  workflowKey: string,
+  workflowRevision: string,
+  input: unknown,
+  requestKey: RequestKey,
+) =>
+  Effect.flatMap(HostControlClient, (client) =>
+    client.startWorkflowRun === undefined
+      ? Effect.fail(
+          new HostOverviewError({
+            code: "host-unavailable",
+            message: "The visualizer Host client cannot start Workflow Runs.",
+            next: "Restart the visualizer and try again.",
+          }),
+        )
+      : (client
+          .startWorkflowRun(identity, workflowKey, workflowRevision, input, requestKey)
+          .pipe(Effect.mapError(hostError)) as Effect.Effect<
+          WorkflowRunStartResult,
+          HostOverviewError
+        >),
+  );
+
+export const revealWorkflowRun = (identity: ProjectIdentity, runId: WorkflowRunId) =>
+  Effect.flatMap(HostControlClient, (client) =>
+    client.revealWorkflowRun === undefined
+      ? Effect.fail(
+          new HostOverviewError({
+            code: "host-unavailable",
+            message: "The visualizer Host client cannot reveal Workflow Run data.",
+            next: "Restart the visualizer and try again.",
+          }),
+        )
+      : (client
+          .revealWorkflowRun(identity, runId)
+          .pipe(Effect.mapError(hostError)) as Effect.Effect<
+          WorkflowRunQueryResult,
+          HostOverviewError
+        >),
   );
 
 export const refreshProjectReadiness = (identity: ProjectIdentity) =>

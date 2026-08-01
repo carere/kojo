@@ -13,6 +13,8 @@ import {
   RequestKey,
   WorkflowRunId,
   WorkflowRunMutationResult,
+  WorkflowRunQueryResult,
+  WorkflowRunStartResult,
   WorkflowScheduleMutationResult,
 } from "@kojo/control";
 import { Schema } from "effect";
@@ -102,6 +104,24 @@ export const StopWorkflowRun = Rpc.make("StopWorkflowRun", {
   error: HostOverviewError,
 });
 
+export const StartWorkflowRun = Rpc.make("StartWorkflowRun", {
+  payload: {
+    identity: ProjectIdentity,
+    workflowKey: Schema.String,
+    workflowRevision: Schema.String,
+    input: Schema.Unknown,
+    requestKey: RequestKey,
+  },
+  success: WorkflowRunStartResult,
+  error: HostOverviewError,
+});
+
+export const RevealWorkflowRun = Rpc.make("RevealWorkflowRun", {
+  payload: { identity: ProjectIdentity, runId: WorkflowRunId },
+  success: WorkflowRunQueryResult,
+  error: HostOverviewError,
+});
+
 /** Same-origin proxy for the Host-owned chronological Execution Trace. */
 export const ReadExecutionTrace = Rpc.make("ReadExecutionTrace", {
   payload: ExecutionTraceReadInput.fields,
@@ -134,6 +154,8 @@ export const VisualizerApi = RpcGroup.make(
   ResumeWorkflowRun,
   CompleteWorkflowDeferred,
   StopWorkflowRun,
+  StartWorkflowRun,
+  RevealWorkflowRun,
   ReadExecutionTrace,
   SubscribeControl,
   AcknowledgeControlSubscription,

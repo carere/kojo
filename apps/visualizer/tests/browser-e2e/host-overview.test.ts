@@ -1,9 +1,9 @@
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Browser, type BrowserContext, chromium } from "playwright";
-import { afterEach, expect, test } from "vitest";
+import { afterAll, afterEach, expect, test } from "vitest";
 import { makeTemporaryDirectory, runKojoCli } from "../../../../tests/support/cli-process";
 import {
   type KojoHostProcessFixture,
@@ -24,9 +24,15 @@ interface TemporaryDirectory {
 }
 
 const fixtureStartupTimeoutMs = 30_000;
+const browserLaunchTimeoutMs = 10_000;
 const browserAssertionTimeoutMs = 30_000;
 const artifactDownloadTimeoutMs = 10_000;
+const hostShutdownTimeoutMs = 5_000;
+const temporaryDirectoryCleanupTimeoutMs = 5_000;
 let fixture: Fixture | undefined;
+let forcedHostTeardownFallbacks = 0;
+let forcedVisualizerTeardownFallbacks = 0;
+let forcedBrowserTeardownFallbacks = 0;
 const temporaryDirectories: Array<() => Promise<void>> = [];
 const workflowPackagePath = fileURLToPath(
   new URL("../../../../packages/workflow", import.meta.url),
@@ -67,6 +73,12 @@ export default defineConfig({
 });
 `;
 
+afterAll(() => {
+  console.info(
+    `Fixture forced teardown fallbacks: Host=${forcedHostTeardownFallbacks}, Vite=${forcedVisualizerTeardownFallbacks}, Chromium=${forcedBrowserTeardownFallbacks}`,
+  );
+});
+
 afterEach(async () => {
   const closingFixture = fixture;
   fixture = undefined;
@@ -91,13 +103,17 @@ test("loads the Host-authoritative Project state and reconciles Navigator prefer
   const page = await fixture.browser.newPage();
 
   await page.goto(`http://127.0.0.1:${fixture.port}`, { waitUntil: "domcontentloaded" });
-  await page.getByText("Connected to Kojo Host 0.1.0").waitFor({ state: "visible" });
+  await within(
+    "Project fixture page HostOverview readiness",
+    page.getByText("Connected to Kojo Host 0.1.0").waitFor({ state: "visible" }),
+    browserAssertionTimeoutMs,
+  );
   await page.getByText("No Kojo Projects yet.").waitFor({ state: "visible" });
 
   expect(await page.getByText("Connected to Kojo Host 0.1.0").isVisible()).toBe(true);
   expect(await page.getByText("No Kojo Projects yet.").isVisible()).toBe(true);
   const directory = await makeTemporaryDirectory("kojo-navigator-");
-  temporaryDirectories.push(directory.cleanup);
+  temporaryDirectories.push(() => cleanupTemporaryDirectory(directory));
   await mkdir(join(directory.path, "node_modules", "@kojo"), { recursive: true });
   await symlink(
     workflowPackagePath,
@@ -164,9 +180,26 @@ export default defineConfig({
   await expect
     .poll(() => page.locator("body").innerText(), { timeout: browserAssertionTimeoutMs })
     .toContain(secondIdentity);
+  const projects = page.locator('[aria-label="Kojo Projects"] button[data-project-identity]');
+  await expect.poll(() => projects.count(), { timeout: browserAssertionTimeoutMs }).toBe(2);
+  expect(await projects.nth(0).getAttribute("data-project-identity")).toBe(secondIdentity);
+  expect(await projects.nth(0).getAttribute("aria-current")).toBe("page");
+  expect(await projects.nth(1).getAttribute("data-project-identity")).toBe(firstIdentity);
+  await projects.nth(1).click();
+  const graphNodes = page.locator("[data-graph-node]");
+  const graphNodeCountBeforeFreshStart = await graphNodes.count();
+  await page.getByRole("button", { name: "Start a fresh Workflow Run", exact: true }).click();
+  await page.getByLabel("Fresh Workflow Run input").fill('"from-browser"');
+  await page.getByRole("button", { name: "Start fresh", exact: true }).click();
+  await expect
+    .poll(() => graphNodes.count(), { timeout: browserAssertionTimeoutMs })
+    .toBeGreaterThan(graphNodeCountBeforeFreshStart);
+  await page.getByRole("button", { name: "Review warning & reveal", exact: true }).click();
+  await page.getByRole("button", { name: "Reveal this view", exact: true }).click();
+  await page.getByText("Explicit reveal active").waitFor({ state: "visible" });
   await page
     .getByLabel("Accepted Workflow Definitions")
-    .getByText(/^echo /)
+    .getByText("echo 1", { exact: true })
     .waitFor({ state: "visible" });
   const schedules = page.getByLabel("Workflow Schedules");
   const initialScheduleText = await schedules.innerText();
@@ -177,12 +210,14 @@ export default defineConfig({
   await page.getByRole("button", { name: "Enable" }).click();
   await page.getByRole("button", { name: "Disable" }).waitFor({ state: "visible" });
   expect(await schedules.innerText()).toContain("Enabled · available");
-  const projects = page.getByRole("navigation", { name: "Kojo Projects" }).getByRole("button");
-  await expect.poll(() => projects.count(), { timeout: browserAssertionTimeoutMs }).toBe(2);
-
-  expect(await projects.nth(0).getAttribute("data-project-identity")).toBe(secondIdentity);
-  expect(await projects.nth(0).getAttribute("aria-current")).toBe("page");
-  expect(await projects.nth(1).getAttribute("data-project-identity")).toBe(firstIdentity);
+  await projects.nth(0).click();
+  await schedules.getByText("No Workflow Schedules yet.").waitFor({ state: "visible" });
+  expect(
+    await page
+      .getByLabel("Accepted Workflow Definitions")
+      .getByText("echo 1", { exact: true })
+      .count(),
+  ).toBe(0);
   const stored = await page.evaluate(() =>
     JSON.parse(window.localStorage.getItem("kojo.navigator.preferences") ?? "null"),
   );
@@ -191,6 +226,18 @@ export default defineConfig({
     order: [secondIdentity, firstIdentity],
     selectedProjectIdentity: secondIdentity,
   });
+
+  await page.setViewportSize({ width: 900, height: 720 });
+  expect(
+    await page.getByRole("separator", { name: "Resize Project resource navigator" }).isVisible(),
+  ).toBe(false);
+  expect(
+    await page.getByRole("complementary", { name: "Project resource navigator" }).isVisible(),
+  ).toBe(true);
+  expect(await page.getByRole("complementary", { name: "Run inspection panel" }).isVisible()).toBe(
+    true,
+  );
+  await page.setViewportSize({ width: 1280, height: 720 });
 
   await page.evaluate(
     ({ firstIdentity, secondIdentity }) => {
@@ -246,7 +293,7 @@ test("force-reclaims an owned browser process when bounded shutdown misses its d
     await terminateOwnedBrowser(profile.path);
     if (browser.exitCode === null) browser.kill("SIGKILL");
     await settlesWithin(browser.exited);
-    await profile.cleanup();
+    await cleanupTemporaryDirectory(profile);
   }
 });
 
@@ -287,7 +334,7 @@ test("force-reclaims an owned browser process when both Playwright closes fail",
     await terminateOwnedBrowser(profile.path);
     if (browser.exitCode === null) browser.kill("SIGKILL");
     await settlesWithin(browser.exited);
-    await profile.cleanup();
+    await cleanupTemporaryDirectory(profile);
   }
 });
 
@@ -309,11 +356,18 @@ test("downloads a real Artifact as an inert attachment instead of rendering it",
   fixture = await startFixture();
   const page = await within("browser page startup", fixture.browser.newPage());
   const origin = `http://127.0.0.1:${fixture.port}`;
-  await within("visualizer page navigation", page.goto(origin, { waitUntil: "domcontentloaded" }));
-  await page.getByText("Connected to Kojo Host 0.1.0").waitFor({ state: "visible" });
+  await page.goto(origin, {
+    waitUntil: "domcontentloaded",
+    timeout: fixtureStartupTimeoutMs,
+  });
+  await within(
+    "Artifact test page HostOverview readiness",
+    page.getByText("Connected to Kojo Host 0.1.0").waitFor({ state: "visible" }),
+    browserAssertionTimeoutMs,
+  );
 
   const directory = await makeTemporaryDirectory("kojo-artifact-download-browser-");
-  temporaryDirectories.push(directory.cleanup);
+  temporaryDirectories.push(() => cleanupTemporaryDirectory(directory));
   await mkdir(join(directory.path, "node_modules", "@kojo"), { recursive: true });
   await symlink(
     workflowPackagePath,
@@ -401,10 +455,10 @@ test("downloads a real Artifact as an inert attachment instead of rendering it",
   // The page loaded before the CLI created the Project and Workflow Run. Refresh the
   // Host-authoritative overview before exercising the real download control.
   await page.reload({ waitUntil: "domcontentloaded" });
-  const runButton = page.getByRole("button", { name: runId });
+  const runButton = page.getByRole("button", { name: runId, exact: true });
   await runButton.waitFor({ state: "visible", timeout: browserAssertionTimeoutMs });
   await runButton.click();
-  const artifactLink = page.getByRole("link", { name: `Download Artifact ${artifactId}` });
+  const artifactLink = page.getByRole("link", { name: `Download Artifact ${artifactId}` }).last();
   await artifactLink.waitFor({ state: "visible", timeout: browserAssertionTimeoutMs });
   const artifactDownloadControl = await within(
     "Artifact download control handle",
@@ -435,14 +489,16 @@ const startFixture = async (): Promise<Fixture> => {
   const browserProfile = await makeTemporaryDirectory("kojo-browser-profile-");
   let host: KojoHostProcessFixture | undefined;
   let visualizer: Bun.Subprocess | undefined;
+  let browser: BrowserContext | undefined;
   let visualizerStderr: Promise<string> = Promise.resolve("");
   try {
     host = await startKojoHostProcess();
+    const hostProcess = host;
     visualizer = Bun.spawn(
       ["bun", "vite", "dev", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
       {
         cwd: visualizerDirectory,
-        env: { ...process.env, KOJO_HOST_SOCKET: host.socketPath },
+        env: { ...process.env, KOJO_HOST_SOCKET: hostProcess.socketPath },
         stdout: "ignore",
         stderr: "pipe",
       },
@@ -452,35 +508,106 @@ const startFixture = async (): Promise<Fixture> => {
       try {
         const origin = `http://127.0.0.1:${port}`;
         const page = await fetch(origin, { signal: AbortSignal.timeout(1_000) });
-        if (!page.ok) return false;
-        const api = await fetch(`${origin}/api/artifacts`, {
-          signal: AbortSignal.timeout(1_000),
-        });
-        return api.status === 400;
+        return page.ok;
       } catch {
         return false;
       }
     }, visualizer);
 
+    browser = await chromium.launchPersistentContext(browserProfile.path, {
+      headless: true,
+      timeout: browserLaunchTimeoutMs,
+    });
+    const warmupPage = await browser.newPage();
+    try {
+      await warmupPage.goto(`http://127.0.0.1:${port}`, {
+        waitUntil: "domcontentloaded",
+        timeout: fixtureStartupTimeoutMs,
+      });
+      await warmupPage.getByText("Connected to Kojo Host 0.1.0").waitFor({
+        state: "visible",
+        timeout: fixtureStartupTimeoutMs,
+      });
+    } finally {
+      await warmupPage.close();
+    }
+
     return {
-      browser: await chromium.launchPersistentContext(browserProfile.path, { headless: true }),
+      browser,
       browserProfile,
       host,
       port,
       visualizer,
     };
   } catch (error) {
-    await Promise.allSettled([
-      ...(visualizer === undefined ? [] : [stopVisualizer(visualizer)]),
-      ...(host === undefined ? [] : [host.crash()]),
-      terminateOwnedBrowser(browserProfile.path),
-    ]);
-    await Promise.allSettled([browserProfile.cleanup()]);
-    throw withFixtureStderr(error, await visualizerStderr);
+    const ownedHostProcessIds =
+      host === undefined ? new Set<number>() : await collectOwnedHostProcessIds(host.processId);
+    const ownedVisualizerProcessIds =
+      visualizer === undefined ? new Set<number>() : await collectOwnedProcessIds([visualizer.pid]);
+    const ownedBrowserProcessIds = await collectOwnedBrowserProcessIds(browserProfile.path);
+    const cleanupErrors: Array<unknown> = [];
+    if (browser !== undefined) {
+      try {
+        await closeBrowser(browser, browserProfile.path);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    } else {
+      try {
+        await terminateOwnedBrowser(browserProfile.path);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    if (visualizer !== undefined) {
+      try {
+        await stopVisualizer(visualizer);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    if (host !== undefined) {
+      try {
+        await stopHost(host, ownedHostProcessIds);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    for (const [label, processIds] of [
+      ["Chromium", ownedBrowserProcessIds],
+      ["Vite/esbuild", ownedVisualizerProcessIds],
+    ] as const) {
+      try {
+        await reapOwnedProcessIds(label, processIds);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    if (host !== undefined) {
+      try {
+        await assertHostOwnershipReaped(host, ownedHostProcessIds);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    try {
+      await cleanupTemporaryDirectory(browserProfile);
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    throw withFixtureStderr(
+      cleanupErrors.length === 0 ? error : new AggregateError([error, ...cleanupErrors]),
+      await visualizerStderr,
+    );
   }
 };
 
 const closeFixture = async (closingFixture: Fixture) => {
+  const ownedHostProcessIds = await collectOwnedHostProcessIds(closingFixture.host.processId);
+  const ownedVisualizerProcessIds = await collectOwnedProcessIds([closingFixture.visualizer.pid]);
+  const ownedBrowserProcessIds = await collectOwnedBrowserProcessIds(
+    closingFixture.browserProfile.path,
+  );
   let failure: unknown;
   try {
     await closeBrowser(closingFixture.browser, closingFixture.browserProfile.path);
@@ -493,16 +620,112 @@ const closeFixture = async (closingFixture: Fixture) => {
     failure ??= error;
   }
   try {
-    await closingFixture.host.crash();
+    await stopHost(closingFixture.host, ownedHostProcessIds);
   } catch (error) {
     failure ??= error;
   }
   try {
-    await closingFixture.browserProfile.cleanup();
+    if (await reapOwnedProcessIds("Chromium", ownedBrowserProcessIds)) {
+      forcedBrowserTeardownFallbacks += 1;
+    }
+  } catch (error) {
+    failure ??= error;
+  }
+  try {
+    if (await reapOwnedProcessIds("Vite/esbuild", ownedVisualizerProcessIds)) {
+      forcedVisualizerTeardownFallbacks += 1;
+    }
+  } catch (error) {
+    failure ??= error;
+  }
+  try {
+    await assertHostOwnershipReaped(closingFixture.host, ownedHostProcessIds);
+    if ((await ownedBrowserPids(closingFixture.browserProfile.path)).length > 0) {
+      throw new Error("Owned Chromium processes remained after bounded browser teardown.");
+    }
+  } catch (error) {
+    failure ??= error;
+  }
+  try {
+    await cleanupTemporaryDirectory(closingFixture.browserProfile);
+  } catch (error) {
+    failure ??= error;
+  }
+  try {
+    if (await pathExists(closingFixture.browserProfile.path)) {
+      throw new Error("Owned Chromium profile state remained after browser teardown.");
+    }
   } catch (error) {
     failure ??= error;
   }
   if (failure !== undefined) throw failure;
+};
+
+const stopHost = async (
+  host: KojoHostProcessFixture,
+  capturedOwnedProcessIds?: ReadonlySet<number>,
+) => {
+  const ownedHostProcessIds =
+    capturedOwnedProcessIds ?? (await collectOwnedHostProcessIds(host.processId));
+  const gracefulStop = host.stop().then(
+    () => ({ _tag: "succeeded" }) as const,
+    (error) => ({ _tag: "failed", error }) as const,
+  );
+  const outcome = await Promise.race([
+    gracefulStop,
+    Bun.sleep(hostShutdownTimeoutMs).then(() => ({ _tag: "timed-out" }) as const),
+  ]);
+  if (outcome._tag === "succeeded") {
+    try {
+      await assertHostOwnershipReaped(host, ownedHostProcessIds);
+      return;
+    } catch (error) {
+      forcedHostTeardownFallbacks += 1;
+      await forceReapHostOwnership(host, ownedHostProcessIds, error);
+      return;
+    }
+  }
+
+  try {
+    await forceReapHostOwnership(host, ownedHostProcessIds);
+  } catch (error) {
+    if (outcome._tag === "failed")
+      throw new Error("Kojo Host graceful teardown failed.", { cause: error });
+    throw error;
+  }
+  await Promise.race([gracefulStop, Bun.sleep(cleanupDeadlineMs)]);
+  if (outcome._tag === "failed") throw outcome.error;
+  forcedHostTeardownFallbacks += 1;
+};
+
+const forceReapHostOwnership = async (
+  host: KojoHostProcessFixture,
+  ownedProcessIds: ReadonlySet<number>,
+  cause?: unknown,
+) => {
+  const crash = host.crash().then(
+    () => ({ _tag: "succeeded" }) as const,
+    (error) => ({ _tag: "failed", error }) as const,
+  );
+  let crashOutcome = await Promise.race([
+    crash,
+    Bun.sleep(cleanupDeadlineMs).then(() => ({ _tag: "timed-out" }) as const),
+  ]);
+  await reapOwnedProcessIds("Kojo Host", ownedProcessIds);
+
+  if (crashOutcome._tag === "timed-out") {
+    crashOutcome = await Promise.race([
+      crash,
+      Bun.sleep(cleanupDeadlineMs).then(() => ({ _tag: "timed-out" }) as const),
+    ]);
+  }
+  if (crashOutcome._tag === "timed-out") {
+    throw new Error("Kojo Host crash fallback did not settle within its bounded deadline.", {
+      cause,
+    });
+  }
+  if (crashOutcome._tag === "failed") throw crashOutcome.error;
+  await assertHostOwnershipReaped(host, ownedProcessIds);
 };
 
 const cleanupDeadlineMs = 1_000;
@@ -545,25 +768,52 @@ const closeFailureCause = (...outcomes: ReadonlyArray<TimedCloseOutcome | undefi
       outcome?._tag === "failed",
   )?.error;
 
+const isAlreadyClosedError = (error: unknown) =>
+  error instanceof Error && /closed|disconnected/i.test(error.message);
+
+const closePages = async (browser: Pick<BrowserContext, "pages">) => {
+  const outcomes = await Promise.all(
+    browser.pages().map((page) => closeWithin(observeClose(page.close()))),
+  );
+  const incomplete = outcomes.find((outcome) => outcome._tag !== "succeeded");
+  if (incomplete !== undefined) {
+    throw new Error(`A browser page close ${incomplete._tag} within its bounded deadline.`);
+  }
+};
+
 const closeBrowser = async (
-  browser: Pick<BrowserContext, "browser" | "close">,
+  browser: Pick<BrowserContext, "browser" | "close"> & Partial<Pick<BrowserContext, "pages">>,
   profilePath: string,
 ) => {
+  let pageCloseFailure: unknown;
+  if (browser.pages !== undefined) {
+    try {
+      await closePages({ pages: () => browser.pages?.() ?? [] });
+    } catch (error) {
+      pageCloseFailure = error;
+    }
+  }
   const contextClose = observeClose(browser.close());
   const initialContextOutcome = await closeWithin(contextClose);
-  if (initialContextOutcome._tag === "succeeded") return;
-
   let owningBrowserClose: Promise<CloseOutcome> | undefined;
   let owningBrowserOutcome: TimedCloseOutcome | undefined;
   const owningBrowser = browser.browser();
   if (owningBrowser !== null) {
     owningBrowserClose = observeClose(owningBrowser.close());
-    const [contextOutcome, browserOutcome] = await Promise.all([
-      closeWithin(contextClose),
-      closeWithin(owningBrowserClose),
-    ]);
-    owningBrowserOutcome = browserOutcome;
-    if (contextOutcome._tag === "succeeded" && browserOutcome._tag === "succeeded") return;
+    owningBrowserOutcome = await closeWithin(owningBrowserClose);
+    if (
+      owningBrowserOutcome._tag === "failed" &&
+      isAlreadyClosedError(owningBrowserOutcome.error)
+    ) {
+      owningBrowserOutcome = { _tag: "succeeded" };
+    }
+  }
+  if (
+    initialContextOutcome._tag === "succeeded" &&
+    (owningBrowserOutcome === undefined || owningBrowserOutcome._tag === "succeeded")
+  ) {
+    if (pageCloseFailure !== undefined) throw pageCloseFailure;
+    return;
   }
   if (!(await terminateOwnedBrowser(profilePath))) {
     throw new Error(
@@ -578,6 +828,7 @@ const closeBrowser = async (
     finalContextOutcome._tag === "succeeded" &&
     (finalOwningBrowserOutcome === undefined || finalOwningBrowserOutcome._tag === "succeeded")
   ) {
+    if (pageCloseFailure !== undefined) throw pageCloseFailure;
     return;
   }
   throw new Error(
@@ -589,6 +840,7 @@ const closeBrowser = async (
 interface ProcessEntry {
   readonly commandLine: string;
   readonly pid: number;
+  readonly parentPid?: number;
 }
 
 const ownsBrowserProfile = (commandLine: string, profilePath: string) => {
@@ -613,42 +865,138 @@ const ownedBrowserPidsFromProcessEntries = (
     .map(({ pid }) => pid);
 
 const processEntries = async (): Promise<ReadonlyArray<ProcessEntry>> => {
-  const search = Bun.spawn(["ps", "-axww", "-o", "pid=", "-o", "command="], {
+  const search = Bun.spawn(["ps", "-axww", "-o", "pid=", "-o", "ppid=", "-o", "command="], {
     stderr: "ignore",
     stdout: "pipe",
   });
   const [exitCode, stdout] = await Promise.all([search.exited, new Response(search.stdout).text()]);
   if (exitCode !== 0) return [];
   return stdout.split("\n").flatMap((line) => {
-    const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
     if (match === null) return [];
     const pid = Number.parseInt(match[1] ?? "", 10);
-    const commandLine = match[2] ?? "";
-    return Number.isSafeInteger(pid) && pid > 0 ? [{ commandLine, pid }] : [];
+    const parentPid = Number.parseInt(match[2] ?? "", 10);
+    const commandLine = match[3] ?? "";
+    return Number.isSafeInteger(pid) && pid > 0 ? [{ commandLine, parentPid, pid }] : [];
   });
+};
+
+const pathExists = async (path: string) => {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const isProcessRunning = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+
+const collectOwnedProcessIds = async (rootPids: ReadonlyArray<number>) => {
+  const processes = await processEntries();
+  const childrenByParent = new Map<number, Array<number>>();
+  for (const entry of processes) {
+    if (entry.parentPid === undefined) continue;
+    const children = childrenByParent.get(entry.parentPid) ?? [];
+    children.push(entry.pid);
+    childrenByParent.set(entry.parentPid, children);
+  }
+
+  const owned = new Set<number>(rootPids);
+  const pending = [...rootPids];
+  while (pending.length > 0) {
+    const parentPid = pending.pop();
+    if (parentPid === undefined) continue;
+    for (const childPid of childrenByParent.get(parentPid) ?? []) {
+      if (owned.has(childPid)) continue;
+      owned.add(childPid);
+      pending.push(childPid);
+    }
+  }
+  return owned;
+};
+
+const collectOwnedHostProcessIds = (rootPid: number) => collectOwnedProcessIds([rootPid]);
+
+const collectOwnedBrowserProcessIds = async (profilePath: string) =>
+  collectOwnedProcessIds(await ownedBrowserPids(profilePath));
+
+const assertProcessIdsReaped = (label: string, ownedProcessIds: ReadonlySet<number>) => {
+  const remainingProcessIds = [...ownedProcessIds].filter(isProcessRunning);
+  if (remainingProcessIds.length > 0) {
+    throw new Error(
+      `${label} ownership remained after teardown (PIDs: ${remainingProcessIds.join(", ")}).`,
+    );
+  }
+};
+
+const reapOwnedProcessIds = async (
+  label: string,
+  ownedProcessIds: ReadonlySet<number>,
+): Promise<boolean> => {
+  if ([...ownedProcessIds].every((pid) => !isProcessRunning(pid))) return false;
+
+  for (const pid of ownedProcessIds) {
+    if (pid === process.pid) {
+      throw new Error(`${label} ownership capture included the browser-test process.`);
+    }
+    if (!isProcessRunning(pid)) continue;
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  }
+
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if ([...ownedProcessIds].every((pid) => !isProcessRunning(pid))) break;
+    await Bun.sleep(25);
+  }
+  assertProcessIdsReaped(label, ownedProcessIds);
+  return true;
+};
+
+const assertHostOwnershipReaped = async (
+  host: KojoHostProcessFixture,
+  ownedProcessIds: ReadonlySet<number>,
+) => {
+  assertProcessIdsReaped("Kojo Host", ownedProcessIds);
+
+  const remainingStatePaths = [
+    host.socketPath,
+    `${host.socketPath}.lock`,
+    dirname(host.socketPath),
+  ];
+  const stateExists = await Promise.all(remainingStatePaths.map((path) => pathExists(path)));
+  const existingStatePaths = remainingStatePaths.filter((_, index) => stateExists[index]);
+  if (existingStatePaths.length > 0) {
+    throw new Error(
+      `Kojo Host socket/store state remained after teardown: ${existingStatePaths.join(", ")}.`,
+    );
+  }
 };
 
 const ownedBrowserPids = async (profilePath: string) =>
   ownedBrowserPidsFromProcessEntries(profilePath, await processEntries());
 
-const processCommandLine = async (pid: number) => {
-  const search = Bun.spawn(["ps", "-ww", "-p", String(pid), "-o", "command="], {
-    stderr: "ignore",
-    stdout: "pipe",
-  });
-  const [exitCode, stdout] = await Promise.all([search.exited, new Response(search.stdout).text()]);
-  return exitCode === 0 ? stdout.trim() : undefined;
-};
-
 const signalOwnedBrowser = async (signal: "SIGKILL" | "SIGTERM", profilePath: string) => {
-  for (const pid of await ownedBrowserPids(profilePath)) {
-    const commandLine = await processCommandLine(pid);
-    if (commandLine === undefined || !ownsBrowserProfile(commandLine, profilePath)) continue;
-    const processHandle = Bun.spawn(["kill", `-${signal}`, String(pid)], {
-      stderr: "ignore",
-      stdout: "ignore",
-    });
-    await processHandle.exited;
+  // The process snapshot already proves both the exact Chromium executable and
+  // the exact fixture profile. Kill that bounded ownership set directly so a
+  // per-PID `ps` probe cannot stall teardown under process contention.
+  const processIds = ownedBrowserPidsFromProcessEntries(profilePath, await processEntries());
+  for (const pid of processIds) {
+    try {
+      process.kill(pid, signal);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
   }
 };
 
@@ -720,6 +1068,13 @@ const within = async <Value>(label: string, operation: Promise<Value>, timeoutMs
     if (timeout !== undefined) clearTimeout(timeout);
   }
 };
+
+const cleanupTemporaryDirectory = (directory: TemporaryDirectory) =>
+  within(
+    `Temporary directory cleanup (${directory.path})`,
+    directory.cleanup(),
+    temporaryDirectoryCleanupTimeoutMs,
+  );
 
 const readStderr = (processHandle: Bun.Subprocess) =>
   processHandle.stderr instanceof ReadableStream

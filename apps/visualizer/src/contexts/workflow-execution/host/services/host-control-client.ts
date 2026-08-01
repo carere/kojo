@@ -13,6 +13,8 @@ import type {
   RequestKey,
   WorkflowRunId,
   WorkflowRunMutationResult,
+  WorkflowRunQueryResult,
+  WorkflowRunStartResult,
 } from "@kojo/control";
 import {
   defaultSocketPath,
@@ -95,6 +97,23 @@ export interface HostControlClientShape {
     requestKey: RequestKey,
   ) => Effect.Effect<
     WorkflowRunMutationResult,
+    LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+  >;
+  readonly startWorkflowRun?: (
+    identity: ProjectIdentity,
+    workflowKey: string,
+    workflowRevision: string,
+    input: unknown,
+    requestKey: RequestKey,
+  ) => Effect.Effect<
+    WorkflowRunStartResult,
+    LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+  >;
+  readonly revealWorkflowRun?: (
+    identity: ProjectIdentity,
+    runId: WorkflowRunId,
+  ) => Effect.Effect<
+    WorkflowRunQueryResult,
     LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
   >;
 }
@@ -212,6 +231,29 @@ export const HostControlClientLive = Layer.succeed(HostControlClient, {
       ),
     ) as unknown as Effect.Effect<
       WorkflowRunMutationResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >,
+  startWorkflowRun: (identity, workflowKey, workflowRevision, input, requestKey) =>
+    Effect.suspend(() =>
+      makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath()).startWorkflowRun(
+        identity,
+        workflowKey,
+        workflowRevision,
+        input,
+        requestKey,
+      ),
+    ) as unknown as Effect.Effect<
+      WorkflowRunStartResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >,
+  revealWorkflowRun: (identity, runId) =>
+    Effect.suspend(() =>
+      makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath()).revealWorkflowRun(
+        identity,
+        runId,
+      ),
+    ) as unknown as Effect.Effect<
+      WorkflowRunQueryResult,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >,
 });
