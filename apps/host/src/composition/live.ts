@@ -13,6 +13,10 @@ import {
   makeKojoControlServerLayer,
   startKojoHost,
 } from "../contexts/workflow-execution/control/services/local-host";
+import { DrizzleDeletionRepositoryLive } from "../contexts/workflow-execution/deletion/repositories/deletion-repository";
+import { DeletionClockLive } from "../contexts/workflow-execution/deletion/services/deletion-clock";
+import { DeletionHooksLive } from "../contexts/workflow-execution/deletion/services/deletion-hooks";
+import { DeletionPlanStoreLive } from "../contexts/workflow-execution/deletion/services/deletion-plan-store";
 import {
   DrizzleProjectRepositoryLive,
   DrizzleWorkflowRunRepositoryLive,
@@ -42,8 +46,9 @@ export const startLiveKojoHost = async () => {
   const protocol = RpcServer.layerProtocolSocketServer.pipe(
     Layer.provide([BunSocketServer.layer({ path: socketPath }), RpcSerialization.layerNdjson]),
   );
+  const providerRuntime = SandcastleProviderRuntimeLive;
   const workflowBackend = makeLocalWorkflowBackendLayer(hostIdentity).pipe(
-    Layer.provide(SandcastleProviderRuntimeLive),
+    Layer.provide(providerRuntime),
   );
   const projectRuntime = ProjectRuntimeLive.pipe(
     Layer.provide([
@@ -59,8 +64,13 @@ export const startLiveKojoHost = async () => {
     DrizzleProjectRepositoryLive,
     DrizzleWorkflowRunRepositoryLive,
     DrizzleWorkflowScheduleRepositoryLive,
+    DrizzleDeletionRepositoryLive,
+    DeletionClockLive,
+    DeletionHooksLive,
+    DeletionPlanStoreLive,
     retentionRepository,
     ScheduleClockLive,
+    providerRuntime,
     workflowBackend,
     projectRuntime,
   );

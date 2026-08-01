@@ -286,7 +286,10 @@ it("delivers one persisted occurrence after Host restart and preserves its linke
       deliveryAttemptCount: 0,
       outcome: "planned",
     });
-    expect(current.scheduledAtMs).toBeGreaterThan(Date.now());
+    // The Host can persist the next minute immediately before the wall clock
+    // crosses that minute. Keep the assertion about freshness without making
+    // the test depend on which side of the boundary this read observes.
+    expect(current.scheduledAtMs).toBeGreaterThan(Date.now() - 60_000);
     database
       .query(
         "UPDATE kojo_workflow_schedule_occurrences SET scheduled_at_ms = ?, resolved_input_json = ? WHERE schedule_key = 'morning-report' AND scheduled_at_ms = ?",

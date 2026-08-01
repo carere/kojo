@@ -12,6 +12,8 @@ export interface KojoHostProcessFixture {
 }
 
 export interface KojoHostProcessOptions {
+  readonly deletionClockPath?: string;
+  readonly deletionCrashPhase?: string;
   readonly storePath?: string;
 }
 
@@ -27,7 +29,17 @@ export const startKojoHostProcess = async (
   const socketPath = join(directory, "host.sock");
   const processHandle = Bun.spawn([process.execPath, join(workspaceRoot, "apps/host/main.ts")], {
     cwd: workspaceRoot,
-    env: { ...process.env, KOJO_HOST_SOCKET: socketPath, KOJO_HOST_STORE: directory },
+    env: {
+      ...process.env,
+      KOJO_HOST_SOCKET: socketPath,
+      KOJO_HOST_STORE: directory,
+      ...(options.deletionClockPath === undefined
+        ? {}
+        : { KOJO_TEST_DELETION_CLOCK_FILE: options.deletionClockPath }),
+      ...(options.deletionCrashPhase === undefined
+        ? {}
+        : { KOJO_TEST_DELETION_CRASH_PHASE: options.deletionCrashPhase }),
+    },
     stdout: "ignore",
     stderr: "pipe",
   });

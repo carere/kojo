@@ -108,6 +108,8 @@ describe("local Kojo Host control", () => {
               "artifacts:read",
               "retention:show",
               "retention:set",
+              "deletion:plan",
+              "deletion:confirm",
               "control:subscribe",
               "control:acknowledge",
             ],

@@ -3,6 +3,7 @@ import { chmod, open, readFile, unlink } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname } from "node:path";
 import {
+  type DeletionResult,
   type ExecutionArtifactDownloadResult,
   type ExecutionTraceExportResult,
   type ExecutionTraceQueryResult,
@@ -37,6 +38,7 @@ import {
   showProject,
   showWorkflowDefinition,
 } from "../../../workflow-authoring/projects/use-cases/manage-projects";
+import { deleteExecutionData } from "../../deletion/use-cases/delete-execution-data";
 import {
   assessProjectReadiness,
   repairProjectReadiness,
@@ -182,6 +184,11 @@ const retentionDiagnostic =
     ...(result.ok ? {} : { safeErrorCode: result.error.code }),
   });
 
+const deletionDiagnostic = (identity: ProjectIdentity) => (result: DeletionResult) => ({
+  projectIdentity: identity,
+  ...(result.ok ? {} : { safeErrorCode: result.error.code }),
+});
+
 const workflowRunDiagnostic =
   (identity: ProjectIdentity) =>
   (
@@ -303,6 +310,20 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           resetProjectRetention(identity, requestKey),
           retentionDiagnostic(identity),
         ),
+      DeleteExecutionData: ({ scope, planKey }, options) =>
+        Effect.gen(function* () {
+          const result = yield* withHostRequestDiagnostic(
+            hostIdentity,
+            "DeleteExecutionData",
+            String(options.requestId),
+            deleteExecutionData(scope, planKey),
+            deletionDiagnostic(scope.identity),
+          );
+          if (scope.kind === "project" && result.ok) {
+            yield* (yield* HostDiagnosticLogger).removeProject(scope.identity);
+          }
+          return result;
+        }),
       ShowProjectReadiness: ({ identity }, options) =>
         withHostRequestDiagnostic(
           hostIdentity,

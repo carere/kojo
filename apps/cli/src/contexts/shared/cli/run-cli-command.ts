@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
+  type DeletionScope,
   type ProjectCondition,
   ProjectIdentity as ProjectIdentitySchema,
   type ProjectReadinessActionKey,
@@ -33,6 +34,7 @@ import { runEffect } from "./cli-effect";
 import { canonicalSelectorPath, decodeRequestKey, parseOptions } from "./cli-options";
 import {
   type CliFailure,
+  deletionFailure,
   invalid,
   pendingRegistrationWarning,
   projectCursorFailure,
@@ -44,6 +46,7 @@ import {
   workflowRunFailure,
   workflowScheduleFailure,
   workflowScheduleOccurrenceFailure,
+  writeDeletionResult,
   writeFailure,
   writeProject,
   writeProjectReadiness,
@@ -73,6 +76,124 @@ export const runCliCommand = async (rawArgs: ReadonlyArray<string>) => {
   }
 
   if (args[0] === "trace") return runTraceCliCommand(args, json);
+
+  if (args[0] === "delete") {
+    const options = parseOptions(args.slice(2));
+    const operation = args[1];
+    const command = `delete.${operation ?? "unknown"}`;
+    const occurrenceOperation = operation === "occurrence" || operation === "occurrences";
+    if (
+      options === undefined ||
+      !["run", "occurrence", "occurrences", "schedule", "project"].includes(operation ?? "")
+    ) {
+      return writeFailure(
+        invalid("Run: kojo delete run|occurrence|schedule|project ..."),
+        json,
+        command,
+      );
+    }
+    if (
+      options.requestKey !== undefined ||
+      options.revision !== undefined ||
+      options.parentRunId !== undefined ||
+      options.cursor !== undefined ||
+      options.limit !== undefined ||
+      options.input !== undefined ||
+      options.value !== undefined ||
+      options.valueFile !== undefined ||
+      options.conditions.length > 0 ||
+      options.outcomes.length > 0 ||
+      options.states.length > 0 ||
+      options.workflowKeys.length > 0 ||
+      (!occurrenceOperation && options.scheduleKeys.length > 0) ||
+      (!occurrenceOperation && options.before !== undefined) ||
+      (occurrenceOperation && options.before === undefined) ||
+      (operation === "project" && options.projectId === undefined) ||
+      (operation !== "project" &&
+        options.projectId !== undefined &&
+        options.projectPath !== undefined) ||
+      (operation === "project" && options.projectPath !== undefined) ||
+      (operation === "run" && options.args.length !== 1) ||
+      (operation === "schedule" && options.args.length !== 1) ||
+      (occurrenceOperation && options.args.length !== 0) ||
+      (operation === "project" && options.args.length !== 0) ||
+      options.args.some(
+        (argument) => argument === "--yes" || argument === "--force" || argument === "*",
+      ) ||
+      options.scheduleKeys.some((key) => key === "*" || key.length === 0)
+    ) {
+      return writeFailure(
+        invalid(
+          "Run: kojo delete run <Run Identity> [--plan-key <Plan Key>] [--project <path>|--project-id <Project Identity>] or kojo delete occurrence --before <ISO UTC instant> [--schedule <Schedule Key>] [--plan-key <Plan Key>] [--project <path>|--project-id <Project Identity>] or kojo delete schedule <Schedule Key> [--plan-key <Plan Key>] [--project <path>|--project-id <Project Identity>] or kojo delete project --project-id <Project Identity> [--plan-key <Plan Key>]",
+        ),
+        json,
+        command,
+      );
+    }
+
+    let identity: ProjectSnapshot["identity"];
+    if (options.projectId !== undefined) {
+      try {
+        identity = Schema.decodeUnknownSync(ProjectIdentitySchema)(options.projectId);
+      } catch {
+        return writeFailure(invalid("Use a full Project Identity."), json, command);
+      }
+    } else {
+      try {
+        identity = (await resolveInitializedProject(options.projectPath ?? process.cwd())).identity;
+      } catch (error) {
+        return writeFailure(
+          invalid(
+            error instanceof ProjectInitializationError
+              ? error.message
+              : "Choose an initialized Kojo Project.",
+          ),
+          json,
+          command,
+        );
+      }
+    }
+
+    let scope: DeletionScope;
+    if (operation === "run") {
+      let runId: WorkflowRunId;
+      try {
+        runId = Schema.decodeUnknownSync(WorkflowRunIdSchema)(options.args[0]);
+      } catch {
+        return writeFailure(invalid("Use a valid top-level Workflow Run Identity."), json, command);
+      }
+      scope = { kind: "run", identity, runId };
+    } else if (occurrenceOperation) {
+      const beforeMs = Date.parse(options.before as string);
+      if (!Number.isFinite(beforeMs)) {
+        return writeFailure(invalid("Use an ISO UTC instant for --before."), json, command);
+      }
+      scope = {
+        kind: "occurrences",
+        identity,
+        beforeMs,
+        scheduleKeys: options.scheduleKeys,
+      };
+    } else if (operation === "schedule") {
+      scope = { kind: "schedule", identity, scheduleKey: options.args[0] as string };
+    } else {
+      scope = { kind: "project", identity };
+    }
+    const planKey = options.planKey === undefined ? undefined : decodeRequestKey(options.planKey);
+    if (options.planKey !== undefined && planKey === undefined) {
+      return writeFailure(
+        invalid("Use a non-empty Plan Key of at most 256 characters."),
+        json,
+        command,
+      );
+    }
+    const client = makeDefaultLocalClient(process.env.KOJO_HOST_SOCKET ?? defaultSocketPath());
+    const result = await runEffect(client.deleteExecutionData(scope, planKey));
+    if (!result.succeeded) return writeFailure(transportFailure(result.error), json, command);
+    if (!result.value.ok) return writeFailure(deletionFailure(result.value), json, command);
+    writeDeletionResult(command, result.value, json);
+    return 0;
+  }
 
   if (
     args.includes("--include-artifacts") ||

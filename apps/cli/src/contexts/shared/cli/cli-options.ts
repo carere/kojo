@@ -10,6 +10,7 @@ export interface ParsedOptions {
   readonly projectPath?: string;
   readonly parentRunId?: string;
   readonly requestKey?: string;
+  readonly planKey?: string;
   readonly revision?: string;
   readonly reveal: boolean;
   readonly includeArtifacts: boolean;
@@ -29,6 +30,7 @@ export interface ParsedOptions {
   readonly diagnosticsSize?: string;
   readonly disposableAge?: string;
   readonly disposableSize?: string;
+  readonly before?: string;
 }
 
 export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undefined => {
@@ -37,6 +39,7 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
   let projectPath: string | undefined;
   let parentRunId: string | undefined;
   let requestKey: string | undefined;
+  let planKey: string | undefined;
   let revision: string | undefined;
   let reveal = false;
   let includeArtifacts = false;
@@ -56,6 +59,7 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
   let diagnosticsSize: string | undefined;
   let disposableAge: string | undefined;
   let disposableSize: string | undefined;
+  let before: string | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (argument === "--reveal") {
@@ -79,6 +83,7 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
         "--project-id",
         "--parent-run",
         "--request-key",
+        "--plan-key",
         "--revision",
         "--condition",
         "--outcome",
@@ -95,6 +100,7 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
         "--diagnostics-size",
         "--disposable-age",
         "--disposable-size",
+        "--before",
       ].includes(argument)
     ) {
       remaining.push(argument);
@@ -140,6 +146,9 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
     } else if (argument === "--project-id") {
       if (projectId !== undefined) return undefined;
       projectId = optionValue;
+    } else if (argument === "--plan-key") {
+      if (planKey !== undefined) return undefined;
+      planKey = optionValue;
     } else if (argument === "--parent-run") {
       if (parentRunId !== undefined) return undefined;
       parentRunId = optionValue;
@@ -155,6 +164,9 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
     } else if (argument === "--disposable-size") {
       if (disposableSize !== undefined) return undefined;
       disposableSize = optionValue;
+    } else if (argument === "--before") {
+      if (before !== undefined) return undefined;
+      before = optionValue;
     } else {
       if (requestKey !== undefined) return undefined;
       requestKey = optionValue;
@@ -167,6 +179,7 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
     projectPath,
     parentRunId,
     requestKey,
+    planKey,
     revision,
     reveal,
     includeArtifacts,
@@ -186,6 +199,7 @@ export const parseOptions = (args: ReadonlyArray<string>): ParsedOptions | undef
     diagnosticsSize,
     disposableAge,
     disposableSize,
+    before,
   };
 };
 

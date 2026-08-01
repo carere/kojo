@@ -872,6 +872,7 @@ describe("Drizzle Execution Trace reads", () => {
           Effect.sync(() => {
             retentionEvents.push(event);
           }),
+        removeProject: () => Effect.void,
       };
       return Effect.gen(function* () {
         const fixture = yield* Effect.promise(() =>

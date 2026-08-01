@@ -20,6 +20,8 @@ import { ProviderRuntime, type ProviderSandboxAcquisition } from "./provider-run
 interface LiveSandbox {
   readonly branch: string;
   readonly sandbox?: SandcastleSandbox;
+  /** Custom Providers have no Host-facing release operation in the public contract. */
+  readonly cleanupSupported: boolean;
 }
 
 const sessionKey = (project: ProjectSnapshot, runId: string, sandboxIdentity: string) =>
@@ -118,13 +120,16 @@ export const SandcastleProviderRuntimeLive = Layer.sync(ProviderRuntime, () => {
   const sessions = new Map<string, LiveSandbox>();
 
   const releaseRun = async (project: ProjectSnapshot, runId: string) => {
+    let unsupported = false;
     const owned = [...sessions.entries()].filter(([key]) =>
       key.startsWith(`${project.identity}:${runId}:`),
     );
     for (const [key, session] of owned) {
+      if (!session.cleanupSupported) unsupported = true;
       await session.sandbox?.close();
       sessions.delete(key);
     }
+    return unsupported;
   };
 
   const acquire = (input: {
@@ -152,7 +157,7 @@ export const SandcastleProviderRuntimeLive = Layer.sync(ProviderRuntime, () => {
               sandbox: input.sandbox,
             }) ?? Effect.void,
           );
-          sessions.set(key, { branch });
+          sessions.set(key, { branch, cleanupSupported: false });
           return {
             providerKind: "custom",
             sessionRecreated: true,
@@ -164,7 +169,7 @@ export const SandcastleProviderRuntimeLive = Layer.sync(ProviderRuntime, () => {
           cwd: input.project.path,
           sandbox: await builtinProvider(input.definition.provider, input.definition),
         });
-        sessions.set(key, { branch, sandbox });
+        sessions.set(key, { branch, sandbox, cleanupSupported: true });
         return {
           providerKind: input.sandbox.providerKind,
           sessionRecreated: true,
@@ -258,7 +263,14 @@ export const SandcastleProviderRuntimeLive = Layer.sync(ProviderRuntime, () => {
           text: result.stdout,
         };
       }),
-    interruptRun: (project, runId) => Effect.promise(() => releaseRun(project, runId)),
+    interruptRun: (project, runId) =>
+      Effect.promise(() => releaseRun(project, runId)).pipe(Effect.asVoid),
+    cleanupRun: (project, runId) =>
+      Effect.promise(async () => {
+        if (await releaseRun(project, runId)) {
+          throw new Error("Provider cleanup is unsupported for this custom Provider.");
+        }
+      }),
     releaseProject: (project) =>
       Effect.promise(async () => {
         const runIds = new Set(

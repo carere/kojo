@@ -464,6 +464,7 @@ describe("Local Workflow backend ownership", () => {
             Effect.provideService(HostDiagnosticLogger, {
               cleanup: Effect.void,
               emit: () => Effect.void,
+              removeProject: () => Effect.void,
             }),
             Effect.provideService(WorkflowBackend, backend),
             Effect.provideService(WorkflowRunRepository, repository),
@@ -516,6 +517,7 @@ describe("Local Workflow backend ownership", () => {
             Effect.provideService(HostDiagnosticLogger, {
               cleanup: Effect.void,
               emit: () => Effect.void,
+              removeProject: () => Effect.void,
             }),
             Effect.provideService(WorkflowBackend, backend),
             Effect.provideService(WorkflowRunRepository, repository),

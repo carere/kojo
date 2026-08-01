@@ -186,6 +186,16 @@ export interface WorkflowBackendShape {
     project: ProjectSnapshot,
     reference: WorkflowBackendReference,
   ) => Effect.Effect<WorkflowBackendInterruptResult>;
+  /** Clears the known Workflow and Durable Clock mailbox addresses for one generation. */
+  readonly clearExecution?: (
+    project: ProjectSnapshot,
+    input: {
+      readonly workflowKey: string;
+      readonly workflowRevision: string;
+      readonly runId: string;
+      readonly engineGeneration: number;
+    },
+  ) => Effect.Effect<void>;
   /** Replays a suspended execution only to rebuild private wait registrations after restart. */
   readonly rehydrate?: (
     project: ProjectSnapshot,

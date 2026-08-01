@@ -12,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import {
+  DeletionOperationErrorCode,
   ProjectIdentity,
   ProjectOperationErrorCode,
   ProjectReadinessOperationErrorCode,
@@ -66,6 +67,7 @@ export const HostRequestDiagnosticEvent = Schema.Struct({
     "ShowProjectRetention",
     "SetProjectRetention",
     "ResetProjectRetention",
+    "DeleteExecutionData",
     "ShowProjectReadiness",
     "RefreshProjectReadiness",
     "RepairProjectReadiness",
@@ -106,6 +108,7 @@ export const HostRequestDiagnosticEvent = Schema.Struct({
       WorkflowScheduleOccurrenceOperationErrorCode,
       WorkflowRunOperationErrorCode,
       RetentionOperationErrorCode,
+      DeletionOperationErrorCode,
       Schema.Literals([
         "project-runtime-activation-failed",
         "workflow-run-reconciliation-failed",
@@ -128,6 +131,7 @@ export type HostRequestDiagnosticEvent = typeof HostRequestDiagnosticEvent.Type;
 export interface HostDiagnosticLoggerShape {
   readonly cleanup: Effect.Effect<void>;
   readonly emit: (event: HostRequestDiagnosticEvent) => Effect.Effect<void>;
+  readonly removeProject: (projectIdentity: ProjectIdentity) => Effect.Effect<void>;
   readonly hostIdentity?: HostIdentity;
 }
 
@@ -356,6 +360,16 @@ export const makeHostDiagnosticLogger = (
         if (rotated) await cleanupStore();
       });
     },
+    removeProject: (projectIdentity) =>
+      Effect.suspend(() =>
+        run(async () => {
+          const paths = await diagnosticFiles(options.path);
+          if (paths.length === 0) return;
+          const { lines } = await readStoredLines(paths);
+          const retained = lines.filter((line) => line.event.projectIdentity !== projectIdentity);
+          if (retained.length !== lines.length) await rewriteStore(paths, retained);
+        }),
+      ),
     ...(options.hostIdentity === undefined ? {} : { hostIdentity: options.hostIdentity }),
   };
 };

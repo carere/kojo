@@ -129,6 +129,27 @@ describe("Host Diagnostic Store", () => {
     }),
   );
 
+  it.effect("removes only the selected Project's partitioned Diagnostic Events", () =>
+    Effect.gen(function* () {
+      const directory = yield* Effect.promise(() =>
+        mkdtemp(join(tmpdir(), "kojo-diagnostics-project-delete-")),
+      );
+      cleanups.push(() => rm(directory, { recursive: true }));
+      const path = join(directory, "diagnostics.jsonl");
+      const projectA = projectIdentity("00000000-0000-7000-8000-0000000000a1");
+      const projectB = projectIdentity("00000000-0000-7000-8000-0000000000b1");
+      const logger = makeHostDiagnosticLogger(path);
+
+      yield* logger.emit(diagnosticEvent("project-a", "2026-07-15T00:00:00.000Z", projectA));
+      yield* logger.emit(diagnosticEvent("project-b", "2026-07-15T00:00:01.000Z", projectB));
+      yield* logger.emit(diagnosticEvent("host", "2026-07-15T00:00:02.000Z"));
+      yield* logger.removeProject(projectA);
+
+      const events = yield* Effect.promise(() => readDiagnosticEvents(directory));
+      expect(events.map((event) => event.requestId)).toEqual(["project-b", "host"]);
+    }),
+  );
+
   it.effect("keeps the newest events within each Project byte limit", () =>
     Effect.gen(function* () {
       const directory = yield* Effect.promise(() =>

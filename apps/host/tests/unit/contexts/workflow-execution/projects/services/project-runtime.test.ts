@@ -337,6 +337,7 @@ it.effect("commits migration only after the Workflow backend acquires ownership"
       Effect.sync(() => {
         retentionEvents.push(event);
       }),
+    removeProject: () => Effect.void,
   };
 
   return Effect.gen(function* () {
@@ -454,6 +455,7 @@ it.effect("emits one safe failure completion when activation cleanup fails", () 
       Effect.sync(() => {
         events.push(event);
       }),
+    removeProject: () => Effect.void,
   };
 
   return Effect.gen(function* () {

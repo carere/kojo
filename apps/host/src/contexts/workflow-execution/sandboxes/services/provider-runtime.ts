@@ -61,6 +61,8 @@ export interface ProviderRuntimeShape {
   }) => Effect.Effect<ProviderAgentExecution, SandboxProviderFailure>;
   /** Interrupts provider work that is still owned by a Run. */
   readonly interruptRun: (project: ProjectSnapshot, runId: string) => Effect.Effect<void>;
+  /** Requests best-effort remote cleanup for one Run, when the provider supports it. */
+  readonly cleanupRun?: (project: ProjectSnapshot, runId: string) => Effect.Effect<void>;
   readonly releaseProject: (project: ProjectSnapshot) => Effect.Effect<void>;
 }
 
@@ -86,5 +88,6 @@ export const ProviderRuntimeUnavailable = {
       message: "Workflow Agent execution is not configured for this Project Runtime.",
     }),
   interruptRun: () => Effect.void,
+  cleanupRun: undefined,
   releaseProject: () => Effect.void,
 } satisfies ProviderRuntimeShape;

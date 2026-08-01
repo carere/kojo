@@ -88,6 +88,62 @@ const ownershipPath = (project: ProjectSnapshot) =>
   join(project.path, ".kojo", "project-runtime-lock.sqlite");
 const ownershipWaitAttempts = 80;
 
+const clearKnownExecutionAddresses = (
+  backend: ActiveBackend,
+  input: {
+    readonly workflowKey: string;
+    readonly workflowRevision: string;
+    readonly runId: string;
+    readonly engineGeneration: number;
+  },
+) => {
+  const workflow = Workflow.make(`Kojo/${input.workflowKey}/${input.workflowRevision}`, {
+    payload: {
+      engineGeneration: Schema.Number,
+      runId: Schema.String,
+      input: Schema.Unknown,
+    },
+    success: Schema.Unknown,
+    error: Schema.Never,
+    idempotencyKey: ({ runId, engineGeneration }) => `${runId}:${engineGeneration}`,
+  });
+  return workflow
+    .executionId({
+      engineGeneration: input.engineGeneration,
+      input: undefined,
+      runId: input.runId,
+    })
+    .pipe(
+      Effect.map((executionId) => {
+        const entityId = EntityId.make(executionId);
+        const shardId = backend.sharding.getShardId(entityId, "default");
+        return { entityId, shardId };
+      }),
+      Effect.flatMap(({ entityId, shardId }) =>
+        Effect.all([
+          backend.messageStorage.clearAddress(
+            EntityAddress.make({
+              entityId,
+              entityType: EntityType.make(
+                `Workflow/Kojo/${input.workflowKey}/${input.workflowRevision}`,
+              ),
+              shardId,
+            }),
+          ),
+          backend.messageStorage.clearAddress(
+            EntityAddress.make({
+              entityId,
+              entityType: EntityType.make("Workflow/-/DurableClock"),
+              shardId,
+            }),
+          ),
+        ]),
+      ),
+      Effect.orDie,
+      Effect.asVoid,
+    );
+};
+
 const configure = (sql: SqlClient.SqlClient) =>
   Effect.gen(function* () {
     yield* sql.unsafe("PRAGMA foreign_keys = ON");
@@ -473,6 +529,10 @@ export const makeLocalWorkflowBackendLayer = (
               .submit(backend.engine, runId, input, engineGeneration ?? 1)
               .pipe(Effect.as(makeReference(workflowKey, workflowRevision, runId)));
           }),
+        clearExecution: (project, input) =>
+          Effect.suspend(() =>
+            clearKnownExecutionAddresses(getActiveBackend(active, project), input),
+          ),
         observe: (project, reference) =>
           Effect.suspend(() => {
             const backend = getActiveBackend(active, project);
