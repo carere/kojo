@@ -613,7 +613,7 @@ export const deleteExecutionData = (
           return errorFor(
             "deletion-in-progress",
             "Another deletion is already making this Project unavailable.",
-            "Retry the same confirmed command after the Host resumes the pending deletion.",
+            "Retry the original pending confirmed Plan Key after the Host resumes the pending deletion; do not retry this superseding Plan Key.",
             scope,
             suppliedPlanKey,
           );

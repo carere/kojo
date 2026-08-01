@@ -699,7 +699,10 @@ it("blocks and preserves an owned file created after immutable confirmation acro
     project,
   );
   expect(supersedingConfirmation.exitCode).toBe(4);
-  expect(readJson(supersedingConfirmation.stdout).error.code).toBe("deletion-in-progress");
+  expect(readJson(supersedingConfirmation.stdout).error).toMatchObject({
+    code: "deletion-in-progress",
+    next: "Retry the original pending confirmed Plan Key after the Host resumes the pending deletion; do not retry this superseding Plan Key.",
+  });
 
   await unlink(lateFilePath);
   const recovered = await runKojoCli(
