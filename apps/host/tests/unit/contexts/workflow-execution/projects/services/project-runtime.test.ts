@@ -4,7 +4,7 @@ import {
   type ProjectRetentionSnapshot,
   type ProjectSnapshot,
 } from "@kojo/control";
-import { Effect, Layer, Schema } from "effect";
+import { Deferred, Effect, Fiber, Layer, Schema } from "effect";
 import { HostIdentity } from "../../../../../../src/contexts/workflow-execution/control/models/host-identity";
 import {
   HostDiagnosticLogger,
@@ -100,6 +100,130 @@ it.effect("blocks new Project work behind a durable pending-deletion intent", ()
     );
     expect(result).toEqual({ _tag: "blocked" });
     expect(started).toBe(false);
+  }).pipe(Effect.provide(runtimeLayer(store)));
+});
+
+it.effect("fences a concurrent diagnostic-producing preview behind Project deletion", () => {
+  const events: Array<string> = [];
+  const projectDiagnostics = new Set([project.identity]);
+  const store = Layer.succeed(ProjectRepository, {
+    migrate: () => Effect.succeed(true),
+    postflight: () => Effect.succeed(true),
+    completeMigration: () => Effect.succeed(true),
+    readiness: () => Effect.succeed("ready" as const),
+    inspectForgetBlockers: () =>
+      Effect.succeed({
+        assessment: "available" as const,
+        enabledScheduleKeys: [],
+        nonFinalRunIds: [],
+      }),
+  });
+
+  return Effect.gen(function* () {
+    const runtime = yield* ProjectRuntime;
+    if (
+      runtime.coordinateDeletion === undefined ||
+      runtime.coordinateProjectDiagnosticRequest === undefined
+    ) {
+      throw new Error("Project Runtime does not expose the deletion diagnostic fence");
+    }
+    const deletionStarted = yield* Deferred.make<void>();
+    const releaseDeletion = yield* Deferred.make<void>();
+    const deletion = yield* Effect.forkChild(
+      runtime.coordinateDeletion(
+        project,
+        Effect.gen(function* () {
+          projectDiagnostics.delete(project.identity);
+          events.push("diagnostics-removed");
+          yield* Deferred.succeed(deletionStarted, undefined);
+          yield* Deferred.await(releaseDeletion);
+          events.push("receipt-completed");
+        }),
+      ),
+    );
+
+    yield* Deferred.await(deletionStarted);
+    const preview = yield* runtime.coordinateProjectDiagnosticRequest(
+      project.identity,
+      Effect.sync(() => {
+        projectDiagnostics.add(project.identity);
+        events.push("preview-diagnostic");
+        return "preview";
+      }),
+      Effect.succeed("blocked"),
+    );
+    expect(preview).toBe("blocked");
+
+    yield* Deferred.succeed(releaseDeletion, undefined);
+    yield* Fiber.join(deletion);
+    expect(events).toEqual(["diagnostics-removed", "receipt-completed"]);
+    expect(projectDiagnostics.has(project.identity)).toBe(false);
+  }).pipe(Effect.provide(runtimeLayer(store)));
+});
+
+it.effect("keeps a preview diagnostic before the Project deletion receipt", () => {
+  const events: Array<string> = [];
+  const projectDiagnostics = new Set<string>();
+  const store = Layer.succeed(ProjectRepository, {
+    migrate: () => Effect.succeed(true),
+    postflight: () => Effect.succeed(true),
+    completeMigration: () => Effect.succeed(true),
+    readiness: () => Effect.succeed("ready" as const),
+    inspectForgetBlockers: () =>
+      Effect.succeed({
+        assessment: "available" as const,
+        enabledScheduleKeys: [],
+        nonFinalRunIds: [],
+      }),
+  });
+
+  return Effect.gen(function* () {
+    const runtime = yield* ProjectRuntime;
+    if (
+      runtime.coordinateDeletion === undefined ||
+      runtime.coordinateProjectDiagnosticRequest === undefined
+    ) {
+      throw new Error("Project Runtime does not expose the deletion diagnostic fence");
+    }
+    const previewPlanned = yield* Deferred.make<void>();
+    const releasePreviewDiagnostic = yield* Deferred.make<void>();
+    const preview = yield* Effect.forkChild(
+      runtime.coordinateProjectDiagnosticRequest(
+        project.identity,
+        Effect.gen(function* () {
+          events.push("preview-plan-created");
+          yield* Deferred.succeed(previewPlanned, undefined);
+          yield* Deferred.await(releasePreviewDiagnostic);
+          projectDiagnostics.add(project.identity);
+          events.push("preview-diagnostic");
+          return "preview";
+        }),
+        Effect.succeed("blocked"),
+      ),
+    );
+    yield* Deferred.await(previewPlanned);
+
+    const deletion = yield* Effect.forkChild(
+      runtime.coordinateDeletion(
+        project,
+        Effect.sync(() => {
+          projectDiagnostics.delete(project.identity);
+          events.push("diagnostics-removed");
+          events.push("receipt-completed");
+        }),
+      ),
+    );
+    yield* Deferred.succeed(releasePreviewDiagnostic, undefined);
+    expect(yield* Fiber.join(preview)).toBe("preview");
+    yield* Fiber.join(deletion);
+
+    expect(events).toEqual([
+      "preview-plan-created",
+      "preview-diagnostic",
+      "diagnostics-removed",
+      "receipt-completed",
+    ]);
+    expect(projectDiagnostics.has(project.identity)).toBe(false);
   }).pipe(Effect.provide(runtimeLayer(store)));
 });
 

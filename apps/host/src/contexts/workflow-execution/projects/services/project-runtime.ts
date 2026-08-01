@@ -3,7 +3,7 @@ import type {
   ProjectDefinitionSnapshot,
   ProjectDefinitionValidation,
 } from "@kojo/control/project-definition-validation";
-import { Context, Effect, Layer, Option } from "effect";
+import { Context, Effect, Layer, Option, Semaphore } from "effect";
 import type { HostIdentity } from "../../control/models/host-identity";
 import { HOST_INFORMATION } from "../../control/models/host-information";
 import { HostDiagnosticLogger } from "../../control/services/host-diagnostic-logger";
@@ -13,6 +13,24 @@ import { type ProjectForgetBlockers, ProjectRepository } from "../repositories/p
 import { WorkflowBackend } from "./workflow-backend";
 
 export interface ProjectRuntimeShape {
+  /**
+   * Admits an ordered Project deletion and fences diagnostic-producing
+   * requests while the deletion is queued or running.
+   */
+  readonly coordinateDeletion?: <A>(
+    project: ProjectSnapshot,
+    operation: Effect.Effect<A>,
+  ) => Effect.Effect<A>;
+  /**
+   * Runs a diagnostic-producing request in the Project serialization slot.
+   * A request admitted after deletion starts uses the caller's non-emitting
+   * fallback instead of being allowed to write after a target-free receipt.
+   */
+  readonly coordinateProjectDiagnosticRequest?: <A, E = never, R = never>(
+    identity: ProjectIdentity,
+    operation: Effect.Effect<A, E, R>,
+    blocked: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, E, R>;
   readonly coordinateWork: <A>(
     project: ProjectSnapshot,
     operation: Effect.Effect<A>,
@@ -75,11 +93,20 @@ export const ProjectRuntimeLive = Layer.effect(
     const diagnosticLogger = yield* Effect.serviceOption(HostDiagnosticLogger);
     const retentionRepository = yield* Effect.serviceOption(RetentionRepository);
     const pending = new Map<string, Promise<void>>();
+    const diagnosticLocks = new Map<string, Semaphore.Semaphore>();
+    const deletionFences = new Map<string, number>();
     const acceptedDefinitions = new Map<
       string,
       { readonly path: string; readonly snapshot: ProjectDefinitionSnapshot }
     >();
     let pendingRegistration: Promise<void> = Promise.resolve();
+    const diagnosticLockFor = (identity: string) => {
+      const existing = diagnosticLocks.get(identity);
+      if (existing !== undefined) return existing;
+      const created = Semaphore.makeUnsafe(1);
+      diagnosticLocks.set(identity, created);
+      return created;
+    };
     const serializeIdentity = <A>(identity: string, effect: Effect.Effect<A>) =>
       Effect.promise(() => {
         const previous = pending.get(identity) ?? Promise.resolve();
@@ -95,6 +122,14 @@ export const ProjectRuntimeLive = Layer.effect(
       });
     const serialize = <A>(project: ProjectSnapshot, effect: Effect.Effect<A>) =>
       serializeIdentity(project.identity, effect);
+    const incrementDeletionFence = (identity: ProjectIdentity) => {
+      deletionFences.set(identity, (deletionFences.get(identity) ?? 0) + 1);
+    };
+    const decrementDeletionFence = (identity: ProjectIdentity) => {
+      const remaining = (deletionFences.get(identity) ?? 1) - 1;
+      if (remaining <= 0) deletionFences.delete(identity);
+      else deletionFences.set(identity, remaining);
+    };
     const acceptDefinitions = (
       project: ProjectSnapshot,
       definitions: ProjectDefinitionValidation,
@@ -179,6 +214,23 @@ export const ProjectRuntimeLive = Layer.effect(
       );
     };
     return {
+      coordinateDeletion: <A>(project: ProjectSnapshot, operation: Effect.Effect<A>) =>
+        Effect.suspend(() => {
+          incrementDeletionFence(project.identity);
+          return serialize(project, diagnosticLockFor(project.identity).withPermit(operation)).pipe(
+            Effect.ensuring(Effect.sync(() => decrementDeletionFence(project.identity))),
+          );
+        }),
+      coordinateProjectDiagnosticRequest: <A, E = never, R = never>(
+        identity: ProjectIdentity,
+        operation: Effect.Effect<A, E, R>,
+        blocked: Effect.Effect<A, E, R>,
+      ) =>
+        Effect.suspend(() =>
+          (deletionFences.get(identity) ?? 0) > 0
+            ? blocked
+            : diagnosticLockFor(identity).withPermit(operation),
+        ),
       coordinateRegistration: <A>(
         project: ProjectSnapshot,
         beforeMigration: Effect.Effect<{

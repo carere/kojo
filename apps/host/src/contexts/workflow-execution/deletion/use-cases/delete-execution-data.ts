@@ -636,7 +636,8 @@ export const deleteExecutionData = (
     const backend = yield* WorkflowBackend;
     const provider = yield* ProviderRuntime;
     const diagnosticLogger = yield* HostDiagnosticLogger;
-    const result = yield* runtime.coordinateLifecycle(
+    const coordinateDeletion = runtime.coordinateDeletion ?? runtime.coordinateLifecycle;
+    const result = yield* coordinateDeletion(
       project,
       Effect.gen(function* () {
         const started = yield* repository.begin(project, plan as DeletionPlanRecord, clock.now());

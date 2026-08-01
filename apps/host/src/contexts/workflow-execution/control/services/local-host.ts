@@ -39,7 +39,9 @@ import {
   showProject,
   showWorkflowDefinition,
 } from "../../../workflow-authoring/projects/use-cases/manage-projects";
+import { newDeletionPlanKey } from "../../deletion/models/deletion-plan";
 import { deleteExecutionData } from "../../deletion/use-cases/delete-execution-data";
+import { ProjectRuntime } from "../../projects/services/project-runtime";
 import {
   assessProjectReadiness,
   repairProjectReadiness,
@@ -195,6 +197,25 @@ const deletionRequestDiagnostic = (scope: DeletionScope) => (result: DeletionRes
     ? {}
     : deletionDiagnostic(scope.identity)(result);
 
+const blockedDeletionPreview = (scope: DeletionScope): DeletionResult => ({
+  ok: false,
+  requestKey: newDeletionPlanKey(),
+  error: {
+    code: "deletion-in-progress",
+    message: "Another deletion is already making this Project unavailable.",
+    next: "Retry this deletion preview after the original pending confirmed deletion completes.",
+    affectedResource:
+      scope.kind === "run"
+        ? { kind: "run", identity: scope.identity, runId: scope.runId }
+        : scope.kind === "schedule"
+          ? { kind: "schedule", identity: scope.identity, scheduleKey: scope.scheduleKey }
+          : scope.kind === "occurrences"
+            ? { kind: "occurrences", identity: scope.identity }
+            : { kind: "project", identity: scope.identity },
+    findingKeys: [],
+  },
+});
+
 const workflowRunDiagnostic =
   (identity: ProjectIdentity) =>
   (
@@ -317,13 +338,23 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           retentionDiagnostic(identity),
         ),
       DeleteExecutionData: ({ scope, planKey }, options) =>
-        withHostRequestDiagnostic(
-          hostIdentity,
-          "DeleteExecutionData",
-          String(options.requestId),
-          deleteExecutionData(scope, planKey),
-          deletionRequestDiagnostic(scope),
-        ),
+        Effect.gen(function* () {
+          const request = withHostRequestDiagnostic(
+            hostIdentity,
+            "DeleteExecutionData",
+            String(options.requestId),
+            deleteExecutionData(scope, planKey),
+            deletionRequestDiagnostic(scope),
+          );
+          if (planKey !== undefined) return yield* request;
+          const runtime = yield* ProjectRuntime;
+          if (runtime.coordinateProjectDiagnosticRequest === undefined) return yield* request;
+          return yield* runtime.coordinateProjectDiagnosticRequest(
+            scope.identity,
+            request,
+            Effect.succeed(blockedDeletionPreview(scope)),
+          );
+        }),
       ShowProjectReadiness: ({ identity }, options) =>
         withHostRequestDiagnostic(
           hostIdentity,
