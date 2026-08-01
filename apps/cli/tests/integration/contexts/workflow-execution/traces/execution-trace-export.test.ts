@@ -326,6 +326,7 @@ it("records later unavailable evidence for traversed, symbolic-link, and missing
   }
 
   const database = new Database(join(project, ".kojo", "kojo.sqlite"));
+  database.exec("PRAGMA busy_timeout = 5000");
   database
     .query(
       "UPDATE kojo_execution_artifacts SET storage_key = ? WHERE run_id = ? AND artifact_id = ?",
