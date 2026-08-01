@@ -30,6 +30,12 @@ const installWorkflowDependencies = async (path: string) => {
   await symlink(await realpath(effectPackagePath), join(path, "node_modules", "effect"), "dir");
 };
 
+const openReadonlyDatabase = (databasePath: string) => {
+  const database = new Database(databasePath, { readonly: true, strict: true });
+  database.exec("PRAGMA busy_timeout = 5000");
+  return database;
+};
+
 const configuration = (cron: string) => `
 import { Effect, Schema } from "effect";
 import { defineConfig, defineWorkflow } from "@kojo/workflow";
@@ -216,10 +222,7 @@ it("reconciles and controls durable Workflow Schedules without starting an occur
   expect(JSON.parse(replayedDisable.stdout).result.alreadyApplied).toBe(true);
 
   const databasePath = join(project, ".kojo", "kojo.sqlite");
-  const database = new Database(databasePath, {
-    readonly: true,
-    strict: true,
-  });
+  const database = openReadonlyDatabase(databasePath);
   try {
     expect(database.query("SELECT count(*) AS count FROM kojo_workflow_runs").get()).toEqual({
       count: 0,
@@ -264,11 +267,11 @@ it("delivers one persisted occurrence after Host restart and preserves its linke
   await waitFor(() => occurrenceCount(databasePath) === 1);
   await firstHost.stop();
 
-  const scheduledAtMs = Date.now() - 1_000;
   const boundaryObservedAtMs = Date.now();
   const currentCronBoundaryMs = boundaryObservedAtMs - (boundaryObservedAtMs % 60_000);
   const adjacentCronBoundariesMs = [currentCronBoundaryMs, currentCronBoundaryMs + 60_000];
-  const expectedInput = { kind: `morning-report:${new Date(scheduledAtMs).toISOString()}` };
+  let scheduledAtMs!: number;
+  let expectedInput!: { readonly kind: string };
   const database = new Database(databasePath, { strict: true });
   try {
     const current = database
@@ -284,6 +287,13 @@ it("delivers one persisted occurrence after Host restart and preserves its linke
       readonly outcome: string;
       readonly scheduledAtMs: number;
     };
+    const scheduleState = database
+      .query(
+        `SELECT high_water_mark_ms AS highWaterMarkMs
+         FROM kojo_workflow_schedule_states
+         WHERE schedule_key = 'morning-report'`,
+      )
+      .get() as { readonly highWaterMarkMs: number | null };
     expect(current).toMatchObject({
       appliedRevision: revision,
       deliveryAttemptCount: 0,
@@ -293,6 +303,12 @@ it("delivers one persisted occurrence after Host restart and preserves its linke
     // minute. Capture those exact adjacent cron boundaries before reading;
     // avoid accepting an arbitrary overdue value.
     expect(adjacentCronBoundariesMs).toContain(current.scheduledAtMs);
+    // Keep the restart probe safely inside the current minute. The lower
+    // bound is normally persisted; the fallback is the preceding boundary
+    // for this test's one-minute cron expression before the first scan.
+    const highWaterMarkMs = scheduleState.highWaterMarkMs ?? current.scheduledAtMs - 60_000;
+    scheduledAtMs = highWaterMarkMs + 15_000;
+    expectedInput = { kind: `morning-report:${new Date(scheduledAtMs).toISOString()}` };
     database
       .query(
         "UPDATE kojo_workflow_schedule_occurrences SET scheduled_at_ms = ?, resolved_input_json = ? WHERE schedule_key = 'morning-report' AND scheduled_at_ms = ?",
@@ -306,6 +322,9 @@ it("delivers one persisted occurrence after Host restart and preserves its linke
   } finally {
     database.close();
   }
+  const dueAtMs = scheduledAtMs + 1_000;
+  const waitUntilDueMs = dueAtMs - Date.now();
+  if (waitUntilDueMs > 0) await Bun.sleep(waitUntilDueMs);
 
   const restarted = await startKojoHostProcess({ storePath: hostStore });
   cleanups.push(restarted.stop);
@@ -404,7 +423,7 @@ it("delivers one persisted occurrence after Host restart and preserves its linke
 }, 20_000);
 
 const occurrenceCount = (databasePath: string) => {
-  const database = new Database(databasePath, { readonly: true, strict: true });
+  const database = openReadonlyDatabase(databasePath);
   try {
     return (
       database.query("SELECT count(*) AS count FROM kojo_workflow_schedule_occurrences").get() as {
@@ -417,7 +436,7 @@ const occurrenceCount = (databasePath: string) => {
 };
 
 const scheduledRunCount = (databasePath: string) => {
-  const database = new Database(databasePath, { readonly: true, strict: true });
+  const database = openReadonlyDatabase(databasePath);
   try {
     return (
       database
@@ -432,7 +451,7 @@ const scheduledRunCount = (databasePath: string) => {
 };
 
 const plannedFutureOccurrenceCount = (databasePath: string) => {
-  const database = new Database(databasePath, { readonly: true, strict: true });
+  const database = openReadonlyDatabase(databasePath);
   try {
     return (
       database
@@ -463,7 +482,7 @@ const markSubmissionPending = (databasePath: string, runId: string) => {
 };
 
 const submissionState = (databasePath: string, runId: string) => {
-  const database = new Database(databasePath, { readonly: true, strict: true });
+  const database = openReadonlyDatabase(databasePath);
   try {
     return (
       database
@@ -476,7 +495,7 @@ const submissionState = (databasePath: string, runId: string) => {
 };
 
 const readOccurrenceAndRun = (databasePath: string) => {
-  const database = new Database(databasePath, { readonly: true, strict: true });
+  const database = openReadonlyDatabase(databasePath);
   try {
     return database
       .query(
