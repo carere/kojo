@@ -1,4 +1,8 @@
-import type { HostOverview as HostOverviewSnapshot } from "@kojo/control";
+import type {
+  HostOverview as HostOverviewSnapshot,
+  ProjectIdentity,
+  WorkflowRunSnapshot,
+} from "@kojo/control";
 import { type Accessor, createSignal } from "solid-js";
 import {
   type CancellableOverviewLoader,
@@ -25,6 +29,8 @@ export interface HostOverviewCoordinator {
   readonly start: () => void;
   /** Requests one authoritative refresh, coalescing overlapping requests behind one trailing load. */
   readonly refresh: () => Promise<HostOverviewSnapshot>;
+  /** Commits a Host mutation receipt until the next composite overview includes it. */
+  readonly acceptRun: (identity: ProjectIdentity, run: WorkflowRunSnapshot) => void;
   /** Aborts the owned request and prevents late results from committing. */
   readonly dispose: () => void;
 }
@@ -65,6 +71,53 @@ export const makeHostOverviewCoordinator = (
   let delayTimer: ReturnType<typeof setTimeout> | undefined;
   let finishDelayWait: ((continueWaiting: boolean) => void) | undefined;
   let beginEmptyDiscovery: () => void = () => undefined;
+  const acceptedRuns = new Map<
+    string,
+    { readonly identity: ProjectIdentity; readonly run: WorkflowRunSnapshot }
+  >();
+
+  const runKey = (identity: ProjectIdentity, runId: string) => `${identity}:${runId}`;
+  const containsRun = (snapshot: HostOverviewSnapshot, identity: ProjectIdentity, runId: string) =>
+    snapshot.workflowRuns.some(
+      (projectRuns) =>
+        projectRuns.project.identity === identity &&
+        projectRuns.runs.some((run) => run.runId === runId),
+    );
+  const mergeAcceptedRun = (
+    snapshot: HostOverviewSnapshot,
+    identity: ProjectIdentity,
+    run: WorkflowRunSnapshot,
+  ): HostOverviewSnapshot => {
+    const project = snapshot.projects.find((candidate) => candidate.identity === identity);
+    if (project === undefined) return snapshot;
+    const existing = snapshot.workflowRuns.find(
+      (projectRuns) => projectRuns.project.identity === identity,
+    );
+    const runs = [
+      run,
+      ...(existing?.runs ?? []).filter((candidate) => candidate.runId !== run.runId),
+    ];
+    return {
+      ...snapshot,
+      workflowRuns:
+        existing === undefined
+          ? [...snapshot.workflowRuns, { project, runs }]
+          : snapshot.workflowRuns.map((projectRuns) =>
+              projectRuns.project.identity === identity ? { ...projectRuns, runs } : projectRuns,
+            ),
+    };
+  };
+  const applyAcceptedRuns = (snapshot: HostOverviewSnapshot) => {
+    let current = snapshot;
+    for (const [key, accepted] of acceptedRuns) {
+      if (containsRun(current, accepted.identity, accepted.run.runId)) {
+        acceptedRuns.delete(key);
+        continue;
+      }
+      current = mergeAcceptedRun(current, accepted.identity, accepted.run);
+    }
+    return current;
+  };
 
   const execute = async () => {
     const generation = ++requestGeneration;
@@ -77,12 +130,13 @@ export const makeHostOverviewCoordinator = (
         signal: controller.signal,
       });
       if (snapshot === undefined) throw new Error("Kojo Host overview is unavailable.");
+      const authoritativeSnapshot = applyAcceptedRuns(snapshot);
       if (!disposed && generation === requestGeneration) {
-        setOverview(snapshot);
+        setOverview(authoritativeSnapshot);
         setError(undefined);
       }
-      if (!disposed && snapshot.projects.length === 0) beginEmptyDiscovery();
-      return snapshot;
+      if (!disposed && authoritativeSnapshot.projects.length === 0) beginEmptyDiscovery();
+      return authoritativeSnapshot;
     } catch (cause) {
       if (!disposed && generation === requestGeneration) setError(cause);
       throw cause;
@@ -221,6 +275,13 @@ export const makeHostOverviewCoordinator = (
     });
   };
 
+  const acceptRun = (identity: ProjectIdentity, run: WorkflowRunSnapshot) => {
+    if (disposed) return;
+    acceptedRuns.set(runKey(identity, run.runId), { identity, run });
+    const current = overview();
+    if (current !== undefined) setOverview(mergeAcceptedRun(current, identity, run));
+  };
+
   const dispose = () => {
     if (disposed) return;
     disposed = true;
@@ -232,11 +293,12 @@ export const makeHostOverviewCoordinator = (
     finishDelayWait = undefined;
     recoveryRunning = false;
     discoveryRunning = false;
+    acceptedRuns.clear();
     const waiters = trailingWaiters;
     trailingWaiters = [];
     for (const waiter of waiters)
       waiter.reject(new Error("Host overview coordinator was disposed."));
   };
 
-  return { overview, error, loading, refresh, start, dispose };
+  return { overview, error, loading, refresh, acceptRun, start, dispose };
 };

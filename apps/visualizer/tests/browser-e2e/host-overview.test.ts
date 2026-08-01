@@ -1,7 +1,7 @@
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { access, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Browser, type BrowserContext, chromium, type Page } from "playwright";
 import { afterAll, afterEach, expect, test } from "vitest";
@@ -10,7 +10,7 @@ import {
   type KojoHostProcessFixture,
   startKojoHostProcess,
 } from "../../../../tests/support/host-process";
-import { makeTeardownBudget, type TeardownBudget } from "./teardown-budget";
+import { makeTeardownBudget, type TeardownBudget } from "../../../../tests/support/teardown-budget";
 
 interface Fixture {
   readonly browser: BrowserContext;
@@ -267,19 +267,15 @@ export default defineConfig({
 
 test("force-reclaims an owned browser process when bounded shutdown misses its deadline", async () => {
   const profile = await makeTemporaryDirectory("kojo-browser-profile-reclaim-");
-  const browser = Bun.spawn(
-    [
-      headlessBrowserExecutablePath(),
-      "--headless",
-      "--no-default-browser-check",
-      "--no-first-run",
-      `--user-data-dir=${profile.path}`,
-      "about:blank",
-    ],
-    { stderr: "ignore", stdout: "ignore" },
-  );
+  const browser = await chromium.launchPersistentContext(profile.path, {
+    headless: true,
+    timeout: browserLaunchTimeoutMs,
+  });
   try {
-    await waitFor(async () => (await ownedBrowserPids(profile.path)).length > 0, browser);
+    await waitFor(
+      async () => (await ownedBrowserPids(profile.path)).length > 0,
+      () => browser.browser()?.isConnected() ?? false,
+    );
 
     let closeSettled = false;
     const eventuallyClosingBrowser: Pick<BrowserContext, "browser" | "close"> = {
@@ -297,30 +293,26 @@ test("force-reclaims an owned browser process when bounded shutdown misses its d
     ).resolves.toEqual({ gone: true, forced: true });
     expect(closeSettled).toBe(true);
     expect(await ownedBrowserPids(profile.path)).toEqual([]);
-    expect(await browser.exited).toBeTypeOf("number");
   } finally {
-    await terminateOwnedBrowser(profile.path, makeTeardownBudget());
-    if (browser.exitCode === null) browser.kill("SIGKILL");
-    await browser.exited;
-    await cleanupTemporaryDirectory(profile, makeTeardownBudget());
+    const budget = makeTeardownBudget();
+    await closeBrowser(browser, profile.path, budget);
+    await terminateOwnedBrowser(profile.path, budget);
+    expect(await ownedBrowserPids(profile.path)).toEqual([]);
+    await cleanupTemporaryDirectory(profile, budget);
   }
 });
 
 test("force-reclaims an owned browser process when both Playwright closes fail", async () => {
   const profile = await makeTemporaryDirectory("kojo-browser-profile-failed-reclaim-");
-  const browser = Bun.spawn(
-    [
-      headlessBrowserExecutablePath(),
-      "--headless",
-      "--no-default-browser-check",
-      "--no-first-run",
-      `--user-data-dir=${profile.path}`,
-      "about:blank",
-    ],
-    { stderr: "ignore", stdout: "ignore" },
-  );
+  const browser = await chromium.launchPersistentContext(profile.path, {
+    headless: true,
+    timeout: browserLaunchTimeoutMs,
+  });
   try {
-    await waitFor(async () => (await ownedBrowserPids(profile.path)).length > 0, browser);
+    await waitFor(
+      async () => (await ownedBrowserPids(profile.path)).length > 0,
+      () => browser.browser()?.isConnected() ?? false,
+    );
     let owningCloseCalled = false;
     const failingBrowser: Pick<BrowserContext, "browser" | "close"> = {
       browser: () =>
@@ -338,36 +330,31 @@ test("force-reclaims an owned browser process when both Playwright closes fail",
     );
     expect(owningCloseCalled).toBe(true);
     expect(await ownedBrowserPids(profile.path)).toEqual([]);
-    expect(await browser.exited).toBeTypeOf("number");
   } finally {
-    await terminateOwnedBrowser(profile.path, makeTeardownBudget());
-    if (browser.exitCode === null) browser.kill("SIGKILL");
-    await browser.exited;
-    await cleanupTemporaryDirectory(profile, makeTeardownBudget());
+    const budget = makeTeardownBudget();
+    await closeBrowser(browser, profile.path, budget);
+    await terminateOwnedBrowser(profile.path, budget);
+    expect(await ownedBrowserPids(profile.path)).toEqual([]);
+    await cleanupTemporaryDirectory(profile, budget);
   }
 });
 
 test("does not count a force reclaim when Browser.close removes Chromium after context timeout", async () => {
   const profile = await makeTemporaryDirectory("kojo-browser-profile-already-gone-");
-  const browser = Bun.spawn(
-    [
-      headlessBrowserExecutablePath(),
-      "--headless",
-      "--no-default-browser-check",
-      "--no-first-run",
-      `--user-data-dir=${profile.path}`,
-      "about:blank",
-    ],
-    { stderr: "ignore", stdout: "ignore" },
-  );
+  const browser = await chromium.launchPersistentContext(profile.path, {
+    headless: true,
+    timeout: browserLaunchTimeoutMs,
+  });
   try {
-    await waitFor(async () => (await ownedBrowserPids(profile.path)).length > 0, browser);
+    await waitFor(
+      async () => (await ownedBrowserPids(profile.path)).length > 0,
+      () => browser.browser()?.isConnected() ?? false,
+    );
     const playwrightBrowser: Pick<BrowserContext, "browser" | "close"> = {
       browser: () =>
         ({
           close: async () => {
-            if (browser.exitCode === null) browser.kill("SIGTERM");
-            await browser.exited;
+            await browser.close();
           },
         }) as Browser,
       close: () => Bun.sleep(processSnapshotTimeoutMs + 100),
@@ -377,12 +364,14 @@ test("does not count a force reclaim when Browser.close removes Chromium after c
       closeBrowser(playwrightBrowser, profile.path, makeTeardownBudget()),
     ).resolves.toEqual({ gone: true, forced: false });
     expect(await ownedBrowserPids(profile.path)).toEqual([]);
-    expect(await browser.exited).toBeTypeOf("number");
   } finally {
-    await terminateOwnedBrowser(profile.path, makeTeardownBudget());
-    if (browser.exitCode === null) browser.kill("SIGKILL");
-    await browser.exited;
-    await cleanupTemporaryDirectory(profile, makeTeardownBudget());
+    const budget = makeTeardownBudget();
+    if (browser.browser()?.isConnected() ?? false) {
+      await closeBrowser(browser, profile.path, budget);
+    }
+    await terminateOwnedBrowser(profile.path, budget);
+    expect(await ownedBrowserPids(profile.path)).toEqual([]);
+    await cleanupTemporaryDirectory(profile, budget);
   }
 });
 
@@ -1073,14 +1062,46 @@ const escapeRegularExpression = (value: string) => value.replace(/[.*+?^${}()|[\
 
 const browserExecutablePaths = () => {
   const chromiumExecutable = chromium.executablePath();
-  const headlessShell = join(dirname(chromiumExecutable), "chrome-headless-shell");
-  return [...new Set([chromiumExecutable, ...(existsSync(headlessShell) ? [headlessShell] : [])])];
+  const chromiumArchitectureDirectory = dirname(dirname(dirname(dirname(chromiumExecutable))));
+  const chromiumRevisionDirectory = dirname(chromiumArchitectureDirectory);
+  const playwrightCacheDirectory = dirname(chromiumRevisionDirectory);
+  const chromiumRevision = basename(chromiumRevisionDirectory).replace(/^chromium-/, "");
+  const platformDirectory =
+    process.platform === "darwin"
+      ? `chrome-headless-shell-mac-${process.arch === "arm64" ? "arm64" : "x64"}`
+      : process.platform === "win32"
+        ? "chrome-headless-shell-win64"
+        : "chrome-headless-shell-linux64";
+  const headlessShellFileName =
+    process.platform === "win32" ? "chrome-headless-shell.exe" : "chrome-headless-shell";
+  const headlessShellDirectoryName = [
+    `chromium_headless_shell-${chromiumRevision}`,
+    ...readdirSync(playwrightCacheDirectory).filter((entry) =>
+      entry.startsWith("chromium_headless_shell-"),
+    ),
+  ].find((entry, index, entries) => {
+    if (entries.indexOf(entry) !== index) return false;
+    return existsSync(
+      join(playwrightCacheDirectory, entry, platformDirectory, headlessShellFileName),
+    );
+  });
+  const headlessShell =
+    headlessShellDirectoryName === undefined
+      ? undefined
+      : join(
+          playwrightCacheDirectory,
+          headlessShellDirectoryName,
+          platformDirectory,
+          headlessShellFileName,
+        );
+  return [chromiumExecutable, ...(headlessShell === undefined ? [] : [headlessShell])];
 };
 
 const headlessBrowserExecutablePath = () => {
   const executablePaths = browserExecutablePaths();
   return (
-    executablePaths.find((path) => path.endsWith("chrome-headless-shell")) ?? executablePaths[0]
+    executablePaths.find((path) => basename(path).startsWith("chrome-headless-shell")) ??
+    executablePaths[0]
   );
 };
 
@@ -1387,12 +1408,17 @@ const availablePort = () =>
     });
   });
 
-const waitFor = async (condition: () => Promise<boolean>, processHandle: Bun.Subprocess) => {
+const waitFor = async (
+  condition: () => Promise<boolean>,
+  processAlive: (() => boolean) | Bun.Subprocess,
+) => {
   const deadline = Date.now() + fixtureStartupTimeoutMs;
+  const isAlive =
+    typeof processAlive === "function" ? processAlive : () => processAlive.exitCode === null;
 
   while (Date.now() < deadline) {
     if (await condition()) return;
-    if (processHandle.exitCode !== null) {
+    if (!isAlive()) {
       throw new Error("Acceptance fixture process exited before becoming ready.");
     }
     await Bun.sleep(25);

@@ -6,6 +6,7 @@ interface WorkflowInspectorDialogProps {
   readonly dialog: Accessor<DialogKind>;
   readonly freshInput: Accessor<string>;
   readonly busyAction: Accessor<string | undefined>;
+  readonly mutationsEnabled: boolean;
   readonly onFreshInput: (value: string) => void;
   readonly onClose: () => void;
   readonly onFreshStart: () => void;
@@ -59,7 +60,7 @@ export function WorkflowInspectorDialog(props: WorkflowInspectorDialogProps) {
               <button
                 type="button"
                 class="h-7 rounded-md bg-emerald-300 px-3 font-bold text-[9px] text-zinc-950 disabled:opacity-50"
-                disabled={props.busyAction() === "fresh-start"}
+                disabled={!props.mutationsEnabled || props.busyAction() === "fresh-start"}
                 onClick={props.onFreshStart}
               >
                 {props.busyAction() === "fresh-start" ? "Starting…" : "Start fresh"}
@@ -89,7 +90,7 @@ export function WorkflowInspectorDialog(props: WorkflowInspectorDialogProps) {
               <button
                 type="button"
                 class="h-7 rounded-md bg-rose-400 px-3 font-bold text-[9px] text-zinc-950 disabled:opacity-50"
-                disabled={props.busyAction() === "stop"}
+                disabled={!props.mutationsEnabled || props.busyAction() === "stop"}
                 onClick={props.onConfirmStop}
               >
                 {props.busyAction() === "stop" ? "Stopping…" : "Request safe stop"}
@@ -122,7 +123,7 @@ export function WorkflowInspectorDialog(props: WorkflowInspectorDialogProps) {
               <button
                 type="button"
                 class="h-7 rounded-md bg-amber-300 px-3 font-bold text-[9px] text-zinc-950 disabled:opacity-50"
-                disabled={props.busyAction() === "reveal"}
+                disabled={!props.mutationsEnabled || props.busyAction() === "reveal"}
                 onClick={props.onReveal}
               >
                 {props.busyAction() === "reveal" ? "Revealing…" : "Reveal this view"}

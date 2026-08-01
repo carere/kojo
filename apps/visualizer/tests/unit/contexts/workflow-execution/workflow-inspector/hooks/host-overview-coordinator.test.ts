@@ -7,7 +7,7 @@ import {
 } from "../../../../../../src/contexts/workflow-execution/workflow-inspector/hooks/host-overview-coordinator";
 
 const snapshot = (projects: HostOverviewSnapshot["projects"]): HostOverviewSnapshot =>
-  ({ projects }) as HostOverviewSnapshot;
+  ({ projects, workflowRuns: [] }) as unknown as HostOverviewSnapshot;
 
 const deferred = <Value>() => {
   let resolve!: (value: Value) => void;
@@ -112,6 +112,29 @@ it("does not commit a late result after disposal", async () => {
   request.resolve(snapshot([{ identity: "late", path: "/late" } as never]));
   await loading;
   expect(coordinator.overview()).toBeUndefined();
+});
+
+it("keeps a Host-accepted Run visible until the composite overview catches up", async () => {
+  const identity = "project-a" as never;
+  const acceptedRun = { runId: "run-a" } as never;
+  let loads = 0;
+  const project = { identity, path: "/project-a" } as never;
+  const coordinator = makeHostOverviewCoordinator({
+    load: async () => {
+      loads += 1;
+      return snapshot([project]);
+    },
+    policy: { attemptTimeoutMs: 100, maxAttempts: 1, maxElapsedMs: 100, retryDelaysMs: [0] },
+  });
+
+  await coordinator.refresh();
+  coordinator.acceptRun(identity, acceptedRun);
+  expect(coordinator.overview()?.workflowRuns?.[0]?.runs).toEqual([acceptedRun]);
+
+  const refreshed = await coordinator.refresh();
+  expect(refreshed.workflowRuns[0]?.runs).toEqual([acceptedRun]);
+  expect(loads).toBe(2);
+  coordinator.dispose();
 });
 
 it("recovers after finite bootstrap exhaustion without turning Connecting into a permanent state", async () => {

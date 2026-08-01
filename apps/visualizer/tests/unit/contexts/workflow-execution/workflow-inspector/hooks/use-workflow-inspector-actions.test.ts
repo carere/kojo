@@ -1,27 +1,26 @@
+import { Effect } from "effect";
 import { expect, it } from "vitest";
-import { withStableRequestKey } from "../../../../../../src/contexts/workflow-execution/workflow-inspector/hooks/use-workflow-inspector-actions";
-
-const retry = async <Value>(operation: () => Promise<Value>) => {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return await operation();
-    } catch (error) {
-      if (attempt >= 2) throw error;
-    }
-  }
-};
+import {
+  runWithCancellableRetries,
+  withStableRequestKey,
+} from "../../../../../../src/contexts/workflow-execution/workflow-inspector/hooks/use-workflow-inspector-actions";
 
 const observeRetriedMutation = async (mutation: "fresh-start" | "schedule-enable") => {
   const observedKeys: Array<string> = [];
   let attempts = 0;
-  const request = withStableRequestKey((key) => async () => {
-    observedKeys.push(key);
-    attempts += 1;
-    if (attempts < 3) throw new Error(`${mutation} transport interrupted`);
-    return mutation;
-  });
+  const request = withStableRequestKey((key) =>
+    Effect.tryPromise({
+      try: async () => {
+        observedKeys.push(key);
+        attempts += 1;
+        if (attempts < 3) throw new Error(`${mutation} transport interrupted`);
+        return mutation;
+      },
+      catch: (cause) => cause,
+    }),
+  );
 
-  await retry(request);
+  await runWithCancellableRetries(request, new AbortController().signal);
   return observedKeys;
 };
 

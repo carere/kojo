@@ -172,6 +172,7 @@ export function ResourceNavigator(props: ResourceNavigatorProps) {
                                 <button
                                   type="button"
                                   class={`h-6 rounded-md border px-2 font-semibold text-[9px] ${action === "disable" ? "border-zinc-300 bg-white hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900" : "border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-500"}`}
+                                  disabled={!props.mutationsEnabled}
                                   onClick={() => props.onScheduleAction(schedule, action)}
                                 >
                                   {action === "enable" ? "Enable" : "Disable"}

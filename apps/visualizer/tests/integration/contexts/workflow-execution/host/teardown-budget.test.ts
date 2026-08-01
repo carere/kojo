@@ -1,7 +1,9 @@
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
 
-const teardownBudgetModulePath = fileURLToPath(new URL("./teardown-budget.ts", import.meta.url));
+const teardownBudgetModulePath = fileURLToPath(
+  new URL("../../../../../../../tests/support/teardown-budget.ts", import.meta.url),
+);
 
 test("exits promptly after a bounded operation settles", async () => {
   const child = Bun.spawn(

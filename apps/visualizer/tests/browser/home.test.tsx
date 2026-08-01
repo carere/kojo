@@ -5,6 +5,7 @@ import {
   WorkflowRunId,
 } from "@kojo/control";
 import { Effect, Schema, Stream } from "effect";
+import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, expect, test } from "vitest";
 import { page } from "vitest/browser";
@@ -867,7 +868,148 @@ test("reloads durable trace state and reconnects after live transport loss", asy
   await expect.poll(() => follows).toBe(2);
   await expect.poll(() => loads).toBe(2);
   await expect.element(page.getByText("run.completed@1")).toBeVisible();
+  await expect.element(page.getByText("completed · sequence 2 · final")).toBeVisible();
   expect(acknowledged).toEqual([1]);
+});
+
+test("clears old trace history before a delayed Project switch completes", async () => {
+  setLocale("en", { reload: false });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const firstIdentity = Schema.decodeUnknownSync(ProjectIdentity)(
+    "00000000-0000-7000-8000-000000000031",
+  );
+  const secondIdentity = Schema.decodeUnknownSync(ProjectIdentity)(
+    "00000000-0000-7000-8000-000000000032",
+  );
+  const firstRunId = Schema.decodeUnknownSync(WorkflowRunId)(
+    "00000000-0000-7000-8000-000000000033",
+  );
+  const secondRunId = Schema.decodeUnknownSync(WorkflowRunId)(
+    "00000000-0000-7000-8000-000000000034",
+  );
+  const tracePage = (_identity: ProjectIdentity, runId: WorkflowRunId, eventId: string) =>
+    ({
+      events: [
+        {
+          eventId,
+          runId,
+          sequence: 1,
+          envelopeVersion: 1,
+          kind: "run.accepted",
+          kindVersion: 1,
+          recordedAtMs: 1,
+          observedAtMs: null,
+          engineOperationId: null,
+          activityAttemptId: null,
+          boundaryId: null,
+          childRunId: null,
+          compatibility: "supported" as const,
+          payload: {},
+        },
+      ],
+      firstSequence: 1,
+      hasMore: false,
+      lastSequence: 1,
+      nextCursor: null,
+      highWaterSequence: 1,
+      runState: "running" as const,
+      final: false,
+    }) satisfies ExecutionTracePage;
+  let resolveSecond: ((page: ExecutionTracePage) => void) | undefined;
+  const firstPage = tracePage(firstIdentity, firstRunId, "first-event");
+  const secondPage = tracePage(secondIdentity, secondRunId, "second-event");
+  const [selection, setSelection] = createSignal<{
+    readonly identity: ProjectIdentity;
+    readonly runId: WorkflowRunId;
+  }>({ identity: firstIdentity, runId: firstRunId });
+  dispose = render(
+    () => (
+      <div>
+        <button
+          type="button"
+          onClick={() => setSelection({ identity: secondIdentity, runId: secondRunId })}
+        >
+          Switch trace Project
+        </button>
+        <ExecutionTrace
+          selection={selection()}
+          loadTrace={(current) =>
+            current.identity === firstIdentity
+              ? Promise.resolve(firstPage)
+              : new Promise((resolve) => {
+                  resolveSecond = resolve;
+                })
+          }
+        />
+      </div>
+    ),
+    root,
+  );
+
+  await expect.element(page.getByText("run.accepted@1")).toBeVisible();
+  await page.getByRole("button", { name: "Switch trace Project" }).click();
+  await expect.poll(() => document.querySelector("[data-event-sequence]")).toBeNull();
+  resolveSecond?.(secondPage);
+  await expect.poll(() => document.querySelector(`[data-run-id="${secondRunId}"]`)).not.toBeNull();
+  expect(document.querySelector(`[data-run-id="${firstRunId}"]`)).toBeNull();
+});
+
+test("recovers the initial trace after one Host read fails without a reload", async () => {
+  setLocale("en", { reload: false });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+    "00000000-0000-7000-8000-000000000035",
+  );
+  const runId = Schema.decodeUnknownSync(WorkflowRunId)("00000000-0000-7000-8000-000000000036");
+  const tracePage: ExecutionTracePage = {
+    events: [
+      {
+        eventId: "initial-recovery-event",
+        runId,
+        sequence: 1,
+        envelopeVersion: 1,
+        kind: "run.accepted",
+        kindVersion: 1,
+        recordedAtMs: 1,
+        observedAtMs: null,
+        engineOperationId: null,
+        activityAttemptId: null,
+        boundaryId: null,
+        childRunId: null,
+        compatibility: "supported",
+        payload: {},
+      },
+    ],
+    firstSequence: 1,
+    hasMore: false,
+    lastSequence: 1,
+    nextCursor: null,
+    highWaterSequence: 1,
+    runState: "running",
+    final: false,
+  };
+  let loads = 0;
+  dispose = render(
+    () => (
+      <ExecutionTrace
+        selection={{ identity, runId }}
+        refreshIntervalMs={60_000}
+        loadTrace={() => {
+          loads += 1;
+          return loads === 1
+            ? Promise.reject(new Error("Host trace request was briefly unavailable."))
+            : Promise.resolve(tracePage);
+        }}
+      />
+    ),
+    root,
+  );
+
+  await expect.element(page.getByText("run.accepted@1")).toBeVisible();
+  expect(loads).toBe(2);
+  expect(page.getByRole("alert").length).toBe(0);
 });
 
 test("acknowledges a trace resync only after its authoritative reload succeeds", async () => {
@@ -989,7 +1131,7 @@ test("does not acknowledge a trace resync whose authoritative reload fails", asy
     root,
   );
 
-  await expect.poll(() => loads).toBe(2);
+  await expect.poll(() => loads).toBe(3);
   await expect.poll(() => follows).toBe(2);
   await new Promise<void>((resolve) => setTimeout(resolve, 20));
   expect(acknowledgements).toEqual([]);

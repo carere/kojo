@@ -16,7 +16,7 @@ import {
   Radio,
   X,
 } from "lucide-solid";
-import { createEffect, createMemo, createSignal, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, on, onCleanup, onMount, Show } from "solid-js";
 import { LanguageToggle } from "../../../preferences/components/language-toggle";
 import { ThemeToggle } from "../../../preferences/components/theme-toggle";
 import { VisualizerApiClient, visualizerApiRuntime } from "../../../shared/services/client";
@@ -24,6 +24,7 @@ import {
   NAVIGATOR_PREFERENCES_KEY,
   type NavigatorPreferences,
   orderProjects,
+  readNavigatorPreferences,
   reconcileNavigatorPreferences,
 } from "../../../workflow-authoring/projects/services/navigator-preferences";
 import { ExecutionTrace } from "../../traces/components/execution-trace";
@@ -79,19 +80,23 @@ const hasRun = (snapshot: HostOverviewSnapshot, identity: ProjectIdentity, runId
   );
 
 export function WorkflowInspector(props: WorkflowInspectorProps) {
+  const production = props.production ?? props.loadOverview === undefined;
   const overviewCoordinator = makeHostOverviewCoordinator({
     load: props.loadOverview ?? loadHostOverview,
-    policy:
-      props.loadOverview === undefined ? productionHostOverviewPolicy : embeddedHostOverviewPolicy,
+    policy: production ? productionHostOverviewPolicy : embeddedHostOverviewPolicy,
   });
   const overview = overviewCoordinator.overview;
   const overviewError = overviewCoordinator.error;
-  overviewCoordinator.start();
+  // HostOverview and its long-lived discovery loop belong to the browser
+  // component. Starting during SSR would create an unowned server-side
+  // coordinator alongside the hydrated browser coordinator.
+  onMount(() => overviewCoordinator.start());
   onCleanup(() => overviewCoordinator.dispose());
-  const [preferences, setPreferences] = createSignal<NavigatorPreferences>({
-    version: 1,
-    order: [],
-  });
+  const [preferences, setPreferences] = createSignal<NavigatorPreferences>(
+    readNavigatorPreferences(
+      typeof window === "undefined" ? null : window.localStorage.getItem(NAVIGATOR_PREFERENCES_KEY),
+    ),
+  );
   const [selectedRunId, setSelectedRunId] = createSignal<WorkflowRunId | undefined>();
   const [revealedRun, setRevealedRun] = createSignal<WorkflowRunSnapshot | undefined>();
   const [dialog, setDialog] = createSignal<DialogKind>(null);
@@ -180,12 +185,10 @@ export function WorkflowInspector(props: WorkflowInspectorProps) {
   );
   const selectedDefinition = createMemo(() => {
     const run = selectedRun();
-    return (
-      selectedDefinitions().find(
-        (definition) =>
-          definition.workflowKey === run?.workflowKey &&
-          definition.revision === run?.workflowRevision,
-      ) ?? selectedDefinitions()[0]
+    if (run === undefined) return selectedDefinitions()[0];
+    return selectedDefinitions().find(
+      (definition) =>
+        definition.workflowKey === run.workflowKey && definition.revision === run.workflowRevision,
     );
   });
   const traceSelection = createMemo(() => {
@@ -204,9 +207,13 @@ export function WorkflowInspector(props: WorkflowInspectorProps) {
     ];
   });
 
-  const reloadOverview = async (expectedRunId?: WorkflowRunId) => {
+  const reloadOverview = async (expected?: {
+    readonly identity: ProjectIdentity;
+    readonly runId?: WorkflowRunId;
+  }) => {
     if (props.loadOverview !== undefined) return;
-    const expectedIdentity = selectedProjectIdentity();
+    const expectedIdentity = expected?.identity ?? selectedProjectIdentity();
+    const expectedRunId = expected?.runId;
     for (let attempt = 0; ; attempt += 1) {
       const refreshed = await overviewCoordinator.refresh();
       if (
@@ -241,15 +248,18 @@ export function WorkflowInspector(props: WorkflowInspectorProps) {
     identity: selectedProjectIdentity,
     overview,
     refetch: reloadHostOverview,
-    production: props.loadOverview === undefined,
+    production,
     acknowledge: props.acknowledgeTrace,
+    ...(props.followOverview === undefined ? {} : { followOverview: props.followOverview }),
   });
   const actions = useWorkflowInspectorActions({
     identity: selectedProjectIdentity,
     run: selectedRun,
     definition: selectedDefinition,
-    production: props.loadOverview === undefined,
+    production,
+    authoritative: () => overviewError() === undefined,
     reloadOverview,
+    acceptRun: overviewCoordinator.acceptRun,
     setDialog,
     setSelectedRunId,
     setRevealedRun,
@@ -333,6 +343,7 @@ export function WorkflowInspector(props: WorkflowInspectorProps) {
                   occurrences={selectedOccurrences()}
                   runs={selectedRuns()}
                   selectedRunId={selectedRunId()}
+                  mutationsEnabled={overviewError() === undefined}
                   onSelectRun={setSelectedRunId}
                   onScheduleAction={actions.scheduleAction}
                 />
@@ -374,9 +385,11 @@ export function WorkflowInspector(props: WorkflowInspectorProps) {
                   </div>
                 </div>
                 <div class="flex items-center gap-1.5">
-                  <span class="flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-1 font-semibold text-[9px] text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-300">
-                    <Radio class="size-2.5" /> Connected to Kojo Host {current().host.hostVersion} ·
-                    Host live
+                  <span
+                    class={`flex items-center gap-1 rounded-full px-2 py-1 font-semibold text-[9px] ${overviewError() === undefined ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-300" : "bg-amber-100 text-amber-800 dark:bg-amber-400/10 dark:text-amber-300"}`}
+                  >
+                    <Radio class="size-2.5" /> Connected to Kojo Host {current().host.hostVersion} ·{" "}
+                    {overviewError() === undefined ? "Host live" : "Host snapshot stale"}
                   </span>
                   <button
                     type="button"
@@ -409,6 +422,28 @@ export function WorkflowInspector(props: WorkflowInspectorProps) {
                 </div>
               </header>
               <div class="workflow-inspector-workspace-scroll">
+                <Show when={overviewError()}>
+                  {(hostError) => (
+                    <div
+                      class="mx-4 mt-3 flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[10px] text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200"
+                      role="alert"
+                    >
+                      <CircleAlert class="mt-0.5 size-3 shrink-0" />
+                      <span class="flex-1">
+                        Host snapshot is stale; mutation controls are disabled until an
+                        authoritative HostOverview refresh succeeds. {errorMessage(hostError())}
+                      </span>
+                      <button
+                        type="button"
+                        class="shrink-0 rounded-md border border-amber-300 px-2 py-1 font-semibold text-[9px] hover:bg-amber-100 dark:border-amber-800 dark:hover:bg-amber-900/40"
+                        onClick={() => void overviewCoordinator.refresh().catch(() => undefined)}
+                        disabled={overviewCoordinator.loading()}
+                      >
+                        {overviewCoordinator.loading() ? "Retrying…" : "Retry HostOverview"}
+                      </button>
+                    </div>
+                  )}
+                </Show>
                 <Show when={actions.notice()}>
                   {(message) => (
                     <div
@@ -481,6 +516,7 @@ export function WorkflowInspector(props: WorkflowInspectorProps) {
                     <RunGraph
                       runs={selectedRuns()}
                       selectedRunId={selectedRunId()}
+                      hostLive={overviewError() === undefined}
                       onSelectRun={setSelectedRunId}
                     />
                     <section aria-label="Live Event feed" class="workflow-inspector-card">
@@ -524,6 +560,7 @@ export function WorkflowInspector(props: WorkflowInspectorProps) {
                   retention={selectedRetention()}
                   canStart={current().host.capabilities.includes("runs:start")}
                   canReveal={current().host.capabilities.includes("runs:reveal")}
+                  canMutate={overviewError() === undefined}
                   revealedRun={revealedRun()}
                   artifactIds={artifactIds()}
                   busyAction={actions.busyAction()}
@@ -556,6 +593,7 @@ export function WorkflowInspector(props: WorkflowInspectorProps) {
         dialog={dialog}
         freshInput={actions.freshInput}
         busyAction={actions.busyAction}
+        mutationsEnabled={overviewError() === undefined}
         onFreshInput={actions.setFreshInput}
         onClose={() => setDialog(null)}
         onFreshStart={() => void actions.freshStart()}

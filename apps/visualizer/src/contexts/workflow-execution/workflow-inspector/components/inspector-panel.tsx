@@ -53,7 +53,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
               <p class="text-[10px] text-zinc-500">
                 Select a Workflow Run to inspect its relationships, evidence, and allowed controls.
               </p>
-              <Show when={props.canStart && props.definition}>
+              <Show when={props.canStart && props.canMutate && props.definition}>
                 <section
                   class="mt-4 border-zinc-200 border-t pt-3 dark:border-zinc-800"
                   aria-label="Workflow Definition controls"
@@ -123,7 +123,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
                   <span class="text-[8px] text-zinc-400">Host-authoritative</span>
                 </div>
                 <div class="mt-2 space-y-2">
-                  <Show when={run().allowedActions.includes("resume")}>
+                  <Show when={props.canMutate && run().allowedActions.includes("resume")}>
                     <div class="rounded-lg border border-emerald-200 bg-emerald-50 p-2 dark:border-emerald-900 dark:bg-emerald-950/30">
                       <p class="flex items-center gap-1 font-semibold text-[9px] text-emerald-800 dark:text-emerald-300">
                         <Play class="size-2.5" /> Resume this same Workflow Run
@@ -148,7 +148,9 @@ export function InspectorPanel(props: InspectorPanelProps) {
                       </button>
                     </div>
                   </Show>
-                  <Show when={run().allowedActions.includes("deferred-complete")}>
+                  <Show
+                    when={props.canMutate && run().allowedActions.includes("deferred-complete")}
+                  >
                     <div class="rounded-lg border border-sky-200 bg-sky-50 p-2 dark:border-sky-900 dark:bg-sky-950/30">
                       <p class="flex items-center gap-1 font-semibold text-[9px] text-sky-800 dark:text-sky-300">
                         <span aria-hidden="true">✓</span> Complete Workflow Deferred
@@ -182,7 +184,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
                       </button>
                     </div>
                   </Show>
-                  <Show when={run().allowedActions.includes("stop")}>
+                  <Show when={props.canMutate && run().allowedActions.includes("stop")}>
                     <button
                       type="button"
                       class="flex h-7 w-full items-center justify-center gap-1 rounded-md border border-rose-200 bg-white px-2 font-semibold text-[9px] text-rose-700 hover:bg-rose-50 dark:border-rose-900 dark:bg-zinc-900 dark:text-rose-300"
@@ -191,7 +193,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
                       <Square class="size-2.5" /> Request safe stop
                     </button>
                   </Show>
-                  <Show when={props.canStart && props.definition}>
+                  <Show when={props.canStart && props.canMutate && props.definition}>
                     <button
                       type="button"
                       class="flex h-7 w-full items-center justify-center gap-1 rounded-md border border-zinc-300 bg-white px-2 font-semibold text-[9px] hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900"
@@ -202,7 +204,8 @@ export function InspectorPanel(props: InspectorPanelProps) {
                   </Show>
                   <Show
                     when={
-                      run().allowedActions.length === 0 && !(props.canStart && props.definition)
+                      run().allowedActions.length === 0 &&
+                      !(props.canStart && props.canMutate && props.definition)
                     }
                   >
                     <p class="rounded-md bg-zinc-100 p-2 text-[9px] text-zinc-500 dark:bg-zinc-800">
@@ -233,7 +236,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
                   Masked by default. Reveal requests a warning and asks the Host for one explicit
                   view.
                 </p>
-                <Show when={props.canReveal && props.revealedRun === undefined}>
+                <Show when={props.canReveal && props.canMutate && props.revealedRun === undefined}>
                   <button
                     type="button"
                     class="mt-2 flex h-7 w-full items-center justify-center gap-1 rounded-md border border-amber-300 bg-amber-50 font-semibold text-[9px] text-amber-900 hover:bg-amber-100 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300"

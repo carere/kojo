@@ -4,8 +4,9 @@ import {
   ProjectIdentity,
   WorkflowRunId,
   type WorkflowRunSnapshot,
+  type WorkflowRunStartResult,
 } from "@kojo/control";
-import { Schema } from "effect";
+import { Effect, Schema, Stream } from "effect";
 import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, expect, test } from "vitest";
@@ -256,6 +257,20 @@ const overview: HostOverviewSnapshot = {
   ],
 };
 
+const firstProjectDefinitionSnapshot = overview.projectDefinitions.at(0);
+const secondProjectDefinitionSnapshot = overview.projectDefinitions.at(1);
+const firstWorkflowRunsSnapshot = overview.workflowRuns.at(0);
+const secondWorkflowRunsSnapshot = overview.workflowRuns.at(1);
+const firstDefinition = firstProjectDefinitionSnapshot?.definitions.workflows.at(0);
+if (
+  firstProjectDefinitionSnapshot === undefined ||
+  secondProjectDefinitionSnapshot === undefined ||
+  firstWorkflowRunsSnapshot === undefined ||
+  secondWorkflowRunsSnapshot === undefined ||
+  firstDefinition === undefined
+)
+  throw new Error("Workflow Inspector browser fixture is incomplete.");
+
 const traceFor = (
   runId: WorkflowRunId,
   kind: "run.accepted" | "activity.attempt-started",
@@ -393,6 +408,51 @@ test("shows a recoverable HostOverview error after finite exhaustion and succeed
   expect(attempts).toBe(5);
 });
 
+test("does not offer Fresh Start from an unrelated definition when the selected Run is unavailable", async () => {
+  setLocale("en", { reload: false });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const acceptedOtherDefinition = {
+    ...firstDefinition,
+    workflowKey: "accepted-other-workflow",
+    revision: "2",
+  };
+  const unavailableRunOverview: HostOverviewSnapshot = {
+    ...overview,
+    projectDefinitions: [
+      {
+        ...firstProjectDefinitionSnapshot,
+        definitions: {
+          ...firstProjectDefinitionSnapshot.definitions,
+          workflows: [acceptedOtherDefinition],
+        },
+      },
+      secondProjectDefinitionSnapshot,
+    ],
+    workflowRuns: [
+      {
+        ...firstWorkflowRunsSnapshot,
+        runs: [run(firstRunId, "removed-workflow", null, ["resume", "stop"])],
+      },
+      secondWorkflowRunsSnapshot,
+    ],
+  };
+  dispose = render(
+    () => (
+      <ColorModeProvider initialColorMode="light">
+        <WorkflowInspector loadOverview={() => Promise.resolve(unavailableRunOverview)} />
+      </ColorModeProvider>
+    ),
+    root,
+  );
+
+  await expect.element(page.getByText("Connected to Kojo Host 0.1.0")).toBeVisible();
+  await expect
+    .element(page.getByRole("complementary", { name: "Run inspection panel" }))
+    .toBeVisible();
+  expect(page.getByRole("button", { name: "Start a fresh Workflow Run" }).length).toBe(0);
+});
+
 test("discards a delayed sensitive reveal after switching Project and Run identity", async () => {
   const root = document.createElement("div");
   document.body.append(root);
@@ -458,6 +518,271 @@ test("discards a delayed sensitive reveal after switching Project and Run identi
 
   resolveReveal?.({ ok: true, run: { runId: firstRunId } as WorkflowRunSnapshot });
   await expect.poll(() => document.querySelector("[data-revealed-run]")?.textContent).toBe("none");
+});
+
+test("discards a delayed accepted Fresh Start after switching Project identity", async () => {
+  const root = document.createElement("div");
+  document.body.append(root);
+  const first = run(firstRunId, "first-workflow");
+  const second = run(secondRunId, "second-workflow");
+  let resolveStart: ((result: WorkflowRunStartResult) => void) | undefined;
+  let aborted = false;
+  const reloadExpectations: Array<unknown> = [];
+
+  const FreshStartHarness = () => {
+    const [identity, setIdentity] = createSignal(firstIdentity);
+    const [runId, setRunId] = createSignal(firstRunId);
+    const [_dialog, setDialog] = createSignal<DialogKind>(null);
+    const [_selectedRunId, setSelectedRunId] = createSignal<WorkflowRunId | undefined>(firstRunId);
+    const [_revealedRun, setRevealedRun] = createSignal<WorkflowRunSnapshot>();
+    const actions = useWorkflowInspectorActions({
+      identity,
+      run: () => (runId() === firstRunId ? first : second),
+      definition: () => firstDefinition,
+      production: true,
+      reloadOverview: async (expected) => {
+        reloadExpectations.push(expected);
+      },
+      setDialog,
+      setSelectedRunId,
+      setRevealedRun,
+      startWorkflowRun: async (request, signal) => {
+        expect(request.identity).toBe(firstIdentity);
+        expect(request.workflowKey).toBe("first-workflow");
+        signal.addEventListener("abort", () => {
+          aborted = true;
+        });
+        return await new Promise((resolve) => {
+          resolveStart = resolve;
+        });
+      },
+    });
+
+    return (
+      <div>
+        <button type="button" onClick={() => void actions.freshStart()}>
+          Start delayed Fresh Start
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setIdentity(secondIdentity);
+            setRunId(secondRunId);
+          }}
+        >
+          Switch Fresh Start Project
+        </button>
+        <output data-fresh-selection>
+          {identity()}:{runId()}
+        </output>
+        <output data-fresh-notice>{actions.notice() ?? "none"}</output>
+        <output data-fresh-busy>{actions.busyAction() ?? "none"}</output>
+      </div>
+    );
+  };
+
+  dispose = render(() => <FreshStartHarness />, root);
+  await page.getByRole("button", { name: "Start delayed Fresh Start" }).click();
+  await expect.poll(() => resolveStart !== undefined).toBe(true);
+  await page.getByRole("button", { name: "Switch Fresh Start Project" }).click();
+  await expect.poll(() => aborted).toBe(true);
+
+  resolveStart?.({
+    ok: true,
+    run: { runId: firstRunId } as WorkflowRunSnapshot,
+    alreadyApplied: false,
+    requestKey: "00000000-0000-7000-8000-000000000901" as never,
+  });
+  await expect
+    .poll(() => document.querySelector("[data-fresh-selection]")?.textContent)
+    .toBe(`${secondIdentity}:${secondRunId}`);
+  expect(document.querySelector("[data-fresh-notice]")?.textContent).toBe("none");
+  expect(document.querySelector("[data-fresh-busy]")?.textContent).toBe("none");
+  expect(reloadExpectations).toEqual([]);
+});
+
+test("refreshes authoritative Host state before retrying a recoverable Fresh Start", async () => {
+  const root = document.createElement("div");
+  document.body.append(root);
+  const acceptedRun = run(firstRunId, "first-workflow");
+  const requestKeys: Array<string> = [];
+  let attempts = 0;
+  let reloads = 0;
+  let acceptedReceipts = 0;
+  const FreshStartRecoveryHarness = () => {
+    const [_dialog, setDialog] = createSignal<DialogKind>("fresh-start");
+    const [_selectedRunId, setSelectedRunId] = createSignal<WorkflowRunId | undefined>();
+    const [_revealedRun, setRevealedRun] = createSignal<WorkflowRunSnapshot>();
+    const actions = useWorkflowInspectorActions({
+      identity: () => firstIdentity,
+      run: () => undefined,
+      definition: () => firstDefinition,
+      production: true,
+      reloadOverview: async () => {
+        reloads += 1;
+      },
+      acceptRun: () => {
+        acceptedReceipts += 1;
+      },
+      setDialog,
+      setSelectedRunId,
+      setRevealedRun,
+      startWorkflowRun: async (request) => {
+        attempts += 1;
+        requestKeys.push(request.requestKey);
+        if (attempts === 1) {
+          return {
+            ok: false,
+            requestKey: request.requestKey,
+            error: {
+              code: "project-runtime-not-ready",
+              message: "The executable Project Runtime is still converging.",
+              next: "Refresh the Host overview and retry.",
+              affectedResource: { kind: "project", identity: firstIdentity },
+              findingKeys: [],
+            },
+          } satisfies WorkflowRunStartResult;
+        }
+        return {
+          ok: true,
+          run: acceptedRun as unknown as WorkflowRunSnapshot,
+          alreadyApplied: false,
+          requestKey: request.requestKey,
+        } satisfies WorkflowRunStartResult;
+      },
+    });
+
+    return (
+      <div>
+        <button type="button" onClick={() => void actions.freshStart()}>
+          Recover Fresh Start
+        </button>
+        <output data-recovery-notice>{actions.notice() ?? "none"}</output>
+      </div>
+    );
+  };
+
+  dispose = render(() => <FreshStartRecoveryHarness />, root);
+  await page.getByRole("button", { name: "Recover Fresh Start" }).click();
+  await expect
+    .poll(() => document.querySelector("[data-recovery-notice]")?.textContent)
+    .toContain(firstRunId);
+  expect(attempts).toBe(2);
+  expect(reloads).toBe(2);
+  expect(acceptedReceipts).toBe(1);
+  expect(new Set(requestKeys).size).toBe(1);
+});
+
+test("cancels Fresh Start retry backoff on Project replacement", async () => {
+  const root = document.createElement("div");
+  document.body.append(root);
+  const first = run(firstRunId, "first-workflow");
+  const second = run(secondRunId, "second-workflow");
+  let attempts = 0;
+  const FreshStartRetryHarness = () => {
+    const [identity, setIdentity] = createSignal(firstIdentity);
+    const [runId, setRunId] = createSignal(firstRunId);
+    const [_dialog, setDialog] = createSignal<DialogKind>(null);
+    const [_selectedRunId, setSelectedRunId] = createSignal<WorkflowRunId | undefined>(firstRunId);
+    const [_revealedRun, setRevealedRun] = createSignal<WorkflowRunSnapshot>();
+    const actions = useWorkflowInspectorActions({
+      identity,
+      run: () => (runId() === firstRunId ? first : second),
+      definition: () => firstDefinition,
+      production: true,
+      reloadOverview: async () => undefined,
+      setDialog,
+      setSelectedRunId,
+      setRevealedRun,
+      startWorkflowRun: async () => {
+        attempts += 1;
+        throw new Error("temporary transport failure");
+      },
+    });
+    return (
+      <div>
+        <button type="button" onClick={() => void actions.freshStart()}>
+          Start retrying Fresh Start
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setIdentity(secondIdentity);
+            setRunId(secondRunId);
+          }}
+        >
+          Replace retry Project
+        </button>
+        <output data-retry-busy>{actions.busyAction() ?? "none"}</output>
+      </div>
+    );
+  };
+
+  dispose = render(() => <FreshStartRetryHarness />, root);
+  await page.getByRole("button", { name: "Start retrying Fresh Start" }).click();
+  await expect.poll(() => attempts).toBe(1);
+  await page.getByRole("button", { name: "Replace retry Project" }).click();
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(attempts).toBe(1);
+  expect(document.querySelector("[data-retry-busy]")?.textContent).toBe("none");
+});
+
+test("marks a retained snapshot stale and disables mutations after an authoritative refresh fails", async () => {
+  setLocale("en", { reload: false });
+  const root = document.createElement("div");
+  document.body.append(root);
+  let loads = 0;
+  dispose = render(
+    () => (
+      <ColorModeProvider initialColorMode="light">
+        <WorkflowInspector
+          production
+          loadOverview={async () => {
+            loads += 1;
+            if (loads === 1) return overview;
+            throw new HostOverviewError({
+              code: "host-unavailable",
+              message: "Host refresh failed after the retained snapshot.",
+              next: "Retry the Host request.",
+            });
+          }}
+          loadTrace={(selection) => Promise.resolve(traceFor(selection.runId, "run.accepted"))}
+          acknowledgeTrace={() => Effect.void}
+          followOverview={() =>
+            Stream.concat(
+              Stream.make({
+                kind: "resource-changed" as const,
+                deliverySequence: 1,
+                identity: firstIdentity,
+                topic: "runs" as const,
+                subscriptionId: "stale-snapshot" as never,
+              }),
+              Stream.never,
+            )
+          }
+        />
+      </ColorModeProvider>
+    ),
+    root,
+  );
+
+  await expect.element(page.getByText("Connected to Kojo Host 0.1.0")).toBeVisible();
+  await expect.element(page.getByText("Host snapshot stale", { exact: true })).toBeVisible();
+  expect(
+    document.querySelector('[aria-label="Workflow relationship graph"]')?.textContent,
+  ).toContain("Host snapshot stale");
+  expect(
+    document.querySelector('[aria-label="Workflow relationship graph"]')?.textContent,
+  ).not.toContain("Host live");
+  await expect
+    .element(page.getByText(/mutation controls are disabled until an authoritative HostOverview/))
+    .toBeVisible();
+  const inspector = page.getByRole("complementary", { name: "Run inspection panel" });
+  expect(inspector.getByRole("button", { name: "Resume Workflow Run" }).length).toBe(0);
+  expect(inspector.getByRole("button", { name: "Request safe stop" }).length).toBe(0);
+  expect(inspector.getByRole("button", { name: "Review warning & reveal" }).length).toBe(0);
+  expect(inspector.getByRole("button", { name: "Start a fresh Workflow Run" }).length).toBe(0);
+  expect(loads).toBeGreaterThan(1);
 });
 
 test("renders the production inspector with isolated Projects, evidence, controls, retention, and accessible panels", async () => {
@@ -557,6 +882,12 @@ test("renders the production inspector with isolated Projects, evidence, control
     new KeyboardEvent("keydown", { key: "End", bubbles: true }),
   );
   expect(inspectorResizerElement.getAttribute("aria-valuenow")).toBe("420");
+  navigatorResizerElement.dispatchEvent(
+    new PointerEvent("pointerdown", { bubbles: true, clientX: 100 }),
+  );
+  window.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, clientX: 200 }));
+  window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: 200 }));
+  expect(navigatorResizerElement.getAttribute("aria-valuenow")).toBe("320");
   await page.getByRole("button", { name: "Collapse Project resource navigator" }).click();
   await expect
     .element(

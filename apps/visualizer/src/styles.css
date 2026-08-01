@@ -162,6 +162,7 @@
 
 @layer components {
   .workflow-inspector-layout {
+    position: relative;
     display: grid;
     grid-template-columns: 52px minmax(220px, var(--workflow-nav-width)) minmax(0, 1fr) minmax(
         220px,
@@ -294,11 +295,13 @@
   }
 
   .workflow-inspector-resizer-nav {
-    right: -0.5rem;
+    right: auto;
+    left: calc(52px + var(--workflow-nav-width) - 0.5rem);
   }
 
   .workflow-inspector-resizer-inspector {
-    left: -0.5rem;
+    right: calc(var(--workflow-inspector-width) - 0.5rem);
+    left: auto;
   }
 
   .dark .workflow-inspector-resource-panel,

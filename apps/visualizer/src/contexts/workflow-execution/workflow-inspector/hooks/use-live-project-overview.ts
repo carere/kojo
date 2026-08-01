@@ -97,6 +97,9 @@ interface UseLiveProjectOverviewProps {
   readonly acknowledge:
     | ((delivery: ControlSubscriptionDelivery) => Effect.Effect<void, unknown, never>)
     | undefined;
+  readonly followOverview?: (
+    identity: ProjectIdentity,
+  ) => Stream.Stream<ControlSubscriptionUpdate, unknown>;
 }
 
 /** Keeps the selected Project snapshot Host-authoritative across resource updates and reconnects. */
@@ -135,15 +138,18 @@ export function useLiveProjectOverview(props: UseLiveProjectOverviewProps) {
                 client.AcknowledgeControlSubscription(delivery),
               ).pipe(Effect.asVoid)
             : props.acknowledge(delivery);
+        const followOverview = props.followOverview;
         const follow = followProjectOverview<VisualizerApiClient>(identity, {
           subscribe: () =>
-            Effect.map(VisualizerApiClient, (client) =>
-              client.SubscribeControl({
-                projects: [identity],
-                topics: ["readiness", "schedules", "runs"],
-                traces: [],
-              }),
-            ),
+            followOverview === undefined
+              ? Effect.map(VisualizerApiClient, (client) =>
+                  client.SubscribeControl({
+                    projects: [identity],
+                    topics: ["readiness", "schedules", "runs"],
+                    traces: [],
+                  }),
+                )
+              : Effect.sync(() => followOverview(identity)),
           reload,
           acknowledge,
         });

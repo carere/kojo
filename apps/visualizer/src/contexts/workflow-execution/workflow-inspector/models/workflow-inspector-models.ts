@@ -21,6 +21,8 @@ import type { ExecutionTraceSelection } from "../../traces/components/execution-
 export interface WorkflowInspectorProps {
   /** Test and embedded-client seam. The production route leaves this unset. */
   readonly loadOverview?: (signal: AbortSignal) => Promise<HostOverviewSnapshot | undefined>;
+  /** Allows browser regressions to exercise the production coordinator with a controlled loader. */
+  readonly production?: boolean;
   /** Test seam for a Host-owned trace query. */
   readonly loadTrace?: (
     selection: ExecutionTraceSelection,
@@ -34,6 +36,10 @@ export interface WorkflowInspectorProps {
   readonly acknowledgeTrace?: (
     delivery: ControlSubscriptionDelivery,
   ) => import("effect").Effect.Effect<void>;
+  /** Test seam for the production Project-scoped Host subscription. */
+  readonly followOverview?: (
+    identity: ProjectIdentity,
+  ) => Stream.Stream<ControlSubscriptionUpdate, unknown>;
   readonly traceRefreshIntervalMs?: number;
 }
 
@@ -59,6 +65,7 @@ export interface ResourceNavigatorProps {
   readonly occurrences: ReadonlyArray<WorkflowScheduleOccurrenceSnapshot>;
   readonly runs: ReadonlyArray<WorkflowRunListItem>;
   readonly selectedRunId: WorkflowRunId | undefined;
+  readonly mutationsEnabled: boolean;
   readonly onSelectRun: (runId: WorkflowRunId) => void;
   readonly onScheduleAction: (
     schedule: WorkflowScheduleSnapshot,
@@ -69,6 +76,7 @@ export interface ResourceNavigatorProps {
 export interface RunGraphProps {
   readonly runs: ReadonlyArray<WorkflowRunListItem>;
   readonly selectedRunId: WorkflowRunId | undefined;
+  readonly hostLive: boolean;
   readonly onSelectRun: (runId: WorkflowRunId) => void;
 }
 
@@ -79,6 +87,7 @@ export interface InspectorPanelProps {
   readonly retention: RetentionSnapshot | undefined;
   readonly canStart: boolean;
   readonly canReveal: boolean;
+  readonly canMutate: boolean;
   readonly revealedRun: WorkflowRunSnapshot | undefined;
   readonly artifactIds: ReadonlyArray<string>;
   readonly busyAction: string | undefined;

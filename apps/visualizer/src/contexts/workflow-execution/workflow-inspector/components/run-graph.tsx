@@ -80,8 +80,10 @@ export function RunGraph(props: RunGraphProps) {
             the chronological source of evidence.
           </p>
         </div>
-        <span class="flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 font-semibold text-[9px] text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-300">
-          <Radio class="size-2.5" /> Host live
+        <span
+          class={`flex items-center gap-1 rounded-full px-2 py-0.5 font-semibold text-[9px] ${props.hostLive ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-300" : "bg-amber-100 text-amber-800 dark:bg-amber-400/10 dark:text-amber-300"}`}
+        >
+          <Radio class="size-2.5" /> {props.hostLive ? "Host live" : "Host snapshot stale"}
         </span>
       </div>
       <Show

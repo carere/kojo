@@ -40,6 +40,9 @@ const parsePreferences = (value: string | null): NavigatorPreferences | undefine
   }
 };
 
+export const readNavigatorPreferences = (stored: string | null): NavigatorPreferences =>
+  parsePreferences(stored) ?? { version: 1, order: [] };
+
 export const reconcileNavigatorPreferences = (
   projects: ReadonlyArray<ProjectSnapshot>,
   stored: string | null,
