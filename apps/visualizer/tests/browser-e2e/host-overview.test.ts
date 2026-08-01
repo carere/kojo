@@ -1418,30 +1418,36 @@ const within = async <Value>(label: string, operation: Promise<Value>, timeoutMs
 };
 
 const waitForHostOverviewReady = async (page: Page, label: string) => {
-  const connected = page.getByText("Connected to Kojo Host 0.1.0");
-  const alert = page.getByRole("alert");
-  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let result: "connected" | "alert" | undefined;
   try {
-    const result = await Promise.race([
-      connected
-        .waitFor({ state: "visible", timeout: browserAssertionTimeoutMs })
-        .then(() => "connected" as const),
-      alert
-        .waitFor({ state: "visible", timeout: browserAssertionTimeoutMs })
-        .then(() => "alert" as const),
-      new Promise<"timeout">((resolve) => {
-        timeout = setTimeout(() => resolve("timeout"), browserAssertionTimeoutMs);
-      }),
-    ]);
-    if (result === "connected") return;
-    const body = await page.locator("body").innerText({ timeout: 1_000 });
-    if (result === "alert") {
-      throw new Error(`${label} reported a HostOverview error. Body: ${body}`);
+    const resultHandle = await page.waitForFunction(
+      () => {
+        if (document.body.textContent?.includes("Connected to Kojo Host 0.1.0"))
+          return "connected" as const;
+        if (document.querySelector('[role="alert"]')) return "alert" as const;
+        return undefined;
+      },
+      undefined,
+      { timeout: browserAssertionTimeoutMs, polling: 100 },
+    );
+    try {
+      result = await resultHandle.jsonValue();
+    } finally {
+      await resultHandle.dispose();
     }
-    throw new Error(`${label} timed out before Connected. Body: ${body}`);
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout);
+  } catch (cause) {
+    const body = await page
+      .locator("body")
+      .innerText({ timeout: 1_000 })
+      .catch((bodyCause) => `<body unavailable: ${String(bodyCause)}>`);
+    throw new Error(`${label} timed out before Connected. Body: ${body}`, { cause });
   }
+  if (result === "connected") return;
+  const body = await page
+    .locator("body")
+    .innerText({ timeout: 1_000 })
+    .catch((cause) => `<body unavailable: ${String(cause)}>`);
+  throw new Error(`${label} reported a HostOverview error. Body: ${body}`);
 };
 
 const cleanupTemporaryDirectory = (directory: TemporaryDirectory, budget: TeardownBudget) =>
