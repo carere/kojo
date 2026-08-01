@@ -18,6 +18,8 @@ import {
   RefreshProjectReadinessHandler,
   RepairProjectReadinessHandler,
   ResumeWorkflowRunHandler,
+  RevealWorkflowRunHandler,
+  StartWorkflowRunHandler,
   StopWorkflowRunHandler,
   SubscribeControlHandler,
 } from "../../workflow-execution/host/server/handlers";
@@ -40,6 +42,8 @@ const VisualizerApiLive = RpcServer.layerHttp({
     ResumeWorkflowRunHandler.pipe(Layer.provide(HostControlClientLive)),
     CompleteWorkflowDeferredHandler.pipe(Layer.provide(HostControlClientLive)),
     StopWorkflowRunHandler.pipe(Layer.provide(HostControlClientLive)),
+    StartWorkflowRunHandler.pipe(Layer.provide(HostControlClientLive)),
+    RevealWorkflowRunHandler.pipe(Layer.provide(HostControlClientLive)),
     ReadExecutionTraceHandler.pipe(Layer.provide(HostControlClientLive)),
     SubscribeControlHandler.pipe(Layer.provide(HostControlClientLive)),
     AcknowledgeControlSubscriptionHandler.pipe(Layer.provide(HostControlClientLive)),

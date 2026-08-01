@@ -1,14 +1,16 @@
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { existsSync, readdirSync } from "node:fs";
+import { access, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type Browser, type BrowserContext, chromium } from "playwright";
-import { afterEach, expect, test } from "vitest";
+import { type Browser, type BrowserContext, chromium, type Page } from "playwright";
+import { afterAll, afterEach, expect, test } from "vitest";
 import { makeTemporaryDirectory, runKojoCli } from "../../../../tests/support/cli-process";
 import {
   type KojoHostProcessFixture,
   startKojoHostProcess,
 } from "../../../../tests/support/host-process";
+import { makeTeardownBudget, type TeardownBudget } from "../../../../tests/support/teardown-budget";
 
 interface Fixture {
   readonly browser: BrowserContext;
@@ -24,14 +26,21 @@ interface TemporaryDirectory {
 }
 
 const fixtureStartupTimeoutMs = 30_000;
+const browserLaunchTimeoutMs = 10_000;
 const browserAssertionTimeoutMs = 30_000;
 const artifactDownloadTimeoutMs = 10_000;
+const hostShutdownTimeoutMs = 5_000;
+const processSnapshotTimeoutMs = 1_000;
 let fixture: Fixture | undefined;
-const temporaryDirectories: Array<() => Promise<void>> = [];
+let forcedHostTeardownFallbacks = 0;
+let forcedVisualizerTeardownFallbacks = 0;
+let forcedBrowserTeardownFallbacks = 0;
+const temporaryDirectories: Array<(budget: TeardownBudget) => Promise<void>> = [];
 const workflowPackagePath = fileURLToPath(
   new URL("../../../../packages/workflow", import.meta.url),
 );
 const effectPackagePath = fileURLToPath(new URL("../../node_modules/effect", import.meta.url));
+
 const artifactDownloadConfiguration = `
 import { Effect, Schema } from "effect";
 import { Command, CommandFailure, CommandResult, Sandbox, defineCommand, defineConfig, defineSandbox, defineWorkflow } from "@kojo/workflow";
@@ -67,17 +76,24 @@ export default defineConfig({
 });
 `;
 
+afterAll(() => {
+  console.info(
+    `Fixture forced teardown fallbacks: Host=${forcedHostTeardownFallbacks}, Vite=${forcedVisualizerTeardownFallbacks}, Chromium=${forcedBrowserTeardownFallbacks}`,
+  );
+});
+
 afterEach(async () => {
   const closingFixture = fixture;
   fixture = undefined;
   const cleanups = temporaryDirectories.splice(0);
+  const teardownBudget = makeTeardownBudget();
   let failure: unknown;
   try {
-    if (closingFixture !== undefined) await closeFixture(closingFixture);
+    if (closingFixture !== undefined) await closeFixture(closingFixture, teardownBudget);
   } catch (error) {
     failure = error;
   } finally {
-    const results = await Promise.allSettled(cleanups.map((cleanup) => cleanup()));
+    const results = await Promise.allSettled(cleanups.map((cleanup) => cleanup(teardownBudget)));
     const rejected = results.find(
       (result): result is PromiseRejectedResult => result.status === "rejected",
     );
@@ -91,13 +107,13 @@ test("loads the Host-authoritative Project state and reconciles Navigator prefer
   const page = await fixture.browser.newPage();
 
   await page.goto(`http://127.0.0.1:${fixture.port}`, { waitUntil: "domcontentloaded" });
-  await page.getByText("Connected to Kojo Host 0.1.0").waitFor({ state: "visible" });
+  await waitForHostOverviewReady(page, "Project fixture page HostOverview readiness");
   await page.getByText("No Kojo Projects yet.").waitFor({ state: "visible" });
 
   expect(await page.getByText("Connected to Kojo Host 0.1.0").isVisible()).toBe(true);
   expect(await page.getByText("No Kojo Projects yet.").isVisible()).toBe(true);
   const directory = await makeTemporaryDirectory("kojo-navigator-");
-  temporaryDirectories.push(directory.cleanup);
+  temporaryDirectories.push((budget) => cleanupTemporaryDirectory(directory, budget));
   await mkdir(join(directory.path, "node_modules", "@kojo"), { recursive: true });
   await symlink(
     workflowPackagePath,
@@ -161,12 +177,31 @@ export default defineConfig({
   );
 
   await page.reload({ waitUntil: "domcontentloaded" });
+  await waitForHostOverviewReady(page, "Project fixture reload HostOverview readiness");
+  const projects = page.locator('[aria-label="Kojo Projects"] button[data-project-identity]');
+  await expect.poll(() => projects.count(), { timeout: browserAssertionTimeoutMs }).toBe(2);
+  expect(await projects.nth(0).getAttribute("data-project-identity")).toBe(secondIdentity);
+  expect(await projects.nth(0).getAttribute("aria-current")).toBe("page");
+  expect(await projects.nth(1).getAttribute("data-project-identity")).toBe(firstIdentity);
+  await projects.nth(1).click();
+  const graphNodes = page.locator("[data-graph-node]");
+  const graphNodeCountBeforeFreshStart = await graphNodes.count();
+  await page.getByRole("button", { name: "Start a fresh Workflow Run", exact: true }).click();
+  await page.getByLabel("Fresh Workflow Run input").fill('"from-browser"');
+  await page.getByRole("button", { name: "Start fresh", exact: true }).click();
   await expect
-    .poll(() => page.locator("body").innerText(), { timeout: browserAssertionTimeoutMs })
-    .toContain(secondIdentity);
+    .poll(() => graphNodes.count(), { timeout: browserAssertionTimeoutMs })
+    .toBeGreaterThan(graphNodeCountBeforeFreshStart);
+  await page.getByRole("button", { name: "Review warning & reveal", exact: true }).click();
+  await page.getByRole("button", { name: "Reveal this view", exact: true }).click();
+  await within(
+    "reveal rendering",
+    page.getByText("Explicit reveal active").waitFor({ state: "visible" }),
+    browserAssertionTimeoutMs,
+  );
   await page
     .getByLabel("Accepted Workflow Definitions")
-    .getByText(/^echo /)
+    .getByText("echo 1", { exact: true })
     .waitFor({ state: "visible" });
   const schedules = page.getByLabel("Workflow Schedules");
   const initialScheduleText = await schedules.innerText();
@@ -174,15 +209,22 @@ export default defineConfig({
   expect(initialScheduleText).toContain("Disabled · available");
   expect(initialScheduleText).toContain("echo · 0 9 * * 1-5 · Europe/Paris · allow overlap");
   expect(initialScheduleText).toContain("Next: No next occurrence");
-  await page.getByRole("button", { name: "Enable" }).click();
-  await page.getByRole("button", { name: "Disable" }).waitFor({ state: "visible" });
+  const enableButton = page.getByRole("button", { name: "Enable", exact: true });
+  await enableButton.click();
+  await within(
+    "schedule enable rendering",
+    page.getByRole("button", { name: "Disable" }).waitFor({ state: "visible" }),
+    browserAssertionTimeoutMs,
+  );
   expect(await schedules.innerText()).toContain("Enabled · available");
-  const projects = page.getByRole("navigation", { name: "Kojo Projects" }).getByRole("button");
-  await expect.poll(() => projects.count(), { timeout: browserAssertionTimeoutMs }).toBe(2);
-
-  expect(await projects.nth(0).getAttribute("data-project-identity")).toBe(secondIdentity);
-  expect(await projects.nth(0).getAttribute("aria-current")).toBe("page");
-  expect(await projects.nth(1).getAttribute("data-project-identity")).toBe(firstIdentity);
+  await projects.nth(0).click();
+  await schedules.getByText("No Workflow Schedules yet.").waitFor({ state: "visible" });
+  expect(
+    await page
+      .getByLabel("Accepted Workflow Definitions")
+      .getByText("echo 1", { exact: true })
+      .count(),
+  ).toBe(0);
   const stored = await page.evaluate(() =>
     JSON.parse(window.localStorage.getItem("kojo.navigator.preferences") ?? "null"),
   );
@@ -191,6 +233,18 @@ export default defineConfig({
     order: [secondIdentity, firstIdentity],
     selectedProjectIdentity: secondIdentity,
   });
+
+  await page.setViewportSize({ width: 900, height: 720 });
+  expect(
+    await page.getByRole("separator", { name: "Resize Project resource navigator" }).isVisible(),
+  ).toBe(false);
+  expect(
+    await page.getByRole("complementary", { name: "Project resource navigator" }).isVisible(),
+  ).toBe(true);
+  expect(await page.getByRole("complementary", { name: "Run inspection panel" }).isVisible()).toBe(
+    true,
+  );
+  await page.setViewportSize({ width: 1280, height: 720 });
 
   await page.evaluate(
     ({ firstIdentity, secondIdentity }) => {
@@ -213,19 +267,15 @@ export default defineConfig({
 
 test("force-reclaims an owned browser process when bounded shutdown misses its deadline", async () => {
   const profile = await makeTemporaryDirectory("kojo-browser-profile-reclaim-");
-  const browser = Bun.spawn(
-    [
-      chromium.executablePath(),
-      "--headless",
-      "--no-default-browser-check",
-      "--no-first-run",
-      `--user-data-dir=${profile.path}`,
-      "about:blank",
-    ],
-    { stderr: "ignore", stdout: "ignore" },
-  );
+  const browser = await chromium.launchPersistentContext(profile.path, {
+    headless: true,
+    timeout: browserLaunchTimeoutMs,
+  });
   try {
-    await waitFor(async () => (await ownedBrowserPids(profile.path)).length > 0, browser);
+    await waitFor(
+      async () => (await ownedBrowserPids(profile.path)).length > 0,
+      () => browser.browser()?.isConnected() ?? false,
+    );
 
     let closeSettled = false;
     const eventuallyClosingBrowser: Pick<BrowserContext, "browser" | "close"> = {
@@ -235,36 +285,34 @@ test("force-reclaims an owned browser process when bounded shutdown misses its d
           setTimeout(() => {
             closeSettled = true;
             resolve();
-          }, cleanupDeadlineMs + 100);
+          }, processSnapshotTimeoutMs + 100);
         }),
     };
-    await expect(closeBrowser(eventuallyClosingBrowser, profile.path)).resolves.toBeUndefined();
+    await expect(
+      closeBrowser(eventuallyClosingBrowser, profile.path, makeTeardownBudget()),
+    ).resolves.toEqual({ gone: true, forced: true });
     expect(closeSettled).toBe(true);
     expect(await ownedBrowserPids(profile.path)).toEqual([]);
-    expect(await browser.exited).toBeTypeOf("number");
   } finally {
-    await terminateOwnedBrowser(profile.path);
-    if (browser.exitCode === null) browser.kill("SIGKILL");
-    await settlesWithin(browser.exited);
-    await profile.cleanup();
+    const budget = makeTeardownBudget();
+    await closeBrowser(browser, profile.path, budget);
+    await terminateOwnedBrowser(profile.path, budget);
+    expect(await ownedBrowserPids(profile.path)).toEqual([]);
+    await cleanupTemporaryDirectory(profile, budget);
   }
 });
 
 test("force-reclaims an owned browser process when both Playwright closes fail", async () => {
   const profile = await makeTemporaryDirectory("kojo-browser-profile-failed-reclaim-");
-  const browser = Bun.spawn(
-    [
-      chromium.executablePath(),
-      "--headless",
-      "--no-default-browser-check",
-      "--no-first-run",
-      `--user-data-dir=${profile.path}`,
-      "about:blank",
-    ],
-    { stderr: "ignore", stdout: "ignore" },
-  );
+  const browser = await chromium.launchPersistentContext(profile.path, {
+    headless: true,
+    timeout: browserLaunchTimeoutMs,
+  });
   try {
-    await waitFor(async () => (await ownedBrowserPids(profile.path)).length > 0, browser);
+    await waitFor(
+      async () => (await ownedBrowserPids(profile.path)).length > 0,
+      () => browser.browser()?.isConnected() ?? false,
+    );
     let owningCloseCalled = false;
     const failingBrowser: Pick<BrowserContext, "browser" | "close"> = {
       browser: () =>
@@ -277,43 +325,120 @@ test("force-reclaims an owned browser process when both Playwright closes fail",
       close: () => Promise.reject(new Error("Browser context close failed.")),
     };
 
-    await expect(closeBrowser(failingBrowser, profile.path)).rejects.toThrow(
-      "BrowserContext.close failed",
+    await expect(closeBrowser(failingBrowser, profile.path, makeTeardownBudget())).resolves.toEqual(
+      { gone: true, forced: true },
     );
     expect(owningCloseCalled).toBe(true);
     expect(await ownedBrowserPids(profile.path)).toEqual([]);
-    expect(await browser.exited).toBeTypeOf("number");
   } finally {
-    await terminateOwnedBrowser(profile.path);
-    if (browser.exitCode === null) browser.kill("SIGKILL");
-    await settlesWithin(browser.exited);
-    await profile.cleanup();
+    const budget = makeTeardownBudget();
+    await closeBrowser(browser, profile.path, budget);
+    await terminateOwnedBrowser(profile.path, budget);
+    expect(await ownedBrowserPids(profile.path)).toEqual([]);
+    await cleanupTemporaryDirectory(profile, budget);
+  }
+});
+
+test("does not count a force reclaim when Browser.close removes Chromium after context timeout", async () => {
+  const profile = await makeTemporaryDirectory("kojo-browser-profile-already-gone-");
+  const browser = await chromium.launchPersistentContext(profile.path, {
+    headless: true,
+    timeout: browserLaunchTimeoutMs,
+  });
+  try {
+    await waitFor(
+      async () => (await ownedBrowserPids(profile.path)).length > 0,
+      () => browser.browser()?.isConnected() ?? false,
+    );
+    const playwrightBrowser: Pick<BrowserContext, "browser" | "close"> = {
+      browser: () =>
+        ({
+          close: async () => {
+            await browser.close();
+          },
+        }) as Browser,
+      close: () => Bun.sleep(processSnapshotTimeoutMs + 100),
+    };
+
+    await expect(
+      closeBrowser(playwrightBrowser, profile.path, makeTeardownBudget()),
+    ).resolves.toEqual({ gone: true, forced: false });
+    expect(await ownedBrowserPids(profile.path)).toEqual([]);
+  } finally {
+    const budget = makeTeardownBudget();
+    if (browser.browser()?.isConnected() ?? false) {
+      await closeBrowser(browser, profile.path, budget);
+    }
+    await terminateOwnedBrowser(profile.path, budget);
+    expect(await ownedBrowserPids(profile.path)).toEqual([]);
+    await cleanupTemporaryDirectory(profile, budget);
   }
 });
 
 test("selects only Chromium processes with this fixture's exact profile argument", () => {
   const profilePath = "/private/tmp/kojo-browser-profile-[exact]";
-  const browser = chromium.executablePath();
+  const browser = headlessBrowserExecutablePath();
+  const chromiumExecutable = chromium.executablePath();
+  const alternateBrowser =
+    browser === chromiumExecutable
+      ? join(dirname(browser), "chrome-headless-shell")
+      : chromiumExecutable;
+  const supportedBrowserEntries = browserExecutablePaths().includes(alternateBrowser)
+    ? [{ commandLine: `${alternateBrowser} --user-data-dir=${profilePath}`, pid: 106 }]
+    : [];
   expect(
     ownedBrowserPidsFromProcessEntries(profilePath, [
       { commandLine: `${browser} --user-data-dir=${profilePath}`, pid: 101 },
+      ...supportedBrowserEntries,
       { commandLine: `${browser} --user-data-dir=${profilePath}-near-match`, pid: 102 },
       { commandLine: `${browser} --flag=--user-data-dir=${profilePath}`, pid: 103 },
       { commandLine: `node run ${profilePath}`, pid: 104 },
       { commandLine: `node --user-data-dir=${profilePath}`, pid: 105 },
     ]),
-  ).toEqual([101]);
+  ).toEqual([101, ...supportedBrowserEntries.map(({ pid }) => pid)]);
+});
+
+test("does not retain a PID after its process identity is reused", () => {
+  const snapshot = new Map<number, ProcessEntry>([
+    [
+      101,
+      {
+        commandLine: "/owned/host --socket=/private/tmp/kojo.sock",
+        pid: 101,
+        startTime: "Sat Aug  1 05:00:00 2026",
+      },
+    ],
+  ]);
+  const reusedEntry: ProcessEntry = {
+    commandLine: "/unrelated/process --socket=/private/tmp/other.sock",
+    pid: 101,
+    startTime: "Sat Aug  1 05:01:00 2026",
+  };
+
+  expect(revalidatedProcessEntries(snapshot, [reusedEntry])).toEqual([]);
+});
+
+test("does not report an empty browser ownership set as reclaimed", async () => {
+  await expect(
+    terminateOwnedBrowser(
+      "/private/tmp/kojo-browser-profile-without-a-process",
+      makeTeardownBudget(),
+    ),
+  ).resolves.toBe(false);
 });
 
 test("downloads a real Artifact as an inert attachment instead of rendering it", async () => {
   fixture = await startFixture();
   const page = await within("browser page startup", fixture.browser.newPage());
   const origin = `http://127.0.0.1:${fixture.port}`;
-  await within("visualizer page navigation", page.goto(origin, { waitUntil: "domcontentloaded" }));
-  await page.getByText("Connected to Kojo Host 0.1.0").waitFor({ state: "visible" });
+  await page.goto(origin, {
+    waitUntil: "domcontentloaded",
+    timeout: fixtureStartupTimeoutMs,
+  });
+  await waitForHostOverviewReady(page, "Artifact test page HostOverview readiness");
 
   const directory = await makeTemporaryDirectory("kojo-artifact-download-browser-");
-  temporaryDirectories.push(directory.cleanup);
+  temporaryDirectories.push((budget) => cleanupTemporaryDirectory(directory, budget));
   await mkdir(join(directory.path, "node_modules", "@kojo"), { recursive: true });
   await symlink(
     workflowPackagePath,
@@ -401,10 +526,11 @@ test("downloads a real Artifact as an inert attachment instead of rendering it",
   // The page loaded before the CLI created the Project and Workflow Run. Refresh the
   // Host-authoritative overview before exercising the real download control.
   await page.reload({ waitUntil: "domcontentloaded" });
-  const runButton = page.getByRole("button", { name: runId });
+  await waitForHostOverviewReady(page, "Artifact reload HostOverview readiness");
+  const runButton = page.getByRole("button", { name: runId, exact: true });
   await runButton.waitFor({ state: "visible", timeout: browserAssertionTimeoutMs });
   await runButton.click();
-  const artifactLink = page.getByRole("link", { name: `Download Artifact ${artifactId}` });
+  const artifactLink = page.getByRole("link", { name: `Download Artifact ${artifactId}` }).last();
   await artifactLink.waitFor({ state: "visible", timeout: browserAssertionTimeoutMs });
   const artifactDownloadControl = await within(
     "Artifact download control handle",
@@ -435,14 +561,16 @@ const startFixture = async (): Promise<Fixture> => {
   const browserProfile = await makeTemporaryDirectory("kojo-browser-profile-");
   let host: KojoHostProcessFixture | undefined;
   let visualizer: Bun.Subprocess | undefined;
+  let browser: BrowserContext | undefined;
   let visualizerStderr: Promise<string> = Promise.resolve("");
   try {
     host = await startKojoHostProcess();
+    const hostProcess = host;
     visualizer = Bun.spawn(
       ["bun", "vite", "dev", "--host", "127.0.0.1", "--port", String(port), "--strictPort"],
       {
         cwd: visualizerDirectory,
-        env: { ...process.env, KOJO_HOST_SOCKET: host.socketPath },
+        env: { ...process.env, KOJO_HOST_SOCKET: hostProcess.socketPath },
         stdout: "ignore",
         stderr: "pipe",
       },
@@ -452,87 +580,273 @@ const startFixture = async (): Promise<Fixture> => {
       try {
         const origin = `http://127.0.0.1:${port}`;
         const page = await fetch(origin, { signal: AbortSignal.timeout(1_000) });
-        if (!page.ok) return false;
-        const api = await fetch(`${origin}/api/artifacts`, {
-          signal: AbortSignal.timeout(1_000),
-        });
-        return api.status === 400;
+        return page.ok;
       } catch {
         return false;
       }
     }, visualizer);
 
+    browser = await chromium.launchPersistentContext(browserProfile.path, {
+      headless: true,
+      timeout: browserLaunchTimeoutMs,
+    });
+
     return {
-      browser: await chromium.launchPersistentContext(browserProfile.path, { headless: true }),
+      browser,
       browserProfile,
       host,
       port,
       visualizer,
     };
   } catch (error) {
-    await Promise.allSettled([
-      ...(visualizer === undefined ? [] : [stopVisualizer(visualizer)]),
-      ...(host === undefined ? [] : [host.crash()]),
-      terminateOwnedBrowser(browserProfile.path),
-    ]);
-    await Promise.allSettled([browserProfile.cleanup()]);
-    throw withFixtureStderr(error, await visualizerStderr);
+    const budget = makeTeardownBudget();
+    const ownedHostProcessSnapshot = new Map<number, ProcessEntry>();
+    const ownedVisualizerProcessSnapshot = new Map<number, ProcessEntry>();
+    const ownedBrowserProcessSnapshot = new Map<number, ProcessEntry>();
+    const cleanupErrors: Array<unknown> = [];
+    const capture = async (
+      label: string,
+      target: Map<number, ProcessEntry>,
+      snapshot: () => Promise<ProcessSnapshot>,
+    ) => {
+      try {
+        mergeProcessSnapshots(target, await snapshot());
+      } catch (captureError) {
+        cleanupErrors.push(
+          new Error(`${label} ownership capture failed.`, { cause: captureError }),
+        );
+      }
+    };
+    await capture("Chromium", ownedBrowserProcessSnapshot, () =>
+      collectOwnedBrowserProcessSnapshot(browserProfile.path, budget),
+    );
+    if (browser !== undefined) {
+      try {
+        const browserTeardown = await closeBrowser(browser, browserProfile.path, budget);
+        if (browserTeardown.forced) {
+          forcedBrowserTeardownFallbacks += 1;
+        }
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    } else {
+      try {
+        if (await terminateOwnedBrowser(browserProfile.path, budget)) {
+          forcedBrowserTeardownFallbacks += 1;
+        }
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    await capture("Chromium after startup browser cleanup", ownedBrowserProcessSnapshot, () =>
+      collectOwnedBrowserProcessSnapshot(browserProfile.path, budget),
+    );
+    if (visualizer !== undefined) {
+      const visualizerProcess = visualizer;
+      await capture("Vite/esbuild", ownedVisualizerProcessSnapshot, () =>
+        collectOwnedProcessSnapshot([visualizerProcess.pid], budget),
+      );
+      try {
+        await stopVisualizer(visualizerProcess, budget);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+      await capture("Vite/esbuild after startup shutdown", ownedVisualizerProcessSnapshot, () =>
+        collectOwnedProcessSnapshot([visualizerProcess.pid], budget),
+      );
+    }
+    if (host !== undefined) {
+      const hostProcess = host;
+      await capture("Kojo Host", ownedHostProcessSnapshot, () =>
+        collectOwnedHostProcessSnapshot(hostProcess.processId, budget),
+      );
+      try {
+        await stopHost(hostProcess, ownedHostProcessSnapshot, budget);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+      await capture("Kojo Host after startup shutdown", ownedHostProcessSnapshot, () =>
+        collectOwnedHostProcessSnapshot(hostProcess.processId, budget),
+      );
+    }
+    for (const [label, processIds] of [
+      ["Chromium", ownedBrowserProcessSnapshot],
+      ["Vite/esbuild", ownedVisualizerProcessSnapshot],
+    ] as const) {
+      try {
+        if (await reapOwnedProcessSnapshot(label, processIds, budget)) {
+          if (label === "Chromium") forcedBrowserTeardownFallbacks += 1;
+          else forcedVisualizerTeardownFallbacks += 1;
+        }
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    try {
+      const remainingBrowserPids = await ownedBrowserPids(browserProfile.path, budget);
+      if (remainingBrowserPids.length > 0) {
+        if (await terminateOwnedBrowser(browserProfile.path, budget)) {
+          forcedBrowserTeardownFallbacks += 1;
+        }
+        if ((await ownedBrowserPids(browserProfile.path, budget)).length > 0) {
+          throw new Error("Owned Chromium processes remained after startup cleanup.");
+        }
+      }
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    if (host !== undefined) {
+      try {
+        await assertHostOwnershipReaped(host, ownedHostProcessSnapshot, budget);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    try {
+      await cleanupTemporaryDirectory(browserProfile, budget);
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    let stderr = "";
+    try {
+      stderr = await budget.run("Visualizer stderr collection", () => visualizerStderr);
+    } catch (stderrError) {
+      cleanupErrors.push(stderrError);
+    }
+    throw withFixtureStderr(
+      cleanupErrors.length === 0 ? error : new AggregateError([error, ...cleanupErrors]),
+      stderr,
+    );
   }
 };
 
-const closeFixture = async (closingFixture: Fixture) => {
-  let failure: unknown;
+const closeFixture = async (closingFixture: Fixture, budget: TeardownBudget) => {
+  const ownedHostProcessSnapshot = new Map<number, ProcessEntry>();
+  const ownedVisualizerProcessSnapshot = new Map<number, ProcessEntry>();
+  const ownedBrowserProcessSnapshot = new Map<number, ProcessEntry>();
+  const cleanupErrors: Array<unknown> = [];
+  const record = (error: unknown) => cleanupErrors.push(error);
+  const capture = async (
+    label: string,
+    target: Map<number, ProcessEntry>,
+    snapshot: () => Promise<ProcessSnapshot>,
+  ) => {
+    try {
+      mergeProcessSnapshots(target, await snapshot());
+    } catch (captureError) {
+      record(new Error(`${label} ownership capture failed.`, { cause: captureError }));
+    }
+  };
+
+  await capture("Chromium", ownedBrowserProcessSnapshot, () =>
+    collectOwnedBrowserProcessSnapshot(closingFixture.browserProfile.path, budget),
+  );
   try {
-    await closeBrowser(closingFixture.browser, closingFixture.browserProfile.path);
+    const browserTeardown = await closeBrowser(
+      closingFixture.browser,
+      closingFixture.browserProfile.path,
+      budget,
+    );
+    if (browserTeardown.forced) {
+      forcedBrowserTeardownFallbacks += 1;
+    }
   } catch (error) {
-    failure = error;
+    record(error);
+  }
+  await capture("Chromium after Browser close", ownedBrowserProcessSnapshot, () =>
+    collectOwnedBrowserProcessSnapshot(closingFixture.browserProfile.path, budget),
+  );
+
+  await capture("Vite/esbuild", ownedVisualizerProcessSnapshot, () =>
+    collectOwnedProcessSnapshot([closingFixture.visualizer.pid], budget),
+  );
+  try {
+    await stopVisualizer(closingFixture.visualizer, budget);
+  } catch (error) {
+    record(error);
+  }
+  await capture("Vite/esbuild after shutdown", ownedVisualizerProcessSnapshot, () =>
+    collectOwnedProcessSnapshot([closingFixture.visualizer.pid], budget),
+  );
+
+  // Visualizer shutdown closes the child-creation window before Host ownership
+  // is captured, so the Host snapshot includes the complete remaining tree.
+  await capture("Kojo Host", ownedHostProcessSnapshot, () =>
+    collectOwnedHostProcessSnapshot(closingFixture.host.processId, budget),
+  );
+  try {
+    await stopHost(closingFixture.host, ownedHostProcessSnapshot, budget);
+  } catch (error) {
+    record(error);
+  }
+  await capture("Kojo Host after shutdown", ownedHostProcessSnapshot, () =>
+    collectOwnedHostProcessSnapshot(closingFixture.host.processId, budget),
+  );
+
+  try {
+    if (await reapOwnedProcessSnapshot("Chromium", ownedBrowserProcessSnapshot, budget)) {
+      forcedBrowserTeardownFallbacks += 1;
+    }
+  } catch (error) {
+    record(error);
   }
   try {
-    await stopVisualizer(closingFixture.visualizer);
+    if (await reapOwnedProcessSnapshot("Vite/esbuild", ownedVisualizerProcessSnapshot, budget)) {
+      forcedVisualizerTeardownFallbacks += 1;
+    }
   } catch (error) {
-    failure ??= error;
+    record(error);
   }
   try {
-    await closingFixture.host.crash();
+    const remainingBrowserPids = await ownedBrowserPids(closingFixture.browserProfile.path, budget);
+    if (remainingBrowserPids.length > 0) {
+      if (await terminateOwnedBrowser(closingFixture.browserProfile.path, budget)) {
+        forcedBrowserTeardownFallbacks += 1;
+      }
+      if ((await ownedBrowserPids(closingFixture.browserProfile.path, budget)).length > 0) {
+        throw new Error("Owned Chromium processes remained after bounded browser teardown.");
+      }
+    }
   } catch (error) {
-    failure ??= error;
+    record(error);
   }
   try {
-    await closingFixture.browserProfile.cleanup();
+    await assertHostOwnershipReaped(closingFixture.host, ownedHostProcessSnapshot, budget);
   } catch (error) {
-    failure ??= error;
+    record(error);
   }
-  if (failure !== undefined) throw failure;
+  try {
+    await cleanupTemporaryDirectory(closingFixture.browserProfile, budget);
+  } catch (error) {
+    record(error);
+  }
+  try {
+    if (
+      await budget.run("Chromium profile postcondition", () =>
+        pathExists(closingFixture.browserProfile.path),
+      )
+    ) {
+      throw new Error("Owned Chromium profile state remained after browser teardown.");
+    }
+  } catch (error) {
+    record(error);
+  }
+  if (cleanupErrors.length > 0) {
+    throw cleanupErrors.length === 1 ? cleanupErrors[0] : new AggregateError(cleanupErrors);
+  }
 };
-
-const cleanupDeadlineMs = 1_000;
-
-const settlesWithin = async (operation: Promise<unknown>) =>
-  Promise.race([
-    operation.then(
-      () => true,
-      () => true,
-    ),
-    Bun.sleep(cleanupDeadlineMs).then(() => false),
-  ]);
 
 type CloseOutcome =
   | { readonly _tag: "failed"; readonly error: unknown }
   | { readonly _tag: "succeeded" };
 
-type TimedCloseOutcome = CloseOutcome | { readonly _tag: "timed-out" };
+type TimedCloseOutcome = CloseOutcome | { readonly _tag: "timed-out"; readonly error?: unknown };
 
 const observeClose = (operation: Promise<void>): Promise<CloseOutcome> =>
   operation.then(
     () => ({ _tag: "succeeded" }) as const,
     (error) => ({ _tag: "failed", error }) as const,
   );
-
-const closeWithin = async (operation: Promise<CloseOutcome>): Promise<TimedCloseOutcome> =>
-  Promise.race([
-    operation,
-    Bun.sleep(cleanupDeadlineMs).then(() => ({ _tag: "timed-out" }) as const),
-  ]);
 
 const describeCloseOutcome = (
   owner: "Browser.close" | "BrowserContext.close",
@@ -545,64 +859,263 @@ const closeFailureCause = (...outcomes: ReadonlyArray<TimedCloseOutcome | undefi
       outcome?._tag === "failed",
   )?.error;
 
-const closeBrowser = async (
-  browser: Pick<BrowserContext, "browser" | "close">,
-  profilePath: string,
-) => {
-  const contextClose = observeClose(browser.close());
-  const initialContextOutcome = await closeWithin(contextClose);
-  if (initialContextOutcome._tag === "succeeded") return;
+const isAlreadyClosedError = (error: unknown) =>
+  error instanceof Error && /closed|disconnected/i.test(error.message);
 
-  let owningBrowserClose: Promise<CloseOutcome> | undefined;
-  let owningBrowserOutcome: TimedCloseOutcome | undefined;
-  const owningBrowser = browser.browser();
-  if (owningBrowser !== null) {
-    owningBrowserClose = observeClose(owningBrowser.close());
-    const [contextOutcome, browserOutcome] = await Promise.all([
-      closeWithin(contextClose),
-      closeWithin(owningBrowserClose),
-    ]);
-    owningBrowserOutcome = browserOutcome;
-    if (contextOutcome._tag === "succeeded" && browserOutcome._tag === "succeeded") return;
+const closeWithinBudget = (
+  budget: TeardownBudget,
+  label: string,
+  operation: () => Promise<void>,
+  limitMs = processSnapshotTimeoutMs,
+): Promise<TimedCloseOutcome> =>
+  budget
+    .run(label, () => observeClose(operation()), limitMs)
+    .catch(
+      (error) =>
+        ({
+          _tag: "timed-out",
+          error,
+        }) as const,
+    );
+
+const closePages = async (browser: Pick<BrowserContext, "pages">, budget: TeardownBudget) => {
+  const pages = await budget.run(
+    "BrowserContext.pages",
+    () => Promise.resolve().then(() => browser.pages()),
+    processSnapshotTimeoutMs,
+  );
+  const outcomes = await Promise.all(
+    pages.map((page) =>
+      closeWithinBudget(budget, "Browser page close", () =>
+        Promise.resolve().then(() => page.close()),
+      ),
+    ),
+  );
+  const incomplete = outcomes.find((outcome) => outcome._tag !== "succeeded");
+  if (incomplete !== undefined) {
+    throw new Error(`A browser page close ${incomplete._tag} within its bounded deadline.`);
   }
-  if (!(await terminateOwnedBrowser(profilePath))) {
+};
+
+const closeBrowser = async (
+  browser: Pick<BrowserContext, "browser" | "close"> & Partial<Pick<BrowserContext, "pages">>,
+  profilePath: string,
+  budget: TeardownBudget,
+): Promise<{ readonly gone: boolean; readonly forced: boolean }> => {
+  let pageCloseFailure: unknown;
+  if (browser.pages !== undefined) {
+    try {
+      await closePages({ pages: () => browser.pages?.() ?? [] }, budget);
+    } catch (error) {
+      pageCloseFailure = error;
+    }
+  }
+  let contextClosePromise: Promise<void> | undefined;
+  const contextClose = () => {
+    contextClosePromise ??= Promise.resolve().then(() => browser.close());
+    return contextClosePromise;
+  };
+  const initialContextOutcome = await closeWithinBudget(
+    budget,
+    "BrowserContext.close",
+    contextClose,
+  );
+  let owningBrowserOutcome: TimedCloseOutcome | undefined;
+  let owningBrowser: Browser | null = null;
+  try {
+    owningBrowser = browser.browser();
+  } catch (error) {
+    owningBrowserOutcome = { _tag: "failed", error };
+  }
+  if (owningBrowser !== null) {
+    const browserToClose = owningBrowser;
+    let owningBrowserClosePromise: Promise<void> | undefined;
+    const owningBrowserClose = () => {
+      owningBrowserClosePromise ??= Promise.resolve().then(() => browserToClose.close());
+      return owningBrowserClosePromise;
+    };
+    owningBrowserOutcome = await closeWithinBudget(budget, "Browser.close", owningBrowserClose);
+    if (
+      owningBrowserOutcome._tag === "failed" &&
+      isAlreadyClosedError(owningBrowserOutcome.error)
+    ) {
+      owningBrowserOutcome = { _tag: "succeeded" };
+    }
+  }
+  if (
+    initialContextOutcome._tag === "succeeded" &&
+    (owningBrowserOutcome === undefined || owningBrowserOutcome._tag === "succeeded")
+  ) {
+    if (pageCloseFailure !== undefined) throw pageCloseFailure;
+    return { gone: true, forced: false };
+  }
+  const ownedBeforeReclaim = await ownedBrowserPids(profilePath, budget);
+  if (ownedBeforeReclaim.length === 0) {
+    if (pageCloseFailure !== undefined) throw pageCloseFailure;
+    return { gone: true, forced: false };
+  }
+  const reclaimed = await terminateOwnedBrowser(profilePath, budget);
+  const remainingOwnedBrowserPids = await ownedBrowserPids(profilePath, budget);
+  if (remainingOwnedBrowserPids.length > 0) {
     throw new Error(
       `${describeCloseOutcome("BrowserContext.close", initialContextOutcome)} and force-reclaiming its owned process failed.`,
       { cause: closeFailureCause(initialContextOutcome, owningBrowserOutcome) },
     );
   }
-  const finalContextOutcome = await closeWithin(contextClose);
-  const finalOwningBrowserOutcome =
-    owningBrowserClose === undefined ? undefined : await closeWithin(owningBrowserClose);
-  if (
-    finalContextOutcome._tag === "succeeded" &&
-    (finalOwningBrowserOutcome === undefined || finalOwningBrowserOutcome._tag === "succeeded")
-  ) {
-    return;
-  }
-  throw new Error(
-    `Browser process was reclaimed, but ${describeCloseOutcome("BrowserContext.close", finalContextOutcome)}${finalOwningBrowserOutcome === undefined ? "" : ` and ${describeCloseOutcome("Browser.close", finalOwningBrowserOutcome)}`}.`,
-    { cause: closeFailureCause(finalContextOutcome, finalOwningBrowserOutcome) },
+  if (pageCloseFailure !== undefined) throw pageCloseFailure;
+  return { gone: true, forced: reclaimed };
+};
+
+const stopHost = async (
+  host: KojoHostProcessFixture,
+  ownedProcessSnapshot: ProcessSnapshot,
+  budget: TeardownBudget,
+) => {
+  const gracefulOutcome = await closeWithinBudget(
+    budget,
+    "Kojo Host graceful teardown",
+    () => host.stop(),
+    hostShutdownTimeoutMs,
   );
+  if (gracefulOutcome._tag === "succeeded") {
+    try {
+      await assertHostOwnershipReaped(host, ownedProcessSnapshot, budget);
+      return;
+    } catch (error) {
+      forcedHostTeardownFallbacks += 1;
+      await forceReapHostOwnership(host, ownedProcessSnapshot, budget, error);
+      return;
+    }
+  }
+
+  try {
+    forcedHostTeardownFallbacks += 1;
+    await forceReapHostOwnership(host, ownedProcessSnapshot, budget, gracefulOutcome);
+  } catch (error) {
+    if (gracefulOutcome._tag === "failed") {
+      throw new Error("Kojo Host graceful teardown failed.", { cause: error });
+    }
+    throw error;
+  }
+  if (gracefulOutcome._tag === "failed") throw gracefulOutcome.error;
+};
+
+const forceReapHostOwnership = async (
+  host: KojoHostProcessFixture,
+  ownedProcessSnapshot: ProcessSnapshot,
+  budget: TeardownBudget,
+  cause?: unknown,
+) => {
+  const crashOutcome = await closeWithinBudget(
+    budget,
+    "Kojo Host crash fallback",
+    () => host.crash(),
+    hostShutdownTimeoutMs,
+  );
+  let reapError: unknown;
+  try {
+    await reapOwnedProcessSnapshot("Kojo Host", ownedProcessSnapshot, budget);
+  } catch (error) {
+    reapError = error;
+  }
+  if (reapError !== undefined) {
+    throw new Error("Kojo Host ownership was not reaped.", { cause: reapError });
+  }
+  if (crashOutcome._tag === "timed-out") {
+    throw new Error("Kojo Host crash fallback did not settle within its shared deadline.", {
+      cause,
+    });
+  }
+  if (crashOutcome._tag === "failed") throw crashOutcome.error;
+  await assertHostOwnershipReaped(host, ownedProcessSnapshot, budget);
+};
+
+const stopVisualizer = async (visualizer: Bun.Subprocess, budget: TeardownBudget) => {
+  if (visualizer.exitCode === null) visualizer.kill("SIGTERM");
+  try {
+    await budget.run(
+      "Visualizer graceful teardown",
+      () => visualizer.exited,
+      processSnapshotTimeoutMs,
+    );
+    return;
+  } catch (error) {
+    if (visualizer.exitCode === null) visualizer.kill("SIGKILL");
+    await budget
+      .run("Visualizer forced teardown", () => visualizer.exited, processSnapshotTimeoutMs)
+      .catch(() => {
+        throw error;
+      });
+  }
 };
 
 interface ProcessEntry {
   readonly commandLine: string;
   readonly pid: number;
+  readonly parentPid?: number;
+  readonly startTime?: string;
 }
 
+type ProcessSnapshot = ReadonlyMap<number, ProcessEntry>;
+
+const escapeRegularExpression = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const browserExecutablePaths = () => {
+  const chromiumExecutable = chromium.executablePath();
+  const chromiumArchitectureDirectory = dirname(dirname(dirname(dirname(chromiumExecutable))));
+  const chromiumRevisionDirectory = dirname(chromiumArchitectureDirectory);
+  const playwrightCacheDirectory = dirname(chromiumRevisionDirectory);
+  const chromiumRevision = basename(chromiumRevisionDirectory).replace(/^chromium-/, "");
+  const platformDirectory =
+    process.platform === "darwin"
+      ? `chrome-headless-shell-mac-${process.arch === "arm64" ? "arm64" : "x64"}`
+      : process.platform === "win32"
+        ? "chrome-headless-shell-win64"
+        : "chrome-headless-shell-linux64";
+  const headlessShellFileName =
+    process.platform === "win32" ? "chrome-headless-shell.exe" : "chrome-headless-shell";
+  const headlessShellDirectoryName = [
+    `chromium_headless_shell-${chromiumRevision}`,
+    ...readdirSync(playwrightCacheDirectory).filter((entry) =>
+      entry.startsWith("chromium_headless_shell-"),
+    ),
+  ].find((entry, index, entries) => {
+    if (entries.indexOf(entry) !== index) return false;
+    return existsSync(
+      join(playwrightCacheDirectory, entry, platformDirectory, headlessShellFileName),
+    );
+  });
+  const headlessShell =
+    headlessShellDirectoryName === undefined
+      ? undefined
+      : join(
+          playwrightCacheDirectory,
+          headlessShellDirectoryName,
+          platformDirectory,
+          headlessShellFileName,
+        );
+  return [chromiumExecutable, ...(headlessShell === undefined ? [] : [headlessShell])];
+};
+
+const headlessBrowserExecutablePath = () => {
+  const executablePaths = browserExecutablePaths();
+  return (
+    executablePaths.find((path) => basename(path).startsWith("chrome-headless-shell")) ??
+    executablePaths[0]
+  );
+};
+
 const ownsBrowserProfile = (commandLine: string, profilePath: string) => {
-  const browser = chromium.executablePath();
   const exactProfileArgument = `--user-data-dir=${profilePath}`;
   return (
-    (commandLine === browser || commandLine.startsWith(`${browser} `)) &&
+    browserExecutablePaths().some(
+      (browser) => commandLine === browser || commandLine.startsWith(`${browser} `),
+    ) &&
     new RegExp(`(?:^|\\s)${escapeRegularExpression(exactProfileArgument)}(?=$|\\s)`).test(
       commandLine,
     )
   );
 };
-
-const escapeRegularExpression = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const ownedBrowserPidsFromProcessEntries = (
   profilePath: string,
@@ -612,68 +1125,272 @@ const ownedBrowserPidsFromProcessEntries = (
     .filter(({ commandLine }) => ownsBrowserProfile(commandLine, profilePath))
     .map(({ pid }) => pid);
 
-const processEntries = async (): Promise<ReadonlyArray<ProcessEntry>> => {
-  const search = Bun.spawn(["ps", "-axww", "-o", "pid=", "-o", "command="], {
-    stderr: "ignore",
-    stdout: "pipe",
-  });
-  const [exitCode, stdout] = await Promise.all([search.exited, new Response(search.stdout).text()]);
-  if (exitCode !== 0) return [];
-  return stdout.split("\n").flatMap((line) => {
-    const match = /^\s*(\d+)\s+(.*)$/.exec(line);
-    if (match === null) return [];
-    const pid = Number.parseInt(match[1] ?? "", 10);
-    const commandLine = match[2] ?? "";
-    return Number.isSafeInteger(pid) && pid > 0 ? [{ commandLine, pid }] : [];
-  });
-};
-
-const ownedBrowserPids = async (profilePath: string) =>
-  ownedBrowserPidsFromProcessEntries(profilePath, await processEntries());
-
-const processCommandLine = async (pid: number) => {
-  const search = Bun.spawn(["ps", "-ww", "-p", String(pid), "-o", "command="], {
-    stderr: "ignore",
-    stdout: "pipe",
-  });
-  const [exitCode, stdout] = await Promise.all([search.exited, new Response(search.stdout).text()]);
-  return exitCode === 0 ? stdout.trim() : undefined;
-};
-
-const signalOwnedBrowser = async (signal: "SIGKILL" | "SIGTERM", profilePath: string) => {
-  for (const pid of await ownedBrowserPids(profilePath)) {
-    const commandLine = await processCommandLine(pid);
-    if (commandLine === undefined || !ownsBrowserProfile(commandLine, profilePath)) continue;
-    const processHandle = Bun.spawn(["kill", `-${signal}`, String(pid)], {
+const processEntries = async (budget?: TeardownBudget): Promise<ReadonlyArray<ProcessEntry>> => {
+  const timeoutMs = Math.min(
+    processSnapshotTimeoutMs,
+    budget?.remainingMs() ?? processSnapshotTimeoutMs,
+  );
+  if (timeoutMs <= 0) throw new Error("Process ownership snapshot exceeded its shared deadline.");
+  const search = Bun.spawn(
+    ["ps", "-axww", "-o", "pid=", "-o", "ppid=", "-o", "lstart=", "-o", "command="],
+    {
       stderr: "ignore",
-      stdout: "ignore",
+      stdout: "pipe",
+    },
+  );
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  try {
+    const result = await Promise.race([
+      Promise.all([search.exited, new Response(search.stdout).text()]).then(
+        ([exitCode, stdout]) => ({ _tag: "completed" as const, exitCode, stdout }),
+        (error) => ({ _tag: "failed" as const, error }),
+      ),
+      new Promise<{ readonly _tag: "timed-out" }>((resolve) => {
+        timeout = setTimeout(() => {
+          timedOut = true;
+          resolve({ _tag: "timed-out" });
+        }, timeoutMs);
+      }),
+    ]);
+    if (result._tag === "timed-out") {
+      throw new Error("Process ownership snapshot exceeded its bounded deadline.");
+    }
+    if (result._tag === "failed") throw result.error;
+    if (result.exitCode !== 0) throw new Error("Process ownership snapshot exited unsuccessfully.");
+    const stdout = result.stdout;
+    return stdout.split("\n").flatMap((line) => {
+      const match =
+        /^\s*(\d+)\s+(\d+)\s+((?:\w{3}\s+){2}\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/.exec(
+          line,
+        );
+      if (match === null) return [];
+      const pid = Number.parseInt(match[1] ?? "", 10);
+      const parentPid = Number.parseInt(match[2] ?? "", 10);
+      const startTime = match[3];
+      const commandLine = match[4] ?? "";
+      return Number.isSafeInteger(pid) && pid > 0
+        ? [{ commandLine, parentPid, pid, startTime }]
+        : [];
     });
-    await processHandle.exited;
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    if (timedOut && search.exitCode === null) search.kill("SIGKILL");
+  }
+};
+
+const pathExists = async (path: string) => {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const processSnapshotForRoots = (
+  processes: ReadonlyArray<ProcessEntry>,
+  rootPids: ReadonlyArray<number>,
+): Map<number, ProcessEntry> => {
+  const entriesByPid = new Map(processes.map((entry) => [entry.pid, entry]));
+  const childrenByParent = new Map<number, Array<number>>();
+  for (const entry of processes) {
+    if (entry.parentPid === undefined) continue;
+    const children = childrenByParent.get(entry.parentPid) ?? [];
+    children.push(entry.pid);
+    childrenByParent.set(entry.parentPid, children);
+  }
+
+  const owned = new Map<number, ProcessEntry>();
+  const pending = [...rootPids];
+  while (pending.length > 0) {
+    const parentPid = pending.pop();
+    if (parentPid === undefined) continue;
+    const parent = entriesByPid.get(parentPid);
+    if (parent !== undefined) owned.set(parent.pid, parent);
+    for (const childPid of childrenByParent.get(parentPid) ?? []) {
+      if (owned.has(childPid)) continue;
+      pending.push(childPid);
+    }
+  }
+  return owned;
+};
+
+const collectOwnedProcessSnapshot = async (
+  rootPids: ReadonlyArray<number>,
+  budget?: TeardownBudget,
+): Promise<ProcessSnapshot> => processSnapshotForRoots(await processEntries(budget), rootPids);
+
+const collectOwnedHostProcessSnapshot = (rootPid: number, budget?: TeardownBudget) =>
+  collectOwnedProcessSnapshot([rootPid], budget);
+
+const collectOwnedBrowserProcessSnapshot = async (
+  profilePath: string,
+  budget?: TeardownBudget,
+): Promise<ProcessSnapshot> => {
+  const processes = await processEntries(budget);
+  const rootPids = ownedBrowserPidsFromProcessEntries(profilePath, processes);
+  return processSnapshotForRoots(processes, rootPids);
+};
+
+const mergeProcessSnapshots = (target: Map<number, ProcessEntry>, source: ProcessSnapshot) => {
+  for (const [pid, entry] of source) target.set(pid, entry);
+};
+
+const sameProcessIdentity = (captured: ProcessEntry, current: ProcessEntry) =>
+  captured.commandLine === current.commandLine &&
+  (captured.startTime === undefined || captured.startTime === current.startTime);
+
+const revalidatedProcessEntries = (
+  snapshot: ProcessSnapshot,
+  currentEntries: ReadonlyArray<ProcessEntry>,
+  predicate: (entry: ProcessEntry) => boolean = () => true,
+) => {
+  const currentByPid = new Map(currentEntries.map((entry) => [entry.pid, entry]));
+  return [...snapshot.values()].filter((captured) => {
+    const current = currentByPid.get(captured.pid);
+    return current !== undefined && sameProcessIdentity(captured, current) && predicate(current);
+  });
+};
+
+const currentSnapshotEntries = async (
+  snapshot: ProcessSnapshot,
+  budget: TeardownBudget,
+  predicate: (entry: ProcessEntry) => boolean = () => true,
+) => {
+  return revalidatedProcessEntries(snapshot, await processEntries(budget), predicate);
+};
+
+const assertProcessSnapshotReaped = async (
+  label: string,
+  snapshot: ProcessSnapshot,
+  budget: TeardownBudget,
+  predicate?: (entry: ProcessEntry) => boolean,
+) => {
+  const remainingEntries = await currentSnapshotEntries(snapshot, budget, predicate);
+  if (remainingEntries.length > 0) {
+    throw new Error(
+      `${label} ownership remained after teardown (PIDs: ${remainingEntries.map(({ pid }) => pid).join(", ")}).`,
+    );
+  }
+};
+
+const signalOwnedProcessSnapshot = async (
+  label: string,
+  snapshot: ProcessSnapshot,
+  signal: "SIGKILL" | "SIGTERM",
+  budget: TeardownBudget,
+  predicate?: (entry: ProcessEntry) => boolean,
+): Promise<number> => {
+  const currentEntries = await currentSnapshotEntries(snapshot, budget, predicate);
+  let signaled = 0;
+  for (const { pid } of currentEntries) {
+    if (pid === process.pid) {
+      throw new Error(`${label} ownership capture included the browser-test process.`);
+    }
+    try {
+      process.kill(pid, signal);
+      signaled += 1;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  }
+  return signaled;
+};
+
+const reapOwnedProcessSnapshot = async (
+  label: string,
+  snapshot: ProcessSnapshot,
+  budget: TeardownBudget,
+  predicate?: (entry: ProcessEntry) => boolean,
+): Promise<boolean> => {
+  if (snapshot.size === 0) return false;
+  const signaled = await signalOwnedProcessSnapshot(label, snapshot, "SIGKILL", budget, predicate);
+  if (signaled === 0) return false;
+  for (;;) {
+    if ((await currentSnapshotEntries(snapshot, budget, predicate)).length === 0) return true;
+    if (budget.remainingMs() <= 25) break;
+    await budget.sleep(`${label} reap polling`, 25);
+  }
+  throw new Error(`${label} ownership remained after bounded reaping.`);
+};
+
+const assertHostOwnershipReaped = async (
+  host: KojoHostProcessFixture,
+  ownedProcessSnapshot: ProcessSnapshot,
+  budget: TeardownBudget,
+) => {
+  await assertProcessSnapshotReaped("Kojo Host", ownedProcessSnapshot, budget);
+  const currentHostEntry = (await processEntries(budget)).find(({ pid }) => pid === host.processId);
+  if (ownedProcessSnapshot.size === 0 && currentHostEntry !== undefined) {
+    throw new Error("Kojo Host ownership was not captured before teardown.");
+  }
+
+  const remainingStatePaths = [
+    host.socketPath,
+    `${host.socketPath}.lock`,
+    dirname(host.socketPath),
+  ];
+  const stateExists = await budget.run("Kojo Host socket/store state check", () =>
+    Promise.all(remainingStatePaths.map((path) => pathExists(path))),
+  );
+  const existingStatePaths = remainingStatePaths.filter((_, index) => stateExists[index]);
+  if (existingStatePaths.length > 0) {
+    throw new Error(
+      `Kojo Host socket/store state remained after teardown: ${existingStatePaths.join(", ")}.`,
+    );
+  }
+};
+
+const ownedBrowserPids = async (profilePath: string, budget?: TeardownBudget) =>
+  ownedBrowserPidsFromProcessEntries(profilePath, await processEntries(budget));
+
+const signalOwnedBrowser = async (
+  signal: "SIGKILL" | "SIGTERM",
+  profilePath: string,
+  budget: TeardownBudget,
+) => {
+  const processes = await processEntries(budget);
+  const ownedEntries = processes.filter(({ commandLine }) =>
+    ownsBrowserProfile(commandLine, profilePath),
+  );
+  let signaled = 0;
+  for (const { pid, commandLine } of ownedEntries) {
+    if (pid === process.pid) {
+      throw new Error("Chromium ownership capture included the browser-test process.");
+    }
+    // This is the immediate pre-signal identity check: only the freshly observed
+    // exact executable/profile command line is eligible for the signal.
+    if (!ownsBrowserProfile(commandLine, profilePath)) continue;
+    try {
+      process.kill(pid, signal);
+      signaled += 1;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  }
+  return signaled;
+};
+
+const waitForNoOwnedBrowser = async (profilePath: string, budget: TeardownBudget) => {
+  for (;;) {
+    if ((await ownedBrowserPids(profilePath, budget)).length === 0) return true;
+    if (budget.remainingMs() <= 25) return false;
+    await budget.sleep("Chromium reap polling", 25);
   }
 };
 
 /** Reclaims only Chromium processes launched with this fixture's unique profile. */
-const terminateOwnedBrowser = async (profilePath: string) => {
-  await signalOwnedBrowser("SIGTERM", profilePath);
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    if ((await ownedBrowserPids(profilePath)).length === 0) return true;
-    await Bun.sleep(25);
-  }
-  await signalOwnedBrowser("SIGKILL", profilePath);
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    if ((await ownedBrowserPids(profilePath)).length === 0) return true;
-    await Bun.sleep(25);
-  }
-  return (await ownedBrowserPids(profilePath)).length === 0;
-};
-
-const stopVisualizer = async (visualizer: Bun.Subprocess) => {
-  if (visualizer.exitCode === null) visualizer.kill("SIGTERM");
-  if (await settlesWithin(visualizer.exited)) return;
-  if (visualizer.exitCode === null) visualizer.kill("SIGKILL");
-  if (!(await settlesWithin(visualizer.exited))) {
-    throw new Error("Visualizer teardown did not settle after SIGKILL.");
-  }
+const terminateOwnedBrowser = async (
+  profilePath: string,
+  budget: TeardownBudget,
+): Promise<boolean> => {
+  const termSignaled = await signalOwnedBrowser("SIGTERM", profilePath, budget);
+  if (termSignaled === 0) return false;
+  if (await waitForNoOwnedBrowser(profilePath, budget)) return true;
+  const killSignaled = await signalOwnedBrowser("SIGKILL", profilePath, budget);
+  if (killSignaled === 0) return false;
+  return await waitForNoOwnedBrowser(profilePath, budget);
 };
 
 const availablePort = () =>
@@ -691,12 +1408,17 @@ const availablePort = () =>
     });
   });
 
-const waitFor = async (condition: () => Promise<boolean>, processHandle: Bun.Subprocess) => {
+const waitFor = async (
+  condition: () => Promise<boolean>,
+  processAlive: (() => boolean) | Bun.Subprocess,
+) => {
   const deadline = Date.now() + fixtureStartupTimeoutMs;
+  const isAlive =
+    typeof processAlive === "function" ? processAlive : () => processAlive.exitCode === null;
 
   while (Date.now() < deadline) {
     if (await condition()) return;
-    if (processHandle.exitCode !== null) {
+    if (!isAlive()) {
       throw new Error("Acceptance fixture process exited before becoming ready.");
     }
     await Bun.sleep(25);
@@ -720,6 +1442,42 @@ const within = async <Value>(label: string, operation: Promise<Value>, timeoutMs
     if (timeout !== undefined) clearTimeout(timeout);
   }
 };
+
+const waitForHostOverviewReady = async (page: Page, label: string) => {
+  let result: "connected" | "alert" | undefined;
+  try {
+    const resultHandle = await page.waitForFunction(
+      () => {
+        if (document.body.textContent?.includes("Connected to Kojo Host 0.1.0"))
+          return "connected" as const;
+        if (document.querySelector('[role="alert"]')) return "alert" as const;
+        return undefined;
+      },
+      undefined,
+      { timeout: browserAssertionTimeoutMs, polling: 100 },
+    );
+    try {
+      result = await resultHandle.jsonValue();
+    } finally {
+      await resultHandle.dispose();
+    }
+  } catch (cause) {
+    const body = await page
+      .locator("body")
+      .innerText({ timeout: 1_000 })
+      .catch((bodyCause) => `<body unavailable: ${String(bodyCause)}>`);
+    throw new Error(`${label} timed out before Connected. Body: ${body}`, { cause });
+  }
+  if (result === "connected") return;
+  const body = await page
+    .locator("body")
+    .innerText({ timeout: 1_000 })
+    .catch((cause) => `<body unavailable: ${String(cause)}>`);
+  throw new Error(`${label} reported a HostOverview error. Body: ${body}`);
+};
+
+const cleanupTemporaryDirectory = (directory: TemporaryDirectory, budget: TeardownBudget) =>
+  budget.run(`Temporary directory cleanup (${directory.path})`, () => directory.cleanup());
 
 const readStderr = (processHandle: Bun.Subprocess) =>
   processHandle.stderr instanceof ReadableStream

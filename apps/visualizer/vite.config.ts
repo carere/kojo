@@ -86,6 +86,13 @@ export default defineConfig({
           environment: "node",
           include: ["tests/browser-e2e/**/*.test.ts"],
           sequence: { groupOrder: 0 },
+          // The acceptance fixture owns a Host, a Vite server, and a persistent
+          // Chromium profile. Keep that process boundary isolated from any
+          // future browser-e2e files and let the project group run before the
+          // in-process browser project above.
+          fileParallelism: false,
+          isolate: false,
+          maxWorkers: 1,
         },
       },
     ],

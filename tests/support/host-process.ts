@@ -7,6 +7,7 @@ export interface KojoHostProcessFixture {
   /** Terminates the Host without running graceful shutdown handlers. */
   readonly crash: () => Promise<void>;
   readonly diagnosticPath: string;
+  readonly processId: number;
   readonly socketPath: string;
   readonly stop: () => Promise<void>;
 }
@@ -68,6 +69,7 @@ export const startKojoHostProcess = async (
       if (ownsDirectory) await rm(directory, { force: true, recursive: true });
     },
     diagnosticPath: join(directory, "diagnostics.jsonl"),
+    processId: processHandle.pid,
     socketPath,
     stop: async () => {
       if (processHandle.exitCode === null) processHandle.kill("SIGTERM");
