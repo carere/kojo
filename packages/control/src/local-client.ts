@@ -21,6 +21,8 @@ import {
   type ControlSubscriptionDelivery,
   type ControlSubscriptionInput,
   type ControlSubscriptionUpdate,
+  type DeletionResult,
+  type DeletionScope,
   type ExecutionArtifactDownloadInput,
   type ExecutionArtifactDownloadResult,
   type ExecutionTraceExportInput,
@@ -456,6 +458,15 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     activateAndRetry(
       request("retention:set", (client) => client.ResetProjectRetention({ identity, requestKey })),
     );
+  const deleteExecutionData = (scope: DeletionScope, planKey?: RequestKey) =>
+    activateAndRetry(
+      request(planKey === undefined ? "deletion:plan" : "deletion:confirm", (client) =>
+        client.DeleteExecutionData({
+          scope,
+          ...(planKey === undefined ? {} : { planKey }),
+        }),
+      ),
+    );
   const showProjectReadiness = (identity: ProjectIdentity) =>
     activateAndRetry(
       request("readiness:show", (client) => client.ShowProjectReadiness({ identity })),
@@ -721,6 +732,7 @@ export const makeLocalClient = (options: LocalClientOptions) => {
     showProjectRetention,
     setProjectRetention,
     resetProjectRetention,
+    deleteExecutionData,
     showProjectReadiness,
     refreshProjectReadiness,
     repairProjectReadiness,
@@ -786,6 +798,13 @@ export const makeLocalClient = (options: LocalClientOptions) => {
       requestKey: RequestKey,
     ) => Effect.Effect<
       ProjectRetentionMutationResult,
+      LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
+    >;
+    readonly deleteExecutionData: (
+      scope: DeletionScope,
+      planKey?: RequestKey,
+    ) => Effect.Effect<
+      DeletionResult,
       LocalTransportError | IncompatibleProtocolError | UnsupportedControlCapabilityError
     >;
     readonly showProjectReadiness: (

@@ -61,6 +61,14 @@ const layoutError = (identity: ProjectIdentity, message: string, findingKey: str
     [findingKey as never],
   );
 
+const pendingDeletionError = (identity: ProjectIdentity) =>
+  operationError(
+    "project-runtime-not-ready",
+    "This Project is unavailable while its confirmed deletion is being recovered.",
+    "Wait for the original confirmed deletion to complete, then retry this operation.",
+    { kind: "project", identity },
+  );
+
 interface ReconciledProject {
   readonly project: ProjectSnapshot;
 }
@@ -118,7 +126,7 @@ const reconcileProjectSchedules = (
       );
     }
     const schedules = definitions.workflows.flatMap((workflow) => workflow.schedules);
-    yield* runtime.coordinateLifecycle(
+    const coordinated = yield* runtime.coordinateWork(
       validation.project,
       repository.reconcile(
         validation.project,
@@ -127,6 +135,7 @@ const reconcileProjectSchedules = (
         nextWorkflowScheduleOccurrence,
       ),
     );
+    if (coordinated._tag === "blocked") return pendingDeletionError(identity);
     return { project: validation.project };
   });
 
@@ -219,7 +228,7 @@ export const enableWorkflowSchedule = (input: {
     const repository = yield* WorkflowScheduleRepository;
     const runtime = yield* ProjectRuntime;
     const clock = yield* ScheduleClock;
-    const outcome = yield* runtime.coordinateLifecycle(
+    const coordinated = yield* runtime.coordinateWork(
       resolved.project,
       repository.enable({
         project: resolved.project,
@@ -237,6 +246,14 @@ export const enableWorkflowSchedule = (input: {
         nextOccurrence: nextWorkflowScheduleOccurrence,
       }),
     );
+    if (coordinated._tag === "blocked") {
+      return {
+        ok: false,
+        requestKey: input.requestKey,
+        error: pendingDeletionError(input.identity),
+      };
+    }
+    const outcome = coordinated.value;
     if (outcome._tag === "accepted") {
       return {
         ok: true,
@@ -298,7 +315,7 @@ export const disableWorkflowSchedule = (input: {
     const repository = yield* WorkflowScheduleRepository;
     const runtime = yield* ProjectRuntime;
     const clock = yield* ScheduleClock;
-    const outcome = yield* runtime.coordinateLifecycle(
+    const coordinated = yield* runtime.coordinateWork(
       resolved.project,
       repository.disable({
         project: resolved.project,
@@ -310,6 +327,14 @@ export const disableWorkflowSchedule = (input: {
         acceptedAtMs: clock.now(),
       }),
     );
+    if (coordinated._tag === "blocked") {
+      return {
+        ok: false,
+        requestKey: input.requestKey,
+        error: pendingDeletionError(input.identity),
+      };
+    }
+    const outcome = coordinated.value;
     if (outcome._tag === "accepted") {
       return {
         ok: true,

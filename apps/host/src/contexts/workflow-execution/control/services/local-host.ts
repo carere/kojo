@@ -3,6 +3,8 @@ import { chmod, open, readFile, unlink } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname } from "node:path";
 import {
+  type DeletionResult,
+  type DeletionScope,
   type ExecutionArtifactDownloadResult,
   type ExecutionTraceExportResult,
   type ExecutionTraceQueryResult,
@@ -15,6 +17,7 @@ import {
   type ProjectRetentionMutationResult,
   type ProjectRetentionQueryResult,
   type ProjectRetentionSetInput,
+  type RequestKey,
   type WorkflowRunListResult,
   type WorkflowRunMutationResult,
   type WorkflowRunQueryResult,
@@ -37,6 +40,9 @@ import {
   showProject,
   showWorkflowDefinition,
 } from "../../../workflow-authoring/projects/use-cases/manage-projects";
+import { newDeletionPlanKey } from "../../deletion/models/deletion-plan";
+import { deleteExecutionData } from "../../deletion/use-cases/delete-execution-data";
+import { ProjectRuntime } from "../../projects/services/project-runtime";
 import {
   assessProjectReadiness,
   repairProjectReadiness,
@@ -182,6 +188,41 @@ const retentionDiagnostic =
     ...(result.ok ? {} : { safeErrorCode: result.error.code }),
   });
 
+const deletionDiagnostic = (identity: ProjectIdentity) => (result: DeletionResult) => ({
+  projectIdentity: identity,
+  ...(result.ok ? {} : { safeErrorCode: result.error.code }),
+});
+
+const deletionRequestDiagnostic = (scope: DeletionScope) => (result: DeletionResult) =>
+  scope.kind === "project" && result.ok && result.kind === "completed"
+    ? {}
+    : deletionDiagnostic(scope.identity)(result);
+
+const blockedDeletionRequest = (
+  scope: DeletionScope,
+  planKey: RequestKey | undefined,
+): DeletionResult => ({
+  ok: false,
+  requestKey: planKey ?? newDeletionPlanKey(),
+  error: {
+    code: "deletion-in-progress",
+    message: "Another deletion is already making this Project unavailable.",
+    next:
+      planKey === undefined
+        ? "Retry this deletion preview after the original pending confirmed deletion completes."
+        : "Retry the original pending confirmed Plan Key after the Host resumes the pending deletion; do not retry this superseding Plan Key.",
+    affectedResource:
+      scope.kind === "run"
+        ? { kind: "run", identity: scope.identity, runId: scope.runId }
+        : scope.kind === "schedule"
+          ? { kind: "schedule", identity: scope.identity, scheduleKey: scope.scheduleKey }
+          : scope.kind === "occurrences"
+            ? { kind: "occurrences", identity: scope.identity }
+            : { kind: "project", identity: scope.identity },
+    findingKeys: [],
+  },
+});
+
 const workflowRunDiagnostic =
   (identity: ProjectIdentity) =>
   (
@@ -303,6 +344,26 @@ const makeKojoControlHandlers = (hostIdentity: HostIdentity) =>
           resetProjectRetention(identity, requestKey),
           retentionDiagnostic(identity),
         ),
+      DeleteExecutionData: ({ scope, planKey }, options) =>
+        Effect.gen(function* () {
+          const request = withHostRequestDiagnostic(
+            hostIdentity,
+            "DeleteExecutionData",
+            String(options.requestId),
+            deleteExecutionData(scope, planKey, {
+              diagnosticLockHeld: planKey !== undefined,
+            }),
+            deletionRequestDiagnostic(scope),
+          );
+          const runtime = yield* ProjectRuntime;
+          if (runtime.coordinateProjectDiagnosticRequest === undefined) return yield* request;
+          return yield* runtime.coordinateProjectDiagnosticRequest(
+            scope.identity,
+            request,
+            Effect.succeed(blockedDeletionRequest(scope, planKey)),
+            { reserveDeletionFence: planKey !== undefined },
+          );
+        }),
       ShowProjectReadiness: ({ identity }, options) =>
         withHostRequestDiagnostic(
           hostIdentity,

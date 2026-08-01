@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { BunSocketServer } from "@effect/platform-bun";
 import { afterEach, describe, expect, it } from "@effect/vitest";
-import { type ControlSubscriptionDelivery, ProjectIdentity, RequestKey } from "@kojo/control";
+import {
+  type ControlSubscriptionDelivery,
+  type DeletionReceipt,
+  ProjectIdentity,
+  type ProjectSnapshot,
+  RequestKey,
+} from "@kojo/control";
 import {
   connectUnixControlClient,
   connectUnixControlConnection,
@@ -12,7 +18,9 @@ import {
 import { Effect, Exit, Fiber, Layer, Option, Schema, Stream } from "effect";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import { makeFileProjectIndexRepositoryLayer } from "../../../../../src/contexts/workflow-authoring/projects/repositories/file-project-index-repository";
+import { ProjectIndexRepository } from "../../../../../src/contexts/workflow-authoring/projects/repositories/project-index-repository";
 import { GitProjectLayoutLive } from "../../../../../src/contexts/workflow-authoring/projects/services/git-project-layout";
+import { ProjectLayout } from "../../../../../src/contexts/workflow-authoring/projects/services/project-layout";
 import { SubprocessProjectDefinitionLoaderLive } from "../../../../../src/contexts/workflow-authoring/projects/services/subprocess-project-definition-loader";
 import { HostIdentity } from "../../../../../src/contexts/workflow-execution/control/models/host-identity";
 import { ControlSubscriptionReader } from "../../../../../src/contexts/workflow-execution/control/services/control-subscription-reader";
@@ -24,13 +32,37 @@ import {
   UnsafeHostStoreError,
 } from "../../../../../src/contexts/workflow-execution/control/services/local-host";
 import {
+  countsFor,
+  type DeletionWorkItem,
+  deletionScopeDigest,
+} from "../../../../../src/contexts/workflow-execution/deletion/models/deletion-plan";
+import {
+  type DeletionItemState,
+  DeletionRepository,
+  type DeletionRepositoryShape,
+} from "../../../../../src/contexts/workflow-execution/deletion/repositories/deletion-repository";
+import { DeletionClock } from "../../../../../src/contexts/workflow-execution/deletion/services/deletion-clock";
+import { DeletionHooks } from "../../../../../src/contexts/workflow-execution/deletion/services/deletion-hooks";
+import { DeletionPlanStoreLive } from "../../../../../src/contexts/workflow-execution/deletion/services/deletion-plan-store";
+import {
   DrizzleProjectRepositoryLive,
   DrizzleWorkflowRunRepositoryLive,
   DrizzleWorkflowScheduleRepositoryLive,
 } from "../../../../../src/contexts/workflow-execution/projects/repositories/drizzle-project-repository";
+import { ProjectRepository } from "../../../../../src/contexts/workflow-execution/projects/repositories/project-repository";
 import { makeLocalWorkflowBackendLayer } from "../../../../../src/contexts/workflow-execution/projects/services/local-workflow-backend";
 import { ProjectRuntimeLive } from "../../../../../src/contexts/workflow-execution/projects/services/project-runtime";
-import { ScheduleClockLive } from "../../../../../src/contexts/workflow-execution/schedules/services/schedule-clock";
+import { WorkflowBackend } from "../../../../../src/contexts/workflow-execution/projects/services/workflow-backend";
+import { RetentionRepository } from "../../../../../src/contexts/workflow-execution/retention/repositories/retention-repository";
+import {
+  ProviderRuntime,
+  ProviderRuntimeUnavailable,
+} from "../../../../../src/contexts/workflow-execution/sandboxes/services/provider-runtime";
+import { WorkflowScheduleRepository } from "../../../../../src/contexts/workflow-execution/schedules/repositories/workflow-schedule-repository";
+import {
+  ScheduleClock,
+  ScheduleClockLive,
+} from "../../../../../src/contexts/workflow-execution/schedules/services/schedule-clock";
 
 const cleanups: Array<() => Promise<void>> = [];
 const TEST_HOST_IDENTITY = Schema.decodeUnknownSync(HostIdentity)(
@@ -64,7 +96,7 @@ describe("local Kojo Host control", () => {
           }),
         );
         expect(Schema.decodeUnknownSync(LegacyHostInformation)(legacyHandshake)).toEqual({
-          protocol: { major: 1, minor: 12 },
+          protocol: { major: 1, minor: 13 },
           hostVersion: "0.1.0",
           capabilities: ["projects:list"],
         });
@@ -76,7 +108,7 @@ describe("local Kojo Host control", () => {
 
         expect(overview).toEqual({
           host: {
-            protocol: { major: 1, minor: 12 },
+            protocol: { major: 1, minor: 13 },
             hostVersion: "0.1.0",
             capabilities: [
               "projects:list",
@@ -108,6 +140,8 @@ describe("local Kojo Host control", () => {
               "artifacts:read",
               "retention:show",
               "retention:set",
+              "deletion:plan",
+              "deletion:confirm",
               "control:subscribe",
               "control:acknowledge",
             ],
@@ -149,7 +183,7 @@ describe("local Kojo Host control", () => {
           hostIdentity: "host:00000000-0000-4000-8000-000000000000",
           hostVersion: "0.1.0",
           protocolMajor: 1,
-          protocolMinor: 12,
+          protocolMinor: 13,
         });
       }),
   );
@@ -408,6 +442,187 @@ describe("local Kojo Host control", () => {
         });
       }),
     8_000,
+  );
+
+  it.effect(
+    "fences a concurrent invalid deletion confirmation before Project diagnostic logging",
+    () =>
+      Effect.gen(function* () {
+        const directory = yield* Effect.promise(() =>
+          mkdtemp(join(tmpdir(), "kojo-host-deletion-diagnostic-fence-")),
+        );
+        const socketPath = join(directory, "host.sock");
+        const diagnosticPath = join(directory, "diagnostics.jsonl");
+        const project: ProjectSnapshot = {
+          identity: Schema.decodeUnknownSync(ProjectIdentity)(
+            "00000000-0000-7000-8000-000000000071",
+          ),
+          path: join(directory, "project"),
+        };
+        const scope = { kind: "project", identity: project.identity } as const;
+        const diagnosticItem: DeletionWorkItem = {
+          kind: "diagnostic",
+          key: "diagnostic:project",
+          projectIdentity: project.identity,
+        };
+        const target = {
+          version: 1 as const,
+          scope,
+          scopeDigest: deletionScopeDigest(scope),
+          items: [diagnosticItem],
+          counts: countsFor([diagnosticItem]),
+          preconditions: [],
+        };
+        let diagnosticState: DeletionItemState["state"] = "pending";
+        let confirmedPlanKey: RequestKey | undefined;
+        let completeEnteredResolve!: () => void;
+        let releaseCompletion!: () => void;
+        const completeEntered = new Promise<void>((resolve) => {
+          completeEnteredResolve = resolve;
+        });
+        const completion = new Promise<DeletionReceipt>((resolve) => {
+          releaseCompletion = () => {
+            resolve({
+              version: 1,
+              requestKey: confirmedPlanKey as RequestKey,
+              completedAtMs: 2,
+              counts: target.counts,
+              warnings: [],
+            });
+          };
+        });
+        const repository: DeletionRepositoryShape = {
+          inspect: () => Effect.succeed({ _tag: "accepted", target }),
+          readRequest: () => Effect.succeed(undefined),
+          begin: (_project, plan) =>
+            Effect.sync(() => {
+              confirmedPlanKey = plan.planKey;
+              return { _tag: "started" as const, deletionId: "deletion-1", resumed: false };
+            }),
+          readItems: () =>
+            Effect.succeed([{ item: diagnosticItem, state: diagnosticState, safeErrorCode: null }]),
+          markItem: (_project, _deletionId, _item, state) =>
+            Effect.sync(() => {
+              diagnosticState = state;
+            }),
+          reconcileOwnedFiles: () => Effect.succeed({ _tag: "unchanged" as const }),
+          setPhase: () => Effect.void,
+          complete: () =>
+            Effect.suspend(() => {
+              completeEnteredResolve();
+              return Effect.promise(() => completion);
+            }),
+          hasCompletedProjectReset: () => Effect.succeed(false),
+        };
+        const backend = {
+          acquire: () => Effect.succeed(true),
+          initialize: () => Effect.succeed(true),
+          postflight: () => Effect.succeed(true),
+          readiness: () => Effect.succeed("ready" as const),
+          quiesce: () => Effect.void,
+          release: () => Effect.void,
+        } as unknown as WorkflowBackend["Service"];
+        const layout = {
+          inspectIndexedPath: () => Effect.succeed({ status: "missing" as const }),
+          validate: () =>
+            Effect.succeed({
+              ok: false as const,
+              message: "deletion diagnostic fence test",
+              findingKey: "configuration.invalid" as const,
+            }),
+        } as ProjectLayout["Service"];
+        const projectRepository = Layer.succeed(ProjectRepository, {
+          migrate: () => Effect.succeed(true),
+          postflight: () => Effect.succeed(true),
+          completeMigration: () => Effect.succeed(true),
+          readiness: () => Effect.succeed("ready" as const),
+          hasPendingDeletion: () => Effect.succeed(false),
+          inspectForgetBlockers: () =>
+            Effect.succeed({
+              assessment: "available" as const,
+              enabledScheduleKeys: [],
+              nonFinalRunIds: [],
+            }),
+        } as ProjectRepository["Service"]);
+        const projectRuntime = ProjectRuntimeLive.pipe(
+          Layer.provide([projectRepository, Layer.succeed(WorkflowBackend, backend)]),
+        );
+        const projectIndex = Layer.succeed(ProjectIndexRepository, {
+          read: Effect.succeed({ layoutVersion: 1 as const, projects: [project], receipts: [] }),
+          update: () => Effect.die("not used"),
+        });
+        const retention = Layer.succeed(RetentionRepository, {} as RetentionRepository["Service"]);
+        const protocol = RpcServer.layerProtocolSocketServer.pipe(
+          Layer.provide([
+            BunSocketServer.layer({ path: socketPath }),
+            RpcSerialization.layerNdjson,
+          ]),
+        );
+        const serverLayer = makeKojoControlServerLayer(
+          protocol,
+          makeHostDiagnosticLoggerLayer(diagnosticPath),
+          TEST_HOST_IDENTITY,
+          undefined,
+          retention,
+        ).pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              projectIndex,
+              Layer.succeed(ProjectLayout, layout),
+              Layer.succeed(DeletionRepository, repository),
+              Layer.succeed(DeletionClock, { now: () => 0 }),
+              Layer.succeed(DeletionHooks, { afterPhase: () => Effect.void }),
+              DeletionPlanStoreLive,
+              projectRuntime,
+              Layer.succeed(WorkflowBackend, backend),
+              Layer.succeed(ProviderRuntime, ProviderRuntimeUnavailable),
+              Layer.succeed(
+                WorkflowScheduleRepository,
+                {} as WorkflowScheduleRepository["Service"],
+              ),
+              Layer.succeed(ScheduleClock, { now: () => 0 }),
+              retention,
+            ),
+          ),
+        ) as Layer.Layer<never, unknown>;
+        const server = yield* Effect.promise(() =>
+          startKojoHost({ diagnosticPath, serverLayer, socketPath }),
+        );
+        cleanups.push(() => close(server, directory));
+
+        const client = makeLocalClient({
+          connect: connectUnixControlClient(socketPath),
+          maxAttempts: 1,
+        });
+        const preview = yield* client.deleteExecutionData(scope);
+        expect(preview).toMatchObject({ ok: true, kind: "preview" });
+        if (!preview.ok || preview.kind !== "preview")
+          throw new Error("Expected a deletion preview");
+
+        const confirmed = yield* Effect.forkScoped(
+          client.deleteExecutionData(scope, preview.preview.planKey),
+        );
+        yield* Effect.promise(() => completeEntered);
+
+        const invalid = yield* client.deleteExecutionData(
+          scope,
+          Schema.decodeUnknownSync(RequestKey)("10000000-0000-4000-8000-000000000072"),
+        );
+
+        releaseCompletion();
+        expect(yield* Fiber.join(confirmed)).toMatchObject({ ok: true, kind: "completed" });
+        const diagnosticContents = yield* Effect.promise(() => readFile(diagnosticPath, "utf8"));
+        const events = diagnosticContents
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line));
+        expect(events.filter((event) => event.projectIdentity === project.identity)).toEqual([]);
+        expect(invalid).toMatchObject({
+          ok: false,
+          error: { code: "deletion-in-progress" },
+        });
+      }),
   );
 });
 

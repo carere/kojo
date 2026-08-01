@@ -3,7 +3,7 @@ import type {
   ProjectDefinitionSnapshot,
   ProjectDefinitionValidation,
 } from "@kojo/control/project-definition-validation";
-import { Context, Effect, Layer, Option } from "effect";
+import { Context, Effect, Layer, Option, Semaphore } from "effect";
 import type { HostIdentity } from "../../control/models/host-identity";
 import { HOST_INFORMATION } from "../../control/models/host-information";
 import { HostDiagnosticLogger } from "../../control/services/host-diagnostic-logger";
@@ -13,6 +13,32 @@ import { type ProjectForgetBlockers, ProjectRepository } from "../repositories/p
 import { WorkflowBackend } from "./workflow-backend";
 
 export interface ProjectRuntimeShape {
+  /**
+   * Admits an ordered Project deletion and fences diagnostic-producing
+   * requests while the deletion is queued or running.
+   */
+  readonly coordinateDeletion?: <A>(
+    project: ProjectSnapshot,
+    operation: Effect.Effect<A>,
+    options?: { readonly diagnosticLockHeld?: boolean },
+  ) => Effect.Effect<A>;
+  /**
+   * Runs a diagnostic-producing request in the Project serialization slot.
+   * A request admitted after deletion starts uses the caller's non-emitting
+   * fallback instead of being allowed to write after a target-free receipt.
+   */
+  readonly coordinateProjectDiagnosticRequest?: <A, E = never, R = never>(
+    identity: ProjectIdentity,
+    operation: Effect.Effect<A, E, R>,
+    blocked: Effect.Effect<A, E, R>,
+    options?: { readonly reserveDeletionFence?: boolean },
+  ) => Effect.Effect<A, E, R>;
+  readonly coordinateWork: <A>(
+    project: ProjectSnapshot,
+    operation: Effect.Effect<A>,
+  ) => Effect.Effect<
+    { readonly _tag: "allowed"; readonly value: A } | { readonly _tag: "blocked" }
+  >;
   readonly coordinateRegistration: <A>(
     project: ProjectSnapshot,
     beforeMigration: Effect.Effect<{
@@ -69,11 +95,20 @@ export const ProjectRuntimeLive = Layer.effect(
     const diagnosticLogger = yield* Effect.serviceOption(HostDiagnosticLogger);
     const retentionRepository = yield* Effect.serviceOption(RetentionRepository);
     const pending = new Map<string, Promise<void>>();
+    const diagnosticLocks = new Map<string, Semaphore.Semaphore>();
+    const deletionFences = new Map<string, number>();
     const acceptedDefinitions = new Map<
       string,
       { readonly path: string; readonly snapshot: ProjectDefinitionSnapshot }
     >();
     let pendingRegistration: Promise<void> = Promise.resolve();
+    const diagnosticLockFor = (identity: string) => {
+      const existing = diagnosticLocks.get(identity);
+      if (existing !== undefined) return existing;
+      const created = Semaphore.makeUnsafe(1);
+      diagnosticLocks.set(identity, created);
+      return created;
+    };
     const serializeIdentity = <A>(identity: string, effect: Effect.Effect<A>) =>
       Effect.promise(() => {
         const previous = pending.get(identity) ?? Promise.resolve();
@@ -89,6 +124,14 @@ export const ProjectRuntimeLive = Layer.effect(
       });
     const serialize = <A>(project: ProjectSnapshot, effect: Effect.Effect<A>) =>
       serializeIdentity(project.identity, effect);
+    const incrementDeletionFence = (identity: ProjectIdentity) => {
+      deletionFences.set(identity, (deletionFences.get(identity) ?? 0) + 1);
+    };
+    const decrementDeletionFence = (identity: ProjectIdentity) => {
+      const remaining = (deletionFences.get(identity) ?? 1) - 1;
+      if (remaining <= 0) deletionFences.delete(identity);
+      else deletionFences.set(identity, remaining);
+    };
     const acceptDefinitions = (
       project: ProjectSnapshot,
       definitions: ProjectDefinitionValidation,
@@ -173,6 +216,37 @@ export const ProjectRuntimeLive = Layer.effect(
       );
     };
     return {
+      coordinateDeletion: <A>(
+        project: ProjectSnapshot,
+        operation: Effect.Effect<A>,
+        options?: { readonly diagnosticLockHeld?: boolean },
+      ) =>
+        Effect.suspend(() => {
+          incrementDeletionFence(project.identity);
+          const coordinated =
+            options?.diagnosticLockHeld === true
+              ? operation
+              : diagnosticLockFor(project.identity).withPermit(operation);
+          return serialize(project, coordinated).pipe(
+            Effect.ensuring(Effect.sync(() => decrementDeletionFence(project.identity))),
+          );
+        }),
+      coordinateProjectDiagnosticRequest: <A, E = never, R = never>(
+        identity: ProjectIdentity,
+        operation: Effect.Effect<A, E, R>,
+        blocked: Effect.Effect<A, E, R>,
+        options?: { readonly reserveDeletionFence?: boolean },
+      ) =>
+        Effect.suspend(() => {
+          if ((deletionFences.get(identity) ?? 0) > 0) return blocked;
+          if (options?.reserveDeletionFence !== true) {
+            return diagnosticLockFor(identity).withPermit(operation);
+          }
+          incrementDeletionFence(identity);
+          return diagnosticLockFor(identity)
+            .withPermit(operation)
+            .pipe(Effect.ensuring(Effect.sync(() => decrementDeletionFence(identity))));
+        }),
       coordinateRegistration: <A>(
         project: ProjectSnapshot,
         beforeMigration: Effect.Effect<{
@@ -210,6 +284,17 @@ export const ProjectRuntimeLive = Layer.effect(
         ),
       coordinateLifecycle: <A>(project: ProjectSnapshot, operation: Effect.Effect<A>) =>
         serialize(project, operation),
+      coordinateWork: <A>(project: ProjectSnapshot, operation: Effect.Effect<A>) =>
+        serialize(
+          project,
+          Effect.gen(function* () {
+            const pendingDeletion = repository.hasPendingDeletion
+              ? yield* repository.hasPendingDeletion(project)
+              : (yield* repository.readiness(project)) === "needs-attention";
+            if (pendingDeletion) return { _tag: "blocked" as const };
+            return { _tag: "allowed" as const, value: yield* operation };
+          }),
+        ),
       coordinateRetention: <A>(project: ProjectSnapshot, operation: Effect.Effect<A>) =>
         serialize(project, operation),
       readiness: (
@@ -279,10 +364,11 @@ export const ProjectRuntimeLive = Layer.effect(
           Effect.gen(function* () {
             const resolved = yield* resolve;
             if (resolved._tag === "result") return resolved.result;
-            const outcome = yield* operation(
-              resolved.project,
-              yield* repository.inspectForgetBlockers(resolved.project),
-            );
+            const inspected = yield* repository.inspectForgetBlockers(resolved.project);
+            const pendingDeletion = repository.hasPendingDeletion
+              ? yield* repository.hasPendingDeletion(resolved.project)
+              : inspected.pendingDeletion === true;
+            const outcome = yield* operation(resolved.project, { ...inspected, pendingDeletion });
             if (outcome.deactivate) yield* backend.release(resolved.project);
             return outcome.result;
           }),

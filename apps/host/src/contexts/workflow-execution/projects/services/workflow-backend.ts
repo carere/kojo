@@ -144,6 +144,11 @@ export interface WorkflowBackendShape {
     project: ProjectSnapshot,
     wakeup: WorkflowScheduleWakeup,
   ) => Effect.Effect<void>;
+  /** Clears one known durable Schedule wake-up through the backend owner. */
+  readonly clearScheduleWakeup?: (
+    project: ProjectSnapshot,
+    wakeup: WorkflowScheduleWakeup,
+  ) => Effect.Effect<void>;
   readonly takeDueScheduleWakeups?: (
     project: ProjectSnapshot,
   ) => Effect.Effect<ReadonlyArray<WorkflowScheduleWakeup>>;
@@ -186,6 +191,16 @@ export interface WorkflowBackendShape {
     project: ProjectSnapshot,
     reference: WorkflowBackendReference,
   ) => Effect.Effect<WorkflowBackendInterruptResult>;
+  /** Clears the known Workflow and Durable Clock mailbox addresses for one generation. */
+  readonly clearExecution?: (
+    project: ProjectSnapshot,
+    input: {
+      readonly workflowKey: string;
+      readonly workflowRevision: string;
+      readonly runId: string;
+      readonly engineGeneration: number;
+    },
+  ) => Effect.Effect<void>;
   /** Replays a suspended execution only to rebuild private wait registrations after restart. */
   readonly rehydrate?: (
     project: ProjectSnapshot,

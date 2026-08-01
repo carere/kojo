@@ -12,10 +12,14 @@ export interface KojoHostProcessFixture {
 }
 
 export interface KojoHostProcessOptions {
+  readonly deletionClockPath?: string;
+  readonly deletionCrashPhase?: string;
+  readonly deletionLateFilePath?: string;
   readonly storePath?: string;
 }
 
 const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
+const hostMainPath = join(workspaceRoot, "apps/host/tests/process-main.ts");
 const hostStartupTimeoutMs = 15_000;
 const socketPollIntervalMs = 25;
 
@@ -25,9 +29,22 @@ export const startKojoHostProcess = async (
   const ownsDirectory = options.storePath === undefined;
   const directory = options.storePath ?? (await mkdtemp(join(tmpdir(), "kojo-host-process-")));
   const socketPath = join(directory, "host.sock");
-  const processHandle = Bun.spawn([process.execPath, join(workspaceRoot, "apps/host/main.ts")], {
+  const processHandle = Bun.spawn([process.execPath, hostMainPath], {
     cwd: workspaceRoot,
-    env: { ...process.env, KOJO_HOST_SOCKET: socketPath, KOJO_HOST_STORE: directory },
+    env: {
+      ...process.env,
+      KOJO_HOST_SOCKET: socketPath,
+      KOJO_HOST_STORE: directory,
+      ...(options.deletionClockPath === undefined
+        ? {}
+        : { KOJO_TEST_DELETION_CLOCK_FILE: options.deletionClockPath }),
+      ...(options.deletionCrashPhase === undefined
+        ? {}
+        : { KOJO_TEST_DELETION_CRASH_PHASE: options.deletionCrashPhase }),
+      ...(options.deletionLateFilePath === undefined
+        ? {}
+        : { KOJO_TEST_DELETION_LATE_FILE: options.deletionLateFilePath }),
+    },
     stdout: "ignore",
     stderr: "pipe",
   });

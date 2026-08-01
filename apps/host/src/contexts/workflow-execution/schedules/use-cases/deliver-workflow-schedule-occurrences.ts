@@ -16,6 +16,7 @@ import { Effect, Schema } from "effect";
 import { ProjectIndexRepository } from "../../../workflow-authoring/projects/repositories/project-index-repository";
 import { loadExecutableWorkflowDefinitions } from "../../../workflow-authoring/projects/services/project-executable-definition-loader";
 import { ProjectLayout } from "../../../workflow-authoring/projects/services/project-layout";
+import { DeletionRepository } from "../../deletion/repositories/deletion-repository";
 import { ProjectRuntime } from "../../projects/services/project-runtime";
 import { WorkflowBackend } from "../../projects/services/workflow-backend";
 import { maskPayload } from "../../runs/models/sensitivity-map";
@@ -108,6 +109,7 @@ export const deliverWorkflowScheduleOccurrences = (
   never,
   | ProjectIndexRepository
   | ProjectLayout
+  | DeletionRepository
   | ProjectRuntime
   | ScheduleClock
   | WorkflowScheduleRepository
@@ -117,6 +119,7 @@ export const deliverWorkflowScheduleOccurrences = (
   Effect.gen(function* () {
     const index = yield* ProjectIndexRepository;
     const layout = yield* ProjectLayout;
+    const deletions = yield* DeletionRepository;
     const runtime = yield* ProjectRuntime;
     const clock = yield* ScheduleClock;
     const schedules = yield* WorkflowScheduleRepository;
@@ -124,6 +127,14 @@ export const deliverWorkflowScheduleOccurrences = (
     const backend = yield* WorkflowBackend;
     const indexed = (yield* index.read).projects.find((project) => project.identity === identity);
     if (indexed === undefined) return;
+    if (yield* deletions.hasCompletedProjectReset(indexed)) {
+      const current = yield* schedules.list(indexed, {
+        identity: indexed.identity,
+        workflowKeys: [],
+        conditions: [],
+      });
+      if (current.every((schedule) => !schedule.enabledIntent)) return;
+    }
     const validation = yield* layout.validate(indexed.path);
     if (!validation.ok || !validation.definitions.ok) return;
     const definitions = yield* runtime.acceptDefinitions(
@@ -144,7 +155,7 @@ export const deliverWorkflowScheduleOccurrences = (
     ).pipe(Effect.catchCause(() => Effect.succeed(undefined)));
     if (executable === undefined) return;
 
-    yield* runtime.coordinateLifecycle(
+    const coordinated = yield* runtime.coordinateWork(
       validation.project,
       Effect.gen(function* () {
         const now = clock.now();
@@ -536,6 +547,7 @@ export const deliverWorkflowScheduleOccurrences = (
         }
       }),
     );
+    if (coordinated._tag === "blocked") return;
   }).pipe(Effect.catchCause(() => Effect.void));
 
 const resolveOccurrenceProject = (
@@ -599,6 +611,7 @@ export const listWorkflowScheduleOccurrences = (
   never,
   | ProjectIndexRepository
   | ProjectLayout
+  | DeletionRepository
   | ProjectRuntime
   | ScheduleClock
   | WorkflowScheduleRepository
@@ -627,6 +640,7 @@ export const showWorkflowScheduleOccurrence = (
   never,
   | ProjectIndexRepository
   | ProjectLayout
+  | DeletionRepository
   | ProjectRuntime
   | ScheduleClock
   | WorkflowScheduleRepository

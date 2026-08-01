@@ -8,7 +8,7 @@ import {
 
 export { ProjectIdentity } from "@kojo/workflow";
 
-export const PROTOCOL_VERSION = { major: 1, minor: 12 } as const;
+export const PROTOCOL_VERSION = { major: 1, minor: 13 } as const;
 export const CONTROL_CAPABILITIES = [
   "projects:list",
   "projects:list-page",
@@ -39,6 +39,8 @@ export const CONTROL_CAPABILITIES = [
   "artifacts:read",
   "retention:show",
   "retention:set",
+  "deletion:plan",
+  "deletion:confirm",
   "control:subscribe",
   "control:acknowledge",
 ] as const;
@@ -1344,6 +1346,164 @@ export const ProjectMutationResult = Schema.Union([
 ]);
 export type ProjectMutationResult = typeof ProjectMutationResult.Type;
 
+/**
+ * Describes one explicit destructive scope. The Host expands this input into
+ * an immutable preview before it accepts a confirmation. An empty occurrence
+ * schedule list means the Host will enumerate the schedules in the preview;
+ * it is not a wildcard and cannot be supplied as one.
+ */
+export const DeletionScope = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("run"),
+    identity: ProjectIdentity,
+    runId: WorkflowRunId,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("occurrences"),
+    identity: ProjectIdentity,
+    beforeMs: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+    scheduleKeys: Schema.Array(Schema.String),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("schedule"),
+    identity: ProjectIdentity,
+    scheduleKey: Schema.String,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("project"),
+    identity: ProjectIdentity,
+  }),
+]);
+export type DeletionScope = typeof DeletionScope.Type;
+
+export const DeletionPlanItemKind = Schema.Literals([
+  "run",
+  "occurrence",
+  "schedule",
+  "engine",
+  "owned-file",
+  "provider",
+  "diagnostic",
+]);
+export type DeletionPlanItemKind = typeof DeletionPlanItemKind.Type;
+
+/** The preview names every item the confirmed plan is allowed to touch. */
+export const DeletionPlanItem = Schema.Struct({
+  kind: DeletionPlanItemKind,
+  key: Schema.String,
+});
+export type DeletionPlanItem = typeof DeletionPlanItem.Type;
+
+export const DeletionPlanCounts = Schema.Struct({
+  runs: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  occurrences: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  schedules: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  engine: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  ownedFiles: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  providers: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  diagnostics: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+});
+export type DeletionPlanCounts = typeof DeletionPlanCounts.Type;
+
+export const DeletionPreview = Schema.Struct({
+  version: Schema.Literal(1),
+  planKey: RequestKey,
+  scope: DeletionScope,
+  scopeDigest: Schema.String,
+  observedAtMs: Schema.Number,
+  expiresAtMs: Schema.Number,
+  items: Schema.Array(DeletionPlanItem),
+  counts: DeletionPlanCounts,
+});
+export type DeletionPreview = typeof DeletionPreview.Type;
+
+export const DeletionWarningCode = Schema.Literals([
+  "provider-unsupported",
+  "provider-failed",
+  "owned-file-missing",
+]);
+export type DeletionWarningCode = typeof DeletionWarningCode.Type;
+
+export const DeletionWarning = Schema.Struct({
+  code: DeletionWarningCode,
+  message: Schema.String,
+  next: Schema.String,
+});
+export type DeletionWarning = typeof DeletionWarning.Type;
+
+/**
+ * A completion receipt intentionally has no target identity, path, or scope.
+ * It is safe to return again after a lost CLI response.
+ */
+export const DeletionReceipt = Schema.Struct({
+  version: Schema.Literal(1),
+  requestKey: RequestKey,
+  completedAtMs: Schema.Number,
+  counts: DeletionPlanCounts,
+  warnings: Schema.Array(DeletionWarning),
+});
+export type DeletionReceipt = typeof DeletionReceipt.Type;
+
+export const DeletionOperationErrorCode = Schema.Literals([
+  "project-not-found",
+  "project-layout-invalid",
+  "project-runtime-not-ready",
+  "scope-invalid",
+  "target-not-found",
+  "target-not-final",
+  "schedule-not-unavailable",
+  "schedule-not-disabled",
+  "project-runs-not-final",
+  "plan-expired",
+  "plan-drifted",
+  "deletion-in-progress",
+  "deletion-needs-attention",
+  "request-key-conflict",
+  "owned-file-cleanup-failed",
+]);
+export type DeletionOperationErrorCode = typeof DeletionOperationErrorCode.Type;
+
+export const DeletionOperationError = Schema.Struct({
+  code: DeletionOperationErrorCode,
+  message: Schema.String,
+  next: Schema.String,
+  affectedResource: Schema.Union([
+    Schema.Struct({ kind: Schema.Literal("project"), identity: ProjectIdentity }),
+    Schema.Struct({ kind: Schema.Literal("run"), identity: ProjectIdentity, runId: WorkflowRunId }),
+    Schema.Struct({
+      kind: Schema.Literal("schedule"),
+      identity: ProjectIdentity,
+      scheduleKey: Schema.String,
+    }),
+    Schema.Struct({
+      kind: Schema.Literal("occurrences"),
+      identity: ProjectIdentity,
+    }),
+    Schema.Struct({ kind: Schema.Literal("request-key"), requestKey: RequestKey }),
+  ]),
+  findingKeys: Schema.Array(Schema.String),
+});
+export type DeletionOperationError = typeof DeletionOperationError.Type;
+
+export const DeletionResult = Schema.Union([
+  Schema.Struct({
+    ok: Schema.Literal(true),
+    kind: Schema.Literal("preview"),
+    preview: DeletionPreview,
+  }),
+  Schema.Struct({
+    ok: Schema.Literal(true),
+    kind: Schema.Literal("completed"),
+    receipt: DeletionReceipt,
+  }),
+  Schema.Struct({
+    ok: Schema.Literal(false),
+    requestKey: RequestKey,
+    error: DeletionOperationError,
+  }),
+]);
+export type DeletionResult = typeof DeletionResult.Type;
+
 export const HostOverview = Schema.Struct({
   host: HostInformation,
   projects: Schema.Array(ProjectSnapshot),
@@ -1393,6 +1553,15 @@ export const SetProjectRetention = Rpc.make("SetProjectRetention", {
 export const ResetProjectRetention = Rpc.make("ResetProjectRetention", {
   payload: { identity: ProjectIdentity, requestKey: RequestKey },
   success: ProjectRetentionMutationResult,
+});
+
+/** Plans or confirms one explicit destructive execution-data scope. */
+export const DeleteExecutionData = Rpc.make("DeleteExecutionData", {
+  payload: {
+    scope: DeletionScope,
+    planKey: Schema.optionalKey(RequestKey),
+  },
+  success: DeletionResult,
 });
 
 export const ShowProjectReadiness = Rpc.make("ShowProjectReadiness", {
@@ -1590,6 +1759,7 @@ export const KojoControl = RpcGroup.make(
   ShowProjectRetention,
   SetProjectRetention,
   ResetProjectRetention,
+  DeleteExecutionData,
   ShowProjectReadiness,
   RefreshProjectReadiness,
   RepairProjectReadiness,

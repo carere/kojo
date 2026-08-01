@@ -1,8 +1,11 @@
 import { Database } from "bun:sqlite";
 import { lstatSync } from "node:fs";
 import { join } from "node:path";
+import { type BunSQLiteDatabase, drizzle } from "drizzle-orm/bun-sqlite";
+import * as projectRepositorySchema from "./project-repository-schema";
 
 export type ProjectStoreConnection = Database;
+export type DrizzleProjectStore = BunSQLiteDatabase<typeof projectRepositorySchema>;
 
 export interface ProjectStoreAdapter {
   readonly databasePath: (projectPath: string) => string;
@@ -105,6 +108,29 @@ export const withReadableProjectStore = <A>(
     connection.close();
   }
 };
+
+export const makeDrizzleProjectStore = (connection: ProjectStoreConnection): DrizzleProjectStore =>
+  drizzle(connection, { schema: projectRepositorySchema });
+
+export const withDrizzleWritableProjectStore = <A>(
+  project: { readonly path: string },
+  operation: (store: DrizzleProjectStore) => A,
+): A =>
+  withWritableProjectStore(project, (connection) => operation(makeDrizzleProjectStore(connection)));
+
+export const withDrizzleReadableProjectStore = <A>(
+  project: { readonly path: string },
+  operation: (store: DrizzleProjectStore) => A,
+): A =>
+  withReadableProjectStore(project, (connection) => operation(makeDrizzleProjectStore(connection)));
+
+export const withDrizzleWritableProjectStoreTransaction = <A>(
+  project: { readonly path: string },
+  operation: (store: DrizzleProjectStore) => A,
+): A =>
+  withWritableProjectStore(project, (connection) =>
+    transaction(connection, () => operation(makeDrizzleProjectStore(connection))),
+  );
 
 export const ProjectStoreAdapterLive: ProjectStoreAdapter = {
   databasePath,

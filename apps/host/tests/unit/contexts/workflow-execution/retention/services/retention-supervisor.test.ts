@@ -64,6 +64,7 @@ it.effect("runs retention cleanup at activation and on the periodic interval", (
       Effect.sync(() => {
         safeDiagnostics.push(event.safeErrorCode);
       }),
+    removeProject: () => Effect.void,
   };
   const supervisor = makeRetentionSupervisorLayer({ interval: "5 millis" }).pipe(
     Layer.provide([
@@ -122,6 +123,7 @@ const runCompletionCase = (
       Effect.sync(() => {
         events.push(event);
       }),
+    removeProject: () => Effect.void,
   };
   const supervisor = makeRetentionSupervisorLayer({ interval: "5 millis" }).pipe(
     Layer.provide([

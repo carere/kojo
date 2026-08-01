@@ -861,6 +861,35 @@ const inspectReadiness = (project: { readonly identity: string; readonly path: s
   }
 };
 
+const inspectPendingDeletion = (project: { readonly identity: string; readonly path: string }) => {
+  try {
+    const path = databasePath(project.path);
+    assertDatabaseFile(path);
+    const connection = new Database(path, { readonly: true, strict: true });
+    try {
+      configureReadOnly(connection);
+      assertIntegrity(connection);
+      assertCurrentSchema(connection, project);
+      return (
+        Schema.decodeUnknownSync(DeletionRows)(
+          drizzle(connection)
+            .select({ deletionId: deletionIntents.deletionId })
+            .from(deletionIntents)
+            .limit(1)
+            .all(),
+        ).length > 0
+      );
+    } finally {
+      connection.close();
+    }
+  } catch {
+    // An unreadable Project cannot safely accept new work. The normal
+    // readiness path reports the detailed diagnostic; this fence remains
+    // conservative at the mutation boundary.
+    return true;
+  }
+};
+
 const inspectBlockers = (project: { readonly identity: string; readonly path: string }) => {
   try {
     const path = databasePath(project.path);
@@ -891,13 +920,27 @@ const inspectBlockers = (project: { readonly identity: string; readonly path: st
       const nonFinalRunIds = Schema.decodeUnknownSync(RunBlockerRows)(runRows).map(
         ({ runId }) => runId,
       );
-      return { assessment: "available" as const, enabledScheduleKeys, nonFinalRunIds };
+      const pendingDeletion =
+        Schema.decodeUnknownSync(DeletionRows)(
+          store
+            .select({ deletionId: deletionIntents.deletionId })
+            .from(deletionIntents)
+            .limit(1)
+            .all(),
+        ).length > 0;
+      return {
+        assessment: "available" as const,
+        pendingDeletion,
+        enabledScheduleKeys,
+        nonFinalRunIds,
+      };
     } finally {
       connection.close();
     }
   } catch {
     return {
       assessment: "unavailable" as const,
+      pendingDeletion: false,
       enabledScheduleKeys: [],
       nonFinalRunIds: [],
     };
@@ -968,6 +1011,7 @@ export const DrizzleProjectRepositoryLive = Layer.sync(ProjectRepository, () => 
         }
       }),
     readiness: (project) => Effect.sync(() => inspectReadiness(project)),
+    hasPendingDeletion: (project) => Effect.sync(() => inspectPendingDeletion(project)),
     retryMigration: (project) =>
       Effect.sync(() => {
         failedMigrations.delete(failureKey(project));

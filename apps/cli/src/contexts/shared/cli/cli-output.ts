@@ -1,4 +1,7 @@
 import type {
+  DeletionOperationError,
+  DeletionPreview,
+  DeletionResult,
   ExecutionTraceEvent,
   ExecutionTracePage,
   ProjectListCursorError,
@@ -30,7 +33,8 @@ export interface CliFailure {
     | WorkflowScheduleOperationError["affectedResource"]
     | WorkflowScheduleOccurrenceOperationError["affectedResource"]
     | WorkflowRunOperationError["affectedResource"]
-    | RetentionOperationError["affectedResource"];
+    | RetentionOperationError["affectedResource"]
+    | DeletionOperationError["affectedResource"];
   readonly code: string;
   readonly currentSchedule?: WorkflowScheduleSnapshot;
   readonly exitCode: number;
@@ -108,6 +112,57 @@ export const retentionFailure = (
   requestKey,
   exitCode: error.code === "retention-invalid" ? 2 : 4,
 });
+
+export const deletionFailure = (result: Extract<DeletionResult, { ok: false }>): CliFailure => ({
+  ...result.error,
+  requestKey: result.requestKey,
+  exitCode: result.error.code === "scope-invalid" ? 2 : 4,
+});
+
+const deletionCounts = (
+  previewOrReceipt:
+    | DeletionPreview
+    | Extract<DeletionResult, { ok: true; kind: "completed" }>["receipt"],
+) =>
+  `runs ${previewOrReceipt.counts.runs}, occurrences ${previewOrReceipt.counts.occurrences}, schedules ${previewOrReceipt.counts.schedules}, engine ${previewOrReceipt.counts.engine}, owned files ${previewOrReceipt.counts.ownedFiles}, providers ${previewOrReceipt.counts.providers}, diagnostics ${previewOrReceipt.counts.diagnostics}`;
+
+export const writeDeletionResult = (
+  command: string,
+  result: Extract<DeletionResult, { ok: true }>,
+  json: boolean,
+) => {
+  if (json) {
+    process.stdout.write(
+      `${JSON.stringify({
+        schemaVersion: 1,
+        command,
+        result:
+          result.kind === "preview" ? { preview: result.preview } : { receipt: result.receipt },
+        warnings: result.kind === "completed" ? result.receipt.warnings : [],
+      })}\n`,
+    );
+    return;
+  }
+  if (result.kind === "preview") {
+    process.stdout.write(
+      `Deletion preview (version ${result.preview.version})\n` +
+        `Scope: ${result.preview.scope.kind}\n` +
+        `Scope digest: ${result.preview.scopeDigest}\n` +
+        `Plan Key: ${result.preview.planKey}\n` +
+        `Expires: ${new Date(result.preview.expiresAtMs).toISOString()}\n` +
+        `Items: ${deletionCounts(result.preview)}\n`,
+    );
+    for (const item of result.preview.items) process.stdout.write(`  ${item.kind}\t${item.key}\n`);
+    process.stdout.write("Repeat the exact command with --plan-key <Plan Key> to confirm.\n");
+    return;
+  }
+  process.stdout.write(
+    `Deletion completed\nRequest Key: ${result.receipt.requestKey}\nItems: ${deletionCounts(result.receipt)}\n`,
+  );
+  for (const warning of result.receipt.warnings) {
+    process.stderr.write(`Warning: ${warning.message}\nNext: ${warning.next}\n`);
+  }
+};
 
 const retentionValue = (value: number | null, render: (value: number) => string) =>
   value === null ? "off" : render(value);

@@ -460,10 +460,14 @@ describe("Local Workflow backend ownership", () => {
                   definitions: undefined as never,
                 }),
             }),
-            Effect.provideService(ProjectRuntime, {} as unknown as ProjectRuntime["Service"]),
+            Effect.provideService(ProjectRuntime, {
+              coordinateWork: (_project: ProjectSnapshot, operation: Effect.Effect<unknown>) =>
+                Effect.map(operation, (value) => ({ _tag: "allowed" as const, value })),
+            } as unknown as ProjectRuntime["Service"]),
             Effect.provideService(HostDiagnosticLogger, {
               cleanup: Effect.void,
               emit: () => Effect.void,
+              removeProject: () => Effect.void,
             }),
             Effect.provideService(WorkflowBackend, backend),
             Effect.provideService(WorkflowRunRepository, repository),
@@ -512,10 +516,14 @@ describe("Local Workflow backend ownership", () => {
                   definitions: undefined as never,
                 }),
             }),
-            Effect.provideService(ProjectRuntime, {} as unknown as ProjectRuntime["Service"]),
+            Effect.provideService(ProjectRuntime, {
+              coordinateWork: (_project: ProjectSnapshot, operation: Effect.Effect<unknown>) =>
+                Effect.map(operation, (value) => ({ _tag: "allowed" as const, value })),
+            } as unknown as ProjectRuntime["Service"]),
             Effect.provideService(HostDiagnosticLogger, {
               cleanup: Effect.void,
               emit: () => Effect.void,
+              removeProject: () => Effect.void,
             }),
             Effect.provideService(WorkflowBackend, backend),
             Effect.provideService(WorkflowRunRepository, repository),

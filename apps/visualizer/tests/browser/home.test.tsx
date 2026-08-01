@@ -112,7 +112,7 @@ test("shows read-only retention policy, usage, and warnings", async () => {
           loadOverview={() =>
             Promise.resolve({
               host: {
-                protocol: { major: 1, minor: 12 },
+                protocol: { major: 1, minor: 13 },
                 hostVersion: "0.1.0",
                 capabilities: ["projects:list", "retention:show"],
               },
@@ -184,6 +184,12 @@ test("shows read-only retention policy, usage, and warnings", async () => {
   expect(retention?.textContent).toContain("Some retained Artifact content is missing");
   expect(retention?.textContent).toContain("Destructive retention controls remain CLI-only.");
   expect(retention?.querySelectorAll("button")).toHaveLength(0);
+  expect(document.body.textContent).not.toMatch(
+    /delete (execution|run|occurrence|schedule|project)/i,
+  );
+  expect(
+    document.querySelectorAll('[aria-label*="delete" i], [data-action*="delete" i]'),
+  ).toHaveLength(0);
 });
 
 test("renders Host-produced readiness guidance without exposing hidden diagnostic details", async () => {

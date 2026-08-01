@@ -13,6 +13,16 @@ import {
   makeKojoControlServerLayer,
   startKojoHost,
 } from "../contexts/workflow-execution/control/services/local-host";
+import { DrizzleDeletionRepositoryLive } from "../contexts/workflow-execution/deletion/repositories/deletion-repository";
+import {
+  type DeletionClock,
+  DeletionClockLive,
+} from "../contexts/workflow-execution/deletion/services/deletion-clock";
+import {
+  type DeletionHooks,
+  DeletionHooksLive,
+} from "../contexts/workflow-execution/deletion/services/deletion-hooks";
+import { DeletionPlanStoreLive } from "../contexts/workflow-execution/deletion/services/deletion-plan-store";
 import {
   DrizzleProjectRepositoryLive,
   DrizzleWorkflowRunRepositoryLive,
@@ -26,7 +36,12 @@ import { SandcastleProviderRuntimeLive } from "../contexts/workflow-execution/sa
 import { ScheduleClockLive } from "../contexts/workflow-execution/schedules/services/schedule-clock";
 import { WorkflowScheduleSupervisorLive } from "../contexts/workflow-execution/schedules/services/workflow-schedule-supervisor";
 
-export const startLiveKojoHost = async () => {
+export interface HostCompositionOverrides {
+  readonly deletionClock?: Layer.Layer<DeletionClock>;
+  readonly deletionHooks?: Layer.Layer<DeletionHooks>;
+}
+
+export const startLiveKojoHost = async (overrides: HostCompositionOverrides = {}) => {
   const socketPath = process.env.KOJO_HOST_SOCKET ?? defaultSocketPath();
   const hostStorePath = process.env.KOJO_HOST_STORE ?? join(homedir(), ".kojo", "host");
   const diagnosticPath = join(hostStorePath, "diagnostics.jsonl");
@@ -42,8 +57,9 @@ export const startLiveKojoHost = async () => {
   const protocol = RpcServer.layerProtocolSocketServer.pipe(
     Layer.provide([BunSocketServer.layer({ path: socketPath }), RpcSerialization.layerNdjson]),
   );
+  const providerRuntime = SandcastleProviderRuntimeLive;
   const workflowBackend = makeLocalWorkflowBackendLayer(hostIdentity).pipe(
-    Layer.provide(SandcastleProviderRuntimeLive),
+    Layer.provide(providerRuntime),
   );
   const projectRuntime = ProjectRuntimeLive.pipe(
     Layer.provide([
@@ -59,8 +75,13 @@ export const startLiveKojoHost = async () => {
     DrizzleProjectRepositoryLive,
     DrizzleWorkflowRunRepositoryLive,
     DrizzleWorkflowScheduleRepositoryLive,
+    DrizzleDeletionRepositoryLive,
+    overrides.deletionClock ?? DeletionClockLive,
+    overrides.deletionHooks ?? DeletionHooksLive,
+    DeletionPlanStoreLive,
     retentionRepository,
     ScheduleClockLive,
+    providerRuntime,
     workflowBackend,
     projectRuntime,
   );

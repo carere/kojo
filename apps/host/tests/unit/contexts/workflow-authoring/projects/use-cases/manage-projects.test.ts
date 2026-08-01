@@ -83,6 +83,8 @@ const makeRuntime = (
           : Effect.succeed(preflight.result),
       ),
     coordinateLifecycle: (_project, operation) => operation,
+    coordinateWork: (_project, operation) =>
+      Effect.map(operation, (value) => ({ _tag: "allowed" as const, value })),
     coordinateRetention: (_project, operation) => operation,
     readiness: () => Effect.succeed(condition),
     acceptDefinitions: (_project, definitions) =>
@@ -334,6 +336,8 @@ it.effect("acquires the Project Runtime before the Project Index for register an
         ),
       ),
     coordinateLifecycle: (_project, operation) => withinRuntime(operation),
+    coordinateWork: (_project, operation) =>
+      Effect.map(withinRuntime(operation), (value) => ({ _tag: "allowed" as const, value })),
     coordinateRetention: (_project, operation) => withinRuntime(operation),
     readiness: () => Effect.succeed("ready" as const),
     acceptDefinitions: (_project, definitions) =>
