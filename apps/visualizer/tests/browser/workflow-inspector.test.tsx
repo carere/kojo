@@ -3,13 +3,18 @@ import {
   type HostOverview as HostOverviewSnapshot,
   ProjectIdentity,
   WorkflowRunId,
+  type WorkflowRunSnapshot,
 } from "@kojo/control";
 import { Schema } from "effect";
+import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, expect, test } from "vitest";
 import { page } from "vitest/browser";
 import { ColorModeProvider } from "../../src/contexts/preferences/services/color-mode";
+import { HostOverviewError } from "../../src/contexts/shared/models/contracts";
 import { WorkflowInspector } from "../../src/contexts/workflow-execution/workflow-inspector/components/workflow-inspector";
+import { useWorkflowInspectorActions } from "../../src/contexts/workflow-execution/workflow-inspector/hooks/use-workflow-inspector-actions";
+import type { DialogKind } from "../../src/contexts/workflow-execution/workflow-inspector/models/workflow-inspector-models";
 import { setLocale } from "../../src/i18n/runtime";
 
 let dispose: VoidFunction | undefined;
@@ -320,7 +325,142 @@ test("retries a transient initial Host overview without a page reload", async ()
   expect(attempts).toBe(2);
 });
 
-test("renders the production Variant A inspector with isolated Projects, evidence, controls, retention, and accessible panels", async () => {
+test("discovers a Project registered after an authoritative empty index without reload", async () => {
+  setLocale("en", { reload: false });
+  const root = document.createElement("div");
+  document.body.append(root);
+  let attempts = 0;
+  const emptyOverview: HostOverviewSnapshot = {
+    ...overview,
+    projects: [],
+    projectDefinitions: [],
+    workflowSchedules: [],
+    workflowOccurrences: [],
+    workflowRuns: [],
+    retention: [],
+  };
+  dispose = render(
+    () => (
+      <ColorModeProvider initialColorMode="light">
+        <WorkflowInspector
+          loadOverview={async () => {
+            attempts += 1;
+            return attempts === 1 ? emptyOverview : overview;
+          }}
+        />
+      </ColorModeProvider>
+    ),
+    root,
+  );
+
+  await expect.element(page.getByText("No Kojo Projects yet.")).toBeVisible();
+  await expect.element(page.getByRole("button", { name: "first-project" })).toBeVisible();
+  expect(attempts).toBe(2);
+});
+
+test("shows a recoverable HostOverview error after finite exhaustion and succeeds on Retry", async () => {
+  setLocale("en", { reload: false });
+  const root = document.createElement("div");
+  document.body.append(root);
+  let attempts = 0;
+  dispose = render(
+    () => (
+      <ColorModeProvider initialColorMode="light">
+        <WorkflowInspector
+          loadOverview={(_signal) => {
+            attempts += 1;
+            if (attempts <= 4) {
+              return Promise.reject(
+                new HostOverviewError({
+                  code: "host-unavailable",
+                  message: "Host is still starting.",
+                  next: "Retry the Host request.",
+                }),
+              );
+            }
+            return Promise.resolve(overview);
+          }}
+        />
+      </ColorModeProvider>
+    ),
+    root,
+  );
+
+  await expect.element(page.getByRole("alert")).toBeVisible();
+  expect(document.body.textContent?.includes("Connecting to Kojo Host…")).toBe(false);
+  await page.getByRole("button", { name: "Retry HostOverview", exact: true }).click();
+  await expect.element(page.getByText("Connected to Kojo Host 0.1.0")).toBeVisible();
+  expect(attempts).toBe(5);
+});
+
+test("discards a delayed sensitive reveal after switching Project and Run identity", async () => {
+  const root = document.createElement("div");
+  document.body.append(root);
+  let resolveReveal:
+    | ((result: { readonly ok: true; readonly run: WorkflowRunSnapshot }) => void)
+    | undefined;
+  const first = run(firstRunId, "first-workflow");
+  const second = run(secondRunId, "second-workflow");
+
+  const RevealHarness = () => {
+    const [identity, setIdentity] = createSignal(firstIdentity);
+    const [selectedRunId, setSelectedRunId] = createSignal<WorkflowRunId | undefined>(firstRunId);
+    const [revealedRun, setRevealedRun] = createSignal<WorkflowRunSnapshot>();
+    const [_dialog, setDialog] = createSignal<DialogKind>("reveal");
+    const runId = () => selectedRunId() ?? firstRunId;
+    const actions = useWorkflowInspectorActions({
+      identity,
+      run: () => (runId() === firstRunId ? first : second),
+      definition: () => undefined,
+      production: true,
+      reloadOverview: async () => undefined,
+      setDialog,
+      setSelectedRunId,
+      setRevealedRun,
+      revealWorkflowRun: async (receivedIdentity, receivedRunId) => {
+        expect(receivedIdentity).toBe(firstIdentity);
+        expect(receivedRunId).toBe(firstRunId);
+        return await new Promise((resolve) => {
+          resolveReveal = resolve;
+        });
+      },
+    });
+
+    return (
+      <div>
+        <button type="button" onClick={() => void actions.reveal()}>
+          Start delayed reveal
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setIdentity(secondIdentity);
+            setSelectedRunId(secondRunId);
+          }}
+        >
+          Switch Project and Run
+        </button>
+        <output data-reveal-selection>
+          {identity()}:{runId()}
+        </output>
+        <output data-revealed-run>{revealedRun()?.runId ?? "none"}</output>
+      </div>
+    );
+  };
+
+  dispose = render(() => <RevealHarness />, root);
+  await page.getByRole("button", { name: "Start delayed reveal" }).click();
+  await expect.poll(() => resolveReveal !== undefined).toBe(true);
+  await page.getByRole("button", { name: "Switch Project and Run" }).click();
+  await expect
+    .poll(() => document.querySelector("[data-reveal-selection]")?.textContent)
+    .toBe(`${secondIdentity}:${secondRunId}`);
+
+  resolveReveal?.({ ok: true, run: { runId: firstRunId } as WorkflowRunSnapshot });
+  await expect.poll(() => document.querySelector("[data-revealed-run]")?.textContent).toBe("none");
+});
+
+test("renders the production inspector with isolated Projects, evidence, controls, retention, and accessible panels", async () => {
   setLocale("en", { reload: false });
   const root = document.createElement("div");
   document.body.append(root);

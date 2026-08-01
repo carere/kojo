@@ -16,6 +16,7 @@ import {
   onMount,
   Show,
 } from "solid-js";
+import { makeSequencedLifecycle } from "../../../shared/lib/sequenced-lifecycle";
 import { VisualizerApiClient, visualizerApiRuntime } from "../../../shared/services/client";
 
 export interface ExecutionTraceSelection {
@@ -116,6 +117,12 @@ export function ExecutionTrace(props: ExecutionTraceProps) {
         ? Promise.resolve(undefined)
         : (props.loadTrace ?? readTrace)(selection),
   );
+  type TraceFiber = ReturnType<typeof visualizerApiRuntime.runFork>;
+  const lifecycle = makeSequencedLifecycle<TraceFiber>((fiber) =>
+    visualizerApiRuntime.runPromise(Fiber.interrupt(fiber)),
+  );
+  onCleanup(() => void lifecycle.dispose());
+
   createEffect(() => {
     const selection = props.selection;
     const history = trace();
@@ -125,6 +132,7 @@ export function ExecutionTrace(props: ExecutionTraceProps) {
       history === undefined ||
       (props.loadTrace !== undefined && props.followTrace === undefined)
     ) {
+      void lifecycle.replace(() => undefined);
       return;
     }
     const acknowledge = (delivery: ControlSubscriptionDelivery) =>
@@ -148,23 +156,34 @@ export function ExecutionTrace(props: ExecutionTraceProps) {
         ),
       );
     const consume = <E,>(updates: Stream.Stream<ControlSubscriptionUpdate, E>) => {
-      let sawResync = false;
+      let resyncPage: ExecutionTracePage | undefined;
+      let reloadFailed = false;
       return Stream.runForEach(updates, (update) => {
         const reloadBeforeAcknowledging =
           update.kind === "resync-required" &&
           "runId" in update &&
           update.identity === selection.identity &&
           update.runId === selection.runId;
-        if (reloadBeforeAcknowledging) sawResync = true;
         const processed = reloadBeforeAcknowledging
-          ? reloadAuthoritative().pipe(Effect.asVoid)
+          ? reloadAuthoritative().pipe(
+              Effect.map((page) => {
+                resyncPage = page;
+                return true;
+              }),
+              Effect.catchCause(() =>
+                Effect.sync(() => {
+                  reloadFailed = true;
+                  return false;
+                }),
+              ),
+            )
           : Effect.sync(() => {
               if (
                 update.kind !== "trace-event" ||
                 update.identity !== selection.identity ||
                 update.runId !== selection.runId
               ) {
-                return;
+                return true;
               }
               setLiveTrace((current) => {
                 const base = current ?? history;
@@ -180,19 +199,25 @@ export function ExecutionTrace(props: ExecutionTraceProps) {
                   nextCursor: null,
                 };
               });
+              return true;
             });
         // A failed browser reload intentionally leaves the delivery
         // unacknowledged. The Host can then send a bounded resync instead of
         // treating unavailable browser state as processed.
-        return processed.pipe(Effect.andThen(acknowledge(update)));
-      }).pipe(Effect.as(sawResync));
+        return processed.pipe(
+          Effect.flatMap((shouldAcknowledge) =>
+            shouldAcknowledge ? acknowledge(update) : Effect.void,
+          ),
+        );
+      }).pipe(Effect.map(() => ({ reloadFailed, resyncPage })));
     };
     const follow = Effect.gen(function* () {
       let afterSequence = history.highWaterSequence;
-      for (let attempt = 0; attempt < 5; attempt += 1) {
-        const updates =
+      let attempt = 0;
+      while (true) {
+        const subscriptionEffect =
           props.followTrace === undefined
-            ? yield* Effect.map(VisualizerApiClient, (client) =>
+            ? Effect.map(VisualizerApiClient, (client) =>
                 client.SubscribeControl({
                   projects: [selection.identity],
                   topics: ["traces"],
@@ -205,8 +230,22 @@ export function ExecutionTrace(props: ExecutionTraceProps) {
                   ],
                 }),
               )
-            : props.followTrace(selection, afterSequence);
-        const exit = yield* Effect.exit(consume(updates));
+            : Effect.sync(() => {
+                const followTrace = props.followTrace;
+                if (followTrace === undefined) throw new Error("Trace subscription unavailable.");
+                return followTrace(selection, afterSequence);
+              });
+        const subscribed = yield* Effect.exit(subscriptionEffect);
+        if (Exit.isFailure(subscribed)) {
+          const reloaded = yield* Effect.exit(reloadAuthoritative());
+          if (Exit.isSuccess(reloaded)) {
+            afterSequence = reloaded.value.highWaterSequence;
+          }
+          yield* Effect.sleep(`${Math.min(attempt + 1, 4) * 50} millis`);
+          attempt += 1;
+          continue;
+        }
+        const exit = yield* Effect.exit(consume(subscribed.value));
         if (Exit.isFailure(exit)) {
           // Transport loss is not a successful delivery. Reload durable state
           // before the bounded reconnect so the next subscription resumes
@@ -215,24 +254,28 @@ export function ExecutionTrace(props: ExecutionTraceProps) {
           if (Exit.isSuccess(reloaded)) {
             afterSequence = reloaded.value.highWaterSequence;
           }
-        } else if (exit.value) {
+        } else if (exit.value.reloadFailed) {
+          // The failed reload deliberately left its delivery unacknowledged.
+          // Reconnect from the previous durable cursor and let the Host resend
+          // a bounded resync instead of issuing the same reload twice.
+        } else if (exit.value.resyncPage !== undefined) {
           // A resync terminal closes its stream by design. The authoritative
           // reload happened before its notice was acknowledged; reopen from
           // that page's durable high-water sequence.
+          afterSequence = exit.value.resyncPage.highWaterSequence;
+        } else {
+          // Clean completion is also a reconnect boundary. Refresh durable
+          // state before opening the replacement subscription.
           const reloaded = yield* Effect.exit(reloadAuthoritative());
           if (Exit.isSuccess(reloaded)) {
             afterSequence = reloaded.value.highWaterSequence;
           }
-        } else {
-          return;
         }
         yield* Effect.sleep(`${Math.min(attempt + 1, 4) * 50} millis`);
+        attempt += 1;
       }
     });
-    const fiber = visualizerApiRuntime.runFork(follow);
-    onCleanup(() => {
-      void visualizerApiRuntime.runPromise(Fiber.interrupt(fiber));
-    });
+    void lifecycle.replace(() => visualizerApiRuntime.runFork(follow));
   });
   // Test or embedded loaders are a one-way page seam, not the production
   // follow transport. Keep their explicit refresh contract for browser tests.

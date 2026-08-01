@@ -736,15 +736,18 @@ test("renders live chronological Execution Trace evidence separately from the Wo
           followTrace={(selection, afterSequence) => {
             expect(selection).toEqual({ identity, runId: parentRun });
             expect(afterSequence).toBe(1);
-            return Stream.make({
-              kind: "trace-event",
-              deliverySequence: 1,
-              identity,
-              runId: parentRun,
-              sequence: 2,
-              subscriptionId: "browser-subscription" as never,
-              event: liveEvent,
-            });
+            return Stream.concat(
+              Stream.make({
+                kind: "trace-event",
+                deliverySequence: 1,
+                identity,
+                runId: parentRun,
+                sequence: 2,
+                subscriptionId: "browser-subscription" as never,
+                event: liveEvent,
+              }),
+              Stream.never,
+            );
           }}
         />
       </ColorModeProvider>
@@ -837,15 +840,18 @@ test("reloads durable trace state and reconnects after live transport loss", asy
             follows += 1;
             return follows === 1
               ? Stream.fail(new Error("socket lost"))
-              : Stream.make({
-                  deliverySequence: 1,
-                  kind: "trace-event" as const,
-                  identity,
-                  runId,
-                  sequence: 2,
-                  subscriptionId: "reconnected" as never,
-                  event: reconnectedEvent,
-                });
+              : Stream.concat(
+                  Stream.make({
+                    deliverySequence: 1,
+                    kind: "trace-event" as const,
+                    identity,
+                    runId,
+                    sequence: 2,
+                    subscriptionId: "reconnected" as never,
+                    event: reconnectedEvent,
+                  }),
+                  Stream.never,
+                );
           }}
           acknowledgeTrace={(delivery) =>
             Effect.sync(() => {
@@ -909,7 +915,7 @@ test("acknowledges a trace resync only after its authoritative reload succeeds",
                   runId,
                   subscriptionId: "resync-success" as never,
                 })
-              : Stream.empty;
+              : Stream.never;
           }}
           acknowledgeTrace={(delivery) =>
             Effect.sync(() => {
@@ -926,6 +932,7 @@ test("acknowledges a trace resync only after its authoritative reload succeeds",
   expect(acknowledgements).toEqual([]);
   resolveReload?.(page);
   await expect.poll(() => acknowledgements).toEqual([1]);
+  await expect.poll(() => follows).toBe(2);
 });
 
 test("does not acknowledge a trace resync whose authoritative reload fails", async () => {
@@ -969,7 +976,7 @@ test("does not acknowledge a trace resync whose authoritative reload fails", asy
                   runId,
                   subscriptionId: "resync-failure" as never,
                 })
-              : Stream.empty;
+              : Stream.never;
           }}
           acknowledgeTrace={(delivery) =>
             Effect.sync(() => {
@@ -983,8 +990,51 @@ test("does not acknowledge a trace resync whose authoritative reload fails", asy
   );
 
   await expect.poll(() => loads).toBe(2);
+  await expect.poll(() => follows).toBe(2);
   await new Promise<void>((resolve) => setTimeout(resolve, 20));
   expect(acknowledgements).toEqual([]);
+});
+
+test("reconnects after clean trace stream completion until the component is cleaned up", async () => {
+  setLocale("en", { reload: false });
+  const root = document.createElement("div");
+  document.body.append(root);
+  const identity = Schema.decodeUnknownSync(ProjectIdentity)(
+    "00000000-0000-7000-8000-000000000027",
+  );
+  const runId = Schema.decodeUnknownSync(WorkflowRunId)("00000000-0000-7000-8000-000000000028");
+  const tracePage: ExecutionTracePage = {
+    events: [],
+    final: false,
+    firstSequence: null,
+    hasMore: false,
+    highWaterSequence: 0,
+    lastSequence: null,
+    nextCursor: null,
+    runState: "running",
+  };
+  let loads = 0;
+  let follows = 0;
+  dispose = render(
+    () => (
+      <ExecutionTrace
+        selection={{ identity, runId }}
+        loadTrace={() => {
+          loads += 1;
+          return Promise.resolve(tracePage);
+        }}
+        followTrace={() => {
+          follows += 1;
+          return follows === 1 ? Stream.empty : Stream.never;
+        }}
+      />
+    ),
+    root,
+  );
+
+  await expect.poll(() => follows).toBe(2);
+  expect(loads).toBe(2);
+  expect(document.querySelectorAll("[data-event-sequence]")).toHaveLength(0);
 });
 
 test("navigates between a Schedule Occurrence and its linked resources", async () => {

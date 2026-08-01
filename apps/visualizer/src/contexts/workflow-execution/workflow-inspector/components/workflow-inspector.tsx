@@ -16,7 +16,7 @@ import {
   Radio,
   X,
 } from "lucide-solid";
-import { createEffect, createMemo, createResource, createSignal, on, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, on, onCleanup, Show } from "solid-js";
 import { LanguageToggle } from "../../../preferences/components/language-toggle";
 import { ThemeToggle } from "../../../preferences/components/theme-toggle";
 import { VisualizerApiClient, visualizerApiRuntime } from "../../../shared/services/client";
@@ -27,7 +27,10 @@ import {
   reconcileNavigatorPreferences,
 } from "../../../workflow-authoring/projects/services/navigator-preferences";
 import { ExecutionTrace } from "../../traces/components/execution-trace";
-import { loadWithBoundedRetry } from "../hooks/load-host-overview";
+import {
+  makeHostOverviewCoordinator,
+  productionHostOverviewPolicy,
+} from "../hooks/host-overview-coordinator";
 import { useLiveProjectOverview } from "../hooks/use-live-project-overview";
 import { usePanelLayout } from "../hooks/use-panel-layout";
 import { useWorkflowInspectorActions } from "../hooks/use-workflow-inspector-actions";
@@ -45,18 +48,46 @@ import { ResourceNavigator } from "./resource-navigator";
 import { RunGraph } from "./run-graph";
 import { WorkflowInspectorDialog } from "./workflow-inspector-dialog";
 
-const loadHostOverview = async (_signal: AbortSignal) => {
+const interruptWhenAborted = (signal: AbortSignal) =>
+  Effect.callback<never>((resume) => {
+    const onAbort = () => resume(Effect.interrupt);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+    return Effect.sync(() => signal.removeEventListener("abort", onAbort));
+  });
+
+const loadHostOverview = async (signal: AbortSignal) => {
+  const request = Effect.flatMap(VisualizerApiClient, (client) => client.HostOverview());
   return await visualizerApiRuntime.runPromise(
-    Effect.flatMap(VisualizerApiClient, (client) =>
-      client.HostOverview().pipe(Effect.timeout("1 second")),
-    ),
+    Effect.raceFirst(request, interruptWhenAborted(signal)),
   );
 };
 
-export function WorkflowInspector(props: WorkflowInspectorProps) {
-  const [overview, { refetch }] = createResource<HostOverviewSnapshot | undefined>(() =>
-    loadWithBoundedRetry(props.loadOverview ?? loadHostOverview),
+const freshStartOverviewRetryDelaysMs = [25, 50, 100, 200] as const;
+const embeddedHostOverviewPolicy = {
+  attemptTimeoutMs: 1_000,
+  maxAttempts: 4,
+  maxElapsedMs: 5_000,
+  retryDelaysMs: [25, 50, 100],
+} as const;
+
+const hasRun = (snapshot: HostOverviewSnapshot, identity: ProjectIdentity, runId: WorkflowRunId) =>
+  snapshot.workflowRuns.some(
+    (projectRuns) =>
+      projectRuns.project.identity === identity &&
+      projectRuns.runs.some((run) => run.runId === runId),
   );
+
+export function WorkflowInspector(props: WorkflowInspectorProps) {
+  const overviewCoordinator = makeHostOverviewCoordinator({
+    load: props.loadOverview ?? loadHostOverview,
+    policy:
+      props.loadOverview === undefined ? productionHostOverviewPolicy : embeddedHostOverviewPolicy,
+  });
+  const overview = overviewCoordinator.overview;
+  const overviewError = overviewCoordinator.error;
+  overviewCoordinator.start();
+  onCleanup(() => overviewCoordinator.dispose());
   const [preferences, setPreferences] = createSignal<NavigatorPreferences>({
     version: 1,
     order: [],
@@ -78,10 +109,13 @@ export function WorkflowInspector(props: WorkflowInspectorProps) {
   createEffect(() => {
     const current = overview();
     if (current === undefined) return;
-    const reconciled = reconcileNavigatorPreferences(
-      current.projects,
-      typeof window === "undefined" ? null : window.localStorage.getItem(NAVIGATOR_PREFERENCES_KEY),
-    );
+    const storedPreferences =
+      typeof window === "undefined" ? null : window.localStorage.getItem(NAVIGATOR_PREFERENCES_KEY);
+    // A failed refresh never clears the coordinator's last good snapshot. If a
+    // Host reconnect briefly reports an empty index, keep the persisted order
+    // until a non-empty authoritative replacement confirms the Project set.
+    if (current.projects.length === 0 && storedPreferences !== null) return;
+    const reconciled = reconcileNavigatorPreferences(current.projects, storedPreferences);
     setPreferences(reconciled);
     if (typeof window !== "undefined")
       window.localStorage.setItem(NAVIGATOR_PREFERENCES_KEY, JSON.stringify(reconciled));
@@ -170,6 +204,27 @@ export function WorkflowInspector(props: WorkflowInspectorProps) {
     ];
   });
 
+  const reloadOverview = async (expectedRunId?: WorkflowRunId) => {
+    if (props.loadOverview !== undefined) return;
+    const expectedIdentity = selectedProjectIdentity();
+    for (let attempt = 0; ; attempt += 1) {
+      const refreshed = await overviewCoordinator.refresh();
+      if (
+        expectedRunId === undefined ||
+        expectedIdentity === undefined ||
+        hasRun(refreshed, expectedIdentity, expectedRunId)
+      )
+        return;
+      const delay = freshStartOverviewRetryDelaysMs[attempt];
+      if (delay === undefined) {
+        throw new Error(`Host overview did not include Workflow Run ${expectedRunId}.`);
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, delay));
+    }
+  };
+
+  const reloadHostOverview = () => overviewCoordinator.refresh();
+
   createEffect(() => {
     const runs = selectedRuns();
     if (runs.length === 0) {
@@ -185,15 +240,10 @@ export function WorkflowInspector(props: WorkflowInspectorProps) {
   useLiveProjectOverview({
     identity: selectedProjectIdentity,
     overview,
-    refetch,
+    refetch: reloadHostOverview,
     production: props.loadOverview === undefined,
     acknowledge: props.acknowledgeTrace,
   });
-
-  const reloadOverview = async () => {
-    if (props.loadOverview !== undefined) return;
-    await refetch();
-  };
   const actions = useWorkflowInspectorActions({
     identity: selectedProjectIdentity,
     run: selectedRun,
@@ -221,16 +271,43 @@ export function WorkflowInspector(props: WorkflowInspectorProps) {
       <Show
         when={overview()}
         fallback={
-          <div class="grid min-h-screen place-items-center p-6">
-            <div class="workflow-inspector-card max-w-md text-center">
-              <LoaderCircle class="mx-auto size-5 animate-spin text-emerald-600" />
-              <h1 class="mt-3 font-heading font-semibold text-lg">Connecting to Kojo Host…</h1>
-              <p class="mt-2 text-xs text-zinc-500">
-                The Host-owned Project Index and Workflow resources will appear here when the local
-                service is available.
-              </p>
-            </div>
-          </div>
+          <Show
+            when={overviewError()}
+            fallback={
+              <div class="grid min-h-screen place-items-center p-6">
+                <div class="workflow-inspector-card max-w-md text-center">
+                  <LoaderCircle class="mx-auto size-5 animate-spin text-emerald-600" />
+                  <h1 class="mt-3 font-heading font-semibold text-lg">Connecting to Kojo Host…</h1>
+                  <p class="mt-2 text-xs text-zinc-500">
+                    The Host-owned Project Index and Workflow resources will appear here when the
+                    local service is available.
+                  </p>
+                </div>
+              </div>
+            }
+          >
+            {(error) => (
+              <div class="grid min-h-screen place-items-center p-6">
+                <div class="workflow-inspector-card max-w-md" role="alert">
+                  <CircleAlert class="size-5 text-rose-500" />
+                  <h1 class="mt-3 font-heading font-semibold text-lg">
+                    Kojo Host connection needs attention
+                  </h1>
+                  <p class="mt-2 text-xs text-zinc-600 dark:text-zinc-300">
+                    {errorMessage(error())}
+                  </p>
+                  <button
+                    class="mt-4 rounded-md bg-zinc-900 px-3 py-2 font-medium text-white text-xs dark:bg-zinc-100 dark:text-zinc-900"
+                    type="button"
+                    onClick={() => void overviewCoordinator.refresh().catch(() => undefined)}
+                    disabled={overviewCoordinator.loading()}
+                  >
+                    {overviewCoordinator.loading() ? "Retrying…" : "Retry HostOverview"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </Show>
         }
       >
         {(current) => (
@@ -490,3 +567,13 @@ export function WorkflowInspector(props: WorkflowInspectorProps) {
 }
 
 export type { WorkflowInspectorProps } from "../models/workflow-inspector-models";
+
+const errorMessage = (error: unknown) => {
+  if (typeof error !== "object" || error === null)
+    return "The visualizer could not reach Kojo Host.";
+  const candidate = error as { readonly message?: unknown; readonly next?: unknown };
+  const message =
+    typeof candidate.message === "string" ? candidate.message : "Host request failed.";
+  const next = typeof candidate.next === "string" ? ` ${candidate.next}` : "";
+  return `${message}${next}`;
+};

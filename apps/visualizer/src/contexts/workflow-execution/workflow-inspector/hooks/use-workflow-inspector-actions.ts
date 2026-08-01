@@ -3,24 +3,72 @@ import type {
   ProjectWorkflowSchedulesSnapshot,
   WorkflowRunId,
   WorkflowRunListItem,
+  WorkflowRunQueryResult,
   WorkflowRunSnapshot,
   WorkflowScheduleAllowedAction,
 } from "@kojo/control";
 import { Effect } from "effect";
-import { type Accessor, createSignal, type Setter } from "solid-js";
+import { type Accessor, createEffect, createSignal, on, type Setter } from "solid-js";
 import { VisualizerApiClient, visualizerApiRuntime } from "../../../shared/services/client";
 import type { DialogKind, WorkflowDefinition } from "../models/workflow-inspector-models";
 import { parseJson, requestKey } from "../models/workflow-inspector-models";
+
+const interruptWhenAborted = (signal: AbortSignal) =>
+  Effect.callback<never>((resume) => {
+    const onAbort = () => resume(Effect.interrupt);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+    return Effect.sync(() => signal.removeEventListener("abort", onAbort));
+  });
+
+const runWithCancellableTimeout = async <Value>(
+  request: Effect.Effect<Value, unknown, VisualizerApiClient>,
+  timeoutMs: number,
+) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await visualizerApiRuntime.runPromise(
+      Effect.raceFirst(request, interruptWhenAborted(controller.signal)),
+    );
+  } finally {
+    clearTimeout(timeout);
+    controller.abort();
+  }
+};
+
+const runWithCancellableRetries = async <Value>(
+  request: Effect.Effect<Value, unknown, VisualizerApiClient>,
+) => {
+  const retryDelaysMs = [100, 250] as const;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await runWithCancellableTimeout(request, 5_000);
+    } catch (error) {
+      const delay = retryDelaysMs[attempt];
+      if (delay === undefined) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, delay));
+    }
+  }
+};
+
+/** Builds one idempotent Host mutation request before any transport retry. */
+export const withStableRequestKey = <Value>(build: (key: ReturnType<typeof requestKey>) => Value) =>
+  build(requestKey());
 
 interface UseWorkflowInspectorActionsProps {
   readonly identity: Accessor<ProjectIdentity | undefined>;
   readonly run: Accessor<WorkflowRunListItem | undefined>;
   readonly definition: Accessor<WorkflowDefinition | undefined>;
   readonly production: boolean;
-  readonly reloadOverview: () => Promise<void>;
+  readonly reloadOverview: (expectedRunId?: WorkflowRunId) => Promise<void>;
   readonly setDialog: Setter<DialogKind>;
   readonly setSelectedRunId: Setter<WorkflowRunId | undefined>;
   readonly setRevealedRun: Setter<WorkflowRunSnapshot | undefined>;
+  readonly revealWorkflowRun?: (
+    identity: ProjectIdentity,
+    runId: WorkflowRunId,
+  ) => Promise<WorkflowRunQueryResult>;
 }
 
 export function useWorkflowInspectorActions(props: UseWorkflowInspectorActionsProps) {
@@ -28,6 +76,19 @@ export function useWorkflowInspectorActions(props: UseWorkflowInspectorActionsPr
   const [busyAction, setBusyAction] = createSignal<string>();
   const [notice, setNotice] = createSignal<string>();
   const [error, setError] = createSignal<string>();
+  let actionGeneration = 0;
+
+  createEffect(
+    on(
+      () => `${props.identity() ?? ""}:${props.run()?.runId ?? ""}`,
+      () => {
+        actionGeneration += 1;
+        setBusyAction(undefined);
+        props.setRevealedRun(undefined);
+      },
+      { defer: true },
+    ),
+  );
 
   const scheduleAction = async (
     schedule: ProjectWorkflowSchedulesSnapshot["schedules"][number],
@@ -39,20 +100,22 @@ export function useWorkflowInspectorActions(props: UseWorkflowInspectorActionsPr
     setBusyAction(`schedule:${schedule.scheduleKey}`);
     setError(undefined);
     try {
-      const result = await visualizerApiRuntime.runPromise(
-        Effect.flatMap(VisualizerApiClient, (client) =>
-          action === "enable"
-            ? client.EnableWorkflowSchedule({
-                identity,
-                scheduleKey: schedule.scheduleKey,
-                scheduleRevision: schedule.definition?.revision ?? "",
-                requestKey: requestKey(),
-              })
-            : client.DisableWorkflowSchedule({
-                identity,
-                scheduleKey: schedule.scheduleKey,
-                requestKey: requestKey(),
-              }),
+      const result = await runWithCancellableRetries(
+        withStableRequestKey((mutationRequestKey) =>
+          Effect.flatMap(VisualizerApiClient, (client) =>
+            action === "enable"
+              ? client.EnableWorkflowSchedule({
+                  identity,
+                  scheduleKey: schedule.scheduleKey,
+                  scheduleRevision: schedule.definition?.revision ?? "",
+                  requestKey: mutationRequestKey,
+                })
+              : client.DisableWorkflowSchedule({
+                  identity,
+                  scheduleKey: schedule.scheduleKey,
+                  requestKey: mutationRequestKey,
+                }),
+          ),
         ),
       );
       if (!result.ok) setError(result.error.message);
@@ -87,14 +150,16 @@ export function useWorkflowInspectorActions(props: UseWorkflowInspectorActionsPr
     setBusyAction("resume");
     setError(undefined);
     try {
-      const result = await visualizerApiRuntime.runPromise(
-        Effect.flatMap(VisualizerApiClient, (client) =>
-          client.ResumeWorkflowRun({
-            identity,
-            runId: run.runId,
-            value: parsed.value,
-            requestKey: requestKey(),
-          }),
+      const result = await runWithCancellableRetries(
+        withStableRequestKey((mutationRequestKey) =>
+          Effect.flatMap(VisualizerApiClient, (client) =>
+            client.ResumeWorkflowRun({
+              identity,
+              runId: run.runId,
+              value: parsed.value,
+              requestKey: mutationRequestKey,
+            }),
+          ),
         ),
       );
       if (!result.ok) setError(result.error.message);
@@ -131,15 +196,17 @@ export function useWorkflowInspectorActions(props: UseWorkflowInspectorActionsPr
     setBusyAction("deferred-complete");
     setError(undefined);
     try {
-      const result = await visualizerApiRuntime.runPromise(
-        Effect.flatMap(VisualizerApiClient, (client) =>
-          client.CompleteWorkflowDeferred({
-            identity,
-            runId: run.runId,
-            token,
-            value: parsed.value,
-            requestKey: requestKey(),
-          }),
+      const result = await runWithCancellableRetries(
+        withStableRequestKey((mutationRequestKey) =>
+          Effect.flatMap(VisualizerApiClient, (client) =>
+            client.CompleteWorkflowDeferred({
+              identity,
+              runId: run.runId,
+              token,
+              value: parsed.value,
+              requestKey: mutationRequestKey,
+            }),
+          ),
         ),
       );
       if (!result.ok) setError(result.error.message);
@@ -173,9 +240,11 @@ export function useWorkflowInspectorActions(props: UseWorkflowInspectorActionsPr
     setBusyAction("stop");
     setError(undefined);
     try {
-      const result = await visualizerApiRuntime.runPromise(
-        Effect.flatMap(VisualizerApiClient, (client) =>
-          client.StopWorkflowRun({ identity, runId: run.runId, requestKey: requestKey() }),
+      const result = await runWithCancellableRetries(
+        withStableRequestKey((mutationRequestKey) =>
+          Effect.flatMap(VisualizerApiClient, (client) =>
+            client.StopWorkflowRun({ identity, runId: run.runId, requestKey: mutationRequestKey }),
+          ),
         ),
       );
       if (!result.ok) setError(result.error.message);
@@ -203,15 +272,17 @@ export function useWorkflowInspectorActions(props: UseWorkflowInspectorActionsPr
     setBusyAction("fresh-start");
     setError(undefined);
     try {
-      const result = await visualizerApiRuntime.runPromise(
-        Effect.flatMap(VisualizerApiClient, (client) =>
-          client.StartWorkflowRun({
-            identity,
-            workflowKey: definition.workflowKey,
-            workflowRevision: definition.revision,
-            input: parsed.value,
-            requestKey: requestKey(),
-          }),
+      const result = await runWithCancellableRetries(
+        withStableRequestKey((mutationRequestKey) =>
+          Effect.flatMap(VisualizerApiClient, (client) =>
+            client.StartWorkflowRun({
+              identity,
+              workflowKey: definition.workflowKey,
+              workflowRevision: definition.revision,
+              input: parsed.value,
+              requestKey: mutationRequestKey,
+            }),
+          ),
         ),
       );
       if (!result.ok) setError(result.error.message);
@@ -221,7 +292,7 @@ export function useWorkflowInspectorActions(props: UseWorkflowInspectorActionsPr
         setNotice(
           `${result.run.runId}: fresh Workflow Run accepted with a new identity from the beginning.`,
         );
-        await props.reloadOverview();
+        await props.reloadOverview(result.run.runId);
         props.setSelectedRunId(result.run.runId);
       }
     } catch {
@@ -235,14 +306,29 @@ export function useWorkflowInspectorActions(props: UseWorkflowInspectorActionsPr
     const identity = props.identity();
     const run = props.run();
     if (identity === undefined || run === undefined || !props.production) return;
+    const requestGeneration = ++actionGeneration;
+    const requestIdentity = identity;
+    const requestRunId = run.runId;
     setBusyAction("reveal");
     setError(undefined);
     try {
-      const result = await visualizerApiRuntime.runPromise(
-        Effect.flatMap(VisualizerApiClient, (client) =>
-          client.RevealWorkflowRun({ identity, runId: run.runId }),
-        ),
-      );
+      const revealWorkflowRun = props.revealWorkflowRun;
+      const request =
+        revealWorkflowRun === undefined
+          ? Effect.flatMap(VisualizerApiClient, (client) =>
+              client.RevealWorkflowRun({ identity: requestIdentity, runId: requestRunId }),
+            )
+          : Effect.promise(() => revealWorkflowRun(requestIdentity, requestRunId));
+      const result: WorkflowRunQueryResult =
+        revealWorkflowRun === undefined
+          ? await runWithCancellableRetries(request)
+          : await visualizerApiRuntime.runPromise(request);
+      if (
+        requestGeneration !== actionGeneration ||
+        props.identity() !== requestIdentity ||
+        props.run()?.runId !== requestRunId
+      )
+        return;
       if (!result.ok) setError(result.error.message);
       else {
         props.setRevealedRun(result.run);
@@ -250,9 +336,14 @@ export function useWorkflowInspectorActions(props: UseWorkflowInspectorActionsPr
         setNotice(`${run.runId}: explicit sensitive-data reveal accepted for this view only.`);
       }
     } catch {
-      setError("Kojo Host could not reveal this Workflow Run.");
+      if (
+        requestGeneration === actionGeneration &&
+        props.identity() === requestIdentity &&
+        props.run()?.runId === requestRunId
+      )
+        setError("Kojo Host could not reveal this Workflow Run.");
     } finally {
-      setBusyAction(undefined);
+      if (requestGeneration === actionGeneration) setBusyAction(undefined);
     }
   };
 
