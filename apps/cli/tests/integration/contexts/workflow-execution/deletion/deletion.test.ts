@@ -1415,6 +1415,25 @@ it("resumes the same confirmed Project deletion after a crash at every ordered p
     );
     expect(blockedSchedule.exitCode).toBe(4);
     expect(readJson(blockedSchedule.stdout).error.code).toBe("project-runtime-not-ready");
+    const blockedForget = await runKojoCli(
+      [
+        "project",
+        "forget",
+        "--project-id",
+        identity,
+        "--request-key",
+        `blocked-forget-after-deletion-${phase}`,
+        "--json",
+      ],
+      recoveredHost.socketPath,
+      project,
+    );
+    expect(blockedForget.exitCode).toBe(4);
+    expect(readJson(blockedForget.stdout).error).toMatchObject({
+      code: "project-forget-blocked",
+      message: "Kojo Project cannot be forgotten while its confirmed deletion is being recovered.",
+      next: "Retry the original confirmed deletion command until it completes, then retry forgetting the Project.",
+    });
     const replay = await runKojoCli(
       ["delete", "project", "--project-id", identity, "--plan-key", plan.planKey, "--json"],
       recoveredHost.socketPath,

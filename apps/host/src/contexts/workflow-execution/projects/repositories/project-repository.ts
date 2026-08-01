@@ -3,6 +3,8 @@ import { Context, type Effect } from "effect";
 
 export interface ProjectForgetBlockers {
   readonly assessment: "available" | "unavailable";
+  /** A durable deletion intent keeps the Project indexed until replay completes. */
+  readonly pendingDeletion?: boolean;
   readonly enabledScheduleKeys: ReadonlyArray<string>;
   readonly nonFinalRunIds: ReadonlyArray<string>;
 }

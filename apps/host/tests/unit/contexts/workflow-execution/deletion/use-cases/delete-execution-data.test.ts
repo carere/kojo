@@ -44,6 +44,12 @@ const providerItem: DeletionWorkItem = {
   key: "provider:run-1",
   runId,
 };
+const projectScope = { kind: "project", identity: project.identity } as const;
+const diagnosticItem: DeletionWorkItem = {
+  kind: "diagnostic",
+  key: "diagnostic:project",
+  projectIdentity: project.identity,
+};
 const target: DeletionTargetSnapshot = {
   version: 1,
   scope,
@@ -141,5 +147,115 @@ it.effect("maps failed Provider cleanup to a warning while completing local dele
       receipt: { warnings: [{ code: "provider-failed" }] },
     });
     expect(safeErrorCode).toBe("provider-failed");
+  }).pipe(Effect.provide(layers));
+});
+
+it.effect("does not complete diagnostic cleanup before a recoverable Project release", () => {
+  let diagnosticState: DeletionItemState["state"] = "pending";
+  let releaseAttempts = 0;
+  let diagnosticRemovals = 0;
+  let completionCalls = 0;
+  const projectTarget: DeletionTargetSnapshot = {
+    version: 1,
+    scope: projectScope,
+    scopeDigest: deletionScopeDigest(projectScope),
+    items: [diagnosticItem],
+    counts: countsFor([diagnosticItem]),
+    preconditions: [],
+  };
+  const repository: DeletionRepositoryShape = {
+    inspect: () => Effect.succeed({ _tag: "accepted", target: projectTarget }),
+    readRequest: () => Effect.succeed(undefined),
+    begin: () =>
+      Effect.succeed({ _tag: "started" as const, deletionId: "deletion-1", resumed: false }),
+    readItems: () =>
+      Effect.succeed([{ item: diagnosticItem, state: diagnosticState, safeErrorCode: null }]),
+    markItem: (_project, _deletionId, item, state) =>
+      Effect.sync(() => {
+        if (item.kind === "diagnostic") diagnosticState = state;
+      }),
+    reconcileOwnedFiles: () => Effect.succeed({ _tag: "unchanged" as const }),
+    setPhase: () => Effect.void,
+    complete: () =>
+      Effect.sync(() => {
+        completionCalls += 1;
+        return {
+          version: 1 as const,
+          requestKey: "10000000-0000-4000-8000-000000000010" as RequestKey,
+          completedAtMs: 2,
+          counts: projectTarget.counts,
+          warnings: [],
+        };
+      }),
+    hasCompletedProjectReset: () => Effect.succeed(false),
+  };
+  const runtime = {
+    coordinateLifecycle: (_project: ProjectSnapshot, operation: Effect.Effect<unknown>) =>
+      operation,
+  } as ProjectRuntime["Service"];
+  const backend = {
+    ...ProviderRuntimeUnavailable,
+    acquire: () => Effect.succeed(true),
+    initialize: () => Effect.succeed(true),
+    postflight: () => Effect.succeed(true),
+    readiness: () => Effect.succeed("ready" as const),
+    quiesce: () => Effect.void,
+    release: () => {
+      releaseAttempts += 1;
+      return releaseAttempts === 1
+        ? Effect.fail(new Error("release temporarily unavailable"))
+        : Effect.void;
+    },
+    register: () => Effect.void,
+    submit: () => Effect.die("not used"),
+    observe: () => Effect.die("not used"),
+  } as WorkflowBackend["Service"];
+  const layers = Layer.mergeAll(
+    Layer.succeed(ProjectIndexRepository, {
+      read: Effect.succeed({ layoutVersion: 1 as const, projects: [project], receipts: [] }),
+      update: () => Effect.die("not used"),
+    }),
+    Layer.succeed(ProjectLayout, {
+      inspectIndexedPath: () => Effect.succeed({ status: "missing" as const }),
+      validate: () =>
+        Effect.succeed({
+          ok: false as const,
+          message: "reset test does not rediscover schedules",
+          findingKey: "configuration.invalid" as const,
+        }),
+    }),
+    Layer.succeed(DeletionRepository, repository),
+    Layer.succeed(DeletionClock, { now: () => 0 }),
+    Layer.succeed(DeletionHooks, { afterPhase: () => Effect.void }),
+    DeletionPlanStoreLive,
+    Layer.succeed(ProjectRuntime, runtime),
+    Layer.succeed(WorkflowBackend, backend),
+    Layer.succeed(ProviderRuntime, ProviderRuntimeUnavailable),
+    Layer.succeed(HostDiagnosticLogger, {
+      cleanup: Effect.void,
+      emit: () => Effect.void,
+      removeProject: () =>
+        Effect.sync(() => {
+          diagnosticRemovals += 1;
+        }),
+    }),
+    Layer.succeed(WorkflowScheduleRepository, {} as WorkflowScheduleRepository["Service"]),
+    Layer.succeed(ScheduleClock, { now: () => 0 }),
+  );
+
+  return Effect.gen(function* () {
+    const preview = yield* deleteExecutionData(projectScope);
+    if (!preview.ok || preview.kind !== "preview") throw new Error("Expected a deletion preview");
+    const firstAttempt = yield* deleteExecutionData(projectScope, preview.preview.planKey);
+    expect(firstAttempt).toMatchObject({ ok: false, error: { code: "deletion-needs-attention" } });
+    expect(diagnosticState).toBe("pending");
+    expect(diagnosticRemovals).toBe(0);
+    expect(completionCalls).toBe(0);
+
+    const secondAttempt = yield* deleteExecutionData(projectScope, preview.preview.planKey);
+    expect(secondAttempt).toMatchObject({ ok: true, kind: "completed" });
+    expect(diagnosticState).toBe("completed");
+    expect(diagnosticRemovals).toBe(1);
+    expect(completionCalls).toBe(1);
   }).pipe(Effect.provide(layers));
 });

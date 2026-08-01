@@ -296,10 +296,11 @@ export const ProjectRuntimeLive = Layer.effect(
           Effect.gen(function* () {
             const resolved = yield* resolve;
             if (resolved._tag === "result") return resolved.result;
-            const outcome = yield* operation(
-              resolved.project,
-              yield* repository.inspectForgetBlockers(resolved.project),
-            );
+            const inspected = yield* repository.inspectForgetBlockers(resolved.project);
+            const pendingDeletion = repository.hasPendingDeletion
+              ? yield* repository.hasPendingDeletion(resolved.project)
+              : inspected.pendingDeletion === true;
+            const outcome = yield* operation(resolved.project, { ...inspected, pendingDeletion });
             if (outcome.deactivate) yield* backend.release(resolved.project);
             return outcome.result;
           }),

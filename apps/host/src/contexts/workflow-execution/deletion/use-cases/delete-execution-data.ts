@@ -483,6 +483,33 @@ const resumeDeletion = (
 
     yield* repository.setPhase(project, deletionId, "deleting-records");
     yield* hooks.afterPhase("deleting-records");
+    if (plan.target.scope.kind === "project") {
+      // Stop the Effect runner and release Project ownership before the reset
+      // transaction clears its private durable tables. Otherwise a live
+      // runner can recreate a cluster row after the deletion transaction.
+      const released = yield* Effect.exit(backend.release(project));
+      if (Exit.isFailure(released)) {
+        yield* repository.setPhase(
+          project,
+          deletionId,
+          "needs-attention",
+          "runtime-release-failed",
+        );
+        return yield* Effect.succeed(
+          errorFor(
+            "deletion-needs-attention",
+            "The Project Runtime could not be released before the Project reset.",
+            "Repair the Project Runtime and retry the same confirmed deletion command.",
+            plan.target.scope,
+            plan.planKey,
+          ),
+        );
+      }
+    }
+    // Release is a recoverable boundary: Provider cleanup can fail after the
+    // engine has quiesced. Keep the diagnostic item pending until that
+    // boundary succeeds so a retry removes diagnostics exactly once before a
+    // target-free receipt is committed.
     for (const entry of pendingWork(
       yield* repository.readItems(project, deletionId),
       "diagnostic",
@@ -515,29 +542,6 @@ const resumeDeletion = (
         );
       }
       yield* repository.markItem(project, deletionId, entry.item, "completed");
-    }
-    if (plan.target.scope.kind === "project") {
-      // Stop the Effect runner and release Project ownership before the reset
-      // transaction clears its private durable tables. Otherwise a live
-      // runner can recreate a cluster row after the deletion transaction.
-      const released = yield* Effect.exit(backend.release(project));
-      if (Exit.isFailure(released)) {
-        yield* repository.setPhase(
-          project,
-          deletionId,
-          "needs-attention",
-          "runtime-release-failed",
-        );
-        return yield* Effect.succeed(
-          errorFor(
-            "deletion-needs-attention",
-            "The Project Runtime could not be released before the Project reset.",
-            "Repair the Project Runtime and retry the same confirmed deletion command.",
-            plan.target.scope,
-            plan.planKey,
-          ),
-        );
-      }
     }
     const receipt = yield* repository.complete(project, deletionId, now());
     return yield* Effect.succeed(targetFreeReceipt(receipt));

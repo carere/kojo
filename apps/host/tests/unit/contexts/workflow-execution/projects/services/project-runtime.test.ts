@@ -103,6 +103,37 @@ it.effect("blocks new Project work behind a durable pending-deletion intent", ()
   }).pipe(Effect.provide(runtimeLayer(store)));
 });
 
+it.effect("passes the durable deletion fence to Project forget", () => {
+  let pendingDeletion: boolean | undefined;
+  const store = Layer.succeed(ProjectRepository, {
+    migrate: () => Effect.succeed(true),
+    postflight: () => Effect.succeed(true),
+    completeMigration: () => Effect.succeed(true),
+    readiness: () => Effect.succeed("ready" as const),
+    hasPendingDeletion: () => Effect.succeed(true),
+    inspectForgetBlockers: () =>
+      Effect.succeed({
+        assessment: "available" as const,
+        enabledScheduleKeys: [],
+        nonFinalRunIds: [],
+      }),
+  });
+
+  return Effect.gen(function* () {
+    const runtime = yield* ProjectRuntime;
+    yield* runtime.coordinateForget(
+      project.identity,
+      Effect.succeed({ _tag: "project" as const, project }),
+      (_project, blockers) =>
+        Effect.sync(() => {
+          pendingDeletion = blockers.pendingDeletion;
+          return { deactivate: false, result: undefined };
+        }),
+    );
+    expect(pendingDeletion).toBe(true);
+  }).pipe(Effect.provide(runtimeLayer(store)));
+});
+
 it.effect("serializes retention cleanup with a concurrent Project lifecycle write", () => {
   const order: Array<string> = [];
   const store = Layer.succeed(ProjectRepository, {

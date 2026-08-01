@@ -155,6 +155,27 @@ export const forgetProject = (
                 result,
               };
             }
+            if (blockers.pendingDeletion === true) {
+              const result = mutationFailure(
+                requestKey,
+                "project-forget-blocked",
+                "Kojo Project cannot be forgotten while its confirmed deletion is being recovered.",
+                "Retry the original confirmed deletion command until it completes, then retry forgetting the Project.",
+                { kind: "project", identity },
+                [],
+              );
+              return {
+                state: record(
+                  latest,
+                  requestKey,
+                  "forget",
+                  input,
+                  result,
+                  selectorLookupKey(selector),
+                ),
+                result,
+              };
+            }
             if (blockers.enabledScheduleKeys.length > 0 || blockers.nonFinalRunIds.length > 0) {
               const result = mutationFailure(
                 requestKey,

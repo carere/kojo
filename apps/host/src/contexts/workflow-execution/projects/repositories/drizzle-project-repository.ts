@@ -920,13 +920,27 @@ const inspectBlockers = (project: { readonly identity: string; readonly path: st
       const nonFinalRunIds = Schema.decodeUnknownSync(RunBlockerRows)(runRows).map(
         ({ runId }) => runId,
       );
-      return { assessment: "available" as const, enabledScheduleKeys, nonFinalRunIds };
+      const pendingDeletion =
+        Schema.decodeUnknownSync(DeletionRows)(
+          store
+            .select({ deletionId: deletionIntents.deletionId })
+            .from(deletionIntents)
+            .limit(1)
+            .all(),
+        ).length > 0;
+      return {
+        assessment: "available" as const,
+        pendingDeletion,
+        enabledScheduleKeys,
+        nonFinalRunIds,
+      };
     } finally {
       connection.close();
     }
   } catch {
     return {
       assessment: "unavailable" as const,
+      pendingDeletion: false,
       enabledScheduleKeys: [],
       nonFinalRunIds: [],
     };
