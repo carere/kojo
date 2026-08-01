@@ -22,6 +22,7 @@ export interface KojoHostProcessOptions {
 const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
 const hostMainPath = join(workspaceRoot, "apps/host/tests/process-main.ts");
 const hostStartupTimeoutMs = 15_000;
+const hostShutdownTimeoutMs = 5_000;
 const socketPollIntervalMs = 25;
 
 export const startKojoHostProcess = async (
@@ -73,11 +74,29 @@ export const startKojoHostProcess = async (
     socketPath,
     stop: async () => {
       if (processHandle.exitCode === null) processHandle.kill("SIGTERM");
+      // A deliberately non-terminating Workflow must not consume Vitest's hook budget;
+      // preserve graceful shutdown first, then force-destroy only as a bounded fallback.
+      const exited = await waitForExit(processHandle, hostShutdownTimeoutMs);
+      if (!exited && processHandle.exitCode === null) processHandle.kill("SIGKILL");
       await processHandle.exited;
       await stderr;
       if (ownsDirectory) await rm(directory, { force: true, recursive: true });
     },
   };
+};
+
+const waitForExit = async (processHandle: Bun.Subprocess, timeoutMs: number) => {
+  if (processHandle.exitCode !== null) return true;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<false>((resolve) => {
+    timeout = setTimeout(() => resolve(false), timeoutMs);
+  });
+  try {
+    const result = await Promise.race([processHandle.exited, deadline]);
+    return result !== false;
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
 };
 
 const waitForSocket = async (socketPath: string, processHandle: Bun.Subprocess) => {

@@ -22,12 +22,7 @@ const cliMainPath = fileURLToPath(
 );
 
 afterEach(async () => {
-  await Promise.all(
-    cleanups
-      .splice(0)
-      .reverse()
-      .map((cleanup) => cleanup()),
-  );
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
 const initializeGit = async (path: string) => {
