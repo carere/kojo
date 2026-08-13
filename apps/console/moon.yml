@@ -1,0 +1,36 @@
+layer: application
+language: typescript
+
+tasks:
+  # The front end alone. The API keeps coming from `kojo ui`, which the Vite config proxies to — a
+  # dev server that also served the trace would be the second runtime console.md §7 rejected.
+  dev:
+    command: vite dev
+    preset: server
+
+  # A prerendered shell plus the client bundle, written straight into `packages/kojo/console` so the
+  # published package carries the Console. The output is declared workspace-relative because it is
+  # outside this project, which is exactly the edge this ticket exists to build.
+  build:
+    command: vite build
+    inputs:
+      - src/**/*
+      - vite.config.ts
+      - tsconfig.json
+      - package.json
+    outputs:
+      - "/packages/kojo/console"
+
+  # The browser tier: Playwright against `kojo ui --fixtures`, which is the real HTTP server serving
+  # the real build over stated records. It depends on the build because the thing under test is the
+  # built page, not a dev server — a dev server would exercise a module graph nobody ships.
+  test-browser:
+    command: playwright test
+    deps:
+      - ~:build
+    inputs:
+      - src/**/*
+      - tests/**/*
+      - playwright.config.ts
+    options:
+      cache: false

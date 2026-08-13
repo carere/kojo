@@ -1,0 +1,23 @@
+$schema: ../cache/schemas/tasks.json
+
+tasks:
+  check:
+    command: "biome check --no-errors-on-unmatched ."
+
+  fix:
+    command: "biome check --write --no-errors-on-unmatched ."
+
+  # No `--force`, deliberately: `tsc --build` is timestamp-correct for ordinary edits and forcing a
+  # full rebuild on every invocation would make the common case slow for nothing.
+  #
+  # But know what that costs you. **`moon run <project>:tsc --force` does not force TypeScript.**
+  # moon's `--force` skips *moon's* cache and re-invokes the compiler; the compiler then reads
+  # `tsconfig.tsbuildinfo` and can answer "up to date" without typechecking a line. So this task is
+  # not a full recheck, whatever flag you pass it.
+  #
+  # The only command that proves a compile happened is `bun tsc --build --force --verbose` from the
+  # repository root — it names each project it builds, and an empty list is the answer you are
+  # looking for when you suspect a check of doing no work. Thirteen checks in this build have passed
+  # while doing nothing; this was one of them.
+  tsc:
+    command: "tsc --build --verbose"

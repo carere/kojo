@@ -1,0 +1,55 @@
+layer: library
+language: typescript
+
+tasks:
+  # Both test tasks launch Vitest through `bun`, and the `bun` is not decoration. `vitest.mjs` has a
+  # `#!/usr/bin/env node` shebang, so invoking the binary directly runs the whole suite — workers and
+  # all — under Node. Kojo's runtime is Bun: it depends on `@effect/platform-bun` and
+  # `@effect/sql-sqlite-bun`, and the latter imports the `bun:sqlite` builtin. Under Node that import
+  # is `ERR_UNSUPPORTED_ESM_URL_SCHEME`, which Vitest reports as a *failed suite* — the file
+  # contributes zero tests rather than failing tests. That is the third check in this build that
+  # could pass while doing no work, so it is written down here rather than rediscovered: a test tier
+  # must run on the runtime the code targets, or the adapters that define that runtime are untestable
+  # and their test files quietly evaporate.
+  test:
+    command: bun node_modules/.bin/vitest run --project unit
+    inputs:
+      - src/**/*
+      - tests/unit/**/*
+      - tests/support/**/*
+      - vitest.config.ts
+  test-integration:
+    command: bun node_modules/.bin/vitest run --project integration
+    inputs:
+      - src/**/*
+      - tests/integration/**/*
+      - tests/support/**/*
+      - vitest.config.ts
+  # Sandcastle's build asserts Effect never leaks out of its published types. This asserts the
+  # inverse for Kojo: no bare promise reaches ours, so the boundary in
+  # contexts/sandbox/adapters/boundary.ts cannot quietly spread.
+  #
+  # It grades the emitted declarations, so it depends on the inherited `tsc` task. Its real inputs
+  # live in the workspace type cache rather than in this project, so it is not cached — a guard that
+  # reports a stale answer is worse than one that always runs.
+  check-public-types:
+    command: bun src/scripts/check-public-types.ts
+    deps:
+      - ~:tsc
+    options:
+      cache: false
+  # What the published package is: the sources, plus the Console built into `console/`.
+  #
+  # This is the edge console.md §12 asks for — `console:build` is a build dependency of the package,
+  # so `kojo ui` works for somebody who installed Kojo rather than only for somebody who cloned this
+  # repository. The command asserts what landed rather than doing the landing, because the Vite build
+  # writes straight into this project and a second copy step could only ever disagree with it.
+  #
+  # Not cached: its input is a directory another project writes, so a cache hit here would report a
+  # Console that is no longer there.
+  build:
+    command: bun src/scripts/check-console-build.ts
+    deps:
+      - console:build
+    options:
+      cache: false

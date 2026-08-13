@@ -1,0 +1,38 @@
+@import "tailwindcss";
+
+/**
+ * Zaidan's tokens, in Tailwind v4's `@theme` form.
+ *
+ * Named after role rather than colour, so a component says `bg-muted` and never `bg-zinc-100`. The
+ * dark values are a media query rather than a class because the Console has no theme switch and no
+ * place to persist one: v1 is one factory, one process, no settings.
+ */
+
+@theme {
+  --color-background: oklch(1 0 0);
+  --color-foreground: oklch(0.21 0.006 285.9);
+  --color-muted: oklch(0.967 0.001 286.4);
+  --color-muted-foreground: oklch(0.552 0.016 285.9);
+  --color-border: oklch(0.92 0.004 286.3);
+}
+
+@media (prefers-color-scheme: dark) {
+  @theme {
+    --color-background: oklch(0.21 0.006 285.9);
+    --color-foreground: oklch(0.985 0 0);
+    --color-muted: oklch(0.274 0.006 286.0);
+    --color-muted-foreground: oklch(0.705 0.015 286.1);
+    --color-border: oklch(0.34 0.006 286.0);
+  }
+}
+
+html,
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+}
+
+body {
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}

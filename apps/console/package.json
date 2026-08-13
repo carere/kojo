@@ -1,0 +1,26 @@
+{
+  "name": "@kojo/console",
+  "version": "0.0.0",
+  "description": "The Kojo Console — one factory's trace, read from a browser",
+  "license": "MIT",
+  "author": "Kevin Abatan <contact@carere.dev> (https://github.com/carere)",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@carere/solux": "4.0.1",
+    "@tanstack/solid-query": "5.101.4",
+    "@tanstack/solid-router": "1.170.24",
+    "@tanstack/solid-start": "1.168.41",
+    "@tanstack/solid-table": "9.1.2",
+    "clsx": "2.1.1",
+    "solid-js": "1.9.14",
+    "tailwind-merge": "3.6.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@tailwindcss/vite": "4.3.3",
+    "tailwindcss": "4.3.3",
+    "vite": "8.2.1",
+    "vite-plugin-solid": "2.11.14"
+  }
+}

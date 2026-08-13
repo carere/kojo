@@ -1,0 +1,40 @@
+{
+  "//": [
+    "Kojo's own factory, typechecked the way a target repository's factory is typechecked.",
+    "",
+    "Standalone rather than a reference of the root solution, and both halves of that are deliberate.",
+    "It does not extend `tsconfig.options.json` because a factory in a plain repository does not have",
+    "one: what a stamped `.kojo/` has to survive is ordinary strict TypeScript, and these are the same",
+    "options `tests/integration/contexts/scaffold/services/stampedFactory.test.ts` holds the stamped",
+    "templates to. And it is not in the root `references` because every file here resolves `kojo/...`",
+    "through `node_modules/kojo` to the engine's own sources; under `composite` that is a file in no",
+    "project's file list, and the fix would be a project reference that swaps the source for its",
+    "declaration output — which is precisely the resolution a consumer does not have.",
+    "",
+    "So `bun tsc --build` does not cover this directory — and neither does any lane of this factory,",
+    "whose `typecheck` command is exactly that. The linter does reach here (`bun biome check .` checks",
+    "these files), but a change that breaks this directory's *types* can pass every check a lane runs",
+    "and still land. `packages/kojo/tests/integration/factory/ownFactory.test.ts` is what covers it,",
+    "by running the repository's own tsgo over this file — the same shape of check, in the tier that",
+    "already owns 'is what was written a program'.",
+    "",
+    "`types: [\"bun\"]` is not about this directory: the engine's own sources reach `node:os` and",
+    "`process`, and without it every one of them is a `Cannot find name` here. It is why the repository",
+    "root declares `@types/bun` — a target repository needs the same, which is what `kojo init` writes."
+  ],
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "types": ["bun"]
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["data"]
+}

@@ -1,0 +1,42 @@
+# This file is Kojo's own.
+#
+# The roster. Every agent a workflow calls by name must be here, and every agent here must have
+# `prompts/<name>/system.md` and `prompts/<name>/user.md` beside it — both are read when the factory
+# loads, so a missing prompt is an error before a run exists to be confused by it.
+#
+# An agent is not a model. It is a system prompt, a tool allowlist, and a model, and all three decide
+# what it does. That is why `system.md` is a file rather than a line in this one — and why the models
+# below are not all the same string: routing is a classification and gets a fast model, writing code
+# is a judgement call and gets the strong one. Paying for reasoning to pick one of three words is the
+# cheapest waste a factory can build in.
+#
+# The sandbox provider is deliberately not here. It lives in `workflows/factory.ts`, because a
+# provider is built per run — `CreateSandboxOptions` carries no `env` — so a YAML key naming one would
+# be a key nothing reads.
+
+agents:
+  router:
+    # One line. It is what a human reads beside this agent's phase in the trace.
+    purpose: "Read the request and name the lane that fits it"
+    model: "claude-sonnet-4-6"
+    tools: []
+
+  planner:
+    purpose: "Write down how a feature will be made, before anybody writes it"
+    model: "claude-opus-4-8"
+    tools: []
+
+  builder:
+    purpose: "Build the planned feature, and say exactly which files it touched"
+    model: "claude-opus-4-8"
+    tools: []
+
+  fixer:
+    purpose: "Write the smallest change that resolves one break, and nothing else"
+    model: "claude-opus-4-8"
+    tools: []
+
+  tidier:
+    purpose: "Tidy what is already there without changing what it does"
+    model: "claude-sonnet-4-6"
+    tools: []

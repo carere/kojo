@@ -1,0 +1,73 @@
+{
+  "css.validate": false,
+  "editor.tabSize": 2,
+  "editor.insertSpaces": true,
+  "editor.indentSize": "tabSize",
+  "editor.codeActionsOnSave": {
+    "source.fixAll.biome": "always",
+    "source.organizeImports.biome": "always",
+    "source.removeUnusedImports": "always"
+  },
+  "files.associations": {
+    "*.prototools": "toml"
+  },
+  "files.readonlyInclude": {
+    "**/routeTree.gen.ts": true,
+    "**/src/i18n/**": true
+  },
+  "files.watcherExclude": {
+    "**/routeTree.gen.ts": true,
+    "**/src/i18n/**": true
+  },
+  "search.exclude": {
+    "**/routeTree.gen.ts": true,
+    "**/src/i18n/**": true
+  },
+  "[yaml][yml]": {
+    "editor.defaultFormatter": "redhat.vscode-yaml"
+  },
+  "[toml]": {
+    "editor.defaultFormatter": "tamasfe.even-better-toml"
+  },
+  "[javascript][typescript][typescriptreact][json][jsonc][html][css]": {
+    "editor.defaultFormatter": "biomejs.biome"
+  },
+  "js/ts.updateImportsOnFileMove.enabled": "always",
+  "js/ts.updateImportsOnPaste.enabled": true,
+  "js/ts.experimental.useTsgo": true,
+  "js/ts.tsdk.path": "./node_modules/typescript",
+  "tailwindCSS.classAttributes": ["class"],
+  "tailwindCSS.classFunctions": ["cva", "clsx", "cn"],
+  "tailwindCSS.experimental.classRegex": [
+    ["cva\\(((?:[^()]|\\([^()]*\\))*)\\)", "[\"'`]([^\"'`]*).*?[\"'`]"],
+    ["classList={{([^;]*)}}", "\\s*?[\"'`]([^\"'`]*).*?:"],
+    ["cn\\(([^]*)\\)", "(?:'|\"|`)([^\"'`]*)(?:'|\"|`)"]
+  ],
+  "cSpell.language": "en,fr",
+  "cSpell.words": [
+    "Abatan",
+    "btca",
+    "bunx",
+    "carere",
+    "cocogitto",
+    "esnext",
+    "fontsource",
+    "github",
+    "inlang",
+    "kobalte",
+    "kojo",
+    "moonrepo",
+    "outdir",
+    "oxlint",
+    "paraglide",
+    "prototools",
+    "solidjs",
+    "tailwindcss",
+    "tanstack",
+    "tsgo",
+    "vitest",
+    "zaidan"
+  ],
+  "js/ts.tsdk.additionalLocations": ["./node_modules/typescript/bin"],
+  "js/ts.tsdk.promptToUseWorkspaceVersion": true
+}

@@ -1,0 +1,24 @@
+layer: application
+language: typescript
+
+# The root project exists so repo-wide checks have somewhere to live. It declares its dependency on
+# every published project for one specific reason: moon's TypeScript toolchain syncs project
+# references *from the project graph*, so without this it rewrites the root `tsconfig.json` to
+# `"references": []`. A later `bun tsc --build` then compiles nothing and exits 0 — a check that
+# reports green while doing no work, which is the failure mode this repo has now hit twice.
+dependsOn:
+  - kojo
+
+# `apps/console` cannot be added to `dependsOn` above: moon's layer constraint refuses one
+# `application` depending on another, and the Console is an application. So the mechanism the comment
+# above relies on cannot cover it, and the failure it warns about came back in exactly the shape it
+# describes — measured while ticket 27 landed: `moon run root:tsc` rewrote the references to
+# `packages/kojo` alone, and the next `bun tsc --build --force --verbose` printed "Projects in this
+# build: packages/kojo, ." and exited 0 with the whole Console, TSX and all, compiled by nothing.
+#
+# So the root `tsconfig.json` is hand-held from here on. It is committed, it lists every project that
+# has one, and nothing rewrites it. Adding a project now means adding a reference by hand — which is
+# one line, and is visible in a diff, unlike a check that silently stops checking.
+toolchains:
+  typescript:
+    syncProjectReferences: false

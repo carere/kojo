@@ -1,0 +1,53 @@
+# moon
+.moon/cache
+.moon/docker
+
+# agent worktrees — a checkout nested in the repo, with its own tracked
+# .prototools and biome.json. Repo-wide tools must not descend into it.
+.claude/worktrees
+
+# dependencies
+node_modules
+
+# platform specifics
+.DS_Store
+
+# cache
+*.tsbuildinfo
+.tanstack
+
+# environment
+.env*
+!**/.env.example
+
+# build
+dist
+**/src/i18n/
+
+# tests
+playwright-report
+test-results
+
+# a factory's own run data — the trace database, its WAL sidecars, and the worktrees.
+# The design puts these in an ignored directory; committing a database is never right, and
+# any kojo command run from the repo root creates one here.
+.kojo/data
+.kojo/*.db
+.kojo/*.db-shm
+.kojo/*.db-wal
+
+# beside the database: the lock the first command to touch it takes, and the mark that says it was
+# created and migrated. Both are this machine's, and neither belongs in the history.
+.kojo/*.db.first-run*
+.kojo/*.db.migrated
+
+# Sandcastle's own working directory: the linked worktree every run is cut into, and its logs.
+# **Not `.kojo/data`, and not ours to move** — Sandcastle derives the path from the repo and the
+# branch, and `CreateSandboxOptions` has no override.
+#
+# It writes `.sandcastle/.gitignore` holding `*`, so git already ignores it. This line is here for
+# the tools that read the *root* ignore file and no nested one: after one run, `bun biome check .`
+# died on `Found a nested root configuration` — the run's worktree is a whole copy of this repository,
+# `biome.json` and all. That is the same fault this file already records for `.claude/worktrees`, from
+# the other direction: repo-wide tools must not descend into a checkout nested in the repo.
+.sandcastle

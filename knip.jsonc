@@ -1,0 +1,57 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+
+  // `includeEntryExports` is what makes this a dead-code check at all, and it is not optional here.
+  //
+  // The published package declares `"exports": { "./*": "./src/*.ts" }` — every source file is a
+  // deep-import entry point, which is the promise the no-barrel rule makes to consumers. The side
+  // effect is that knip can never report a file under `src/` as unused: an entry point is reachable
+  // by definition. Without this option knip runs clean over the whole source tree no matter what is
+  // in it, which is worse than not running it — three separate agents read that green as proof
+  // their code was reachable, and it proved nothing.
+  //
+  // Turning it on moves the question from "is this file reachable" to "is this export used", which
+  // is the answerable one for a deep-import library. Verified by mutation: an unused export under
+  // `src/` is reported, and the real tree is clean.
+  //
+  // The escape hatch for something deliberately public that nothing internal uses is the JSDoc
+  // `@public` tag on the export. Also verified: `@public` suppresses the finding, `@internal` does
+  // not. Reach for it only when an export really is consumer surface — the default answer to an
+  // unused export is to delete it.
+  "includeEntryExports": true,
+
+  // An export used only inside its own file is a local, not a public surface.
+  "ignoreExportsUsedInFile": true,
+
+  // Two dependencies nothing appears to import.
+  //
+  // Biome is invoked by moon and by the git hooks rather than imported.
+  //
+  // `kojo` is declared at the repository root because `.kojo/` imports it — `kojo doctor` refuses a
+  // factory whose directory cannot resolve the engine, and that resolution is what the declaration
+  // buys. It is a `workspace:*` link, so knip follows `kojo/contexts/...` straight into
+  // `packages/kojo/src/` and never attributes the import to the dependency entry that made it
+  // resolvable. Removing the entry would leave the factory working here and broken for anybody who
+  // installed Kojo, which is the fault this line is protecting.
+  "ignoreDependencies": ["@biomejs/biome", "kojo"],
+
+  "workspaces": {
+    ".": {
+      // Kojo's own factory. `.kojo/workflows/factory.ts` is loaded by path at run time — `kojo run`
+      // imports it out of the directory — so nothing in this repository imports it and knip reads
+      // the whole factory, and the two dependencies it exists to import, as dead.
+      //
+      // Only the top-level workflow is named. Everything else under `.kojo/` is reached from it, so
+      // a lane or a check that stops being imported is still reported, which is the answer wanted:
+      // an orphaned lane is dead code exactly like any other.
+      "entry": [".kojo/workflows/factory.ts"]
+    },
+    "apps/console": {
+      // A program, not a module: `playwright.config.ts` starts it as a web server by naming it in a
+      // command string, so nothing imports it and knip reads it as dead. It is the entry point of
+      // the one server in the browser tier that stamps a factory and runs `kojo run` — see
+      // `tests/browser/realFactory.ts`.
+      "entry": ["tests/browser/realFactory.ts"]
+    }
+  }
+}

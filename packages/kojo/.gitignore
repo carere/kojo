@@ -1,0 +1,6 @@
+# The Console, built into the package by `console:build`.
+#
+# It lives here rather than under a `dist/` because `kojo ui` serves this exact directory and the
+# published package carries it (console.md §12). It is build output all the same, so it is not
+# tracked — `moon run kojo:build` is what puts it here.
+/console/

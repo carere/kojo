@@ -1,0 +1,25 @@
+{
+  "name": "kojo",
+  "version": "0.0.0",
+  "description": "Software factory builder — Effect workflows driving AI coding agents in sandboxes",
+  "license": "MIT",
+  "author": "Kevin Abatan <contact@carere.dev> (https://github.com/carere)",
+  "type": "module",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "bin": {
+    "kojo": "./src/main.ts"
+  },
+  "dependencies": {
+    "@ai-hero/sandcastle": "0.12.0",
+    "@effect/platform-bun": "4.0.0-beta.106",
+    "@effect/sql-sqlite-bun": "4.0.0-beta.106",
+    "effect": "4.0.0-beta.106"
+  },
+  "devDependencies": {
+    "@effect/vitest": "4.0.0-beta.106",
+    "@types/bun": "^1.3.14",
+    "vitest": "^4.1.0"
+  }
+}
