@@ -165,7 +165,23 @@ Each rung was added after a specific failure, and none was there at the start.
    29, 30, 36, 48. Every one of them refuted something. See §8.
 6. **Check your own harness** against `/usr/bin/false` before trusting it. One integrator read
    `tail`'s exit status as moon's.
-7. **`docker container prune -f` before the integration tier.** Three stale containers made it 4.5×
+7. **The Docker faults are environmental, and wave 20 measured them more sharply than rung 7 did.**
+   Three consecutive tier runs on one integrated tree failed on `lane.test.ts` and **failed on
+   different tests each time** — once `leaves one sandbox record per rebuild` at 190 s, then
+   `suspends inside its sandbox` at 187 s *and* `builds a container…` at 209 s — while the same tree
+   had passed 262/0 an hour earlier. Two shapes, both known: `Test timed out in 180000ms`, and
+   `exit 127 — OCI runtime exec failed … chdir to cwd ("/home/agent/workspace") … no such file or
+   directory` with `containers: 3`. The tier took **503 s against its usual ~130 s**.
+
+   What separates the daemon from the mount: `docker run --rm <image> /bin/true` was measured three
+   times at **0.20–0.22 s**. Container *start* is fine; what fails is a bind-mounted worktree
+   appearing inside the container. So this is Docker Desktop's file sharing, not load and not stale
+   containers — `docker container prune -f` reclaimed 0 B before the worst of the three runs. Ticket
+   50's lane measured the same fault at **1 failure in 4 with its change and 1 in 4 with the whole
+   ticket stashed**, which is the control this entry rested on for a wave. Restarting Docker Desktop
+   is the remedy; a green tier is not evidence the fault is gone, and a red one is not evidence the
+   tree is broken. Read the failing test's *shape* first.
+8. **`docker container prune -f` before the integration tier.** Three stale containers made it 4.5×
    slower; the timeout that followed read as a test failure (`25d6148` settles that flake by
    measurement: four runs, three at 249/249, the failing tier 5m33s against 143s).
 
