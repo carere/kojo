@@ -99,7 +99,7 @@ whole browser tier run, and the mutation put back.
 
 | mutation | what went red |
 |---|---|
-| `spansOfRow`'s filter dropped — every row draws every span | all five new tests, plus 21 others (each span matched three times) |
+| `spansOfRow`'s filter dropped — every row draws every span | **four** of the five new tests, plus 22 others — 26 failed, 4 did not run, 66 passed. *One row per acquisition…* stays **green**: a per-lane `toHaveCount(1)` still finds exactly one match when every row draws every span. Corrected by the adversarial pass, which re-ran it; the original entry said all five |
 | `spansOf`: `rowId: line.sandboxId ?? hostRow` → `rowId: hostRow` | *two phases that share time do not share ground* (on `sift.y ≥ probe.y + height`, 254.5 vs 278.5), *one row per acquisition…*, *the waiting lane's row…* — and **not** the two axis tests, which is the split the fixture was designed for |
 | `waterfall`: `to` = `from +` the sum of the spans' durations | *the axis is the wall clock, never the sum of what the lanes did* — `probe` fell to **0.5939** of the canvas against a floor of 0.78, the predicted 59% to the fourth decimal |
 | `rowsOf`: `to: sandbox.releasedAt` → `to: sandbox.acquiredAt` | *the waiting lane's row is a span…* and *a break inside one lane…* — **and nothing else in the suite** |
@@ -119,3 +119,25 @@ whole browser tier run, and the mutation put back.
   covered. That is a lane strategy nothing in the engine builds today; `run-merged`'s two `build`
   rows are sequential. If it ever becomes reachable, `acquisition N of M` and the row order are what
   would need a fixture.
+
+### Corrected by the adversarial pass, before this landed
+
+Two claims in the report above did not survive independent re-execution, and the corrections are on
+the record rather than quietly folded in:
+
+- **The first mutation row overstated its reach** — four of five, not five. Fixed in the table above.
+  The mutation that isolates cleanly is `rowsOf`: `to: sandbox.releasedAt` → `to: acquiredAt`, which
+  reddens the two new tests and nothing else in ninety-six.
+- **The integration failure was reported as pre-existing, and it is not.** `moon run
+  kojo:test-integration --force` passes completely on the parent commit (255 passed, 3 skipped), and
+  the failure at this lane's head is `expect(sandcastleContainers()).toEqual(before)` naming a
+  **different** foreign `sandcastle-*` container on each run. It is cross-lane Docker interference
+  between wave agents sharing one daemon — a real fragility of running a wave on one machine, and
+  worth the build record, but not evidence that the tree was already red. *"Unrelated to this
+  change"* holds; *"fails on the clean tree too"* did not reproduce.
+- Cosmetic: `fixtures.ts` is +250/−1, not insertions only — the `sandboxes: [...]` literal was
+  rewritten.
+
+One thing the pass added rather than corrected: the summing-axis mutation also reddens five
+pre-existing break and scale tests, so it is not the isolated discriminator the table suggests. The
+0.5939 measurement stands; the isolation claim was the loose part.
