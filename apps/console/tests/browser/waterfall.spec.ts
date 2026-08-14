@@ -164,6 +164,148 @@ test.describe("the time axis breaks", () => {
   });
 });
 
+/**
+ * Two lanes held at the same time — ticket 35's fourth criterion, executed at last.
+ *
+ * Everything above this block grades a **staircase**: `run-merged` holds two containers and they are
+ * sequential, so every assertion in it would read the same on a waterfall that had laid the run's
+ * phases end to end. `run-lanes` and `run-lanes-break` are the first fixtures in this build whose
+ * intervals genuinely overlap, and the assertions here are chosen for one property — each of them
+ * reads differently on a wall-clock axis and on an axis built by adding durations up.
+ *
+ * The three claims are ticket 35's own handover, and each is graded rather than repeated:
+ *
+ * 1. one row per acquisition, and rows that do not overlap;
+ * 2. the axis is `max(end) − min(start)`, never a sum;
+ * 3. a held container is a real span across the sibling's phase, not a gap.
+ */
+test.describe("two lanes, held at the same time", () => {
+  /** Whether two boxes share any horizontal ground at all. Concurrency, as a fact about pixels. */
+  const overlaps = (
+    left: { readonly x: number; readonly width: number },
+    right: { readonly x: number; readonly width: number },
+  ): boolean => left.x < right.x + right.width && right.x < left.x + left.width;
+
+  test("one row per acquisition, and two phases running at once are on two of them", async ({
+    page,
+  }) => {
+    await openRun(page, "busy", "run-lanes");
+
+    // The host, plus one row per acquisition. Two containers were alive together and the row model
+    // has no matching step to get wrong — but *has no matching step* is an argument, and the run
+    // that could turn it into a measurement did not exist until this fixture did.
+    const rows = page.locator("[data-row]");
+    await expect(rows).toHaveCount(3);
+    const lanes = page.locator('[data-scope="sandbox"]');
+    await expect(lanes.nth(0)).toContainText("api");
+    await expect(lanes.nth(1)).toContainText("web");
+    // Two acquisitions of two *different* scopes, so neither row is numbered: `acquisition 1 of 1`
+    // is noise, and a lane that wore it would be indistinguishable from `run-merged`'s rebuild.
+    await expect(page.locator("[data-acquisition]")).toHaveCount(0);
+
+    await expect(lanes.nth(0).locator('[data-phase="run-lanes/probe/1"]')).toHaveCount(1);
+    await expect(lanes.nth(1).locator('[data-phase="run-lanes/sift/1"]')).toHaveCount(1);
+    await expect(lanes.nth(1).locator('[data-phase="run-lanes/report/1"]')).toHaveCount(1);
+  });
+
+  test("two phases that share time do not share ground", async ({ page }) => {
+    await openRun(page, "busy", "run-lanes");
+
+    const probe = await boxOf(span(page, "run-lanes/probe/1"));
+    const sift = await boxOf(span(page, "run-lanes/sift/1"));
+
+    // The criterion in two lines, and it is a claim about boxes rather than about the row model:
+    // the two spans share time, and they do not share ground. A waterfall that drew both lanes on
+    // one row would satisfy the first and fail the second, and no fixture before this one could
+    // even ask — a staircase satisfies both for the trivial reason that nothing ever overlaps.
+    expect(overlaps(probe, sift)).toBe(true);
+    expect(sift.y).toBeGreaterThanOrEqual(probe.y + probe.height);
+  });
+
+  test("the axis is the wall clock, never the sum of what the lanes did", async ({ page }) => {
+    await openRun(page, "busy", "run-lanes");
+
+    // The axis the geometry decided on, in pixels, straight off the canvas it sized.
+    const canvas = Number(await page.locator("[data-canvas]").getAttribute("data-canvas"));
+    const probe = await boxOf(span(page, "run-lanes/probe/1"));
+
+    // `probe` is eight minutes of a ten-minute run, so it is four fifths of the axis. The same run
+    // holds 13m 28s of phase time, and an axis that added the durations up would draw this span at
+    // 59% — the two readings are eighteen points of canvas apart, and they are identical on every
+    // other fixture in this build, because no other fixture ever held two containers at once.
+    expect(probe.width / canvas).toBeGreaterThan(0.78);
+    expect(probe.width / canvas).toBeLessThan(0.82);
+
+    // And the concurrency itself, stated the other way round: `sift` starts after `probe` starts and
+    // ends before `probe` ends, so it is drawn strictly *inside* it. An axis built from a sum has
+    // nowhere to put a span inside another one — it would have to lay `sift` after `probe`.
+    const sift = await boxOf(span(page, "run-lanes/sift/1"));
+    expect(sift.x).toBeGreaterThan(probe.x);
+    expect(sift.x + sift.width).toBeLessThan(probe.x + probe.width);
+  });
+
+  test("the waiting lane's row is a span across the sibling's phase, not a gap", async ({
+    page,
+  }) => {
+    await openRun(page, "busy", "run-lanes");
+
+    const web = page.locator('[data-scope="sandbox"]').nth(1);
+    // Two spans on the lane and nothing between them: `sift` finished at six minutes and `report`
+    // could not start until the sibling let go at nine.
+    await expect(web.locator("[data-phase]")).toHaveCount(2);
+    const sift = await boxOf(span(page, "run-lanes/sift/1"));
+    const report = await boxOf(span(page, "run-lanes/report/1"));
+    expect(report.x - (sift.x + sift.width)).toBeGreaterThan(200);
+
+    // The band under them is continuous across that gap. The container was up for the whole of it
+    // and was being paid for, so the row is a span; drawing it idle would say the sibling constraint
+    // ticket 35 measured costs nothing.
+    const band = await boxOf(web.locator("[data-band]"));
+    expect(band.x).toBeLessThanOrEqual(sift.x);
+    expect(band.x + band.width).toBeGreaterThanOrEqual(report.x + report.width);
+
+    // And it reaches across the sibling's phase, which is the interval it was waiting through.
+    const probe = await boxOf(span(page, "run-lanes/probe/1"));
+    expect(band.x).toBeLessThanOrEqual(probe.x);
+    expect(band.x + band.width).toBeGreaterThanOrEqual(probe.x + probe.width);
+  });
+
+  test("a break inside one lane leaves the other lane's spans where they belong", async ({
+    page,
+  }) => {
+    await openRun(page, "busy", "run-lanes-break");
+
+    // Three hours of `compile` on one lane, collapsed. A break rescales every stretch that is left,
+    // so it is the operation most able to put a *sibling's* span in the wrong place.
+    const inside = page.locator('[data-break][data-break-dense="true"]');
+    await expect(inside).toHaveCount(1);
+    await expect(inside).toHaveAttribute("data-break", "2h 55m");
+    const wall = await boxOf(inside);
+
+    // The sibling lane first, because it is the claim this test exists for: what happened before the
+    // elided hours stays before the wall, what happened after stays after, and neither is dragged
+    // onto it. `report` starts on the instant the break ends, which is the position a reader of the
+    // axis is most able to lose.
+    const sift = await boxOf(span(page, "run-lanes-break/sift/1"));
+    const report = await boxOf(span(page, "run-lanes-break/report/1"));
+    expect(sift.x + sift.width).toBeLessThanOrEqual(wall.x);
+    expect(report.x).toBeGreaterThanOrEqual(wall.x + wall.width);
+
+    // And its container crosses the wall, because it did not stop existing when the axis stopped
+    // drawing those three hours.
+    const watch = page.locator('[data-scope="sandbox"]').nth(1);
+    const band = await boxOf(watch.locator("[data-band]"));
+    expect(band.x).toBeLessThan(wall.x);
+    expect(band.x + band.width).toBeGreaterThan(wall.x + wall.width);
+
+    // The broken lane itself still keeps a head and a tail, as it does on a run with one lane —
+    // stated last because it is the context the three assertions above are read against.
+    const compile = await boxOf(span(page, "run-lanes-break/compile/1"));
+    expect(compile.x).toBeLessThan(wall.x);
+    expect(compile.x + compile.width).toBeGreaterThan(wall.x + wall.width);
+  });
+});
+
 test.describe("the in-flight phase", () => {
   test("is a span that grows to now, from the run row rather than a phase record", async ({
     page,

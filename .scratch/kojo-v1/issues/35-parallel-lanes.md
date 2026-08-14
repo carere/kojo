@@ -9,9 +9,11 @@
 - [x] Two lanes run concurrently in separate sandboxes with separate branches
 - [x] The correlation key crosses into both, so neither lane's agent output joins to the wrong phase
 - [x] A test proves the sibling constraint: a gate in one lane waits for a running phase in the other before either sandbox is released
-- [ ] The waterfall renders concurrent lanes without the rows overlapping or the axis misleading —
-      **not done, and it cannot be: ticket 28 is `ready-for-agent` and there is no waterfall.** What
-      the waterfall needs is built and graded instead; see *Carried forward to ticket 28* below.
+- [x] The waterfall renders concurrent lanes without the rows overlapping or the axis misleading —
+      **done by ticket [53](53-the-waterfall-must-draw-concurrent-lanes.md)**, which built the two
+      fixtures that hold two containers at once and graded all three handover points below. It could
+      not be done here: ticket 28 was `ready-for-agent` and there was no waterfall. What the
+      waterfall needs was built and graded instead; see *Carried forward to ticket 28* below.
 - [x] Timestamp-based correlation is proven insufficient, so nothing later relies on it
 
 ## Comments
@@ -177,3 +179,12 @@ Ticket 28 built the waterfall and **did not pick this up**. Checked at head: eve
 rebuild a gate forced), so `waterfall.spec.ts` has never been shown two lanes at once. The three
 handover points above are now the specification of ticket
 [53](53-the-waterfall-must-draw-concurrent-lanes.md).
+
+### 2026-08-14 — closed by ticket 53
+
+53 built `run-lanes` and `run-lanes-break`, the first fixtures in the build whose intervals overlap,
+and graded all three handover points in the browser tier. Two of the three were held only by
+argument until then, and the third — *a held container is a real span* — turned out to be graded by
+**nothing at all**: collapsing every acquisition's band to a sliver reddened only 53's own two tests
+in a suite of ninety-six. No production code changed; the geometry was right and nothing had asked
+it.
