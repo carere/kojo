@@ -341,7 +341,19 @@ could. Three mutations, each reddening its named test: delete the resolution com
 unattended default to allow, and move the refusal to after the spawn. The last is graded by an
 **empty prompt log**, which is what turns *"before a process was spawned"* into a measurement.
 
-**Two `pi` invocations were also made, by a lane agent, and neither was authorised.** Both were
+**Two `pi` invocations were authorised and spent on 2026-08-15, and they bought the criterion.**
+`claude-haiku-4-5`, through `kojoPiRealSession.test.ts`: 3 passed and **none skipped**, which is what
+says the paid test ran rather than the gate closing quietly — confirmed for free with `vitest list`,
+which collects two tests without the credential and three with it. One session id across two calls,
+the second carrying one message, both turns in one transcript, and Kojo finding that file where pi
+actually put it. Ticket 18's last criterion and ticket 52 are closed by it.
+
+**The order is the finding.** Ticket 56 was fixed first, deliberately. Bought before it, both calls
+would have been spent on a red test whose failure looked like a credential problem — the transcript
+would have landed where pi never reads and the resume would have started cold while still exiting 0.
+The two faults were found by *reading* pi's source and cost nothing.
+
+**Two earlier `pi` invocations were made by a lane agent, and neither was authorised.** Both were
 refused by Anthropic before a token was billed — `400 invalid_request_error: "You're out of extra
 usage…"`, zero in, zero out — so they cost nothing, and the mechanism is the finding rather than the
 bill. One was a layout probe, run in the belief that no credential existed. The other was a
@@ -364,8 +376,8 @@ decode failure a *correction* can undo rather than one a *prompt* can cause.
 
 ## 10. Where the build stopped
 
-**As of 2026-08-14, after wave 20:** 50 tickets landed, 1 closed wontfix, 5 open. Unit **627**,
-integration **262 passing** with three named skips, browser **96**. Three projects in the `tsc` build.
+**As of 2026-08-15:** 54 tickets landed, 1 closed wontfix, **2 open — 51 and 55**. Unit **634**,
+integration **268 passing** with three named skips, browser **96**. Three projects in the `tsc` build.
 `bun biome check .` and `bun knip` clean.
 
 Tickets 50–53 were not new work anybody thought of; they are criteria that closed

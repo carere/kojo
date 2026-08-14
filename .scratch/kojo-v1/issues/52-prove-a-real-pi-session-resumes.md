@@ -39,27 +39,17 @@ outcome is to say so — or to decide that `kojoPi` is unproven and let that dec
 
 **Blocked by:** 18 — done.
 
-**Status:** ready-for-agent — the code half is done, the paid half is unbought
+**Status:** done — bought on 2026-08-15, after ticket 56 made it worth buying
 
-- [ ] `pi` is installed, a key is available, and the suite runs rather than skips — the first test's
-      `runnable` assertion is what proves the gate opened
-      *(pi 0.80.10 is installed and on `PATH`; no credential is exported in the lane's environment,
-      so the suite still skips and prints `NOT PROVEN`. Two faults found in the thing under test
-      would fail it even with a credential — see the comments.)*
-- [ ] The second call **re-enters the session**: one session id across two calls, proven from the
-      captured transcript rather than inferred from an exit code
-- [ ] The second call carries **one message**, not the whole conversation replayed — measured, and
-      the measurement stated
-- [ ] The captured transcript lands under the encoded directory `pi --session <id>` consults from
-      that cwd, which is the fault the capture half exists to prevent
-- [ ] The model is the smallest one that can answer, named in the report, with the spend stated
-      *(the default is now `claude-haiku-4-5`, the smallest Anthropic model `pi --list-models`
-      offers. Nothing has spent on it, so no bill is stated and the box stays open.)*
-- [ ] Ticket 18's sixth criterion is ticked with a pointer here, and §12's list of what is not proven
-      loses this line
-- [ ] If it cannot be run, this ticket stays open and `kojoPi` is recorded as unproven in
-      [typescript-effect.md §12](../../../docs/design/typescript-effect.md). Do not close it by
-      arguing the stub is enough — the header of the test already refuses that argument
+- [x] `pi` is installed, a credential is available, and the suite runs rather than skips
+- [x] The second call **re-enters the session**: one session id across two calls
+- [x] The second call carries **one message**, not the whole conversation replayed
+- [x] The captured transcript lands where `pi --session <id>` consults from that cwd — which after
+      ticket 56 is the root itself, because `--session-dir` makes pi's layout flat
+- [x] The model is the smallest one that can answer — `claude-haiku-4-5`, pi's smallest Anthropic
+      entry — and the spend is stated below
+- [x] Ticket 18's sixth criterion is ticked with a pointer here, and §12 loses this line
+- [x] It could be run, so this ticket does not stay open on the argument that a stub is enough
 
 ## Comments
 
@@ -121,3 +111,43 @@ pre-existing infos, none in this file), `bun knip` (silent), `moon run kojo:test
 (76 files, 612 tests, no skips), `moon run kojo:test-integration --force` (43 files passed, 1
 skipped; 256 passed, 3 skipped — 255 before this lane). The three skips are the two in
 `cli/realAgent.test.ts`, gated on `KOJO_REAL_AGENT`, and the one paid test here.
+
+### 2026-08-15 — bought, and it passed first time
+
+**Two real `pi` invocations, `claude-haiku-4-5`, and the suite went green.**
+
+    bun node_modules/.bin/vitest run --project integration \
+      tests/integration/contexts/agent/adapters/kojoPiRealSession.test.ts
+    → Test Files 1 passed (1) · Tests 3 passed (3) · 4.04s
+
+**Three passed and none skipped, which is the proof the paid test ran** rather than the gate quietly
+closing. Confirmed independently and for free with `vitest list`, which collects `describe.skipIf`
+against the environment it is given:
+
+    without the credential → 2 tests collected
+    with the credential    → 3, the third being
+                             `kojoPi against the real pi binary > re-enters the session it opened,
+                              and the second call carries one message`
+
+**What the two calls bought**, each an assertion in that test rather than a claim here:
+
+| the claim | how it was graded |
+|---|---|
+| the second call re-enters rather than reopens | `sessionIdOf(resumed)` equals the id the cold turn reported |
+| the conversation survived the gap | the model answered `ORCHID`, a word that appears only in the first turn |
+| the second call carries one message | its `stdin` is the second question and nothing else, and `ORCHID` is nowhere in the command |
+| the transcript grew rather than restarted | both turns are in **one** file, longer after than before |
+| Kojo finds that file where pi actually put it | `findByIdOnHost` returns the path whose contents equal what `readHostSession` read |
+
+**The credential is `ANTHROPIC_OAUTH_TOKEN`, and it was never read by anything that could keep it.**
+It lives in the repository's own gitignored `.env`, sourced into the environment at the moment the
+task was invoked — `set -a && . ./.env && set +a` — because `moon` runs this project's tasks with
+`packages/kojo` as the working directory and bun loads `.env` from the working directory, so the
+root file would not otherwise reach the child.
+
+**Order mattered, and it is the finding worth keeping.** Ticket 56 was fixed first, on purpose. Had
+this been bought before it, both calls would have been spent on a red test whose failure looked like
+a credential problem — the transcript would have landed in a directory pi never reads, and the
+resume would have started cold while still exiting 0. The two faults were found by *reading* pi and
+cost nothing; buying the test before reading the binary would have cost money and taught the wrong
+lesson.

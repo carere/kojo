@@ -1286,11 +1286,22 @@ one safe.
 
 ### Where the build stopped
 
-Fifty-six tickets: fifty landed, ticket 31 closed wontfix, and five open. Four of those (50–53) were
-opened by an audit of the *closed* tickets — each carried a criterion a done ticket left unchecked and
-no other ticket took — and 50 and 53 have since landed. Three more (54–56) were opened by the wave
-that built them, which is the working rate this record has always reported. Unit **627**, integration
-**262 passing with 3 named skips**, browser **96**.
+Fifty-seven tickets: fifty-four landed, ticket 31 closed wontfix, and **two open — 51 and 55**.
+
+Tickets 50–53 were opened by an audit of the *closed* ones, each carrying a criterion a done ticket
+left unchecked and no other ticket took; 50, 52 and 53 have since landed, and 51 stays open because
+the model would not produce the fault it was written to repair. Tickets 54–57 were opened by the work
+that built those, which is the working rate this record has always reported: 56 and 57 landed, 54 and
+55 did not. Unit **634**, integration **268 passing with 3 named skips** — two of which are the
+Claude real-agent pair and one of which is the pi test when no credential is exported — browser
+**96**.
+
+**`kojoPi` is proven.** Two `claude-haiku-4-5` invocations on 2026-08-15 bought ticket 18's last
+criterion: one session id across two calls, the second carrying one message, both turns in one
+transcript, and Kojo finding that file where pi actually put it. It could not have passed a day
+earlier — ticket 56 found that `--session-dir` makes pi's layout flat while `piSessionStorage` read
+an encoded subdirectory under it, so criterion 4 of ticket 18 had been graded against Kojo's own
+encoding rather than against pi.
 
 The two agent-facing skills live at `.agents/skills/`, with `.claude/skills/kojo` a symlink to that
 directory — the same shape this machine's home uses. `skillsDirectory` still names

@@ -11,7 +11,7 @@
 - [x] The session is captured back to the host with the paths rewritten, and a later call resumes it
 - [x] The captured transcript lands where the binary will look for it, so resuming does not fall back to an interactive prompt
 - [x] Providers whose session helpers are already public are used unmodified rather than wrapped
-- [ ] An integration test resumes a real session and proves the second call costs one message
+- [x] An integration test resumes a real session and proves the second call costs one message — bought on 2026-08-15 by ticket 52, after ticket 56 fixed the two faults that would have failed it
 
 ## Comments
 
@@ -82,3 +82,15 @@
 [52](52-prove-a-real-pi-session-resumes.md). The test is written and has never run: it needs the `pi`
 binary on `PATH` and `ANTHROPIC_API_KEY`, and neither is present here. That is metered API spend, not
 subscription usage, which is why it is its own ticket rather than a line in ticket 51.
+
+### 2026-08-15 — the sixth criterion is bought
+
+`kojoPiRealSession.test.ts` ran against the real binary with a real credential:
+**3 passed, 0 skipped**, two `claude-haiku-4-5` invocations. One session id across two calls, the
+second call carrying one message, and both turns in one transcript that Kojo found where pi put it.
+
+It could not have passed before ticket 56. `--session-dir` makes pi's layout flat and this ticket's
+`piSessionStorage` read an encoded subdirectory under it, so `existsOnHost` asked a directory pi
+never wrote — and criterion 4 above, *the captured transcript lands where the binary will look for
+it*, was graded against Kojo's own encoding rather than against pi's behaviour. It was ticked, and it
+should not have been.
