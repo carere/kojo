@@ -40,6 +40,48 @@ export const encodePiSessionDirectory = (cwd: string): string =>
   `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 
 /**
+ * The directory under a sessions root that holds one working directory's transcripts — or nothing,
+ * when they go straight into the root.
+ *
+ * **pi encodes only under its own default root, and this is the whole of ticket 56.** Read off pi's
+ * own source, `SessionManager.create`:
+ *
+ *     const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd)
+ *
+ * So `--session-dir S` makes the layout **flat**: pi writes `S/<timestamp>_<id>.jsonl` and nothing
+ * else. Only when the flag is absent does pi build `~/.pi/agent/sessions/<encoded cwd>/`. Kojo used
+ * to pass the flag *and* read an encoded subdirectory under it, which is two behaviours that cannot
+ * both be pi's — and the failure was not a red test. `resumeIntoSandbox` landed a captured
+ * transcript under an encoded directory pi never looks in, so a resumed turn would find nothing and
+ * start cold: no error, no warning, a full prompt billed instead of one message, and none of the
+ * context the run had earned. That silent cold start is the exact fault this whole capture half
+ * exists to prevent.
+ *
+ * The rule is therefore stated once, here, as a function of the one thing that decides it: whether
+ * the root is pi's own. A caller that supplies a root has passed `--session-dir` and gets no
+ * subdirectory; a caller that supplies none is on pi's default and gets the encoding.
+ *
+ * The caller joins, because the host side joins with the platform's separator and the sandbox side
+ * is always POSIX.
+ */
+export const piSessionSubdirectory = (options: {
+  /**
+   * The working directory pi runs in, **exactly as pi's own process reports it**.
+   *
+   * On macOS that is not always the string a caller has: `mkdtemp` hands back
+   * `/var/folders/…` and a process started there reports `/private/var/folders/…`, because `/var`
+   * is a symlink. pi encodes what its `process.cwd()` gives it and resolves nothing —
+   * `resolvePath` is `path.resolve`, which does not follow symlinks. So a host path must be
+   * resolved to its real path *before* it reaches here, or the two sides encode one directory
+   * under two names. See `piSessionStorage` in `contexts/sandbox/adapters/boundary.ts`.
+   */
+  readonly cwd: string;
+  /** Whether this root is pi's own default — that is, no `--session-dir` was passed for this side. */
+  readonly rootIsPiDefault: boolean;
+}): string | undefined =>
+  options.rootIsPiDefault ? encodePiSessionDirectory(options.cwd) : undefined;
+
+/**
  * Whether one filename is the transcript of one session.
  *
  * pi names a transcript `<timestamp>_<session id>.jsonl`, so the id is a suffix rather than the

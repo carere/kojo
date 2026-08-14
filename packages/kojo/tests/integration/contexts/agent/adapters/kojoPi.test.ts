@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +7,10 @@ import { join } from "node:path";
 import * as sandcastle from "@ai-hero/sandcastle";
 import { afterEach, beforeEach, describe, expect, it } from "@effect/vitest";
 import { kojoPi } from "../../../../../src/contexts/agent/adapters/kojoPi.ts";
-import { encodePiSessionDirectory } from "../../../../../src/contexts/agent/services/piSession.ts";
+import {
+  encodePiSessionDirectory,
+  piSessionsSegments,
+} from "../../../../../src/contexts/agent/services/piSession.ts";
 import { piSessionStorage } from "../../../../../src/contexts/sandbox/adapters/boundary.ts";
 import { type LocalBindMount, localBindMount } from "../../../../support/localBindMountHandle.ts";
 
@@ -226,6 +230,20 @@ describe("the providers whose session helpers are already public", () => {
   });
 });
 
+/**
+ * **Every root in this suite is named, so every layout here is flat** — ticket 56.
+ *
+ * `localBindMount` stands a sandbox up in a temporary directory, so the "sandbox" sessions root is
+ * a real host path and has to be given. Naming it is what makes `kojoPi` pass `--session-dir`, and
+ * pi's own `SessionManager.create` reads
+ * `sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd)` — so pi writes straight into
+ * that root and encodes nothing.
+ *
+ * These tests used to expect an encoded subdirectory under a named root, which is a layout pi never
+ * produces. They passed, because both sides of the assertion were Kojo's own encoding. The suite
+ * below now grades pi's behaviour instead of Kojo's assumption, and the encoded half is graded in
+ * *finding a transcript pi wrote, without pi*.
+ */
 describe("capturing a pi transcript to the host and putting it back", () => {
   let mount: LocalBindMount;
   let hostRoot: string;
@@ -249,8 +267,8 @@ describe("capturing a pi transcript to the host and putting it back", () => {
     hostRoot = await mkdtemp(join(tmpdir(), "kojo-pi-host-"));
     hostCwd = await mkdtemp(join(tmpdir(), "kojo-pi-worktree-"));
 
-    // What pi leaves behind inside the sandbox: one transcript, under the encoded sandbox cwd.
-    const directory = join(mount.root, "sessions", encodePiSessionDirectory(sandboxCwd));
+    // What pi leaves behind inside the sandbox: one transcript, straight in the root it was given.
+    const directory = join(mount.root, "sessions");
     await mkdir(directory, { recursive: true });
     await writeFile(join(directory, fileName), transcript(sandboxCwd));
   });
@@ -261,7 +279,7 @@ describe("capturing a pi transcript to the host and putting it back", () => {
     await rm(hostCwd, { recursive: true, force: true });
   });
 
-  it("lands the transcript under the encoded host cwd, which is the only place pi looks", async () => {
+  it("lands the transcript in the host root, which is the only place pi looks", async () => {
     await storage().captureToHost({
       hostCwd,
       sandboxCwd,
@@ -269,14 +287,16 @@ describe("capturing a pi transcript to the host and putting it back", () => {
       handle: mount.handle,
     });
 
-    const landed = join(hostRoot, encodePiSessionDirectory(hostCwd), fileName);
-    expect(await readFile(landed, "utf-8")).toBe(transcript(hostCwd));
+    const landed = join(hostRoot, fileName);
+    // The rewritten session line carries the **resolved** host cwd, because that is what pi's own
+    // `process.cwd()` will report the next time it runs there — `/private/var/...`, not `/var/...`.
+    expect(await readFile(landed, "utf-8")).toBe(transcript(realpathSync(hostCwd)));
 
-    // Nothing was scattered anywhere else under the root.
-    expect(await readdir(hostRoot)).toEqual([encodePiSessionDirectory(hostCwd)]);
+    // Nothing was scattered anywhere else under the root, and no encoded directory was invented.
+    expect(await readdir(hostRoot)).toEqual([fileName]);
   });
 
-  it("reports the session as captured for that cwd and for no other", async () => {
+  it("reports the session as captured, for any cwd, because a named root is one directory", async () => {
     const captured = storage();
     await captured.captureToHost({
       hostCwd,
@@ -286,16 +306,22 @@ describe("capturing a pi transcript to the host and putting it back", () => {
     });
 
     expect(await captured.existsOnHost(hostCwd, session)).toBe(true);
-    // The same file, on the same host, under a directory pi will never consult. Answering "yes"
-    // here is what turns a resumed run into an interactive fork prompt nobody is watching.
-    expect(await captured.existsOnHost("/some/other/worktree", session)).toBe(false);
+
+    // **Under a named root the cwd does not discriminate, and that is correct rather than sloppy.**
+    // pi resolves `--session <id>` against the whole of `--session-dir`, so a transcript in it is a
+    // transcript pi will find whatever directory it is run from. Reporting `false` for another cwd
+    // would be Kojo answering about its own encoding rather than about pi. The encoded layout, where
+    // the cwd *does* discriminate, is graded in the suite below.
+    expect(await captured.existsOnHost("/some/other/worktree", session)).toBe(true);
+
+    // The id still discriminates, which is the half that has to keep working.
     expect(await captured.existsOnHost(hostCwd, "01J-NOT-A-SESSION")).toBe(false);
 
-    expect(await captured.readHostSession(hostCwd, session)).toBe(transcript(hostCwd));
-    expect(await captured.readHostSession("/some/other/worktree", session)).toBeUndefined();
-    expect(captured.hostSessionFilePath(hostCwd, session)).toBe(
-      join(hostRoot, encodePiSessionDirectory(hostCwd)),
+    expect(await captured.readHostSession(hostCwd, session)).toBe(
+      transcript(realpathSync(hostCwd)),
     );
+    expect(await captured.readHostSession(hostCwd, "01J-NOT-A-SESSION")).toBeUndefined();
+    expect(captured.hostSessionFilePath(hostCwd, session)).toBe(hostRoot);
   });
 
   it("finds the transcript by id alone, and says where it looked when it cannot", async () => {
@@ -308,7 +334,7 @@ describe("capturing a pi transcript to the host and putting it back", () => {
     });
 
     expect(await captured.findByIdOnHost(session)).toEqual({
-      path: join(hostRoot, encodePiSessionDirectory(hostCwd), fileName),
+      path: join(hostRoot, fileName),
       searchedRoot: hostRoot,
     });
     expect(await captured.findByIdOnHost("01J-NOT-A-SESSION")).toEqual({
@@ -336,7 +362,7 @@ describe("capturing a pi transcript to the host and putting it back", () => {
       handle: mount.handle,
     });
 
-    const restored = join(mount.root, "sessions", encodePiSessionDirectory(rebuilt), fileName);
+    const restored = join(mount.root, "sessions", fileName);
     expect(await readFile(restored, "utf-8")).toBe(transcript(rebuilt));
   });
 
@@ -376,5 +402,100 @@ describe("capturing a pi transcript to the host and putting it back", () => {
     });
 
     expect(await provider.sessionStorage.existsOnHost(hostCwd, session)).toBe(true);
+  });
+});
+
+/**
+ * **Ticket 56's own criterion: write the file the way pi writes it, and ask Kojo to find it.**
+ *
+ * No pi process, no model, no bill — and it is the test that would have caught the fault. The old
+ * code passed `--session-dir` *and* read an encoded subdirectory under it, and every existing test
+ * agreed with it because both sides of the assertion were Kojo's own encoding. Here the file is
+ * placed by hand, in the place pi's source says pi places it, and Kojo is asked the question a
+ * resume asks.
+ *
+ * The two layouts come from one flag, read off pi 0.80.10's `SessionManager.create`:
+ *
+ *     const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd)
+ */
+describe("finding a transcript pi wrote, without pi", () => {
+  const session = "01JPI56";
+  const fileName = `2026-08-14T15-48-44-573Z_${session}.jsonl`;
+  const body = JSON.stringify({ type: "session", id: session, cwd: "/x" });
+
+  let root: string;
+  let worktree: string;
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "kojo-pi-find-"));
+    worktree = await mkdtemp(join(tmpdir(), "kojo-pi-cwd-"));
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+    await rm(worktree, { recursive: true, force: true });
+  });
+
+  it("finds it flat under a root Kojo named, because that is where --session-dir puts it", async () => {
+    await writeFile(join(root, fileName), body);
+
+    // A named sandbox root is what makes `kojoPi` pass the flag, so both sides go flat.
+    const storage = piSessionStorage({ host: root, sandbox: "/home/agent/sessions" });
+
+    expect(await storage.existsOnHost(worktree, session)).toBe(true);
+    expect(await storage.readHostSession(worktree, session)).toBe(body);
+    expect(await storage.findByIdOnHost(session)).toEqual({
+      path: join(root, fileName),
+      searchedRoot: root,
+    });
+  });
+
+  it("finds it under the encoded cwd when Kojo named no root, which is pi's own default", async () => {
+    // pi encodes what its own `process.cwd()` reports, and on macOS that is the resolved path.
+    const asPiSeesIt = realpathSync(worktree);
+    const directory = join(root, encodePiSessionDirectory(asPiSeesIt));
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, fileName), body);
+
+    // No `sandbox` root, so no `--session-dir`, so pi's own encoded layout. `host` only moves where
+    // Kojo reads; it does not change what pi did.
+    const storage = piSessionStorage({ host: root });
+
+    expect(await storage.existsOnHost(worktree, session)).toBe(true);
+    expect(await storage.findByIdOnHost(session)).toEqual({
+      path: join(directory, fileName),
+      searchedRoot: root,
+    });
+
+    // And here the cwd *does* discriminate, which is the difference between the two layouts.
+    expect(await storage.existsOnHost("/some/other/worktree", session)).toBe(false);
+  });
+
+  /**
+   * **The macOS trap, end to end.**
+   *
+   * `mkdtemp` hands back `/var/folders/…` and pi, running there, reports `/private/var/folders/…`.
+   * The transcript is written under the name pi would use; Kojo is asked with the name it was
+   * handed. Before `onHost` resolved the path, these were two directories and the answer was `false`
+   * — a resume that silently started cold.
+   */
+  it("finds it when asked with the unresolved twin of the directory pi recorded", async () => {
+    const asPiSeesIt = realpathSync(worktree);
+    expect(asPiSeesIt).not.toBe(worktree);
+
+    const directory = join(root, encodePiSessionDirectory(asPiSeesIt));
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, fileName), body);
+
+    const storage = piSessionStorage({ host: root });
+
+    expect(await storage.existsOnHost(worktree, session)).toBe(true);
+    expect(storage.hostSessionFilePath(worktree, session)).toBe(directory);
+  });
+
+  it("names pi's own sessions root when Kojo names none at all", () => {
+    // Not a filesystem assertion — the default must stay `~/.pi/agent/sessions`, and a test that
+    // wrote there would write into whoever is running it.
+    expect(piSessionsSegments.join("/")).toBe(".pi/agent/sessions");
   });
 });

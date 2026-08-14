@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
@@ -12,8 +13,8 @@ import {
 } from "@ai-hero/sandcastle";
 import { Effect, type Scope } from "effect";
 import {
-  encodePiSessionDirectory,
   isPiSessionFile,
+  piSessionSubdirectory,
   piSessionsSegments,
   rewritePiSessionCwd,
   sandboxPiSessionsRoot,
@@ -247,7 +248,43 @@ export const piSessionStorage = (roots?: PiSessionRoots): AgentSessionStorage =>
   const hostRoot = roots?.host ?? join(homedir(), ...piSessionsSegments);
   const sandboxRoot = roots?.sandbox ?? sandboxPiSessionsRoot;
 
-  const hostDirectory = (cwd: string) => join(hostRoot, encodePiSessionDirectory(cwd));
+  /**
+   * **One flag decides the layout on both sides, and it is `--session-dir`.**
+   *
+   * `kojoPi` passes that flag exactly when `sessions.sandbox` is given, and pi's own
+   * `SessionManager.create` reads
+   * `sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd)`. So a run that named a
+   * root gets a flat directory and a run that named none gets pi's encoded one — and it is the
+   * same answer wherever pi ran, because the flag travels with the process rather than with the
+   * root. `roots.host` moves *where* Kojo reads and writes; it does not change what pi did.
+   */
+  const rootIsPiDefault = roots?.sandbox === undefined;
+
+  /**
+   * A host path as the operating system really spells it, resolved once and in one place.
+   *
+   * `mkdtemp` hands back `/var/folders/…`; a process started there reports `/private/var/folders/…`,
+   * because `/var` is a symlink on macOS. pi encodes what its own `process.cwd()` gives it and
+   * resolves nothing — `resolvePath` is `path.resolve`. So without this the two sides name one
+   * directory twice and every lookup misses. Measured, not reasoned.
+   *
+   * A path that cannot be resolved is returned unchanged rather than thrown over: the transcript
+   * this asks about may legitimately not exist yet, and the caller's own *file* lookups are what
+   * decide that. **Host paths only** — a sandbox cwd names a filesystem this process cannot see, and
+   * resolving it here would answer about the host's tree instead.
+   */
+  const onHost = (cwd: string): string => {
+    try {
+      return realpathSync(cwd);
+    } catch {
+      return cwd;
+    }
+  };
+
+  const hostDirectory = (cwd: string) => {
+    const under = piSessionSubdirectory({ cwd: onHost(cwd), rootIsPiDefault });
+    return under === undefined ? hostRoot : join(hostRoot, under);
+  };
 
   /** The transcript of one session inside one directory, or nothing. A missing directory is nothing. */
   const fileIn = async (directory: string, sessionId: string): Promise<string | undefined> => {
@@ -256,8 +293,19 @@ export const piSessionStorage = (roots?: PiSessionRoots): AgentSessionStorage =>
     return match === undefined ? undefined : join(directory, match);
   };
 
-  /** The same search, across every encoded directory under the host root. The id is unique. */
+  /**
+   * The same search, over the whole host root: the root itself, then every directory under it.
+   *
+   * **Both, and not one or the other**, because the layout depends on how pi was started and this
+   * search is what a resume falls back on when it does not know. A named root is flat, so the file
+   * is in the root; pi's default root is encoded, so it is one level down. Looking only one level
+   * down was the old behaviour and it could not find a transcript written under a named root.
+   *
+   * The id is unique, so the first match is the answer and the order does not matter.
+   */
   const anywhereOnHost = async (sessionId: string): Promise<string | undefined> => {
+    const inRoot = await fileIn(hostRoot, sessionId);
+    if (inRoot !== undefined) return inRoot;
     const entries = await readdir(hostRoot, { withFileTypes: true }).catch(() => undefined);
     for (const entry of entries ?? []) {
       if (!entry.isDirectory()) continue;
@@ -304,7 +352,10 @@ export const piSessionStorage = (roots?: PiSessionRoots): AgentSessionStorage =>
       });
       const target = join(hostDirectory(hostCwd), posix.basename(source));
       await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, rewritePiSessionCwd(jsonl, sandboxCwd, hostCwd));
+      // The rewritten `cwd` line is the resolved host path for the same reason the directory is:
+      // it is what pi's own `process.cwd()` will say the next time it runs there, and a session
+      // line naming the unresolved twin would not match.
+      await writeFile(target, rewritePiSessionCwd(jsonl, sandboxCwd, onHost(hostCwd)));
     },
 
     resumeIntoSandbox: async ({ hostCwd, sandboxCwd, sessionId, handle }) => {
@@ -313,13 +364,16 @@ export const piSessionStorage = (roots?: PiSessionRoots): AgentSessionStorage =>
         throw new Error(`pi session ${sessionId} is not under ${hostRoot} on the host`);
       }
       const jsonl = await readFile(source, "utf-8");
-      const target = posix.join(
-        sandboxRoot,
-        encodePiSessionDirectory(sandboxCwd),
-        basename(source),
-      );
+      const under = piSessionSubdirectory({ cwd: sandboxCwd, rootIsPiDefault });
+      const target =
+        under === undefined
+          ? posix.join(sandboxRoot, basename(source))
+          : posix.join(sandboxRoot, under, basename(source));
       await throughTemporaryFile("pi-resume", async (temporary) => {
-        await writeFile(temporary, rewritePiSessionCwd(jsonl, hostCwd, sandboxCwd));
+        // From the **resolved** host path, because that is the one `captureToHost` wrote into the
+        // session line — and a rewrite whose `from` does not match leaves the line alone, silently,
+        // sending the transcript into the sandbox still claiming a directory that is not there.
+        await writeFile(temporary, rewritePiSessionCwd(jsonl, onHost(hostCwd), sandboxCwd));
         await handle.exec(`mkdir -p ${JSON.stringify(posix.dirname(target))}`);
         await handle.copyFileIn(temporary, target);
       });

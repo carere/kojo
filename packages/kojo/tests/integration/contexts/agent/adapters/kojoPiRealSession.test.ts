@@ -19,24 +19,29 @@ import { kojoPi } from "../../../../../src/contexts/agent/adapters/kojoPi.ts";
  * green, because the failure this guards against — a resume that silently degrades to a cold
  * start — is invisible in a run's outcome and shows up only on the bill and in the answer.
  *
- * **Two things other than the credential stop this suite today**, both measured without spending
- * anything against pi 0.80.10 — which ships as `@earendil-works/pi-coding-agent`, not under the
- * `@mariozechner/pi-coding-agent` name ticket 18 and `kojoPi`'s docstring still give it — and
- * neither yet fixed:
+ * **Two things other than the credential used to stop this suite. Ticket 56 fixed both**, and they
+ * are kept here because they are the reason the capture half is worth a paid test at all — each was
+ * found by reading pi rather than by running this file, and each would have failed silently.
  *
- * 1. **`--session-dir` makes pi's layout flat.** `kojoPi` passes `--session-dir <sandbox root>`, and
- *    `piSessionStorage` reads `<root>/<encoded cwd>/`. pi only encodes the cwd into a directory name
- *    for its *default* root: given `--session-dir X` it creates the transcript at
- *    `X/<timestamp>_<id>.jsonl` and, on `--session <id>`, reads `X` with a non-recursive listing.
- *    So `existsOnHost` below asks the wrong directory, and the resume path in
- *    `contexts/sandbox/adapters/boundary.ts` lands a captured transcript where pi will not look.
+ * 1. **`--session-dir` makes pi's layout flat.** `kojoPi` passes `--session-dir <sandbox root>` and
+ *    `piSessionStorage` read `<root>/<encoded cwd>/`. pi encodes the cwd into a directory name only
+ *    for its *default* root — `SessionManager.create` is
+ *    `sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd)` — so given
+ *    `--session-dir X` it writes `X/<timestamp>_<id>.jsonl` and reads `X` with a non-recursive
+ *    listing. `existsOnHost` asked a directory pi never wrote, and the resume path landed a captured
+ *    transcript where pi does not look: a cold start with no error and a whole prompt on the bill.
+ *    `piSessionSubdirectory` now holds the rule, and both layouts are graded without pi, in
+ *    `kojoPi.test.ts`'s *finding a transcript pi wrote, without pi*.
  * 2. **A macOS temp path is not the path pi records.** `mkdtemp(tmpdir())` returns
  *    `/var/folders/…`; a child process started there reports `/private/var/folders/…`, which is what
- *    pi writes into the session line and encodes. So the `cwd` string this file hands to
- *    `existsOnHost` and the one pi used are two strings for one directory.
+ *    pi writes into the session line and encodes — pi's `resolvePath` is `path.resolve`, which
+ *    follows no symlink. `piSessionStorage` now resolves every **host** path once, in `onHost`, and
+ *    a sandbox path never, because that names a filesystem this process cannot see.
  *
- * Both are faults in the thing under test rather than in the test — which is the answer to why the
- * capture half is worth a paid test at all — so they are recorded here rather than worked around.
+ * pi ships as **`@earendil-works/pi-coding-agent`** — 0.84.2 at the registry, 0.80.10 on the machine
+ * every measurement above was taken on. `@mariozechner/pi-coding-agent` is where it used to live and
+ * is stale at 0.73.1, which is what `kojo init` stamped into every pi factory for eleven releases.
+ * Ticket 57 moved the stamped install to the current name, pinned.
  */
 
 /**
@@ -199,9 +204,11 @@ describe.skipIf(!runnable)("kojoPi against the real pi binary", () => {
       expect(cold.exitCode).toBe(0);
       const opened = sessionIdOf(cold);
 
-      // Criterion 4, against the binary rather than against a fixture: the transcript is under
-      // the encoded cwd of the project pi ran in, which is the only directory `--session` reads.
-      // If `--session-dir` were ignored, or the encoding were wrong, this is where it shows.
+      // Criterion 4, against the binary rather than against a fixture. Both roots are named here,
+      // so `--session-dir` is passed and the layout is **flat** — the transcript is in the root
+      // itself, which is the only directory `--session` then reads. If pi's layout is not what
+      // ticket 56 read off its source, this is the line that says so, for the price of a call that
+      // has already happened.
       expect(await provider.sessionStorage.existsOnHost(cwd, opened)).toBe(true);
 
       const before = await provider.sessionStorage.readHostSession(cwd, opened);

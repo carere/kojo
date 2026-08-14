@@ -67,9 +67,25 @@ export interface AgentInstall {
 
 export const agentInstalls: Record<AgentName, AgentInstall> = {
   pi: {
-    beforeUser: ["RUN npm install -g @mariozechner/pi-coding-agent"],
+    // **Pinned, and under the name pi actually ships as today.** `@mariozechner/pi-coding-agent`
+    // is where pi used to live and is stale at 0.73.1; the package it is published under now is
+    // `@earendil-works/pi-coding-agent`. A stamped factory was therefore installing a binary
+    // eleven minor releases behind the one `kojoPi` builds command lines for — and the failure mode
+    // of a flag an agent binary does not have is the one `kojoPi` exists to prevent: the process
+    // runs, the identity is silently dropped, and a *different agent* answers under the roster's
+    // name.
+    //
+    // The version is pinned rather than floating for the reason the whole repository pins: a
+    // factory has to be reproducible, and `kojoPi`'s behaviour was measured against a version
+    // rather than against a tag. `--session-dir` making pi's layout flat (ticket 56) was read off
+    // 0.80.x, and 0.84.2 is the version that reading was re-confirmed against. Moving the pin is a
+    // deliberate act with a measurement behind it, which is exactly what `latest` would remove.
+    beforeUser: ["RUN npm install -g @earendil-works/pi-coding-agent@0.84.2"],
     afterUser: [],
-    env: ["# Anthropic API key — pi reads this.", "ANTHROPIC_API_KEY="].join("\n"),
+    env: [
+      "# Anthropic credential — pi reads either of these, and `pi --help` lists both.",
+      "ANTHROPIC_API_KEY=",
+    ].join("\n"),
     defaultModel: "claude-sonnet-4-6",
   },
   "claude-code": {

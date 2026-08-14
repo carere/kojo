@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   encodePiSessionDirectory,
   isPiSessionFile,
+  piSessionSubdirectory,
   piSessionsSegments,
   rewritePiSessionCwd,
   sandboxPiSessionsRoot,
@@ -96,5 +97,67 @@ describe("moving one pi transcript between two working directories", () => {
     const captured = rewritePiSessionCwd(original, "/repo", "/Users/ada/kojo");
 
     expect(rewritePiSessionCwd(captured, "/Users/ada/kojo", "/repo")).toBe(original);
+  });
+});
+
+/**
+ * **Which layout pi uses, which is ticket 56.**
+ *
+ * Read off pi 0.80.10's own `SessionManager.create`:
+ *
+ *     const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd)
+ *
+ * Kojo used to pass `--session-dir` *and* read an encoded subdirectory under it. Both cannot be
+ * pi's behaviour, and the wrong half did not fail loudly: a captured transcript landed where pi
+ * never looks, so a resumed turn would have started cold — no error, a full prompt billed instead
+ * of one message, and none of the context the run had earned.
+ */
+describe("which directory pi writes a transcript into", () => {
+  it("puts it straight in the root it was given, because `--session-dir` is flat", () => {
+    expect(
+      piSessionSubdirectory({ cwd: "/private/tmp/repo", rootIsPiDefault: false }),
+    ).toBeUndefined();
+  });
+
+  it("encodes the working directory under its own default root, where there is no flag", () => {
+    expect(piSessionSubdirectory({ cwd: "/private/tmp/repo", rootIsPiDefault: true })).toBe(
+      "--private-tmp-repo--",
+    );
+  });
+
+  /**
+   * The rule is a function of the flag and of nothing else — not of the cwd, and not of the
+   * platform. Stated as a property so that a later reader cannot add a third case by accident.
+   */
+  it.each(["/repo", "/private/var/folders/z2/T/x", "C:/work/kojo", "/home/agent/workspace"])(
+    "answers on the flag alone, for %s",
+    (cwd) => {
+      expect(piSessionSubdirectory({ cwd, rootIsPiDefault: false })).toBeUndefined();
+      expect(piSessionSubdirectory({ cwd, rootIsPiDefault: true })).toBe(
+        encodePiSessionDirectory(cwd),
+      );
+    },
+  );
+
+  /**
+   * **The macOS trap, as a test rather than as a warning.**
+   *
+   * `mkdtemp` hands back `/var/folders/…`; a process started there reports
+   * `/private/var/folders/…`, because `/var` is a symlink. pi encodes what its own `process.cwd()`
+   * gives it and resolves nothing — its `resolvePath` is `path.resolve`, which does not follow
+   * symlinks. So these two spellings of one directory encode to two names, and whoever hands a path
+   * to this function owes it the resolved one. `piSessionStorage` resolves every host path exactly
+   * once, in `onHost`.
+   */
+  it("gives two different names to the two spellings of one macOS temp directory", () => {
+    const asHandedOut = "/var/folders/z2/T/kojo-pi-worktree-a1";
+    const asTheProcessSeesIt = `/private${asHandedOut}`;
+
+    expect(encodePiSessionDirectory(asHandedOut)).not.toBe(
+      encodePiSessionDirectory(asTheProcessSeesIt),
+    );
+    expect(encodePiSessionDirectory(asTheProcessSeesIt)).toBe(
+      "--private-var-folders-z2-T-kojo-pi-worktree-a1--",
+    );
   });
 });

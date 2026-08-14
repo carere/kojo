@@ -60,10 +60,18 @@ export interface KojoPiOptions {
   /**
    * Where transcripts live, on either side.
    *
-   * Passing a sandbox root also passes `--session-dir`, which pi documents as its session storage
-   * directory — so the directory pi writes to and the directory Kojo reads from are one string
-   * rather than two that agree by luck. That agreement is asserted against the real binary in
-   * `tests/integration/.../kojoPiRealSession.test.ts` rather than assumed here.
+   * Passing a sandbox root also passes `--session-dir`, and **that flag changes pi's layout, not
+   * only its location.** pi's own `SessionManager.create` reads
+   * `sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd)`, so a named root is
+   * **flat** — `<root>/<timestamp>_<id>.jsonl` — and only pi's own default root carries the
+   * `--<encoded cwd>--` directory.
+   *
+   * An earlier revision of this comment said the flag made the two sides "one string rather than
+   * two that agree by luck". It did the opposite: Kojo passed the flag *and* read an encoded
+   * subdirectory under it, which is a layout pi never writes. Nothing failed loudly — a captured
+   * transcript simply landed where pi does not look, so a resumed turn would have started cold and
+   * been billed as a whole prompt. Ticket 56. `piSessionSubdirectory` now holds the rule, and
+   * `piSessionStorage` reads whichever layout the flag implies.
    *
    * Left alone, both sides are pi's own defaults and the flag is not passed at all.
    */

@@ -135,11 +135,20 @@ describe("the package manager reaching the image and the command block together"
     }
   });
 
-  it("puts the agent's own CLI in the image, from Sandcastle's own install line", () => {
+  it("puts the agent's own CLI in the image, pinned, under the name pi ships as", () => {
     const withPi = plan(choicesFor("review"));
-    expect(contentAt(withPi.files, ".kojo/sandbox/Dockerfile")).toContain(
-      "RUN npm install -g @mariozechner/pi-coding-agent",
-    );
+    const piImage = contentAt(withPi.files, ".kojo/sandbox/Dockerfile");
+    expect(piImage).toContain("RUN npm install -g @earendil-works/pi-coding-agent@0.84.2");
+
+    // **Pinned rather than floating**, which is the half worth asserting on its own: a stamped
+    // factory has to be reproducible, and `kojoPi` builds its command line against a version it was
+    // measured against rather than against whatever `latest` resolves to on the day of the build.
+    expect(piImage).toMatch(/pi-coding-agent@\d+\.\d+\.\d+/);
+    expect(piImage).not.toContain("pi-coding-agent@latest");
+
+    // The old name, which is stale at 0.73.1 and is what this stamped for eleven releases. Ticket
+    // 57 — kept as an assertion because nothing else would notice it coming back.
+    expect(piImage).not.toContain("@mariozechner/");
 
     const withClaude = plan({ ...choicesFor("review"), agent: "claude-code" });
     const dockerfile = contentAt(withClaude.files, ".kojo/sandbox/Dockerfile");
