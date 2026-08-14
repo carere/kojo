@@ -68,6 +68,7 @@ order the waves were launched; the tickets and dates come from the commit log.
 | **17** | 08-12 23:49 | 36 | Kojo's own factory, in Kojo's own repository. **The first attempt failed** — the implementer stalled six times on `kojo watch`, a daemon that never exits. Then I destroyed the recovered worktree; see §7. |
 | **18** | 08-13 12:10 | 48 | The correction loop against a real model. Bought three of four criteria with two of three authorised calls. |
 | **19** | 08-13 | 49 | The guard that was mistaken for a flag, built — and, before it, an audit of every checkbox in every closed ticket, which found four criteria nobody owned and opened 50–53 for them. Cost: no agent call. |
+| **20** | 08-14 | 53, 50, 51, 52 | The first wave run as one workflow: a design pass on 50, four implementers in isolated worktrees, three adversarial verifiers, then a strictly serial integration. Every verifier refuted something. Two of the four tickets landed; two came back with better findings than the criteria they went for. Cost: two real calls, and two unauthorised `pi` calls that Anthropic refused at zero cost. |
 
 Ticket 31 (span export) is closed **wontfix** (`e5f8e08`): it blocked nothing through seventeen
 waves, and the claim it was written under was withdrawn by the wave-3 audit. Tickets 50–53 are open.
@@ -256,7 +257,8 @@ a measured one, and a misread measurement is not a measurement.
 
 ## 9. The real-agent ledger
 
-**Nine real invocations were spent. Eight were ever authorised.**
+**Eleven real invocations were spent. Ten were ever authorised.** Nine and eight until wave 20,
+which spent two authorised calls on ticket 51.
 
 Counted by walking all 348 `*.jsonl` under `~/.claude/projects/`, keeping the seven whose first
 top-level prompt carries a stamped factory phase identity, then counting top-level prompts — user
@@ -272,6 +274,8 @@ run costs two.
 | **08-11 22:01** | **1** | `claude-sonnet-4-6` | **the wave-15 loop walk — unauthorised** |
 | **08-11 22:37** | **1** | `claude-opus-4-8` | **the wave-16 loop walk — unauthorised** |
 | 08-13 09:31 | **2** | `claude-sonnet-5` | ticket 48 |
+| 08-14 16:06 | 1 | `fable` | ticket 51 — the first answer decoded, so there was no repair |
+| 08-14 16:11 | 1 | `fable` | ticket 51 — the same, with the prose rule sharpened |
 
 The two unauthorised calls: both walks intended a scripted stand-in and put a shell script named
 `claude` on the child's `PATH`. The agent is a child process Sandcastle spawns, and both times it
@@ -301,23 +305,46 @@ could. Three mutations, each reddening its named test: delete the resolution com
 unattended default to allow, and move the refusal to after the spawn. The last is graded by an
 **empty prompt log**, which is what turns *"before a process was spawned"* into a measurement.
 
-One authorisation remains unspent. The first thing worth buying with two more is remedy 1 in ticket
-48: `correctionFor` never says that a literal field must *equal* one of the listed words, with
-nothing before or after it. The one repair this build has ever seen missed valid by exactly that gap.
+**Two `pi` invocations were also made, by a lane agent, and neither was authorised.** Both were
+refused by Anthropic before a token was billed — `400 invalid_request_error: "You're out of extra
+usage…"`, zero in, zero out — so they cost nothing, and the mechanism is the finding rather than the
+bill. One was a layout probe, run in the belief that no credential existed. The other was a
+**correct** mutation — flipping `runnable` to prove the gate still bites — which un-skipped the paid
+`describe`. `kojoPiRealSession.test.ts` spawns the binary itself, so `KOJO_AGENT_SPEND` never sees it:
+ticket 49's guard lives in `SandcastleAgentInvoker` and only there, and ticket 55 is the other half.
+The second lesson is worse than the first: **pi on this machine authenticates from its own store**,
+with neither environment variable set, so that suite's gate measures *somebody exported a variable*
+rather than *this binary can reach a model*.
+
+Remedy 1 of ticket 48 is built and did not settle the question. `correctionFor` now says a literal
+field's whole value must **equal** one of the listed words with nothing before or after it — and the
+two calls that were meant to test it never reached a correction at all, because `fable` read the
+rendered contract and obeyed it on the first turn, twice. **A contract rendered into the prompt beats
+a rule written in prose**, which is a better finding than the criterion it was bought for and leaves
+that criterion open. The remaining authorisation is still unspent, and what it should buy now is a
+decode failure a *correction* can undo rather than one a *prompt* can cause.
 
 ---
 
 ## 10. Where the build stopped
 
-**As of 2026-08-13, after ticket 49 and the audit that followed it:** 48 tickets landed, 1 closed
-wontfix, 4 open. Unit **612**, integration **255 passing** with three named skips, browser **91**.
-Three projects in the `tsc` build. `bun biome check .` and `bun knip` clean.
+**As of 2026-08-14, after wave 20:** 50 tickets landed, 1 closed wontfix, 5 open. Unit **627**,
+integration **262 passing** with three named skips, browser **96**. Three projects in the `tsc` build.
+`bun biome check .` and `bun knip` clean.
 
-The four open ones (50–53) were not new work anybody thought of; they are criteria that closed
+Tickets 50–53 were not new work anybody thought of; they are criteria that closed
 tickets left unchecked and no other ticket took — the sandbox mount (from 14), a repaired envelope
 that decodes (15 and 48), a real `pi` session resume (18), and the waterfall over concurrent lanes
 (35). **A closed ticket with an open box is work with no owner**, and the way to find them was to
 read every box in every closed ticket rather than the status line at the top.
+
+Wave 20 built them and opened three more (54–56), each found by doing the work rather than by
+planning it: a file created at the **root** of `.kojo/` is caught by neither line of defence, because
+no entry of `factoryOwnPaths` is `.kojo/` itself; a test that spawns a provider binary itself is
+outside the spend guard, which is how two `pi` calls were made on the day the guard landed; and
+`--session-dir` makes pi's layout flat while Kojo reads an encoded directory, so a resumed turn would
+silently fall back to a cold start — the fault the whole capture half exists to prevent, arriving
+through the flag added to prevent it.
 
 The two agent-facing skills sit at `.agents/skills/`, with `.claude/skills/kojo` a symlink to it.
 `skillsDirectory` is unchanged at `.claude/skills/kojo` — that is what `kojo init` stamps into a

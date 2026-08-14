@@ -1126,6 +1126,17 @@ output surviving the envelope contract across many runs: no decode failure was r
 `corrections` counter advanced, and no routing decision was a judgement call — the stand-in reads a
 marker out of the request. Criterion 2's *taxonomy* is proven; the *classifier* is not.
 
+**Ticket 51 moved that boundary, and this paragraph is what it moved.** The re-walk's sharpening
+below was right about *why* and wrong about *how far*: Sandcastle's resume precheck is a check for a
+**file** — `findByIdOnHost` looks for `<session>.jsonl` under `$HOME/.claude/projects` of the asking
+process — so a rehearsal that gives its child a `HOME` of its own and lets the stand-in write that one
+file gets its repair genuinely spawned, `--resume` on the command line and Kojo's correction on stdin.
+`correctionLoop.test.ts` now runs a full repair with `corrections: 1` and `resumed: true` on the phase
+row and the run landing through its gate, and it costs nothing. **So a stand-in can be *given* a
+correction and can never *read* one**: its repair is decided before the run starts, which is exactly
+the half a model is still needed for. The temporary `HOME` also keeps a rehearsal out of the directory
+this build counts its real spend from. What follows was the belief until 2026-08-14:
+
 The re-walk sharpened that limit into something stronger than "not exercised": **the correction turn
 is unreachable with any stand-in at all.** A repair *resumes the captured provider session*, so when
 the re-walk deliberately made its agent claim a file it had never written, the checks fired and the
@@ -1145,6 +1156,20 @@ inferred:
 | the correction is built from the issue tree, not a generic retry | yes | the second prompt in the session is Kojo's own: *"Your last answer was not a valid `Drafted`… These fields are wrong: - risk: Expected …"* — the field named, with the words it wanted |
 | the repair re-enters the same conversation | yes | **one** session file under `~/.claude/projects/`, two top-level prompts, one `sessionId` — the repair was a second turn, not a cold start |
 | the repair returns an envelope that decodes | **no** | the repair rewrote the sentence with the expected literal moved to the front — `"low — this is a one-line text addition to notes/hello.txt…"` — which is a prefix and not the value, so `withCorrections` exhausted its bound and the phase failed `EnvelopeParseError` |
+
+**Ticket 51 built the remedy, spent two more calls, and was refuted from the other side.**
+`correctionFor` now says the whole value must **equal** one of the listed words with nothing before
+or after it, read out of the decoder's own message and scanned rather than split. Then two runs
+against `fable` — and *neither first answer failed to decode*. The model read the rendered contract
+and obeyed it, once saying so inside its own envelope: *"the answer schema constrains the risk field
+to the enum, so the full sentence lives here."* Sharpening the prose rule bought the same answer
+again. **A contract rendered into the prompt beats a rule written in prose**, twice, against two
+strengths of rule — which is a better finding than the one the ticket went looking for, and it
+settles the bound from the other side: with the schema in front of a model a decode failure is rare,
+so one correction is a defensible number. `corrections: 0` was read off the trace database with its
+WAL sidecar intact, so the reading ticket 48 paid to fix works even though the number is not the one
+wanted. The criterion is still open, and the run itself was a small model driving the stamped factory
+end to end and landing it.
 
 The last row is a finding rather than an omission, and it is the one worth carrying: **a correction
 turn moves the answer, but it does not fully escape the context that caused the fault.** The fault was
@@ -1261,9 +1286,11 @@ one safe.
 
 ### Where the build stopped
 
-Fifty-three tickets: forty-eight landed, ticket 31 closed wontfix, and **four opened by an audit of
-the closed ones** (50–53) — each carries a criterion a done ticket left unchecked and no other ticket
-took. Unit **612**, integration **255 passing with 3 named skips**, browser **91**.
+Fifty-six tickets: fifty landed, ticket 31 closed wontfix, and five open. Four of those (50–53) were
+opened by an audit of the *closed* tickets — each carried a criterion a done ticket left unchecked and
+no other ticket took — and 50 and 53 have since landed. Three more (54–56) were opened by the wave
+that built them, which is the working rate this record has always reported. Unit **627**, integration
+**262 passing with 3 named skips**, browser **96**.
 
 The two agent-facing skills live at `.agents/skills/`, with `.claude/skills/kojo` a symlink to that
 directory — the same shape this machine's home uses. `skillsDirectory` still names
