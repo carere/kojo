@@ -42,18 +42,80 @@ an overlap and is worth a fixture of its own: two lanes, one of them long enough
 
 **Blocked by:** 28, 35 — both done.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A fixture run holds **two sandboxes at once**, with phases whose intervals genuinely overlap,
+- [x] A fixture run holds **two sandboxes at once**, with phases whose intervals genuinely overlap,
       and it is reachable from `kojo ui --fixtures` like every other one
-- [ ] The waterfall draws one row per acquisition and the rows do not overlap — graded, then made red
+- [x] The waterfall draws one row per acquisition and the rows do not overlap — graded, then made red
       by hand to prove the grading works
-- [ ] The axis is the wall clock, `max(end) − min(start)`. A fixture whose durations **sum** to more
+- [x] The axis is the wall clock, `max(end) − min(start)`. A fixture whose durations **sum** to more
       than its wall clock is what proves it, and the assertion must fail if the geometry sums
-- [ ] The waiting lane's row is a span across the sibling's phase, not a gap
-- [ ] A break inside one lane does not misplace the other lane's spans on the shared axis
-- [ ] Ticket 35's fourth criterion is ticked with a pointer here
+- [x] The waiting lane's row is a span across the sibling's phase, not a gap
+- [x] A break inside one lane does not misplace the other lane's spans on the shared axis
+- [x] Ticket 35's fourth criterion is ticked with a pointer here
 
 ## Comments
 
-*(none yet)*
+**Implemented** on `lane/53-waterfall-concurrent-lanes`. Two files: two runs added to
+`packages/kojo/src/console/fixtures.ts`, and five tests added to
+`apps/console/tests/browser/waterfall.spec.ts`. **No production code changed**, which is the answer
+to the question this ticket really asked — the geometry was right, and nothing had ever asked it.
+
+### Two fixtures, not one, and the reason is the break rule
+
+`run-lanes` holds `api` and `web` together for the whole of its middle. `run-lanes-break` holds
+`soak` and `watch` together and puts three hours of `compile` on one of the two. They are separate
+runs on purpose: `run-lanes` is arranged so that **nothing** collapses — the longest stretch between
+two edges is the four and a half minutes the two lanes share, which is under `floorMillis` — and
+`run-lanes-break` is arranged so that exactly one stretch does. One run carrying both would grade the
+overlap only through a broken axis, and the two failures the ticket names (an axis that sums, and a
+break that drags the sibling's spans with it) would be impossible to tell apart in the report.
+
+**The sum is the fixture's whole design.** `run-lanes` is ten minutes of wall clock carrying 13m 28s
+of phase time, and `probe` alone is eight of those ten minutes. So the wall-clock axis draws `probe`
+at **80%** of the canvas and a summing axis would draw it at **59%**, and the assertion is written
+against that gap rather than against a pixel count. On every fixture that existed before this one the
+two readings are the same number, which is precisely why eighty-five green specs could not see the
+difference.
+
+### What the ticket asked to be graded rather than repeated
+
+*"Rows cannot overlap by construction"* is now a claim about two boxes: `probe` and `sift` share
+time (their horizontal extents intersect) and do not share ground (`sift.y ≥ probe.y + height`). A
+staircase satisfies both trivially — nothing overlaps — so the assertion says nothing until it is
+shown a run that holds two containers, which is the state of the world this ticket was opened over.
+
+### The measurement worth keeping
+
+**Nothing in the suite graded a released container's band before this.** The mutation `to:
+sandbox.releasedAt` → `to: sandbox.acquiredAt` in `rowsOf` — which collapses every acquisition's band
+to a two-pixel sliver — reddened **only the two new tests** and nothing else in ninety-six. The band
+is what console.md §5 says the row model exists for, and it was drawn and never checked.
+
+### Proven, and by which mutation
+
+Each was applied to `apps/console/src/contexts/trace/models/waterfall.ts`, the Console rebuilt, the
+whole browser tier run, and the mutation put back.
+
+| mutation | what went red |
+|---|---|
+| `spansOfRow`'s filter dropped — every row draws every span | all five new tests, plus 21 others (each span matched three times) |
+| `spansOf`: `rowId: line.sandboxId ?? hostRow` → `rowId: hostRow` | *two phases that share time do not share ground* (on `sift.y ≥ probe.y + height`, 254.5 vs 278.5), *one row per acquisition…*, *the waiting lane's row…* — and **not** the two axis tests, which is the split the fixture was designed for |
+| `waterfall`: `to` = `from +` the sum of the spans' durations | *the axis is the wall clock, never the sum of what the lanes did* — `probe` fell to **0.5939** of the canvas against a floor of 0.78, the predicted 59% to the fourth decimal |
+| `rowsOf`: `to: sandbox.releasedAt` → `to: sandbox.acquiredAt` | *the waiting lane's row is a span…* and *a break inside one lane…* — **and nothing else in the suite** |
+| `xOf`: the break branch always returns `wallOffset` | *a break inside one lane leaves the other lane's spans where they belong* (on `report.x`, 719.4 against a wall ending at 807.4), plus `run-stale`'s existing break test |
+
+### Argued, not proven
+
+- **The geometry is still graded only through a browser.** The ticket observes that most of this
+  needs no browser, and it is right: `waterfall.ts` is a pure function over one document and one
+  instant. There is no unit tier under `apps/console` — no Vitest project, no Moon task — and adding
+  one is a tier-shaped change that would have arrived in the same commit as the criteria it was
+  meant to grade. So the assertions are pixel measurements over the built page instead. They are
+  sharper than they look (the axis mutation was caught to four decimal places), but they are slower
+  than they need to be and they cannot be run without a build. A console unit tier is worth its own
+  ticket, and `waterfall.ts` is what would populate it on day one.
+- **Two lanes with the *same* scope name** — two acquisitions of one scope, alive together — is not
+  covered. That is a lane strategy nothing in the engine builds today; `run-merged`'s two `build`
+  rows are sequential. If it ever becomes reachable, `acquisition N of M` and the row order are what
+  would need a fixture.

@@ -1032,6 +1032,243 @@ const stalePhases: ReadonlyArray<PhaseRecord> = [
 ];
 
 /**
+ * ------------------------------------------------------------------------------------------------
+ * **Two lanes, held at the same time.** The shape every other run here is missing.
+ *
+ * Every other fixture in this module holds **one** container at a time. `run-merged` holds two, and
+ * they are sequential — the rebuild a mid-run gate forced, which is a different shape and reads as a
+ * staircase. So until these two runs existed the waterfall had never been shown an overlap, and the
+ * one criterion ticket 35 wrote for the Console had never been executed (ticket 53).
+ *
+ * The two runs below are the two halves of that criterion, and they are separate runs because the
+ * break rule is what makes them separate: `run-lanes` is written so that **nothing** collapses, and
+ * `run-lanes-break` is written so that exactly one stretch does. A single run carrying both would
+ * grade the overlap only through a broken axis, and the two failures — an axis that sums, and a break
+ * that drags the sibling's spans with it — would be impossible to tell apart.
+ * ------------------------------------------------------------------------------------------------
+ */
+
+/**
+ * **Two lanes at once, whose phase durations sum to more than the run's wall clock.**
+ *
+ * `api` and `web` are entered together and released together, and `probe` and `sift` genuinely
+ * overlap: for four and a half of the ten minutes both containers are up and both are working.
+ *
+ * **The sum is the point.** Ten minutes of wall clock carry 13m 28s of phase time — `probe` alone is
+ * eight of the ten — so an axis built by adding durations up would draw `probe` at 59% of the canvas
+ * where the wall clock puts it at 80%, and would have to lay `sift` *after* `probe` instead of inside
+ * it. Both readings are the same on a run that never held two containers, which is why no fixture in
+ * this build could tell them apart before this one.
+ *
+ * **`web` then waits.** `sift` finishes at six minutes and `report` does not start until nine, and in
+ * between the `web` container is up and is being paid for. Its row is a span across that wait, not a
+ * gap: drawing it idle would say the sibling constraint costs nothing, and ticket 35 measured that it
+ * costs the whole of the sibling's phase.
+ *
+ * Nothing here collapses, and that is arranged rather than lucky: the longest stretch between two
+ * edges is the four and a half minutes `probe` and `sift` share, which is under `floorMillis`.
+ */
+const lanesStart = frozenNow - 30 * hour;
+const lanesRoute = lanesStart + 200;
+/** Both scopes are entered here, two seconds apart. Two acquisitions, alive together from now on. */
+const lanesFanOut = lanesRoute + 8 * second;
+const lanesWebSetup = lanesFanOut + 2 * second;
+const lanesProbe = lanesStart + 1 * minute;
+const lanesSift = lanesStart + 90 * second;
+/** `sift` ends and `web` starts waiting on its sibling — three minutes of held, idle container. */
+const lanesSiftEnd = lanesStart + 6 * minute;
+/** `probe` ends, which is what `web` was waiting for. `report` starts on the same instant. */
+const lanesProbeEnd = lanesStart + 9 * minute;
+const lanesApiReleased = lanesStart + 9 * minute + 10 * second;
+const lanesReportEnd = lanesStart + 9 * minute + 30 * second;
+const lanesWebReleased = lanesStart + 9 * minute + 40 * second;
+const lanesEnd = lanesStart + 10 * minute;
+const lanesApi = makeSandboxId("run-lanes", "api", lanesFanOut, 1);
+const lanesWeb = makeSandboxId("run-lanes", "web", lanesWebSetup, 1);
+
+const lanesRun = summary({
+  runId: "run-lanes",
+  workflow: "feature",
+  startedAt: lanesStart,
+  outcome: "succeeded",
+  finishedAt: lanesEnd,
+});
+
+const lanesPhases: ReadonlyArray<PhaseRecord> = [
+  phase({
+    runId: "run-lanes",
+    name: "in_progress",
+    kind: "code",
+    startedAt: lanesStart,
+    endedAt: lanesRoute,
+  }),
+  phase({
+    runId: "run-lanes",
+    name: "route",
+    kind: "agent",
+    startedAt: lanesRoute,
+    endedAt: lanesFanOut,
+  }),
+  // Eight minutes, on the `api` lane. The longest thing in the run and the reason the two readings
+  // of the axis are eighteen points of canvas apart.
+  phase({
+    runId: "run-lanes",
+    name: "probe",
+    kind: "agent",
+    startedAt: lanesProbe,
+    endedAt: lanesProbeEnd,
+    sandboxId: lanesApi,
+  }),
+  // Four and a half minutes of it are spent beside `sift`, which starts after `probe` and ends
+  // before it — strictly inside, so *overlapping* is a claim about two boxes rather than about two
+  // numbers a test had to add up itself.
+  phase({
+    runId: "run-lanes",
+    name: "sift",
+    kind: "agent",
+    startedAt: lanesSift,
+    endedAt: lanesSiftEnd,
+    sandboxId: lanesWeb,
+  }),
+  phase({
+    runId: "run-lanes",
+    name: "report",
+    kind: "agent",
+    startedAt: lanesProbeEnd,
+    endedAt: lanesReportEnd,
+    sandboxId: lanesWeb,
+  }),
+  phase({
+    runId: "run-lanes",
+    name: "merge",
+    kind: "code",
+    startedAt: lanesWebReleased,
+    endedAt: lanesEnd,
+  }),
+];
+
+const lanesSandboxes: ReadonlyArray<SandboxRecord> = [
+  acquisition({
+    runId: "run-lanes",
+    name: "api",
+    acquiredAt: lanesFanOut,
+    releasedAt: lanesApiReleased,
+    sequence: 1,
+  }),
+  // Held for the whole of the run's middle, including the three minutes it had nothing to do. That
+  // interval is the cost of the sibling constraint, and the row is where it is visible.
+  acquisition({
+    runId: "run-lanes",
+    name: "web",
+    acquiredAt: lanesWebSetup,
+    releasedAt: lanesWebReleased,
+    sequence: 1,
+  }),
+];
+
+/**
+ * **Two lanes, and a break through the middle of one of them.**
+ *
+ * The other half, and the case the break rule has never been shown: three hours of `compile` on the
+ * `soak` lane collapse to a wall, while `watch` is a lane of its own with a phase on either side of
+ * that wall and a container held straight through it.
+ *
+ * A break rescales every stretch that is left, so it is the operation most able to put a *sibling's*
+ * span in the wrong place. What must hold is that `sift` stays wholly left of the wall, `report`
+ * stays wholly right of it, and the `watch` band crosses it — the container did not stop existing
+ * because the axis stopped drawing those three hours.
+ */
+const lanesBreakStart = frozenNow - 60 * hour;
+const lanesBreakRoute = lanesBreakStart + 200;
+const lanesBreakSoak = lanesBreakRoute + 8 * second;
+const lanesBreakWatch = lanesBreakSoak + 2 * second;
+const lanesBreakCompile = lanesBreakStart + 1 * minute;
+const lanesBreakSift = lanesBreakStart + 6 * minute;
+/** Three hours of one phase. Everything else in the run is under six minutes long. */
+const lanesBreakCompileEnd = lanesBreakCompile + 3 * hour;
+const lanesBreakSoakReleased = lanesBreakCompileEnd + 1 * minute;
+const lanesBreakReportEnd = lanesBreakCompileEnd + 2 * minute;
+const lanesBreakWatchReleased = lanesBreakCompileEnd + 3 * minute;
+const lanesBreakEnd = lanesBreakCompileEnd + 4 * minute;
+const lanesBreakSoakId = makeSandboxId("run-lanes-break", "soak", lanesBreakSoak, 1);
+const lanesBreakWatchId = makeSandboxId("run-lanes-break", "watch", lanesBreakWatch, 1);
+
+const lanesBreakRun = summary({
+  runId: "run-lanes-break",
+  workflow: "audit",
+  startedAt: lanesBreakStart,
+  outcome: "succeeded",
+  finishedAt: lanesBreakEnd,
+});
+
+const lanesBreakPhases: ReadonlyArray<PhaseRecord> = [
+  phase({
+    runId: "run-lanes-break",
+    name: "in_progress",
+    kind: "code",
+    startedAt: lanesBreakStart,
+    endedAt: lanesBreakRoute,
+  }),
+  phase({
+    runId: "run-lanes-break",
+    name: "route",
+    kind: "agent",
+    startedAt: lanesBreakRoute,
+    endedAt: lanesBreakSoak,
+  }),
+  phase({
+    runId: "run-lanes-break",
+    name: "compile",
+    kind: "code",
+    startedAt: lanesBreakCompile,
+    endedAt: lanesBreakCompileEnd,
+    sandboxId: lanesBreakSoakId,
+  }),
+  // Before the wall.
+  phase({
+    runId: "run-lanes-break",
+    name: "sift",
+    kind: "agent",
+    startedAt: lanesBreakCompile,
+    endedAt: lanesBreakSift,
+    sandboxId: lanesBreakWatchId,
+  }),
+  // After it, on the same row, with three elided hours of held container in between.
+  phase({
+    runId: "run-lanes-break",
+    name: "report",
+    kind: "agent",
+    startedAt: lanesBreakCompileEnd,
+    endedAt: lanesBreakReportEnd,
+    sandboxId: lanesBreakWatchId,
+  }),
+  phase({
+    runId: "run-lanes-break",
+    name: "merge",
+    kind: "code",
+    startedAt: lanesBreakWatchReleased,
+    endedAt: lanesBreakEnd,
+  }),
+];
+
+const lanesBreakSandboxes: ReadonlyArray<SandboxRecord> = [
+  acquisition({
+    runId: "run-lanes-break",
+    name: "soak",
+    acquiredAt: lanesBreakSoak,
+    releasedAt: lanesBreakSoakReleased,
+    sequence: 1,
+  }),
+  acquisition({
+    runId: "run-lanes-break",
+    name: "watch",
+    acquiredAt: lanesBreakWatch,
+    releasedAt: lanesBreakWatchReleased,
+    sequence: 1,
+  }),
+];
+
+/**
  * **A gate somebody has already answered, over a run that has not moved.**
  *
  * The state adr/gate/0001 exists for, and the one no other fixture holds: the asking carries a
@@ -1285,6 +1522,9 @@ const busy: Fixture = {
     brokenRun,
     breachRun,
     refusedRun,
+    // Two containers alive at once, and the same again with a break through one of the two lanes.
+    lanesRun,
+    lanesBreakRun,
   ],
   askings: [
     // Forty-one hours with a human and seven still to go: console.md's worked example, and the span
@@ -1351,6 +1591,8 @@ const busy: Fixture = {
     ...brokenPhases,
     ...breachPhases,
     ...refusedPhases,
+    ...lanesPhases,
+    ...lanesBreakPhases,
   ],
   gates: [
     answered({
@@ -1371,7 +1613,14 @@ const busy: Fixture = {
       onExpiry: "reject",
     }),
   ],
-  sandboxes: [...approveSandboxes, ...mergedSandboxes, ...brokenSandboxes, ...breachSandboxes],
+  sandboxes: [
+    ...approveSandboxes,
+    ...mergedSandboxes,
+    ...brokenSandboxes,
+    ...breachSandboxes,
+    ...lanesSandboxes,
+    ...lanesBreakSandboxes,
+  ],
   occurrences: [...scoutOccurrences, ...mergedOccurrences, ...brokenOccurrences],
   artifacts,
 };
