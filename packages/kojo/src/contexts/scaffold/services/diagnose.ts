@@ -1,6 +1,7 @@
 import { Cause, Effect, FileSystem, Path, Result, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as YamlRoster from "../../agent/adapters/YamlRoster.ts";
+import { spendFrom, spendVariable } from "../../agent/models/AgentSpend.ts";
 import { Roster } from "../../agent/ports/Roster.ts";
 import { decodeUnknown } from "../../shared/lib/decode.ts";
 import {
@@ -36,6 +37,7 @@ import {
   sandboxesNamed,
   sandboxFinding,
   sandboxOf,
+  spendFinding,
   survivorsIn,
   toolchainFinding,
   workflowsFinding,
@@ -157,7 +159,18 @@ export const diagnose = (options: {
       fileSystem.readFileString(target).pipe(Effect.orElseSucceed(() => undefined));
 
     // --- the host ------------------------------------------------------------------------------
-    const findings: Array<Finding> = [runtimeFinding(process.versions.bun)];
+    // `spend` sits with the runtime rather than with the factory, and is reported even when there
+    // is no factory here at all: it is a fact about *this process*, and the person who most needs
+    // to read it is the one whose agent phase is being refused for a reason no file explains.
+    const findings: Array<Finding> = [
+      runtimeFinding(process.versions.bun),
+      spendFinding(
+        spendFrom({
+          declared: process.env[spendVariable],
+          attended: process.stdin.isTTY === true,
+        }),
+      ),
+    ];
 
     const git = yield* probe(["git", "--version"]);
     const insideWorkTree = yield* probe(["git", "-C", root, "rev-parse", "--is-inside-work-tree"]);

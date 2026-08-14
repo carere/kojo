@@ -217,6 +217,34 @@ describe("kojo doctor on a factory nobody has finished", () => {
     ),
   );
 
+  /**
+   * **Which spend mode this process is in, on the report** — ticket 49's fifth criterion.
+   *
+   * `kojo doctor` is where a person goes when a run stopped and no file explains it, and *the guard
+   * refused before a process existed* is exactly such a stop. The check is `ok` in every mode: a
+   * factory that may not spend is not a broken factory, and a `failed` here would make `doctor`
+   * refuse a perfectly good one for having a guard switched on.
+   *
+   * This child is spawned by a Vitest worker and declares nothing, so it reports the unattended
+   * default — which is also the assertion that the default is what this repository runs under.
+   */
+  it.live("reports which spend mode this process is in, without failing the factory for it", () =>
+    inRepository(stamped, (root) =>
+      Effect.gen(function* () {
+        const ran = yield* kojo(root, ["doctor"]);
+
+        expect(flat(ran.stdout)).toContain("no agent may be spawned");
+        expect(flat(ran.stdout)).toContain("KOJO_AGENT_SPEND is not set");
+        expect(flat(ran.stdout)).toContain("no terminal is attached");
+        // The way out, on the line itself: an `ok` finding carries no remedy field.
+        expect(flat(ran.stdout)).toContain("Set KOJO_AGENT_SPEND=allow");
+        // And it is not a fault: this factory is refused for its placeholders and its empty
+        // credential, and `spend` is not among the reasons.
+        expect(flat(ran.stdout)).not.toContain("FAILED spend");
+      }),
+    ),
+  );
+
   it.live("still assembles every layer, decodes the config, and validates the roster", () =>
     inRepository(stamped, (root) =>
       Effect.gen(function* () {

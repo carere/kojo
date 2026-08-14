@@ -86,6 +86,16 @@ interface Rehearsal {
   readonly root: string;
   /** The child's `PATH`, with the scripted `claude` in front of the operator's own. */
   readonly path: string;
+  /**
+   * What the child may spawn, declared as the **file** rather than as a `PATH`.
+   *
+   * A `PATH` in front of the operator's own binary is what this rehearsal has always used, and it is
+   * not a guarantee: twice in this build a child resolved the real `claude` anyway and spent money
+   * nobody authorised. `stand-in:<absolute path>` is checked by the invoker — it resolves `claude`
+   * itself and refuses unless it opens this exact file — so the rehearsal now *proves* what it used
+   * to assume. Ticket 49.
+   */
+  readonly spend: string;
   /** Every prompt the scripted agent was handed, in order. */
   readonly prompts: Effect.Effect<ReadonlyArray<string>, never, FileSystem.FileSystem>;
 }
@@ -128,6 +138,7 @@ const rehearsal = <A, E>(
       root: repo.root,
       // `/usr/bin:/bin` still carries `git` and `sh`, which the sandbox scope needs.
       path: `${outside}:/usr/bin:/bin:/usr/sbin:/sbin`,
+      spend: `stand-in:${binary}`,
       prompts: Effect.gen(function* () {
         const text = yield* fileSystem.readFileString(log).pipe(Effect.orElseSucceed(() => ""));
         return text.split("PROMPT-END\n").filter((entry) => entry.trim() !== "");
@@ -160,7 +171,10 @@ describe("the correction loop, rehearsed against a scripted agent", () => {
       rehearsal(riskWords[0], (fixture) =>
         Effect.gen(function* () {
           const started = succeeded(
-            yield* kojo(fixture.root, ["run", "review", riskSubject], { path: fixture.path }),
+            yield* kojo(fixture.root, ["run", "review", riskSubject], {
+              path: fixture.path,
+              spend: fixture.spend,
+            }),
           );
           const runId = runIdOf(started);
 
@@ -196,7 +210,10 @@ describe("the correction loop, rehearsed against a scripted agent", () => {
            * are rehearsed here, for nothing, before a call is spent on them.
            */
           const listing = succeeded(
-            yield* kojo(fixture.root, ["gate", "list"], { path: fixture.path }),
+            yield* kojo(fixture.root, ["gate", "list"], {
+              path: fixture.path,
+              spend: fixture.spend,
+            }),
           );
           const answered = succeeded(
             yield* kojo(
@@ -210,7 +227,7 @@ describe("the correction loop, rehearsed against a scripted agent", () => {
                 "--as",
                 "rehearsal",
               ],
-              { path: fixture.path },
+              { path: fixture.path, spend: fixture.spend },
             ),
           );
           expect(answered).toContain(`recorded approve on run ${runId}`);
@@ -242,6 +259,7 @@ describe("the correction loop, rehearsed against a scripted agent", () => {
         Effect.gen(function* () {
           const ran = yield* kojo(fixture.root, ["run", "review", riskSubject], {
             path: fixture.path,
+            spend: fixture.spend,
           });
 
           expect(ran.status).not.toBe(0);

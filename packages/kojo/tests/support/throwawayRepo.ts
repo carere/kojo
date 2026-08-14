@@ -64,15 +64,31 @@ export const kojo = (
      * a rehearsal puts a script in front of it instead.
      */
     readonly path?: string | undefined;
+    /**
+     * What the child may spawn — the value of `KOJO_AGENT_SPEND`.
+     *
+     * **Left unset the child refuses every agent call**, because a Vitest worker's child has no
+     * terminal and an unattended process is refused by default (ticket 49). A rehearsal that wants
+     * its script to run says `stand-in:<absolute path>` and the invoker checks that the name really
+     * resolves there — which a `PATH` in front of the operator's own binary does not prove, and
+     * twice did not.
+     */
+    readonly spend?: string | undefined;
   },
 ): Effect.Effect<Ran> =>
   Effect.sync(() => {
+    const environment =
+      options?.path === undefined && options?.spend === undefined
+        ? undefined
+        : ({
+            ...process.env,
+            ...(options?.path === undefined ? {} : { PATH: options.path }),
+            ...(options?.spend === undefined ? {} : { KOJO_AGENT_SPEND: options.spend }),
+          } as NodeJS.ProcessEnv);
     const finished = spawnSync(bun(), [cli, ...args], {
       cwd: root,
       encoding: "utf8",
-      ...(options?.path === undefined
-        ? {}
-        : { env: { ...process.env, PATH: options.path } as NodeJS.ProcessEnv }),
+      ...(environment === undefined ? {} : { env: environment }),
       // An agent turn is minutes, not seconds, and a `kojo run` that carries one inherits that.
       timeout: options?.timeoutMillis ?? 15 * 60 * 1000,
       maxBuffer: 64 * 1024 * 1024,

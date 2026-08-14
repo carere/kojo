@@ -14,6 +14,8 @@
  * - **Every failure carries a remedy**, because `failed` takes one as an argument.
  */
 
+import type { AgentSpend } from "../../agent/models/AgentSpend.ts";
+import { describeSpend, spendVariable } from "../../agent/models/AgentSpend.ts";
 import { factoryDirectory, workflowsDirectory } from "../../shared/models/FactoryLayout.ts";
 import type { ResolvedPackage } from "../../shared/models/ResolvedPackage.ts";
 import { describeSplit, identify } from "../../shared/models/ResolvedPackage.ts";
@@ -43,6 +45,28 @@ const lastLine = (output: string): string => {
   const lines = output.trim().split("\n");
   return (lines[lines.length - 1] ?? "").trim();
 };
+
+// --- what this process may spend ---------------------------------------------------------------
+
+/**
+ * Which spend mode this process is in — reported, never judged.
+ *
+ * `ok` in all three cases, and that is the deliberate reading: refusing to spend is not a fault of
+ * the factory, and a `failed` here would make `kojo doctor` call a perfectly good factory unready
+ * for having a guard switched on. What the line is *for* is that a person can see which mode they
+ * are in before they wonder why their run stopped at its agent phase — which, before ticket 49, was
+ * a question nothing on this machine could answer.
+ *
+ * The detail carries the way out, because there is no `remedy` on an `ok` finding and the reader
+ * who needs this line most is the one whose runs are all being refused.
+ */
+export const spendFinding = (spend: AgentSpend): Finding =>
+  ok(
+    "spend",
+    spend._tag === "Refuse"
+      ? `${describeSpend(spend)}. Set ${spendVariable}=allow to make real calls`
+      : describeSpend(spend),
+  );
 
 // --- the runtime -------------------------------------------------------------------------------
 

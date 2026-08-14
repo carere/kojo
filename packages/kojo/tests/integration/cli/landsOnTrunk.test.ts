@@ -45,13 +45,26 @@ interface Ran {
   readonly stderr: string;
 }
 
-/** One whole `kojo` process, launched from inside the target repository, the way a person does. */
-const kojo = (root: string, args: ReadonlyArray<string>, path: string): Effect.Effect<Ran> =>
+/**
+ * One whole `kojo` process, launched from inside the target repository, the way a person does.
+ *
+ * `spend` is the file the child may spawn, and it is not the same claim as `path`. A `PATH` in front
+ * of the operator's own binary says *what this test intends*; `stand-in:<absolute path>` is checked
+ * by the invoker, which resolves `claude` for itself and refuses anything else. Twice in this build
+ * the intention and the resolution disagreed and the difference was two unauthorised calls. Without
+ * it the child would refuse every agent call, because a Vitest worker's child has no terminal.
+ */
+const kojo = (
+  root: string,
+  args: ReadonlyArray<string>,
+  path: string,
+  spend: string,
+): Effect.Effect<Ran> =>
   Effect.sync(() => {
     const finished = spawnSync(bun(), [cli, ...args], {
       cwd: root,
       encoding: "utf8",
-      env: { ...process.env, PATH: path } as NodeJS.ProcessEnv,
+      env: { ...process.env, PATH: path, KOJO_AGENT_SPEND: spend } as NodeJS.ProcessEnv,
     });
     return {
       status: finished.status,
@@ -237,13 +250,19 @@ const stamped = Effect.gen(function* () {
   });
 
   // `/usr/bin:/bin` still carries `git` and `sh`, which the sandbox scope needs.
-  return { root, path: `${binary}:/usr/bin:/bin:/usr/sbin:/sbin` };
+  return {
+    root,
+    path: `${binary}:/usr/bin:/bin:/usr/sbin:/sbin`,
+    spend: `stand-in:${path.join(binary, "claude")}`,
+  };
 });
 
 const inStampedRepository = <A, E>(
   use: (factory: {
     readonly root: string;
     readonly path: string;
+    /** `KOJO_AGENT_SPEND`, naming the scripted binary the invoker will check for. */
+    readonly spend: string;
   }) => Effect.Effect<A, E, FileSystem.FileSystem | Path.Path>,
 ) => Effect.flatMap(stamped, use).pipe(Effect.scoped, Effect.provide(BunServices.layer));
 
@@ -253,11 +272,11 @@ const subjects = (root: string, ref: string): ReadonlyArray<string> =>
 
 describe("a stamped factory landing the branch it made", () => {
   it.live("merges the run's branch onto the trunk once a human approves", () =>
-    inStampedRepository(({ root, path }) =>
+    inStampedRepository(({ root, path, spend }) =>
       Effect.gen(function* () {
         const before = git(root, ["rev-parse", "main"]).trim();
 
-        const started = succeeded(yield* kojo(root, ["run", "review", summary], path));
+        const started = succeeded(yield* kojo(root, ["run", "review", summary], path, spend));
         const runId = runIdOf(started);
         const branch = `kojo/${runId}`;
 
@@ -274,12 +293,13 @@ describe("a stamped factory landing the branch it made", () => {
 
         // A second process, holding nothing but the token. It has to load `.kojo/workflows/review.ts`
         // to replay the body, and the replay is what reaches the merge.
-        const listing = succeeded(yield* kojo(root, ["gate", "list"], path));
+        const listing = succeeded(yield* kojo(root, ["gate", "list"], path, spend));
         const answered = succeeded(
           yield* kojo(
             root,
             ["gate", "answer", tokenOf(listing, runId), "--choice", "approve", "--as", "kevin"],
             path,
+            spend,
           ),
         );
 
@@ -312,19 +332,19 @@ describe("a stamped factory landing the branch it made", () => {
    * reset.
    */
   it.live("merges nothing when the human says no, and leaves the branch where it is", () =>
-    inStampedRepository(({ root, path }) =>
+    inStampedRepository(({ root, path, spend }) =>
       Effect.gen(function* () {
         const before = git(root, ["rev-parse", "main"]).trim();
 
         const started = succeeded(
-          yield* kojo(root, ["run", "review", "a change nobody wants"], path),
+          yield* kojo(root, ["run", "review", "a change nobody wants"], path, spend),
         );
         const runId = runIdOf(started);
         const branch = `kojo/${runId}`;
 
         expect(started).toContain('suspended at gate "approve"');
 
-        const listing = succeeded(yield* kojo(root, ["gate", "list"], path));
+        const listing = succeeded(yield* kojo(root, ["gate", "list"], path, spend));
         const answered = yield* kojo(
           root,
           [
@@ -339,6 +359,7 @@ describe("a stamped factory landing the branch it made", () => {
             "kevin",
           ],
           path,
+          spend,
         );
 
         // The verdict was still recorded — the run failing is not the answer failing.

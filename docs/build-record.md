@@ -67,9 +67,10 @@ order the waves were launched; the tickets and dates come from the commit log.
 | **16** | 08-12 03:34 | 46, 47 | `kojo init` created the condition its own merge refuses: it tells you to install, and the first merge refuses over the `node_modules` it told you to create. |
 | **17** | 08-12 23:49 | 36 | Kojo's own factory, in Kojo's own repository. **The first attempt failed** — the implementer stalled six times on `kojo watch`, a daemon that never exits. Then I destroyed the recovered worktree; see §7. |
 | **18** | 08-13 12:10 | 48 | The correction loop against a real model. Bought three of four criteria with two of three authorised calls. |
+| **19** | 08-13 | 49 | The guard that was mistaken for a flag, built — and, before it, an audit of every checkbox in every closed ticket, which found four criteria nobody owned and opened 50–53 for them. Cost: no agent call. |
 
 Ticket 31 (span export) is closed **wontfix** (`e5f8e08`): it blocked nothing through seventeen
-waves, and the claim it was written under was withdrawn by the wave-3 audit. Ticket 49 is open.
+waves, and the claim it was written under was withdrawn by the wave-3 audit. Tickets 50–53 are open.
 
 ---
 
@@ -288,6 +289,18 @@ before a process is spawned, on by default wherever this repo runs unattended. E
 in this build that mattered was made structural. This one was a convention, and the convention is
 what failed.
 
+**It landed on 2026-08-13, and it cost nothing to prove.** `KOJO_AGENT_SPEND` is read by
+`SandcastleAgentInvoker` before `sandbox.agent`, and an unattended process — no terminal on stdin —
+is refused by default, which is every Vitest worker, Playwright fixture, CI step and agent-driven
+shell without anybody configuring it. The third mode is the one that matters:
+`stand-in:<absolute path>` means *a process may run, and here is the only file it may be*, and the
+invoker resolves the binary name itself rather than trusting a `PATH`. **Both calls in the table
+above would have been refused by it** — each put a script named `claude` in front of the operator's
+own and each resolved the real one, which is a mismatch a comparison catches and an intention never
+could. Three mutations, each reddening its named test: delete the resolution comparison, flip the
+unattended default to allow, and move the refusal to after the spawn. The last is graded by an
+**empty prompt log**, which is what turns *"before a process was spawned"* into a measurement.
+
 One authorisation remains unspent. The first thing worth buying with two more is remedy 1 in ticket
 48: `correctionFor` never says that a literal field must *equal* one of the listed words, with
 nothing before or after it. The one repair this build has ever seen missed valid by exactly that gap.
@@ -296,15 +309,26 @@ nothing before or after it. The one repair this build has ever seen missed valid
 
 ## 10. Where the build stopped
 
-47 tickets landed, 1 closed wontfix, 1 open. Unit **582**, integration **252** with three named
-skips, browser **91**. Three projects in the `tsc` build. `bun biome check .` and `bun knip` clean.
-`feat/kojo-v1`; `main` untouched at `927413d`.
+**As of 2026-08-13, after ticket 49 and the audit that followed it:** 48 tickets landed, 1 closed
+wontfix, 4 open. Unit **612**, integration **255 passing** with three named skips, browser **91**.
+Three projects in the `tsc` build. `bun biome check .` and `bun knip` clean.
+
+The four open ones (50–53) were not new work anybody thought of; they are criteria that closed
+tickets left unchecked and no other ticket took — the sandbox mount (from 14), a repaired envelope
+that decodes (15 and 48), a real `pi` session resume (18), and the waterfall over concurrent lanes
+(35). **A closed ticket with an open box is work with no owner**, and the way to find them was to
+read every box in every closed ticket rather than the status line at the top.
+
+The two agent-facing skills sit at `.agents/skills/`, with `.claude/skills/kojo` a symlink to it.
+`skillsDirectory` is unchanged at `.claude/skills/kojo` — that is what `kojo init` stamps into a
+repository and what `ownFactory.test.ts` reads — so the link is what lets one copy of each file
+answer both conventions.
 
 [§12 of typescript-effect.md](design/typescript-effect.md) carries the authoritative version of what
 is and is not proven. The four things most worth knowing before picking this up:
 
-1. **The most load-bearing unproven thing in the build:** no repaired envelope has ever decoded, so
-   no `corrections` counter has been read off a *succeeded* phase. No stand-in can close it — a
+1. **The most load-bearing unproven thing in the build** — now ticket 51: no repaired envelope has
+   ever decoded, so no `corrections` counter has been read off a *succeeded* phase. No stand-in can close it — a
    repair resumes the captured provider session, so a scripted repair always dies
    `resumeSession not found`. This is why ticket 48 needed real money at all.
 2. **No lane of Kojo's own factory can grade Kojo**, because `.kojo/` sits outside the

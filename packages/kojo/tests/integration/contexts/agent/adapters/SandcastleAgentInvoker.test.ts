@@ -5,6 +5,8 @@ import { Effect, FileSystem, Layer, Option, Path, Result, Schema } from "effect"
 import * as SandcastleAgentInvoker from "../../../../../src/contexts/agent/adapters/SandcastleAgentInvoker.ts";
 import * as YamlRoster from "../../../../../src/contexts/agent/adapters/YamlRoster.ts";
 import type { AgentSessionId } from "../../../../../src/contexts/agent/models/AgentSessionId.ts";
+import type { AgentSpend } from "../../../../../src/contexts/agent/models/AgentSpend.ts";
+import { spendVariable } from "../../../../../src/contexts/agent/models/AgentSpend.ts";
 import { AgentInvoker } from "../../../../../src/contexts/agent/ports/AgentInvoker.ts";
 import { acquireSandbox } from "../../../../../src/contexts/sandbox/adapters/boundary.ts";
 import { noSandbox } from "../../../../../src/contexts/sandbox/adapters/providers.ts";
@@ -120,9 +122,28 @@ interface Fixture {
   readonly agent: AgentInvoker["Service"];
 }
 
+/**
+ * What this file declares to the spend guard, and why it is allowed to.
+ *
+ * The provider under test is the `scripted` object above — built in this file, spawning `sh` with a
+ * script this file wrote. There is no binary name to resolve and no model to reach, so the mode that
+ * checks a resolution has nothing to check here. What makes this safe is not the declaration; it is
+ * that a reader can see the whole provider on this page.
+ *
+ * **The seam is `layer`'s and not `fromConfig`'s, deliberately.** A stamped workflow calls
+ * `fromConfig`, which takes no spend, so no factory can turn the guard off from a workflow file —
+ * only in-process TypeScript, which means Kojo's own tests.
+ */
+const allowed = {
+  _tag: "Allow",
+  because: "the provider is a script this test file wrote",
+} as const;
+
 const withScriptedAgent = <A, E>(
   script: (log: string) => string,
   use: (fixture: Fixture) => Effect.Effect<A, E, FileSystem.FileSystem | Path.Path>,
+  /** `"environment"` passes nothing at all, which is how the default is graded. */
+  spend: AgentSpend | "environment" = allowed,
 ) =>
   Effect.gen(function* () {
     const path = yield* Path.Path;
@@ -140,7 +161,10 @@ const withScriptedAgent = <A, E>(
       environment: {},
     };
 
-    const layer = SandcastleAgentInvoker.layer({ provider: () => scripted(script(log)) }).pipe(
+    const layer = SandcastleAgentInvoker.layer({
+      provider: () => scripted(script(log)),
+      ...(spend === "environment" ? {} : { spend }),
+    }).pipe(
       Layer.provide(
         YamlRoster.layer({ config: path.join(repo.root, ".kojo", "kojo.config.yaml") }).pipe(
           Layer.provide(BunServices.layer),
@@ -296,6 +320,85 @@ describe("the Sandcastle agent invoker", () => {
         }),
     ),
   );
+
+  /**
+   * **The spend switch, honoured by the adapter that spawns the process.** Ticket 49.
+   *
+   * The proof that it refused *before a process existed* is the prompt log: the scripted agent
+   * appends every prompt it is handed, and a refusal that happened after the spawn would leave one
+   * there. An empty log is the same evidence the `unknown-agent` case above rests on.
+   */
+  it.live("refuses before anything is spawned when the switch says refuse", () =>
+    withScriptedAgent(
+      (log) => recording(log, anEnvelope),
+      (fixture) =>
+        Effect.gen(function* () {
+          const outcome = yield* Effect.result(
+            fixture.agent.invoke({ agent: "drafter", prompt: "hello", session: Option.none() }),
+          );
+
+          expect(Result.isFailure(outcome)).toBe(true);
+          if (Result.isFailure(outcome)) {
+            expect(outcome.failure.fault).toBe("refused-to-spend");
+            expect(outcome.failure.reason).toContain(spendVariable);
+            // What would have been called — the agent, the provider, the model, and the run.
+            expect(outcome.failure.reason).toContain("drafter");
+            expect(outcome.failure.reason).toContain("scripted");
+            expect(outcome.failure.reason).toContain("sonnet");
+            expect(outcome.failure.reason).toContain("run-scripted");
+          }
+
+          // Nothing ran. This is the criterion, and the log is what grades it.
+          expect(yield* promptsIn(fixture.log)).toEqual([]);
+        }),
+      { _tag: "Refuse", because: `${spendVariable}=refuse` },
+    ),
+  );
+
+  /**
+   * **On by default, proven in the environment rather than argued about it.**
+   *
+   * No `spend` is passed, so the adapter reads this process: a Vitest worker, whose stdin is a pipe
+   * and not a terminal. That is exactly the shape of every context this repository runs unattended —
+   * the integration tier, the browser tier, CI, and an agent driving a shell — and it is the shape
+   * both unauthorised calls in this build were spent in.
+   *
+   * The variable is cleared for the duration so the test grades the **default** and not whatever the
+   * operator's shell happens to hold.
+   */
+  it.live("refuses by default in an unattended process, with nothing declared", () => {
+    const declared = process.env[spendVariable];
+    delete process.env[spendVariable];
+
+    return withScriptedAgent(
+      (log) => recording(log, anEnvelope),
+      (fixture) =>
+        Effect.gen(function* () {
+          // The premise, asserted rather than assumed: no terminal, nothing declared.
+          expect(process.stdin.isTTY).not.toBe(true);
+          expect(process.env[spendVariable]).toBeUndefined();
+
+          const outcome = yield* Effect.result(
+            fixture.agent.invoke({ agent: "drafter", prompt: "hello", session: Option.none() }),
+          );
+
+          expect(Result.isFailure(outcome)).toBe(true);
+          if (Result.isFailure(outcome)) {
+            expect(outcome.failure.fault).toBe("refused-to-spend");
+            expect(outcome.failure.reason).toContain("no terminal is attached");
+          }
+          expect(yield* promptsIn(fixture.log)).toEqual([]);
+        }),
+      // The point is what the adapter does when it is told nothing at all.
+      "environment",
+    ).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (declared !== undefined) process.env[spendVariable] = declared;
+        }),
+      ),
+    );
+  });
 
   /**
    * An agent that answers and reports no session is a failure, not an answer.

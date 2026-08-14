@@ -141,6 +141,17 @@ import { phaseOf, runIdOf, tokenOf, traceOf } from "../../support/traceOf.ts";
 
 const enabled = process.env.KOJO_REAL_AGENT === "1";
 
+/**
+ * The one place in this repository that declares it may spend, and it declares it out loud.
+ *
+ * `KOJO_REAL_AGENT` enables this *file*; `KOJO_AGENT_SPEND` is what the **invoker** honours, and
+ * without it every call below would be refused before a process existed — this suite's children are
+ * spawned by a Vitest worker and have no terminal. Two switches rather than one is deliberate: the
+ * old single flag gated a test and never gated the CLI, which is precisely how two unauthorised
+ * calls were spent while both integrators reported it was never set (ticket 49).
+ */
+const spending = { KOJO_AGENT_SPEND: "allow" } as const;
+
 /** The model every real call uses. An alias rather than a pinned id, so it survives a rotation. */
 const model = "sonnet";
 
@@ -253,7 +264,11 @@ describe.skipIf(!enabled)("a real agent, invoked for real", () => {
             const fileSystem = yield* FileSystem.FileSystem;
             const path = yield* Path.Path;
 
-            const started = succeeded(yield* kojo(root, ["run", "review", riskSubject]));
+            const started = succeeded(
+              yield* kojo(root, ["run", "review", riskSubject], {
+                spend: spending.KOJO_AGENT_SPEND,
+              }),
+            );
             const runId = runIdOf(started);
             expect(runId).not.toBe("");
 
@@ -271,17 +286,26 @@ describe.skipIf(!enabled)("a real agent, invoked for real", () => {
 
             // The gate is answered by a second process, which replays the body and does **not** call
             // the agent again — the phase's recorded result is what a replay returns.
-            const listing = succeeded(yield* kojo(root, ["gate", "list"]));
+            const listing = succeeded(
+              yield* kojo(root, ["gate", "list"], { spend: spending.KOJO_AGENT_SPEND }),
+            );
             const answered = succeeded(
-              yield* kojo(root, [
-                "gate",
-                "answer",
-                tokenOf(listing, runId),
-                "--choice",
-                "approve",
-                "--as",
-                "tester",
-              ]),
+              yield* kojo(
+                root,
+                [
+                  "gate",
+                  "answer",
+                  tokenOf(listing, runId),
+                  "--choice",
+                  "approve",
+                  "--as",
+                  "tester",
+                ],
+                // A replay returns the phase's recorded result rather than calling the agent again,
+                // so this ought to spend nothing — declared anyway, because a resume that *did*
+                // reach the agent must fail on the model's answer and not on the guard.
+                { spend: spending.KOJO_AGENT_SPEND },
+              ),
             );
 
             expect(answered).toContain(`recorded approve on run ${runId}`);
@@ -405,7 +429,9 @@ describe.skipIf(!enabled)("a real agent, invoked for real", () => {
             const path = yield* Path.Path;
             const before = yield* Effect.sync(() => git(root, ["rev-parse", "HEAD"]));
 
-            const ran = yield* kojo(root, ["run", "review", "loosen the test command"]);
+            const ran = yield* kojo(root, ["run", "review", "loosen the test command"], {
+              spend: spending.KOJO_AGENT_SPEND,
+            });
 
             expect(ran.status).not.toBe(0);
             expect(ran.stderr).toContain("PermissionBreach");

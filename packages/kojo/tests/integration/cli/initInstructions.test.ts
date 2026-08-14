@@ -179,9 +179,15 @@ const fresh = Effect.gen(function* () {
   // `/usr/bin:/bin` still carries `git` and `sh`, which the sandbox scope needs. The credential is
   // exported the way CI exports one, so `kojo doctor` grades a factory whose agent can be paid —
   // the scripted `claude` above never reads it.
+  //
+  // `KOJO_AGENT_SPEND` names the scripted file itself. `PATH` says what this test *intends* to be
+  // spawned; the stand-in declaration is what the invoker **checks**, by resolving `claude` and
+  // refusing anything that is not this exact path. Without it the child refuses every agent call,
+  // because a Vitest worker's child has no terminal and an unattended process does not spend.
   const env = {
     PATH: `${binary}:/usr/bin:/bin:/usr/sbin:/sbin`,
     CLAUDE_CODE_OAUTH_TOKEN: "scripted",
+    KOJO_AGENT_SPEND: `stand-in:${path.join(binary, "claude")}`,
   };
 
   return { root, env };

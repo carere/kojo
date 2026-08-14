@@ -3,10 +3,13 @@ import { claudeCode } from "@ai-hero/sandcastle";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { Effect, Layer, Option } from "effect";
 import { Sandbox } from "../../sandbox/ports/Sandbox.ts";
+import { maySpawn } from "../guards/maySpawn.ts";
 import { AgentAnswer } from "../models/AgentAnswer.ts";
 import type { AgentDefinition } from "../models/AgentDefinition.ts";
 import { AgentInvocationError } from "../models/AgentInvocationError.ts";
 import type { AgentSessionId } from "../models/AgentSessionId.ts";
+import type { AgentSpend } from "../models/AgentSpend.ts";
+import { spendFrom, spendVariable } from "../models/AgentSpend.ts";
 import type { RosterError } from "../models/RosterError.ts";
 import type { AgentCall, AgentCapabilities } from "../ports/AgentInvoker.ts";
 import { AgentInvoker } from "../ports/AgentInvoker.ts";
@@ -48,6 +51,13 @@ import * as YamlRoster from "./YamlRoster.ts";
  * session storage at all. The correction loop reads `resume` before it spends a turn, so getting
  * this wrong does not fail — it silently sends a correction as a cold call carrying none of the
  * context that earned it.
+ *
+ * **5. It asks the spend switch before it asks the sandbox, and an unattended process is refused by
+ * default.** This is the one adapter in Kojo that can cost somebody money, so it is the one that
+ * has to hold the guard: a check anywhere above it protects whatever called it, and a check in a
+ * test protects the test tier. `maySpawn` decides, `AgentSpend` reads the switch, and the refusal
+ * is a `refused-to-spend` raised **before `sandbox.agent` is reached**, so no process exists to
+ * have spent anything. See ticket 49 and `build-record.md` §9 for the two calls this cost.
  */
 
 /** Which Sandcastle agent provider a roster entry becomes. */
@@ -72,7 +82,54 @@ export interface SandcastleAgentOptions {
    * spending anything.
    */
   readonly provider?: ProviderFor | undefined;
+  /**
+   * What this invoker may spawn. Defaults to whatever {@link spendVariable} says.
+   *
+   * A seam for the same reason as `provider`, and it must never become the way a *run* turns the
+   * guard off: `cli/` passes none of this, so every real invocation reads the environment. A test
+   * that needs a specific mode states it here and is graded on the refusal it gets.
+   */
+  readonly spend?: AgentSpend | undefined;
+  /**
+   * What a binary name opens on this machine. Defaults to `Bun.which`.
+   *
+   * The one impure thing the guard needs, taken as an argument so the decision stays a table.
+   */
+  readonly resolve?: ((binary: string) => string | undefined) | undefined;
 }
+
+/** Where a binary name resolves for this process — the same lookup the spawned shell will do. */
+const whichever = (binary: string): string | undefined => Bun.which(binary) ?? undefined;
+
+/**
+ * What the switch says, read fresh on every call.
+ *
+ * Per call rather than once at layer build, because the layer of a stamped workflow is built by a
+ * long-lived process — `kojo watch` — and a guard that was read at start-up would keep answering
+ * for a variable somebody changed hours ago. It is two environment reads; the call it guards is
+ * seconds of a model's time.
+ */
+const declaredSpend = (): AgentSpend =>
+  spendFrom({
+    declared: process.env[spendVariable],
+    // The whole default rule, in one expression. A Vitest worker, a Playwright fixture, a CI step
+    // and an agent-driven shell all have no terminal here, which is what makes the guard on by
+    // default in exactly the places both unauthorised calls were spent.
+    attended: process.stdin.isTTY === true,
+  });
+
+/**
+ * The binary a provider's command names, without running anything.
+ *
+ * `buildPrintCommand` is the same function Sandcastle calls to build the command it spawns, so the
+ * first word of it is the binary that would run — asked of the provider rather than guessed from
+ * its name. The prompt is empty because nothing here is sent anywhere; only the shape of the
+ * command line is read.
+ */
+const binaryOf = (provider: AgentProvider): string => {
+  const built = provider.buildPrintCommand({ prompt: "", dangerouslySkipPermissions: true });
+  return (built.command.trim().split(/\s+/)[0] ?? provider.name).replace(/^["']|["']$/g, "");
+};
 
 /**
  * Whether this provider can carry a conversation across turns at all.
@@ -141,10 +198,39 @@ const make = (options: SandcastleAgentOptions) =>
 
         const definition = yield* define(call.agent);
         const resumed = Option.isSome(call.session);
+        const provider = providerFor(definition);
+
+        /**
+         * **The last thing asked before a process could exist.**
+         *
+         * After the roster, because a refusal that could not name the model would be worth less to
+         * whoever reads it; before `sandbox.agent`, because that call is where the money goes. The
+         * run is named from the correlation the acquisition stamped on the container, which is the
+         * same string the trace row carries — so a person reading this sentence can find the run.
+         */
+        const verdict = maySpawn({
+          spend: options.spend ?? declaredSpend(),
+          agent: call.agent,
+          provider: provider.name,
+          model: definition.model,
+          run: sandbox.environment.KOJO_RUN_ID ?? sandbox.id,
+          binary: binaryOf(provider),
+          resolve: options.resolve ?? whichever,
+          sandbox: sandbox.capabilities.kind,
+        });
+
+        if (verdict._tag === "Refused") {
+          return yield* new AgentInvocationError({
+            agent: call.agent,
+            fault: "refused-to-spend",
+            reason: verdict.reason,
+            cause: undefined,
+          });
+        }
 
         const run = yield* sandbox
           .agent({
-            provider: providerFor(definition),
+            provider,
             // A cold turn carries the identity, the task template and the contract the phase
             // appended. A correction carries only itself — see `renderPrompt`.
             prompt: resumed ? call.prompt : renderPrompt({ agent: definition, task: call.prompt }),

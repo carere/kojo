@@ -1108,8 +1108,19 @@ below marked *re-walk* is theirs.
 was answered by a shell script on the child's `PATH` named like an agent binary — the repository
 owner authorised five real agent calls for ticket 15 and three more for ticket 48, and the build spent
 **nine**, two of them on a dogfood and a demo walk that no authorisation covered (the ledger, with the
-method that counts it, is the table at the top of `tests/integration/cli/realAgent.test.ts`). A
-stand-in proves the
+method that counts it, is the table at the top of `tests/integration/cli/realAgent.test.ts`). 
+**Since ticket 49 that overspend is structurally impossible, and this is the one line to read if you
+inherit this repository.** `KOJO_AGENT_SPEND` is honoured by `SandcastleAgentInvoker` itself, before
+`sandbox.agent` is reached: an unattended process — no terminal on stdin, which is every Vitest
+worker, Playwright fixture, CI step and agent-driven shell — is refused by default, and a refusal is
+an `AgentInvocationError{fault: "refused-to-spend"}` naming the agent, the provider, the model and
+the run. The old `KOJO_REAL_AGENT` gated a *test* and never gated the CLI, which is exactly how two
+walk-throughs reported honestly that it was never set and spent money anyway. A rehearsal that needs
+a scripted binary declares `stand-in:<absolute path>` and the invoker resolves the name itself and
+refuses anything else — so a `PATH` in front of the operator's own binary, which is what those two
+walks used, is now checked rather than believed. `kojo doctor` prints the mode.
+
+A stand-in proves the
 factory, the durability, the trace, the Console and the merge. It does **not** prove a real model's
 output surviving the envelope contract across many runs: no decode failure was repaired, no
 `corrections` counter advanced, and no routing decision was a judgement call — the stand-in reads a
@@ -1250,8 +1261,14 @@ one safe.
 
 ### Where the build stopped
 
-Forty-eight tickets: forty-seven landed, ticket 31 closed wontfix. Unit **582**, integration **252**
-(3 skipped, all named), browser **91**. Kojo stamps a factory into a repository and drives that
+Fifty-three tickets: forty-eight landed, ticket 31 closed wontfix, and **four opened by an audit of
+the closed ones** (50–53) — each carries a criterion a done ticket left unchecked and no other ticket
+took. Unit **612**, integration **255 passing with 3 named skips**, browser **91**.
+
+The two agent-facing skills live at `.agents/skills/`, with `.claude/skills/kojo` a symlink to that
+directory — the same shape this machine's home uses. `skillsDirectory` still names
+`.claude/skills/kojo`, which is what `kojo init` writes into a stamped repository and what
+`ownFactory.test.ts` reads; the link is how one copy of each file answers both. Kojo stamps a factory into a repository and drives that
 factory in this one.
 
 **What is proven, and by what.** A run is an Effect program over four primitives; it cuts a branch,
