@@ -29,17 +29,37 @@ export interface SandboxConfig {
   readonly copyToWorktree?: ReadonlyArray<string>;
   /** Which readings of the worktree stop the run on entry. Defaults to all three. */
   readonly worktree?: WorktreePolicy;
+  /**
+   * Git pathspecs taken out of the worktree the agent works in. Defaults to `factoryOwnPaths`.
+   *
+   * The first line of defence from architecture.md §8, edge 5: an agent that cannot see its grader
+   * cannot edit it. `sandboxed` fills this in, so an author who writes nothing gets the roster, the
+   * workflows, the envelopes, the checks, the commands and the prompts hidden — and `hidden: []` is
+   * the explicit, greppable way to say otherwise.
+   *
+   * Read `guards/hiddenPaths.ts` before relying on it. It is a filesystem measure against an agent
+   * that reads files; the git objects stay reachable, an isolated provider cannot be masked at all,
+   * and `--sandbox none` has no boundary to speak of. Rollback stays for all three.
+   */
+  readonly hidden?: ReadonlyArray<string>;
 }
 
 /**
  * The same thing, with what Kojo stamped on it.
  *
- * `sandboxed` builds this from the author's config; a `SandboxSource` only carries it out. The two
- * added fields are the two an adapter must never invent for itself: the acquisition's identity, and
- * the correlation that has to reach the far side of a boundary Effect cannot cross.
+ * `sandboxed` builds this from the author's config; a `SandboxSource` only carries it out. The three
+ * settled fields are the three an adapter must never invent for itself: the acquisition's identity,
+ * the correlation that has to reach the far side of a boundary Effect cannot cross, and what is kept
+ * out of the worktree.
+ *
+ * `hidden` is **required** here while it is optional on the config, and the narrowing is the point.
+ * An adapter that reads an absent list has to choose a meaning for it, and the only safe meaning —
+ * hide nothing — is the one that fails open. `sandboxed` resolves the default once, where the list
+ * lives, so every adapter and every test states what it wants.
  */
 export interface SandboxRequest extends SandboxConfig {
   readonly id: SandboxId;
   /** Merged over whatever the provider already carries, at the moment the container is built. */
   readonly environment: Record<string, string>;
+  readonly hidden: ReadonlyArray<string>;
 }

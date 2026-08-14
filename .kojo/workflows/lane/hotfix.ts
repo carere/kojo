@@ -29,6 +29,7 @@ import {
   conventional,
   graded,
   type Judged,
+  keepsItsOwnFactory,
   mayWriteCode,
   restore,
 } from "./common.ts";
@@ -50,7 +51,13 @@ export const hotfix = (options: {
   readonly provider: SandboxProvider;
 }) =>
   sandboxed(
-    { name: "hotfix", branch: options.branch, provider: options.provider, hooks: restore },
+    {
+      name: "hotfix",
+      branch: options.branch,
+      provider: options.provider,
+      hooks: restore,
+      hidden: keepsItsOwnFactory,
+    },
     Effect.gen(function* () {
       // `withPermissions` fingerprints the change-set, runs the phase, and compares. A path outside
       // the policy is undone and the run fails with a `PermissionBreach` naming every path and what

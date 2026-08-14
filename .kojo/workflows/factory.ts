@@ -50,7 +50,7 @@ import { sandboxed } from "kojo/contexts/workflow/services/sandboxed";
 import { workflow } from "kojo/contexts/workflow/services/workflow";
 import { Routed } from "../envelopes.ts";
 import { chore } from "./lane/chore.ts";
-import { actor, agents, conventional, mayWriteNothing } from "./lane/common.ts";
+import { actor, agents, conventional, keepsItsOwnFactory, mayWriteNothing } from "./lane/common.ts";
 import { feature } from "./lane/feature.ts";
 import { hotfix } from "./lane/hotfix.ts";
 
@@ -208,7 +208,7 @@ export const factory = workflow(
        * container builds, and the answer then would be to hoist the router into the lane.
        */
       const routed = yield* sandboxed(
-        { name: "route", branch, provider: provider() },
+        { name: "route", branch, provider: provider(), hidden: keepsItsOwnFactory },
         withPermissions(
           mayWriteNothing("router"),
           agent({

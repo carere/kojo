@@ -54,6 +54,11 @@ const request = (cwd: string): SandboxRequest => ({
   provider: noSandbox(),
   cwd,
   environment,
+  // This file is about the branch, the environment and the reading of the tree, and none of them
+  // should change because a factory's own paths were taken out. Stated rather than defaulted:
+  // `hidden` is required on a request precisely so no test can read an absent list as "nothing".
+  // What the mask does is `hiddenFactoryPaths.test.ts`.
+  hidden: [],
 });
 
 /**

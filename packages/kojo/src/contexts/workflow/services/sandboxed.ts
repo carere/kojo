@@ -14,6 +14,7 @@ import { acquisitionAttempt, correlationEnvironment } from "../../shared/models/
 import { makeSandboxId, nextAcquisition } from "../../shared/models/SandboxId.ts";
 import { SandboxRecord } from "../../trace/models/SandboxRecord.ts";
 import { Tracer } from "../../trace/ports/Tracer.ts";
+import { factoryOwnPaths } from "../models/PermissionPolicy.ts";
 import { CurrentRun } from "./CurrentRun.ts";
 
 /** One container, plus what it answered when it was asked whether its workspace is there. */
@@ -61,7 +62,18 @@ const acquireOnce = (config: SandboxConfig) =>
       attempt: acquisitionAttempt,
     });
 
-    const request: SandboxRequest = { ...config, id, environment };
+    // The default is resolved here and nowhere else. `factoryOwnPaths` is the workflow context's
+    // list — it is what `withPermissions` protects after the fact — and the sandbox context must not
+    // learn about it, so the one place that knows both is the scope that joins them. An author who
+    // writes nothing gets the roster, the workflows, the envelopes, the checks, the commands and the
+    // prompts taken out of the tree the agent works in; `hidden: []` is how a factory says otherwise,
+    // out loud and greppably. See architecture.md §8, edge 5.
+    const request: SandboxRequest = {
+      ...config,
+      id,
+      environment,
+      hidden: config.hidden ?? factoryOwnPaths,
+    };
     const acquired = yield* source.acquire(request);
     const sandbox: SandboxHandle = { ...acquired, id, environment };
 

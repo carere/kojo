@@ -52,6 +52,32 @@ export const agents = SandcastleAgentInvoker.fromConfig({ config: ".kojo/kojo.co
 const barred: ReadonlyArray<string> = [...factoryOwnPaths, ".claude/skills/kojo/"];
 
 /**
+ * **This factory keeps its own files in the worktree, and that is a decision rather than an oversight.**
+ *
+ * Every scope in Kojo's factory passes this as `hidden`. Kojo's default is the opposite —
+ * `sandboxed` takes `factoryOwnPaths` out of the tree the agent works in, which is the first line of
+ * defence from architecture.md §8, edge 5 — and this factory is the one place where the default
+ * costs more than it buys. Two measurements, both taken rather than argued:
+ *
+ *  - **`bun knip` fails in a masked worktree.** It is `commands.dead`, one of the five real
+ *    invocations in `commands.ts`, and it is run by `graded` in every lane. `knip.jsonc` names
+ *    `.kojo/workflows/factory.ts` as an entry, and `effect` is a root dependency nothing but
+ *    `.kojo/` imports — so a tree with the factory hidden reports *"Refine entry pattern (no
+ *    matches)"* and *"Unused dependencies (1) effect"* and exits 1. Every run of every lane would
+ *    report a red dead-code check about a change that was perfectly good, which is the same shape of
+ *    lie as a check that passes while doing no work.
+ *  - **This factory runs `noSandbox()`**, where the mask is nearly worthless anyway: the agent is a
+ *    host process and the unmasked repository is three directories above its working directory. It
+ *    would stop `cat .kojo/checks.ts` from the run's worktree and nothing else.
+ *
+ * So what protects this factory's own grader is `barred` above — `withPermissions` fingerprints the
+ * tree around every agent call, and a write under `factoryOwnPaths` is rolled back and the run
+ * failed. That is the second line of defence doing the whole job, on purpose, in the one repository
+ * that can say why. A factory that runs `docker()` should delete this and take the default.
+ */
+export const keepsItsOwnFactory: ReadonlyArray<string> = [];
+
+/**
  * What an agent that writes code may leave behind: anything the barred paths do not cover.
  *
  * `Unrestricted` is the right setting for the fixer, the builder and the tidier. In this repository

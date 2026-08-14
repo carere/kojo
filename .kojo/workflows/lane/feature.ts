@@ -28,6 +28,7 @@ import {
   conventional,
   graded,
   type Judged,
+  keepsItsOwnFactory,
   mayWriteCode,
   mayWriteNotesOnly,
   restore,
@@ -45,7 +46,13 @@ export const feature = (options: {
   readonly provider: SandboxProvider;
 }) =>
   sandboxed(
-    { name: "feature", branch: options.branch, provider: options.provider, hooks: restore },
+    {
+      name: "feature",
+      branch: options.branch,
+      provider: options.provider,
+      hooks: restore,
+      hidden: keepsItsOwnFactory,
+    },
     Effect.gen(function* () {
       // Read-only with respect to the product, writable with respect to its own notes. The prompt
       // says the same thing in words; this is the half that is a boundary.

@@ -22,11 +22,24 @@ export type WriteScope = typeof WriteScope.Type;
  * The factory's own files — the roster, the workflows, the envelopes, the checks, the commands and
  * the prompts. An agent that can edit these can edit its own grader.
  *
- * **Rollback is the second line of defence here, not the first.** The cheaper and more certain
- * protection is never mounting these paths into the sandbox at all: an agent that cannot see its
- * grader cannot edit it, and no fingerprint has to catch it afterwards. See architecture.md §8,
- * edge 5. This list stays because the reference sandbox is a bind mount of the whole worktree, and
- * because a workflow may deliberately run an agent on the host with no sandbox at all.
+ * **Rollback is the second line of defence here, not the first.** The first is that these paths are
+ * taken out of the worktree the agent works in — `sandboxed` defaults `SandboxRequest.hidden` to this
+ * very list, and `guards/hiddenPaths.ts` in the sandbox context does the work. An agent that cannot
+ * see its grader cannot edit it, and no fingerprint has to catch it afterwards. See architecture.md
+ * §8, edge 5.
+ *
+ * **This list is what still protects the three cases the first line cannot reach**, and each of them
+ * is real rather than theoretical:
+ *
+ *  - **`--sandbox none`.** The agent is a host process; the unmasked repository is three directories
+ *    above its working directory. Rollback is the only protection a `none` run has.
+ *  - **An isolated provider** (Vercel, Daytona) materialises its tree from the object database, so
+ *    the factory reappears in the sandbox whatever the host worktree looks like.
+ *  - **A file the agent creates** under a hidden directory. `.kojo/evil.ts` has no index entry, so
+ *    nothing masks it, `git add --all` stages it, and the merge would land it. `permits` returns
+ *    false for it and `rollBack` unlinks it.
+ *
+ * So the two lines are not redundant, and neither one may be deleted on the strength of the other.
  */
 export const factoryOwnPaths: ReadonlyArray<string> = [
   ".kojo/kojo.config.yaml",
