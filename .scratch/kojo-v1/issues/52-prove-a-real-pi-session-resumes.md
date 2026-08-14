@@ -39,10 +39,13 @@ outcome is to say so — or to decide that `kojoPi` is unproven and let that dec
 
 **Blocked by:** 18 — done.
 
-**Status:** ready-for-agent
+**Status:** ready-for-agent — the code half is done, the paid half is unbought
 
 - [ ] `pi` is installed, a key is available, and the suite runs rather than skips — the first test's
       `runnable` assertion is what proves the gate opened
+      *(pi 0.80.10 is installed and on `PATH`; no credential is exported in the lane's environment,
+      so the suite still skips and prints `NOT PROVEN`. Two faults found in the thing under test
+      would fail it even with a credential — see the comments.)*
 - [ ] The second call **re-enters the session**: one session id across two calls, proven from the
       captured transcript rather than inferred from an exit code
 - [ ] The second call carries **one message**, not the whole conversation replayed — measured, and
@@ -50,6 +53,8 @@ outcome is to say so — or to decide that `kojoPi` is unproven and let that dec
 - [ ] The captured transcript lands under the encoded directory `pi --session <id>` consults from
       that cwd, which is the fault the capture half exists to prevent
 - [ ] The model is the smallest one that can answer, named in the report, with the spend stated
+      *(the default is now `claude-haiku-4-5`, the smallest Anthropic model `pi --list-models`
+      offers. Nothing has spent on it, so no bill is stated and the box stays open.)*
 - [ ] Ticket 18's sixth criterion is ticked with a pointer here, and §12's list of what is not proven
       loses this line
 - [ ] If it cannot be run, this ticket stays open and `kojoPi` is recorded as unproven in
@@ -58,4 +63,61 @@ outcome is to say so — or to decide that `kojoPi` is unproven and let that dec
 
 ## Comments
 
-*(none yet)*
+**The code half landed** on `lane/52-pi-session-gate`; **the paid half is still unbought.** No
+credential was exported into this lane and none was looked for, so every criterion above stays
+unticked. What changed is the gate, the model, and — worth more than either — what a reading of pi
+0.80.10 and two free probes say about whether a credential is the only thing missing. It is not.
+
+**The gate takes either credential.** The owner authenticates pi with `ANTHROPIC_OAUTH_TOKEN`, and
+`pi --help` lists it beside `ANTHROPIC_API_KEY` as an alternative pi accepts. The gate read only the
+first, so the suite would have skipped on the owner's own machine and named a reason that was not
+their reason. `credentialVariables` is now the list of the two, `hasCredential` asks whether either
+carries a non-empty value, and the `NOT PROVEN` line is built from the list rather than written out:
+`neither ANTHROPIC_API_KEY nor ANTHROPIC_OAUTH_TOKEN is set`.
+
+**The honesty of the gate is unchanged.** `runnable` and `missing` are still derived separately, so
+`expect(runnable).toBe(missing.length === 0)` still has content — flipping `&&` to `||` in `runnable`
+reddens it. The new test grades the half this machine cannot exercise: `missingIn` is a function of
+an environment rather than of `process.env`, so "accepts the OAuth token" is measured against a
+synthetic environment on a machine that has no token, instead of being a claim nobody can check
+until the day somebody exports one.
+
+**`KOJO_PI_MODEL` now defaults to `claude-haiku-4-5`.** `pi --list-models` on 0.80.10 lists nothing
+smaller from Anthropic. The docstring says why the size buys nothing here: the assertions read a
+session id, one word held across two turns, and a second command carrying one message.
+
+**Two things other than the credential stop this suite**, both measured against pi 0.80.10 without
+spending, both faults in the thing under test rather than in the test, and both left unfixed because
+this lane is the gate:
+
+1. **`--session-dir` makes pi's layout flat, and `piSessionStorage` reads an encoded subdirectory.**
+   pi encodes the cwd into a directory name only for its *default* root: `SessionManager.create`
+   reads `sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd)`, and
+   `listSessionsFromDir` is a single non-recursive `readdir`. Probed: with `--session-dir S` the
+   transcript landed at `S/2026-08-14T15-48-44-573Z_<id>.jsonl`, not under `S/--…--/`. `kojoPi`
+   passes `--session-dir` whenever `sessions` is given, so `existsOnHost` at line 124 asks a
+   directory pi never wrote — and, worse than a red test, `resumeIntoSandbox` lands a captured
+   transcript under `<sandbox root>/<encoded cwd>/` where pi will not look. That is the silent cold
+   start this whole capture half exists to prevent, arriving through the flag added to prevent it.
+2. **A macOS temp path is not the path pi records.** `mkdtemp(tmpdir())` returns `/var/folders/…`; a
+   child started there reports `/private/var/folders/…`, which is what pi writes into the session
+   line and encodes. So the `cwd` this file hands `existsOnHost` and the one pi used are two strings
+   for one directory. It would also stop `rewritePiSessionCwd` matching the line it exists to rewrite.
+
+Both are recorded in the file's header docstring so the next reader meets them before the bill.
+
+**The paid test is outside the spend guard.** `KOJO_AGENT_SPEND` is honoured by
+`SandcastleAgentInvoker`; this file spawns `pi` itself, so nothing refuses the call. Found the hard
+way: mutating `runnable` to prove the first test still bites un-skipped the paid describe and made a
+real pi call. It cost nothing — this machine's pi carries its own stored auth, and Anthropic refused
+with `400 … out of extra usage`, zero tokens, zero cost, reported in pi's own usage line — but the
+lesson stands, and so does a second one: **pi is authenticated without either environment variable**,
+so the gate measures "somebody exported a credential for this suite", not "pi can reach a model".
+Conservative in the right direction, and left that way on purpose: reading pi's credential store to
+decide would be both a worse gate and a thing a lane must not do.
+
+**Checks:** `bun tsc --build --force --verbose` (both projects rebuilt), `bun biome check .` (7
+pre-existing infos, none in this file), `bun knip` (silent), `moon run kojo:test --force`
+(76 files, 612 tests, no skips), `moon run kojo:test-integration --force` (43 files passed, 1
+skipped; 256 passed, 3 skipped — 255 before this lane). The three skips are the two in
+`cli/realAgent.test.ts`, gated on `KOJO_REAL_AGENT`, and the one paid test here.

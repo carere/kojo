@@ -18,26 +18,81 @@ import { kojoPi } from "../../../../../src/contexts/agent/adapters/kojoPi.ts";
  * pass.** The suite prints what it did not prove and Vitest reports the tests as skipped rather than
  * green, because the failure this guards against — a resume that silently degrades to a cold
  * start — is invisible in a run's outcome and shows up only on the bill and in the answer.
+ *
+ * **Two things other than the credential stop this suite today**, both measured without spending
+ * anything against pi 0.80.10 — which ships as `@earendil-works/pi-coding-agent`, not under the
+ * `@mariozechner/pi-coding-agent` name ticket 18 and `kojoPi`'s docstring still give it — and
+ * neither yet fixed:
+ *
+ * 1. **`--session-dir` makes pi's layout flat.** `kojoPi` passes `--session-dir <sandbox root>`, and
+ *    `piSessionStorage` reads `<root>/<encoded cwd>/`. pi only encodes the cwd into a directory name
+ *    for its *default* root: given `--session-dir X` it creates the transcript at
+ *    `X/<timestamp>_<id>.jsonl` and, on `--session <id>`, reads `X` with a non-recursive listing.
+ *    So `existsOnHost` below asks the wrong directory, and the resume path in
+ *    `contexts/sandbox/adapters/boundary.ts` lands a captured transcript where pi will not look.
+ * 2. **A macOS temp path is not the path pi records.** `mkdtemp(tmpdir())` returns
+ *    `/var/folders/…`; a child process started there reports `/private/var/folders/…`, which is what
+ *    pi writes into the session line and encodes. So the `cwd` string this file hands to
+ *    `existsOnHost` and the one pi used are two strings for one directory.
+ *
+ * Both are faults in the thing under test rather than in the test — which is the answer to why the
+ * capture half is worth a paid test at all — so they are recorded here rather than worked around.
  */
 
-/** The model to spend on. Overridable, because a factory does not choose a caller's model. */
-const model = process.env.KOJO_PI_MODEL ?? "claude-sonnet-4-6";
+/**
+ * The model to spend on. Overridable, because a factory does not choose a caller's model.
+ *
+ * The default is the smallest Anthropic model pi's own catalogue lists — `pi --list-models` on
+ * 0.80.10 offers nothing below `claude-haiku-4-5`. Nothing here reads judgement: the assertions are
+ * a session id, one word carried across two turns, and a second command that carries one message. A
+ * larger model would answer the same questions and put a larger number on the bill, and this is the
+ * one test in the suite that has a bill.
+ */
+const model = process.env.KOJO_PI_MODEL ?? "claude-haiku-4-5";
+
+/**
+ * The two spellings of "pi can reach Anthropic", in the order `pi --help` lists them.
+ *
+ * pi takes **either** — `ANTHROPIC_API_KEY` for a metered API key, `ANTHROPIC_OAUTH_TOKEN` for an
+ * OAuth token — and the second is how a subscription is carried. A gate that read the first alone
+ * would skip on the machine of somebody who is authenticated, and print a reason that is not their
+ * reason: the least useful kind of skip, because it sends the reader to fix something that is not
+ * broken.
+ */
+const credentialVariables = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
+
+/** Whether an environment carries either credential. An empty value is not a credential. */
+const hasCredential = (env: Readonly<Record<string, string | undefined>>): boolean =>
+  credentialVariables.some((name) => (env[name] ?? "") !== "");
+
+/**
+ * What is absent, given a binary and an environment.
+ *
+ * A function of its arguments rather than of the ambient process, so the gate itself is graded
+ * below against environments this machine does not have. The message names **both** variables,
+ * built from the list rather than written out, so a third spelling cannot be accepted silently
+ * while the skip goes on naming two.
+ */
+const missingIn = (
+  piOnPath: boolean,
+  env: Readonly<Record<string, string | undefined>>,
+): ReadonlyArray<string> => [
+  ...(piOnPath ? [] : ["the `pi` binary is not on PATH"]),
+  ...(hasCredential(env) ? [] : [`neither ${credentialVariables.join(" nor ")} is set`]),
+];
 
 const binary = Bun.which("pi");
-const credentialed = (process.env.ANTHROPIC_API_KEY ?? "") !== "";
+const credentialed = hasCredential(process.env);
 const runnable = binary !== null && credentialed;
 
-const missing = [
-  ...(binary === null ? ["the `pi` binary is not on PATH"] : []),
-  ...(credentialed ? [] : ["ANTHROPIC_API_KEY is not set"]),
-];
+const missing = missingIn(binary !== null, process.env);
 
 if (!runnable) {
   console.warn(
     [
       "NOT PROVEN: kojoPi resuming a real pi session.",
       ...missing.map((reason) => `  - ${reason}`),
-      "  Install `@mariozechner/pi-coding-agent` and set ANTHROPIC_API_KEY to run it.",
+      `  Install the pi CLI and export ${credentialVariables.join(" or ")} to run it.`,
     ].join("\n"),
   );
 }
@@ -97,6 +152,32 @@ describe("the gate on the real-agent test", () => {
     // a skip. `runnable` and `missing` are two spellings of one fact; if they ever disagree, a
     // suite that proved nothing could still read as a full pass.
     expect(runnable).toBe(missing.length === 0);
+  });
+
+  it("takes either credential, and names both when it has neither", () => {
+    // The half of the gate this machine cannot exercise, exercised anyway: `missingIn` is a
+    // function of an environment, so both spellings are graded here whatever is exported around
+    // the run. Without this, "accepts ANTHROPIC_OAUTH_TOKEN" would be a claim nothing measures on
+    // a machine that has no token — and an untested branch of a gate is how a suite ends up
+    // skipping for a reason that was never true.
+    expect(missingIn(true, { ANTHROPIC_API_KEY: "sk-not-a-real-key" })).toEqual([]);
+    expect(missingIn(true, { ANTHROPIC_OAUTH_TOKEN: "not-a-real-token" })).toEqual([]);
+
+    // Present but empty is absent. `kojo doctor` reads a stamped `.env` the same way, because a
+    // variable somebody meant to fill in is not a credential.
+    expect(missingIn(true, { ANTHROPIC_API_KEY: "", ANTHROPIC_OAUTH_TOKEN: "" })).toEqual([
+      "neither ANTHROPIC_API_KEY nor ANTHROPIC_OAUTH_TOKEN is set",
+    ]);
+
+    // And the two reasons are independent: a binary without a credential names one thing, an
+    // environment without either names the other, and neither hides the other.
+    expect(missingIn(false, { ANTHROPIC_OAUTH_TOKEN: "not-a-real-token" })).toEqual([
+      "the `pi` binary is not on PATH",
+    ]);
+    expect(missingIn(false, {})).toEqual([
+      "the `pi` binary is not on PATH",
+      "neither ANTHROPIC_API_KEY nor ANTHROPIC_OAUTH_TOKEN is set",
+    ]);
   });
 });
 
