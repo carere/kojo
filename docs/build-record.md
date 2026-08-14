@@ -175,12 +175,25 @@ Each rung was added after a specific failure, and none was there at the start.
 
    What separates the daemon from the mount: `docker run --rm <image> /bin/true` was measured three
    times at **0.20–0.22 s**. Container *start* is fine; what fails is a bind-mounted worktree
-   appearing inside the container. So this is Docker Desktop's file sharing, not load and not stale
-   containers — `docker container prune -f` reclaimed 0 B before the worst of the three runs. Ticket
-   50's lane measured the same fault at **1 failure in 4 with its change and 1 in 4 with the whole
-   ticket stashed**, which is the control this entry rested on for a wave. Restarting Docker Desktop
-   is the remedy; a green tier is not evidence the fault is gone, and a red one is not evidence the
-   tree is broken. Read the failing test's *shape* first.
+   appearing inside the container. `docker container prune -f` reclaimed 0 B before the worst of the
+   three runs, so it is not stale containers either.
+
+   **The engine here is OrbStack, not Docker Desktop** — `docker context ls` shows `orbstack *`,
+   `docker info` reports `orbstack | 29.4.0 | OrbStack | overlayfs`, and `orb version` is 2.2.2.
+   Docker Desktop is a leftover context that nothing uses. An earlier revision of this entry named
+   Docker Desktop and told the reader to restart it; that was wrong, and it is corrected here rather
+   than deleted, because *assuming which container engine a Mac is running* is exactly the kind of
+   unchecked premise this record exists to catch.
+
+   A plain race was **ruled out by measurement**: twenty rounds of *create a nested directory under
+   `/private/tmp`, then immediately bind-mount it and run* gave **0 failures in 20**. So the fault is
+   not "the mount is not there yet". What fails is the **rebuild** path with three containers alive
+   at once — `WorkspaceUnreachable{containers: 3}` — which is edge 11 and ticket 37, found by ticket
+   19 on a real container and never fully closed. Ticket 50's lane measured it at **1 failure in 4
+   with its change and 1 in 4 with the whole ticket stashed**, which is the control that keeps it
+   out of any one change's account. A green tier is not evidence the fault is gone, and a red one is
+   not evidence the tree is broken. Read the failing test's *shape* first: a 180 s timeout and an
+   `exit 127 … chdir to cwd` are this, and an assertion mismatch is not.
 8. **`docker container prune -f` before the integration tier.** Three stale containers made it 4.5×
    slower; the timeout that followed read as a test failure (`25d6148` settles that flake by
    measurement: four runs, three at 249/249, the failing tier 5m33s against 143s).
