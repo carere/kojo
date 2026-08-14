@@ -194,6 +194,13 @@ Each rung was added after a specific failure, and none was there at the start.
    out of any one change's account. A green tier is not evidence the fault is gone, and a red one is
    not evidence the tree is broken. Read the failing test's *shape* first: a 180 s timeout and an
    `exit 127 … chdir to cwd` are this, and an assertion mismatch is not.
+
+   **And the load is what settled it.** The three failing runs all happened while eight wave agents
+   had just finished hammering the same daemon. Run again on a quiet machine, with nothing else
+   started and no restart of anything: **264 passed, 3 skipped, 0 failed, 150 s** — the tier's normal
+   duration. So the remedy was neither a restart nor a fix; it was *stop running four container
+   suites at once*. Anybody planning a wave on one machine should know that the integration tier is
+   the part that does not parallelise, and should keep the container lanes serial.
 8. **`docker container prune -f` before the integration tier.** Three stale containers made it 4.5×
    slower; the timeout that followed read as a test failure (`25d6148` settles that flake by
    measurement: four runs, three at 249/249, the failing tier 5m33s against 143s).
