@@ -14,11 +14,11 @@ import { phaseOf, runIdOf, tokenOf, traceOf } from "../../support/traceOf.ts";
  * rather than an early `return`: a suite that returns early is green while doing nothing, and this
  * build has been caught by that eleven times.
  *
- * **Nine real agent calls have been spent in this build, out of eight ever authorised. This is the
- * ledger; keep it honest.** Counted by walking every `*.jsonl` under `~/.claude/projects/`, keeping
- * the transcripts whose first top-level prompt carries a stamped phase identity (`# The drafter`, …),
- * and counting top-level prompts — `user` entries holding no `tool_result` part. Seven such
- * transcripts exist and they hold nine prompts:
+ * **Eleven real agent calls have been spent in this build. This is the ledger; keep it honest.**
+ * Counted by walking every `*.jsonl` under `~/.claude/projects/`, keeping the transcripts whose first
+ * top-level prompt carries a stamped phase identity (`# The drafter`, …), and counting top-level
+ * prompts — `user` entries holding no `tool_result` part. Nine such transcripts exist and they hold
+ * eleven prompts:
  *
  * | when (UTC) | prompts | model | what it was |
  * |---|---|---|---|
@@ -29,11 +29,14 @@ import { phaseOf, runIdOf, tokenOf, traceOf } from "../../support/traceOf.ts";
  * | 2026-08-11 22:00 | 1 | `claude-sonnet-4-6` | **the dogfood walk — outside every authorisation** |
  * | 2026-08-11 22:37 | 1 | `claude-opus-4-8` | **the demo walk — outside every authorisation** |
  * | 2026-08-13 09:30 | **2** | `claude-sonnet-5` | ticket 48, the run recorded below |
+ * | 2026-08-14 16:06 | 1 | `fable` | ticket 51, first run — the design as ticket 48 left it |
+ * | 2026-08-14 16:11 | 1 | `fable` | ticket 51, second run — the design sharpened once |
  *
- * Ticket 15 was authorised five and spent five. Ticket 48 was authorised three on 2026-08-13, spent
- * **two** on the one run below, and left the third unspent — the reserve existed for a design that
- * failed to provoke a decode failure, and this one provoked it on the first turn. **A corrected run
- * costs two calls, so the single remaining authorisation cannot buy one.**
+ * Ticket 15 was authorised five and spent five. Ticket 48 was authorised three, spent **two** on the
+ * one run below, and left the third unspent. Ticket 51's spend was authorised by the owner without a
+ * count, against a subscription and on a **small** model, and it spent **two** — one per run, because
+ * neither run produced a repair to pay for. The ledger is kept anyway: it is the habit, not the
+ * limit.
  *
  * The two rows in bold are a genuine overspend of two calls, found by wave 18's integrator and not by
  * the wave that made them: a dogfood and a demo walk on the evening of 2026-08-11, on two models
@@ -42,9 +45,9 @@ import { phaseOf, runIdOf, tokenOf, traceOf } from "../../support/traceOf.ts";
  * "seven of eight" and were wrong by exactly those two. **Enabling this file spends money nobody has
  * budgeted — ask the owner first, and count afterwards rather than trusting this table.**
  *
- * **And enabling the whole file spends three, not two.** The first test is a corrected run — one cold
- * turn and one repair — and the second is one more. Run one of them at a time with Vitest's `-t`, and
- * read the count off `~/.claude/projects/` afterwards rather than off this comment.
+ * **Enabling the whole file spends two or three.** The first test is one cold turn plus at most one
+ * repair, and the second is one more. Run one of them at a time with Vitest's `-t`, and read the
+ * count off `~/.claude/projects/` afterwards rather than off this comment.
  *
  * What the five bought, because the next person to enable this file inherits the finding rather than
  * the budget:
@@ -68,9 +71,9 @@ import { phaseOf, runIdOf, tokenOf, traceOf } from "../../support/traceOf.ts";
  * 5. The permission breach below — a real model, told to edit `.kojo/commands.ts`, doing it, and the
  *    guard undoing it.
  *
- * **What ticket 48's two calls bought — and what they did not. Read this before running the first
- * test again, because as it stands it is known red.** Run `7808f5f1…` on 2026-08-13, one cold turn and
- * one repair, in one session (`0efd7d69-624e-417d-8658-43c5bdebdf21`, two top-level prompts):
+ * **What ticket 48's two calls bought — and what they did not.** Run `7808f5f1…` on 2026-08-13, one
+ * cold turn and one repair, in one session (`0efd7d69-624e-417d-8658-43c5bdebdf21`, two top-level
+ * prompts):
  *
  * - **A real model's first answer failed the envelope contract, by design rather than by hope.** It
  *   answered a well-formed `Drafted` whose `risk` held a sentence — *"This is a low-risk one-line text
@@ -99,19 +102,45 @@ import { phaseOf, runIdOf, tokenOf, traceOf } from "../../support/traceOf.ts";
  * whole value. It failed by a hair, not by stubbornness. Ticket 15's design worked precisely because
  * its standing instruction *cooperated*: it told the agent to answer the envelope on the second turn.
  *
- * **Three candidate remedies, ranked, none measured. Buy them in this order.**
+ * Remedy 1 of the three this header used to rank — **say what a literal means**: `correctionFor`
+ * reported the expected *type* and never said the value must **equal** one of the listed words with
+ * nothing before or after it — **is built** (ticket 51, `corrections.ts`). It is graded by unit tests
+ * over real `SchemaError` trees, and `correctionLoop.test.ts` proves the sentence is really handed to
+ * an agent process on a resumed turn. Remedy 3, raising the bound, stays refused: a bound that hides a
+ * disagreement is a worse factory.
  *
- * 1. **Say what a literal means.** `correctionFor` reports the expected *type* and never says the
- *    value must **equal** one of the listed words with nothing before or after it. The answer above
- *    misses valid by exactly that gap. This is the only candidate that fixes *Kojo* rather than this
- *    fixture, so it is the one worth two calls; the others only make the fixture kinder.
- * 2. **Stop the prompt and the envelope disagreeing**, so a repair has somewhere to put the sentence —
- *    the clause saying a sentence in `summary` is never read is what leaves the model nowhere to obey
- *    both.
- * 3. **Raise the stamped `corrections: 1`.** Last, because a bound that hides a disagreement is a
- *    worse factory, and because the transcript gives no reason to think a third turn was needed.
+ * **What ticket 51's two calls bought, and the finding they cost. Read this before enabling the first
+ * test again, because it is still known red — for a new reason.** Two runs on 2026-08-14 against
+ * **`fable`, the small model of its generation**, one top-level prompt each, in two throwaway
+ * repositories (`7808f5f1…`/session `9d82ee11…`, and `220ed62a…`/session `3cbcf4f3…`):
  *
- * Design a decode failure a *correction* can undo, not merely one a *prompt* can cause.
+ * - **Neither first answer failed to decode. The design that a larger model walked into, the small
+ *   one walked around.** Run 1 answered `risk: "low"` and put the risk sentence in `summary`, saying
+ *   why in the answer itself: *"(The answer schema constrains the risk field to the enum
+ *   low/medium/high, so the full sentence lives here.)"*. Run 2 — after the rule was sharpened to
+ *   state the house **form** of a grade (`low — reason`) and to say what `summary` is for — answered
+ *   `risk: "low"` and a one-clause summary, dropping the reason altogether.
+ * - **So the finding is about Kojo, not about the model: a contract rendered into the prompt beats a
+ *   rule written in prose, and it beats it twice, against two strengths of rule.** That is the
+ *   reserve case `riskNote.ts` predicted before any money was spent. It also says something useful
+ *   about the bound this build argued over: with the schema in front of a model, a decode failure is
+ *   *rare*, which is why one correction is a defensible number and why raising it would buy nothing.
+ * - **What the two runs did buy, read off the copied trace rather than off a transcript.** Both runs
+ *   went the whole way: `draft`(agent, succeeded, `envelope: Drafted`, `model: fable`, a real
+ *   session id, `diffMatchesClaims` ran and passed) → `commit` → `verify` → gate `approve` asked with
+ *   *"test, lint and build all came back clean"* → answered `approve` by `tester` in a second process
+ *   → `merge` → run `succeeded`. Every acquisition carried exactly `KOJO_ATTEMPT`, `KOJO_PHASE_ID`
+ *   and `KOJO_RUN_ID`, and no marker of a credential appears anywhere in the database. A real small
+ *   model drove the stamped factory end to end and landed on the trunk.
+ * - **`corrections: 1` is still unbought**, and it is now the last assertion in the test rather than
+ *   a middle one, so the next paid run banks everything else before it can fail there.
+ *
+ * **What would buy it, for whoever holds the next authorisation.** Not a stronger prose rule — two
+ * runs say that loses. The fault has to be one the *contract cannot show the model*, which means the
+ * next design should be measured against `contractFor`'s output first: find a refusal the rendered
+ * schema does not carry, and the model has no way to comply in advance. Design a decode failure a
+ * *correction* can undo, not merely one a *prompt* can cause — and remember the correction text that
+ * would meet it is now written.
  *
  * **And one defect of this file's own, found by paying for it: `kojo.db` alone is not the trace.**
  * `KOJO_REAL_AGENT_EVIDENCE=<directory>` copies the trace out on every path, including a failed
@@ -119,7 +148,9 @@ import { phaseOf, runIdOf, tokenOf, traceOf } from "../../support/traceOf.ts";
  * copied one file, and the database is in WAL mode: the copy opened afterwards reported *no tables at
  * all* while the rows sat in the `kojo.db-wal` that went with the temporary directory. It copies the
  * whole set now — which is why the `corrections: 1` row above is evidenced by the correction *in the
- * transcript* rather than by the trace it should also have been read from.
+ * transcript* rather than by the trace it should also have been read from. **Ticket 51 used the fixed
+ * hook and it works**: both 2026-08-14 runs were read back out of the copied `kojo.db` afterwards —
+ * phases, gate, acquisitions and the credential scan — with the temporary repository long gone.
  *
  * Everything about the invoker that a script can settle is settled for free in
  * `tests/integration/contexts/agent/adapters/SandcastleAgentInvoker.test.ts` — the identity in the
@@ -152,8 +183,14 @@ const enabled = process.env.KOJO_REAL_AGENT === "1";
  */
 const spending = { KOJO_AGENT_SPEND: "allow" } as const;
 
-/** The model every real call uses. An alias rather than a pinned id, so it survives a rotation. */
-const model = "sonnet";
+/**
+ * The model every real call uses. An alias rather than a pinned id, so it survives a rotation.
+ *
+ * **`fable`, the small model of its generation** — the owner's instruction when ticket 51's spend was
+ * authorised, and what the run recorded in the header ran on (`claude --model fable`). Every earlier
+ * call in the ledger below was `sonnet` or larger.
+ */
+const model = "fable";
 
 /** A whole run is minutes, not seconds. Vitest's integration default is thirty seconds. */
 const budget = 15 * 60 * 1000;
@@ -234,26 +271,28 @@ describe.skipIf(!enabled)("a real agent, invoked for real", () => {
    * **Criteria 1, 2, 3, 5 and 6, in one run of the factory `kojo init` stamped.**
    *
    * Sandboxing is off — `--sandbox none`, chosen at `kojo init` — so the agent runs on this machine,
-   * in the worktree the scope cut. Its first answer puts a sentence in a field that takes three words
-   * and does not decode; the correction loop sends the decoder's own complaint back into the same
-   * session and the second answer does. The factory's own test, lint and build then run over what it
-   * wrote, through the `Workspace` port. The run suspends at its gate, a second process answers it,
-   * and the trace it leaves is read back and scanned for anything that looks like a credential.
+   * in the worktree the scope cut. The design intends its first answer to put prose in a field that
+   * takes three words, so that it does not decode and the correction loop sends the decoder's own
+   * complaint back into the same session. The factory's own test, lint and build then run over what
+   * it wrote, through the `Workspace` port. The run suspends at its gate, a second process answers
+   * it, and the trace it leaves is read back and scanned for anything that looks like a credential.
    *
    * **The failure is designed rather than asked for** — `tests/support/riskNote.ts` — and everything
    * about this run except the model's judgement is rehearsed for free in `correctionLoop.test.ts`,
    * including the half after the gate. That is what running this one test alone with `-t` is worth: a
    * run that fails on the fixture rather than on the model costs two calls and buys nothing.
    *
-   * **As it stands this test is known red, and the header says why**: the one time it was paid for, the
-   * model's repair moved the expected literal to the front of the sentence it had been told to write,
-   * which is still not the literal, and the phase exhausted its single correction. Every line below the
-   * first therefore describes what a *repaired* run records, and has never been read off one. Do not
-   * spend two more calls on it without first applying remedy 1 in the header — the correction text
-   * never says a literal field must equal one of the listed words exactly.
+   * **This test is known red, and it is red at its last two lines only.** Every assertion above them
+   * has now been seen green against a real small model — twice, on 2026-08-14, against `fable`: the
+   * agent phase, the decoded `Drafted`, the three commands, the gate asked and answered by a second
+   * process, the merge, the acquisitions and the credential scan. What has never been seen is
+   * `corrections: 1` with `resumed: true`, because neither paid answer failed to decode: the model
+   * read the rendered contract and obeyed it, and said so in its own summary. The header holds both
+   * runs and what would buy the row.
    *
-   * **Two calls, and never three.** The stamped `draft` phase declares `corrections: 1`, so the
-   * conversation is one cold turn plus at most one repair whatever the model does.
+   * **One call, or two.** The stamped `draft` phase declares `corrections: 1`, so the conversation is
+   * one cold turn plus at most one repair whatever the model does — and an answer that decodes cold
+   * costs exactly one.
    */
   it.live(
     "drives the stamped factory end to end, correcting a real answer that did not decode",
@@ -329,18 +368,7 @@ describe.skipIf(!enabled)("a real agent, invoked for real", () => {
              * that the loop stayed inside the bound the phase declared.
              */
             expect(draft?.verification?.envelope).toBe("Drafted");
-            /**
-             * **Criterion 3, and the reason this run is worth two calls.**
-             *
-             * `corrections: 1` on a phase that **succeeded** is the whole claim: the phase writes that
-             * number only when it spent a repair turn, and it succeeds only when the envelope finally
-             * decoded. A run that got it right first time reads 0; a run that never got it right does
-             * not succeed at all. Neither can produce this row.
-             */
-            expect(draft?.verification?.corrections).toBe(1);
             expect(draft?.verification?.correctable).toBe(true);
-            // The repair was one more message in the same conversation, not a cold start.
-            expect(draft?.agent?.resumed).toBe(true);
             // And the check the stamped factory grades its drafter with really ran.
             expect(draft?.verification?.ran).toContain("diffMatchesClaims");
             expect(draft?.verification?.failed).toEqual([]);
@@ -394,6 +422,25 @@ describe.skipIf(!enabled)("a real agent, invoked for real", () => {
             ]) {
               expect(text, `the trace holds ${forbidden}`).not.toContain(forbidden);
             }
+
+            /**
+             * **The one claim no run has produced yet, and it is deliberately the last line here.**
+             *
+             * `corrections: 1` on a phase that **succeeded** is the whole of it: the phase writes that
+             * number only when it spent a repair turn, and it succeeds only when the envelope finally
+             * decoded. A run that got it right first time reads 0; a run that never got it right does
+             * not succeed at all. Neither can produce this row, which is why nothing weaker is
+             * asserted and why the number is not read off a transcript.
+             *
+             * It sits **after** every other assertion on purpose, and the order is worth keeping. A
+             * call costs the owner money, and the three runs the header records all failed on this
+             * pair — with it in the middle, the two before them, everything about the gate record, the
+             * acquisitions and the credentials scan was bought and then never graded. Put the
+             * unbought claim last and a failing paid run still buys everything it can.
+             */
+            expect(draft?.verification?.corrections).toBe(1);
+            // The repair was one more message in the same conversation, not a cold start.
+            expect(draft?.agent?.resumed).toBe(true);
           }),
         { insist: riskNoteRule, alsoInEnvelope: riskField },
       ),

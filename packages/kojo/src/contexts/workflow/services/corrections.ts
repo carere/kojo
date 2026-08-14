@@ -13,7 +13,73 @@ const at = (path: ReadonlyArray<string>): string =>
 const listing = (lines: ReadonlyArray<string>): string =>
   lines.map((line) => `- ${line}`).join("\n");
 
-const fromDecodeIssue = (issue: DecodeIssue): string => `${at(issue.path)}: ${issue.message}`;
+/** What the decoder writes in front of the type it wanted. Everything after it is that type. */
+const expects = "Expected ";
+
+/** One JSON string token, escapes and all, anchored at the start of what is left to read. */
+const token = /^"(?:[^"\\]|\\.)*"/;
+
+/**
+ * The words a field accepts, when its type is a set of string literals and nothing else.
+ *
+ * Read back out of the message rather than off the schema, because the message is all a correction
+ * has: `DecodeIssue` is what survives being persisted and read back, and it carries the rendered
+ * type — `Expected "low" | "medium" | "high"` — and the path, never the AST.
+ *
+ * **Scanned rather than split.** `"a | b" | "c"` is a real pair of literals and splitting on the
+ * separator would report three nonsense words, so tokens are read one at a time and the whole
+ * message has to be tokens and separators from end to end. Anything else — `Expected string`,
+ * `Expected 1 | 2`, `Missing key` — returns nothing and is reported exactly as the decoder wrote it.
+ * Only quoted words are recognised: they are the ones that can be quoted back verbatim as the JSON
+ * the agent has to write, and they are the shape the fault was measured on (ticket 48).
+ */
+const literalsIn = (message: string): ReadonlyArray<string> => {
+  if (!message.startsWith(expects)) return [];
+  const words: Array<string> = [];
+  let rest = message.slice(expects.length);
+  for (;;) {
+    const [word] = token.exec(rest) ?? [];
+    if (word === undefined) return [];
+    words.push(word);
+    rest = rest.slice(word.length);
+    if (rest === "") return words;
+    if (!rest.startsWith(" | ")) return [];
+    rest = rest.slice(" | ".length);
+  }
+};
+
+/** The listed words as an English list, so the sentence around them reads as one. */
+const anyOf = (words: ReadonlyArray<string>): string =>
+  words.length === 1
+    ? (words[0] ?? "")
+    : `${words.slice(0, -1).join(", ")} or ${words[words.length - 1] ?? ""}`;
+
+/**
+ * **What "one of these words" means, spelled out — the one thing a rendered type never says.**
+ *
+ * Ticket 48 paid for this sentence. A real model was told `risk: Expected "low" | "medium" | "high"`
+ * by the lines above, and was also standing under a factory rule that asked for a sentence. Its
+ * repair was `"low — this is a one-line text addition to notes/hello.txt …"`: the right word, with
+ * the sentence stapled to it. It missed valid by exactly the gap this fills, and it missed it while
+ * *obeying* the correction — the type was reported and the rule that a literal is the **whole**
+ * value was not, so the model satisfied both instructions the only way that looked open to it.
+ *
+ * So the clause says three things a type cannot: the value is exactly one of these words, nothing
+ * may come before or after it, and the prose that does not fit has nowhere to go in this field. The
+ * last one matters most, because a repair that has nowhere to put the sentence writes it here again.
+ */
+const mustEqualOne = (words: ReadonlyArray<string>): string =>
+  [
+    "  The whole value must be exactly one of those words, with nothing before it and nothing",
+    "  after it — no dash, no sentence, no explanation wrapped around it. Write it as exactly",
+    `  ${anyOf(words)}; anything you have to say beyond that has to go elsewhere.`,
+  ].join("\n");
+
+const fromDecodeIssue = (issue: DecodeIssue): string => {
+  const words = literalsIn(issue.message);
+  const reported = `${at(issue.path)}: ${issue.message}`;
+  return words.length === 0 ? reported : `${reported}\n${mustEqualOne(words)}`;
+};
 
 const fromClaimFault = (fault: ClaimFault): string =>
   `${at(fault.claim)} — "${fault.subject}": ${fault.detail}`;
@@ -126,12 +192,19 @@ const refusable = ["EnvelopeParseError", "CheckViolation"] as const;
  * 1. The number a phase passes here is a claim about *how badly its own prompt and envelope might
  *    disagree*, not only about how careless a model might be. An author who finds one repair is
  *    never enough should suspect the disagreement before raising the bound.
- * 2. **The correction text itself is the untried lever, and it is a Kojo fault rather than a fixture
- *    one.** `forParseError` reports the expected *type* and never says the value must **equal** one
- *    of the listed words with nothing before or after it. Against a model already told to write a
- *    sentence, that gap is what the prefix answer walked into. A correction that closed it would
- *    very likely have decoded. That is a hypothesis, not a measurement — it is what the next real
- *    call should buy, ahead of any change to the bound.
+ * 2. **The correction text itself was the untried lever, and it was a Kojo fault rather than a
+ *    fixture one.** `forParseError` reported the expected *type* and never said the value must
+ *    **equal** one of the listed words with nothing before or after it. Against a model already told
+ *    to write a sentence, that gap is what the prefix answer walked into. It is closed now — see
+ *    `mustEqualOne` above, which is what a literal field's refusal now carries.
+ *
+ * **What closing it has and has not been measured against.** It is graded by unit tests built from
+ * real `SchemaError` trees, and `correctionLoop.test.ts` drives the whole stamped factory until the
+ * repair prompt is handed to an agent process on a resumed turn, with the new clause in it. What no
+ * run has produced is a *model* reading it: ticket 51 spent two calls on a small model and neither
+ * first answer failed to decode at all — the rendered contract beat the factory's prose rule, twice.
+ * So the sentence is proven to reach an agent and is not yet proven to repair one, and the honest
+ * reading of that is in `realAgent.test.ts`'s header.
  */
 export const withCorrections = <A, E, R>(
   attempt: (

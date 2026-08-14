@@ -11,22 +11,28 @@ import { kojo, type Ran, throwawayRepo } from "../../support/throwawayRepo.ts";
 import { phaseOf, runIdOf, tokenOf, traceOf } from "../../support/traceOf.ts";
 
 /**
- * **The rehearsal for ticket 48, and the boundary it cannot cross.**
+ * **The rehearsal for tickets 48 and 51, and the boundary it cannot cross.**
  *
- * Ticket 48 buys one thing with real money: a real model's answer failing to decode, and the repair
- * that fixes it. Three calls are authorised and a corrected run costs two, so everything about that
- * run which a script can settle is settled here first — the envelope, the prompt, the check, the
- * phase record, the trace, and the correction the loop builds — and the real calls are spent only on
- * the model's judgement. See `tests/support/riskNote.ts` for the design and
- * `tests/integration/cli/realAgent.test.ts` for what the money bought.
+ * Real money buys one thing here: a real model's answer failing to decode, and the repair that fixes
+ * it. So everything about that run which a script can settle is settled first — the envelope, the
+ * prompt, the check, the phase record, the trace, the correction the loop builds **and its delivery
+ * into a second turn** — and the calls are spent only on the model's judgement. See
+ * `tests/support/riskNote.ts` for the design and `tests/integration/cli/realAgent.test.ts` for what
+ * the money bought.
  *
- * **The boundary is real and it is the reason the ticket exists.** A repair re-enters the captured
+ * **Where the boundary really runs, corrected by ticket 51.** A repair re-enters the captured
  * provider session, and Sandcastle checks that session exists before it spawns anything: on a `none`
- * sandbox `assertResumeSessionExists` calls `findByIdOnHost` and throws
- * `resumeSession "…" not found under …` when no transcript is there. A scripted `claude` writes no
- * transcript, so its repair dies at that precheck — **the `corrections` counter can be moved past it
- * by a real agent call and by nothing else.** The second test below pins that precheck as the exact
- * place a stand-in stops, so the claim is executable rather than a paragraph in a ticket.
+ * sandbox `assertResumeSessionExists` calls `findByIdOnHost`, which looks for `<id>.jsonl` under
+ * `$HOME/.claude/projects` of the asking process, and throws `resumeSession "…" not found under …`
+ * when nothing is there. Ticket 48 read that as *a stand-in can never move the `corrections`
+ * counter*, and the second test below still pins it — for an agent that leaves no transcript, which
+ * is every scripted agent that is not handed one.
+ *
+ * It is a precheck for a **file**, though, not for a conversation. The third test gives the child a
+ * `HOME` of its own and lets the script write that one file into it, and the repair is then really
+ * spawned and really handed Kojo's correction on stdin. So the line is one step further along than
+ * ticket 48 thought: a script can be *given* a correction, and what it can never do is **read** one
+ * — its repair is decided before the run starts. That last step is the only thing real money buys.
  */
 
 /**
@@ -40,6 +46,22 @@ const quote = (word: string): string => `'${word.replaceAll("'", "'\\''")}'`;
 /** What the drafter claims, and — for `files` — what the script below really changes. */
 const summary = "add a goodbye line to the notes";
 const changed = "notes/hello.txt";
+
+/**
+ * The answer the design expects, and the shape the money was lost on.
+ *
+ * A sentence in the field that takes three words. It is the paid repair's shape as well as the paid
+ * cold turn's — ticket 48's model answered the right word with an explanation stapled to it — so
+ * every rehearsal below that wants a refusal uses this one string.
+ */
+const sentenceInRisk = "low — it only appends one line to a notes file";
+
+/** One `result` line, carrying a whole `Drafted` whose `risk` is whatever the turn decided. */
+const answers = (risk: string): string =>
+  JSON.stringify({
+    type: "result",
+    result: JSON.stringify({ _tag: "Drafted", summary, files: [changed], risk }),
+  });
 
 /**
  * A `claude` that is a shell script, answering with the envelope its `risk` argument decides.
@@ -58,7 +80,21 @@ const changed = "notes/hello.txt";
  * the envelope: a prompt on stdout would be narrowed away and the JSON Schema inside it would come
  * back as the answer.
  */
-const fakeClaude = (options: { readonly log: string; readonly risk: string }): string =>
+const fakeClaude = (options: {
+  readonly log: string;
+  readonly risk: string;
+  /**
+   * What a **resumed** turn answers, and the transcript that lets one happen at all.
+   *
+   * Absent, the script answers the same thing every time and a repair never gets as far as a spawn
+   * — which is the boundary the second test pins. Present, the script writes `transcript` on the
+   * cold turn, so Sandcastle's resume precheck finds a session under the child's own `HOME` and the
+   * correction is really handed to a process on stdin. What that buys is the *delivery* of the
+   * correction, never a model's reading of it: the file is one line of JSON and nothing re-reads
+   * the conversation, so the repair's answer is the script's, decided in advance.
+   */
+  readonly resumed?: { readonly risk: string; readonly transcript: string } | undefined;
+}): string =>
   [
     "#!/bin/sh",
     // Drain stdin. A provider that leaves it unread gives the writer a broken pipe.
@@ -68,19 +104,24 @@ const fakeClaude = (options: { readonly log: string; readonly risk: string }): s
     // The work the envelope claims, because `diffMatchesClaims` goes and looks.
     `printf 'goodbye\\n' >> ${quote(changed)}`,
     `printf '%s\\n' ${quote(JSON.stringify({ type: "system", subtype: "init", session_id: "scripted-cold" }))}`,
-    `printf '%s\\n' ${quote(
-      JSON.stringify({
-        type: "result",
-        result: JSON.stringify({
-          _tag: "Drafted",
-          summary,
-          files: [changed],
-          risk: options.risk,
-        }),
-      }),
-    )}`,
+    ...(options.resumed === undefined
+      ? [`printf '%s\\n' ${quote(answers(options.risk))}`]
+      : [
+          // `--resume <id>` is what the stock Claude Code provider puts on the command line for a
+          // second turn, so the argument list is what tells a cold call from a repair — the same
+          // signal a real `claude` reads.
+          `mkdir -p ${quote(pathOf(options.resumed.transcript))}`,
+          `printf '%s\\n' ${quote(JSON.stringify({ sessionId: "scripted-cold" }))} > ${quote(options.resumed.transcript)}`,
+          'case " $* " in',
+          `  *" --resume "*) printf '%s\\n' ${quote(answers(options.resumed.risk))} ;;`,
+          `  *) printf '%s\\n' ${quote(answers(options.risk))} ;;`,
+          "esac",
+        ]),
     "",
   ].join("\n");
+
+/** The directory a path is in, for the `mkdir -p` above. */
+const pathOf = (file: string): string => file.slice(0, file.lastIndexOf("/"));
 
 interface Rehearsal {
   readonly root: string;
@@ -96,6 +137,15 @@ interface Rehearsal {
    * to assume. Ticket 49.
    */
   readonly spend: string;
+  /**
+   * A home of the child's own, so no rehearsal reads or writes the operator's `~/.claude`.
+   *
+   * Sandcastle resolves a `resumeSession` under `$HOME/.claude/projects` of the process that asks,
+   * so this is both halves of one decision: a rehearsal that wants a repair delivered writes a
+   * transcript in here, and a rehearsal that does not must not be able to find one the operator's
+   * own machine happens to hold.
+   */
+  readonly home: string;
   /** Every prompt the scripted agent was handed, in order. */
   readonly prompts: Effect.Effect<ReadonlyArray<string>, never, FileSystem.FileSystem>;
 }
@@ -111,7 +161,12 @@ interface Rehearsal {
  * scratch there could manufacture the very fault this tier exists to find.
  */
 const rehearsal = <A, E>(
-  risk: string,
+  answer: {
+    /** What the cold turn puts in the narrow field. */
+    readonly risk: string;
+    /** What a resumed turn puts there, when this rehearsal wants the repair delivered at all. */
+    readonly repairsWith?: string | undefined;
+  },
   use: (fixture: Rehearsal) => Effect.Effect<A, E, FileSystem.FileSystem | Path.Path>,
 ) =>
   Effect.gen(function* () {
@@ -129,7 +184,21 @@ const rehearsal = <A, E>(
       .pipe(Effect.orDie);
     const log = path.join(outside, "prompts.log");
     const binary = path.join(outside, "claude");
-    yield* fileSystem.writeFileString(binary, fakeClaude({ log, risk })).pipe(Effect.orDie);
+    const home = path.join(outside, "home");
+    const transcript = path.join(home, ".claude", "projects", "scripted", "scripted-cold.jsonl");
+    yield* fileSystem.makeDirectory(home, { recursive: true }).pipe(Effect.orDie);
+    yield* fileSystem
+      .writeFileString(
+        binary,
+        fakeClaude({
+          log,
+          risk: answer.risk,
+          ...(answer.repairsWith === undefined
+            ? {}
+            : { resumed: { risk: answer.repairsWith, transcript } }),
+        }),
+      )
+      .pipe(Effect.orDie);
     yield* Effect.sync(() => {
       execFileSync("chmod", ["+x", binary]);
     });
@@ -139,6 +208,7 @@ const rehearsal = <A, E>(
       // `/usr/bin:/bin` still carries `git` and `sh`, which the sandbox scope needs.
       path: `${outside}:/usr/bin:/bin:/usr/sbin:/sbin`,
       spend: `stand-in:${binary}`,
+      home,
       prompts: Effect.gen(function* () {
         const text = yield* fileSystem.readFileString(log).pipe(Effect.orElseSucceed(() => ""));
         return text.split("PROMPT-END\n").filter((entry) => entry.trim() !== "");
@@ -168,12 +238,13 @@ describe("the correction loop, rehearsed against a scripted agent", () => {
   it.live(
     "drives the stamped factory to its gate when the scripted answer fits the envelope",
     () =>
-      rehearsal(riskWords[0], (fixture) =>
+      rehearsal({ risk: riskWords[0] }, (fixture) =>
         Effect.gen(function* () {
           const started = succeeded(
             yield* kojo(fixture.root, ["run", "review", riskSubject], {
               path: fixture.path,
               spend: fixture.spend,
+              home: fixture.home,
             }),
           );
           const runId = runIdOf(started);
@@ -213,6 +284,7 @@ describe("the correction loop, rehearsed against a scripted agent", () => {
             yield* kojo(fixture.root, ["gate", "list"], {
               path: fixture.path,
               spend: fixture.spend,
+              home: fixture.home,
             }),
           );
           const answered = succeeded(
@@ -227,7 +299,7 @@ describe("the correction loop, rehearsed against a scripted agent", () => {
                 "--as",
                 "rehearsal",
               ],
-              { path: fixture.path, spend: fixture.spend },
+              { path: fixture.path, spend: fixture.spend, home: fixture.home },
             ),
           );
           expect(answered).toContain(`recorded approve on run ${runId}`);
@@ -248,18 +320,24 @@ describe("the correction loop, rehearsed against a scripted agent", () => {
    * decoder refuses it, `EnvelopeParseError` carries the issue tree, and `withCorrections` turns that
    * into the next prompt and asks the invoker to send it into the same session.
    *
-   * And there it stops, because the session belongs to a script that wrote no transcript. The failure
-   * is Sandcastle's resume precheck, by name. That is the whole reason ticket 48 needed real money:
-   * **no scripted agent can make `corrections` mean anything past this line.**
+   * And there it stops, because the session belongs to a script that wrote no transcript — under the
+   * child's own `HOME`, so the operator's real `~/.claude/projects` cannot supply one by accident.
+   * The failure is Sandcastle's resume precheck, by name.
+   *
+   * **What this pins is that a stand-in must be *given* a session before a repair can be delivered
+   * to it**, which is why ticket 48 could buy nothing here. The test below it is the variant that
+   * gives it one, and the two together say exactly what a script can and cannot stand in for: it can
+   * receive a correction, and it can never *read* one.
    */
   it.live(
     "spends its correction on a sentence in the narrow field, and stops at the resume precheck",
     () =>
-      rehearsal("low — it only appends one line to a notes file", (fixture) =>
+      rehearsal({ risk: sentenceInRisk }, (fixture) =>
         Effect.gen(function* () {
           const ran = yield* kojo(fixture.root, ["run", "review", riskSubject], {
             path: fixture.path,
             spend: fixture.spend,
+            home: fixture.home,
           });
 
           expect(ran.status).not.toBe(0);
@@ -280,6 +358,107 @@ describe("the correction loop, rehearsed against a scripted agent", () => {
           expect(draft?.errorTag).toBe("AgentInvocationError");
           // Nothing after `draft` ran.
           expect(document.phases.map((record) => record.name)).toEqual(["draft"]);
+        }),
+      ),
+    budget,
+  );
+
+  /**
+   * **The rehearsal ticket 51 exists for: the correction Kojo now writes, delivered to an agent.**
+   *
+   * Ticket 48 paid two calls and lost them to one sentence Kojo never said — `correctionFor`
+   * reported the *type* of the narrow field and never said the whole value must **equal** one of the
+   * three words. Before that remedy is bought with more money, the thing it must do has to be seen
+   * happening for free: the repair prompt has to be **handed to a process**, with the new clause in
+   * it, and the run has to finish on the repaired answer with `corrections: 1` on the phase row.
+   *
+   * **What makes it possible, and the honest size of it.** The stand-in writes the one thing
+   * Sandcastle's resume precheck looks for — a `<session>.jsonl` under `$HOME/.claude/projects` —
+   * into the temporary home this fixture gives the child. The precheck then passes and the second
+   * turn really is spawned, with `--resume` on its command line and the correction on its stdin. So
+   * what is graded here is **delivery**: the prompt Kojo builds, the session it re-enters, the
+   * counter it writes, and the whole run around them. What no script can stand in for is the only
+   * thing left — a model *reading* the correction and answering differently because of it. The
+   * script's repair is decided in advance, and that is what `realAgent.test.ts` spends money on.
+   */
+  it.live(
+    "hands the repair prompt to the agent, with the rule a literal field is refused for",
+    () =>
+      rehearsal({ risk: sentenceInRisk, repairsWith: riskWords[0] }, (fixture) =>
+        Effect.gen(function* () {
+          const started = succeeded(
+            yield* kojo(fixture.root, ["run", "review", riskSubject], {
+              path: fixture.path,
+              spend: fixture.spend,
+              home: fixture.home,
+            }),
+          );
+          const runId = runIdOf(started);
+
+          expect(started).toMatch(/^draft\s+(\S+\s+)?agent\s+ok\s/m);
+          expect(started).toContain('suspended at gate "approve"');
+
+          const [cold = "", repair = ""] = yield* fixture.prompts;
+          // Two prompts, one conversation: the cold turn and the correction.
+          expect(yield* fixture.prompts).toHaveLength(2);
+
+          /**
+           * **The correction reached the agent, and it carries the sentence ticket 51 added.**
+           *
+           * The field, the words, and — the new half — that the value must be exactly one of them
+           * with nothing around it. Asserted on the text the *process* was handed rather than on
+           * `correctionFor`'s return value, because the gap between those two is where a correction
+           * can be built perfectly and sent nowhere.
+           */
+          expect(repair).toContain("was not a valid `Drafted`");
+          expect(repair).toContain('risk: Expected "low" | "medium" | "high"');
+          expect(repair).toContain("The whole value must be exactly one of those words");
+          expect(repair).toContain("no dash, no sentence, no explanation wrapped around it");
+          expect(repair).toContain('Write it as exactly\n  "low", "medium" or "high";');
+          // A repair is one more message, not a cold start: the identity and the contract that
+          // caused the disagreement are not re-sent.
+          expect(cold).toContain("A single bare word is not a risk note.");
+          expect(repair).not.toContain("A single bare word is not a risk note.");
+          expect(repair).not.toContain('"enum"');
+
+          const document = yield* traceOf(fixture.root, runId);
+          const draft = phaseOf(document, "draft");
+          expect(draft?.outcome).toBe("succeeded");
+          expect(draft?.verification?.envelope).toBe("Drafted");
+          // **The row the whole ticket is about**, moved by a delivered repair rather than by a
+          // model's judgement — which is what makes a paid run that reads the same row a claim
+          // about the model and about nothing else.
+          expect(draft?.verification?.corrections).toBe(1);
+          expect(draft?.verification?.correctable).toBe(true);
+          expect(draft?.agent?.resumed).toBe(true);
+          expect(draft?.verification?.failed).toEqual([]);
+
+          // And the repaired run goes on to land, exactly as the paid one is asked to.
+          const listing = succeeded(
+            yield* kojo(fixture.root, ["gate", "list"], {
+              path: fixture.path,
+              spend: fixture.spend,
+              home: fixture.home,
+            }),
+          );
+          const answered = succeeded(
+            yield* kojo(
+              fixture.root,
+              [
+                "gate",
+                "answer",
+                tokenOf(listing, runId),
+                "--choice",
+                "approve",
+                "--as",
+                "rehearsal",
+              ],
+              { path: fixture.path, spend: fixture.spend, home: fixture.home },
+            ),
+          );
+          expect(answered).toContain("run succeeded");
+          // The replay called no agent: still two prompts, both from the first process.
+          expect(yield* fixture.prompts).toHaveLength(2);
         }),
       ),
     budget,
@@ -312,7 +491,7 @@ describe("the designed decode failure", () => {
     _tag: "Drafted",
     summary,
     files: [changed],
-    risk: "low — it only appends one line to a notes file",
+    risk: sentenceInRisk,
   });
 
   it.effect("refuses a sentence in the narrow field, naming the field and its three words", () =>
@@ -336,6 +515,10 @@ describe("the designed decode failure", () => {
       expect(correction).toContain("was not a valid `Drafted`");
       expect(correction).toContain('risk: Expected "low" | "medium" | "high"');
       expect(correction).toContain("Answer again with the whole `Drafted`");
+      // And the sentence ticket 51 added, which is what the paid repair was never told: the answer
+      // above misses valid by exactly this rule, and by nothing else in the envelope.
+      expect(correction).toContain("The whole value must be exactly one of those words");
+      expect(correction).toContain('Write it as exactly\n  "low", "medium" or "high";');
 
       // And the field the correction names is the field the target repository really holds.
       expect(riskField).toContain("risk: Schema.Literals(");

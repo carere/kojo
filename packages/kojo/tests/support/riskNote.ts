@@ -60,9 +60,40 @@
  * reading — that the clause *"a sentence that ends up in `summary` instead is never read"* leaves the
  * model nowhere to obey both — is still a live diagnosis, but it is no longer the first one to test:
  * `correctionFor` never told the model that `risk` must **equal** one of the three words with nothing
- * before or after it, and the answer it got back differs from a valid one by exactly that. Everything
- * here is therefore left unchanged — a design nobody has measured must not replace one somebody has —
- * and the ranked remedies are in `realAgent.test.ts`'s header, for whoever gets the next two calls.
+ * before or after it, and the answer it got back differs from a valid one by exactly that. The remedy
+ * is built, and `realAgent.test.ts`'s header carries what it then bought.
+ *
+ * **What the design did against a *small* model, on 2026-08-14 (ticket 51, `fable`, one call).** It
+ * did not provoke the fault at all. The cold answer decoded first time, and it decoded because the
+ * model **saw the conflict and resolved it in the schema's favour, out loud, in the answer**:
+ *
+ *     {"_tag":"Drafted",
+ *      "summary":"Added a second line reading \"goodbye\" to notes/hello.txt … Risk note: this
+ *                 change carries low risk — it only appends one plain-text line, and the only path
+ *                 to look at is notes/hello.txt. (The answer schema constrains the risk field to
+ *                 the enum low/medium/high, so the full sentence lives here.)",
+ *      "files":["notes/hello.txt"], "risk":"low"}
+ *
+ * That is the reserve case this file predicted in as many words — *a schema in the prompt beats a
+ * rule in the prose* — now measured rather than imagined, and it is a finding about **Kojo** rather
+ * than about the model: rendering the contract into the prompt is what makes a decode failure rare,
+ * which is also why one correction is a defensible bound.
+ *
+ * **So the disagreement was sharpened, and only in the two places the measurement pointed at.** The
+ * model escaped through `summary`, so the rule now says what `summary` is for; and the rule now
+ * states the house **form** of a grade — `low — reason`, one string — instead of asking for "a
+ * sentence", because a form that *begins* with a valid word is the shape a model reads as satisfying
+ * both. Nothing here tells a model to be wrong, nothing mentions the correction loop, and the
+ * contract is still rendered last and still says `enum`. What changed is only that the repository's
+ * own convention is now unambiguous, which is the ordinary way a factory's prompt and its envelope
+ * come to disagree.
+ *
+ * **The sharpened version was measured too, and it lost as well.** The second call answered
+ * `risk: "low"` with a one-clause `summary`, dropping the reason the house form asks for rather than
+ * writing it anywhere. So this design has now failed to provoke a decode failure against a small
+ * model twice, at two strengths of rule, and the next attempt should not be a third strength: **the
+ * refusal has to be one the rendered contract cannot show the model in advance.** Measure the next
+ * design against `contractFor`'s output before spending anything on it.
  */
 
 /** The three words the envelope grades risk with. The single source both halves are built from. */
@@ -102,6 +133,17 @@ export const riskNoteRule = [
   "",
   "A single bare word is not a risk note. A reviewer who reads `low` on its own learns nothing about",
   "what to look at, so write the sentence.",
+  "",
+  "### The form a risk grade is written in here",
+  "",
+  "A grade in this repository is the grade, an em dash, and the reason for it, in one string:",
+  "",
+  "    low — only appends a line to a notes file",
+  "",
+  "That is what the changelog quotes and what review reads, so `risk` is written that way.",
+  "",
+  "`summary` is the title of the change and nothing else — one clause, a dozen words at most. It is",
+  "not where the risk note goes, and a risk note put there is lost.",
 ].join("\n");
 
 /**
@@ -113,4 +155,5 @@ export const riskNoteRule = [
  * argue with and the only thing that can refuse the answer is the field this design is about.
  */
 export const riskSubject =
-  "Add a second line saying goodbye to notes/hello.txt, and write the risk note as a sentence";
+  "Add a second line saying goodbye to notes/hello.txt, and write the risk grade in the form this " +
+  "repository uses — the grade, an em dash, and the reason";

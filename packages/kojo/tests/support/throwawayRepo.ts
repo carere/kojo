@@ -74,16 +74,29 @@ export const kojo = (
      * twice did not.
      */
     readonly spend?: string | undefined;
+    /**
+     * The child's `HOME`, when the caller needs the agent's session transcripts somewhere else.
+     *
+     * Sandcastle looks a `resumeSession` up under `$HOME/.claude/projects` **of the process that
+     * asks** — `findClaudeSessionOnHost` reads `process.env.HOME` — and refuses to spawn a resumed
+     * turn when no transcript is there. So a rehearsal that wants its scripted agent to be handed a
+     * correction gives the child a home of its own and lets the script write the transcript into it.
+     * Pointing that at the operator's real `~/.claude/projects` instead would put fabricated
+     * transcripts in the directory this build counts its real spend from, so it is a temporary
+     * directory or nothing.
+     */
+    readonly home?: string | undefined;
   },
 ): Effect.Effect<Ran> =>
   Effect.sync(() => {
     const environment =
-      options?.path === undefined && options?.spend === undefined
+      options?.path === undefined && options?.spend === undefined && options?.home === undefined
         ? undefined
         : ({
             ...process.env,
             ...(options?.path === undefined ? {} : { PATH: options.path }),
             ...(options?.spend === undefined ? {} : { KOJO_AGENT_SPEND: options.spend }),
+            ...(options?.home === undefined ? {} : { HOME: options.home }),
           } as NodeJS.ProcessEnv);
     const finished = spawnSync(bun(), [cli, ...args], {
       cwd: root,
