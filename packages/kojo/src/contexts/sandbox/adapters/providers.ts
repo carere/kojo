@@ -46,6 +46,16 @@ export const daytona = (options?: DaytonaOptions): SandboxProvider =>
  * Named for what Sandcastle calls it rather than for its kind, because the two are not the same
  * fact: the kind is `"none"`, and a reader who sees only that would conclude the run cannot resume
  * a session. It can. See the matrix in `models/SandboxProvider.ts`.
+ *
+ * **There is no boundary here, and nothing in Kojo can put one back.** The agent is a host process
+ * running as the operator's own user. Its working directory is the run's worktree, at
+ * `<repo>/.sandcastle/worktrees/<name>`, so the repository it was cut from — the unmasked factory,
+ * the trace database, the roster, every other run's worktree — is three directories up and readable.
+ * `SandboxRequest.hidden` still applies (it is the tree the agent is *pointed at*), and under this
+ * provider all it buys is that `cat .kojo/checks.ts` from the working directory fails. **Only
+ * `withPermissions` and `factoryOwnPaths` actually protect a `none` run**, after the fact, by
+ * fingerprinting the tree and rolling back what an agent had no business changing. Choose this
+ * provider for a repository you already trust the agent inside of.
  */
 export const noSandbox = (options?: NoSandboxOptions): SandboxProvider =>
   tagged("none", noSandboxProvider(options));

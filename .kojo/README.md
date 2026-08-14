@@ -96,6 +96,18 @@ instead of in a container. For this repository that is the correct call rather t
   would be a second copy of both to keep in step by hand, and the first thing to drift would be the
   thing the checks run on.
 
+**And there is no boundary around the agent under `noSandbox()`.** The agent is a host process
+running as you. Its working directory is the run's own worktree, under `.sandcastle/worktrees/`, so
+this repository — the factory it is being graded by, the trace database, every other run's worktree —
+is three directories up and readable. Kojo's default is to take `factoryOwnPaths` out of the tree the
+agent works in, and **this factory switches that off**: see `keepsItsOwnFactory` in
+`workflows/lane/common.ts` for the two measurements behind it, the first of which is that `bun knip`
+— `commands.dead`, run by every lane — exits 1 in a worktree whose `.kojo/` is hidden. So what
+protects this factory's own grader is the second line of defence and only that: `withPermissions`
+fingerprints the working tree around every agent call, and a write under `barred` is rolled back and
+the run failed. A factory that runs `docker()` should delete `keepsItsOwnFactory` and take the
+default.
+
 Turning this into a containerised factory is one expression in `workflows/factory.ts`: import `docker`
 beside `noSandbox` and return `docker({ imageName: "kojo-factory:latest" })` — **and one move in
 `workflows/lane/common.ts`**, because `restore` uses the `host.onWorktreeReady` hook and Sandcastle

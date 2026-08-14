@@ -22,7 +22,15 @@ import { sandboxed } from "kojo/contexts/workflow/services/sandboxed";
 import { built as builtChecks } from "../../checks.ts";
 import { commands } from "../../commands.ts";
 import { Built } from "../../envelopes.ts";
-import { agents, conventional, graded, type Judged, mayWriteCode, restore } from "./common.ts";
+import {
+  agents,
+  conventional,
+  graded,
+  type Judged,
+  keepsItsOwnFactory,
+  mayWriteCode,
+  restore,
+} from "./common.ts";
 
 /**
  * Tidy it, lint it, look for what it orphaned, hand it back.
@@ -37,7 +45,13 @@ export const chore = (options: {
   readonly provider: SandboxProvider;
 }) =>
   sandboxed(
-    { name: "chore", branch: options.branch, provider: options.provider, hooks: restore },
+    {
+      name: "chore",
+      branch: options.branch,
+      provider: options.provider,
+      hooks: restore,
+      hidden: keepsItsOwnFactory,
+    },
     Effect.gen(function* () {
       const tidied = (yield* withPermissions(
         mayWriteCode("tidier"),

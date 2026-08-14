@@ -30,6 +30,15 @@ export interface SandboxEvent {
   readonly branch: string;
   /** What crossed into the container. Read at acquisition; carried on the release for symmetry. */
   readonly environment: Record<string, string>;
+  /**
+   * What the scope asked to keep out of the worktree.
+   *
+   * Recorded and not acted on: there is no worktree here to take anything out of. What it grades is
+   * the decision — that `sandboxed` fills the list in from `factoryOwnPaths` when an author writes
+   * nothing, and that an author who writes `hidden: []` is obeyed. Both are answerable without a
+   * repository, and the removal itself is the integration tier's.
+   */
+  readonly hidden: ReadonlyArray<string>;
 }
 
 /**
@@ -105,6 +114,7 @@ export const layer = (
           name: request.name,
           branch: request.branch,
           environment: request.environment,
+          hidden: request.hidden,
         });
       };
 

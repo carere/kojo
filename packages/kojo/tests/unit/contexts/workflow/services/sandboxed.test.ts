@@ -17,6 +17,7 @@ import { WorktreeState } from "../../../../../src/contexts/sandbox/models/Worktr
 import { WorktreeUnusable } from "../../../../../src/contexts/sandbox/models/WorktreeUnusable.ts";
 import { Workspace } from "../../../../../src/contexts/sandbox/ports/Workspace.ts";
 import * as InMemoryTracer from "../../../../../src/contexts/trace/adapters/InMemoryTracer.ts";
+import { factoryOwnPaths } from "../../../../../src/contexts/workflow/models/PermissionPolicy.ts";
 import { code } from "../../../../../src/contexts/workflow/services/phase/code.ts";
 import { gate } from "../../../../../src/contexts/workflow/services/phase/gate.ts";
 import { sandboxed } from "../../../../../src/contexts/workflow/services/sandboxed.ts";
@@ -115,6 +116,18 @@ const nested = workflow(
     ),
 );
 
+/** A lane that says out loud that it wants its factory left in the tree. See `hidden`. */
+const unmasked = workflow(
+  {
+    name: "unmasked",
+    payload: { subject: Schema.String },
+    success: Schema.String,
+    error: failures,
+    idempotencyKey: (payload) => `unmasked/${payload.subject}`,
+  },
+  () => sandboxed({ name: "unmasked", branch, provider, hidden: [] }, readHealth),
+);
+
 /**
  * The mistake, written down so nobody has to make it twice.
  *
@@ -157,7 +170,7 @@ const layerFor = (
   programmed: InMemorySandboxSource.Programmed = seeded,
   answers: Record<string, ReadonlyArray<InMemoryGate.ProgrammedAnswer>> = {},
 ) =>
-  Layer.mergeAll(lane.layer, nested.layer, misplaced.layer).pipe(
+  Layer.mergeAll(lane.layer, nested.layer, misplaced.layer, unmasked.layer).pipe(
     Layer.provideMerge(
       Layer.mergeAll(
         InMemoryTracer.layer,
@@ -315,6 +328,30 @@ describe("what crosses into the container", () => {
       // A rebuild is a different acquisition, so its correlation is different too. Anything else
       // would join two containers' output onto one row.
       expect(rows[0]?.environment.KOJO_PHASE_ID).not.toBe(rows[1]?.environment.KOJO_PHASE_ID);
+    }).pipe(Effect.provide(layerFor())),
+  );
+});
+
+describe("what the factory's own files are asked to do", () => {
+  it.effect("takes them out of every scope an author said nothing about", () =>
+    Effect.gen(function* () {
+      yield* startLane("hidden-default");
+
+      // The first line of defence from architecture.md §8, edge 5, resolved where the two contexts
+      // meet: the roster, the workflows, the envelopes, the checks, the commands and the prompts.
+      // An author who writes nothing gets it, which is the whole point of it being a default.
+      expect((yield* observed)[0]?.hidden).toEqual([...factoryOwnPaths]);
+    }).pipe(Effect.provide(layerFor())),
+  );
+
+  it.effect("obeys a factory that says out loud it wants them left in", () =>
+    Effect.gen(function* () {
+      yield* started(unmasked.definition.execute({ subject: "kept" }, { discard: true }));
+
+      // `hidden: []` is the opt-out, and it has to be greppable rather than inferred: Kojo's own
+      // factory takes it, because `bun knip` — one of its five real commands — exits 1 in a worktree
+      // whose `.kojo/` is hidden. See `keepsItsOwnFactory` in `.kojo/workflows/lane/common.ts`.
+      expect((yield* observed)[0]?.hidden).toEqual([]);
     }).pipe(Effect.provide(layerFor())),
   );
 });
