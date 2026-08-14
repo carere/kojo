@@ -116,3 +116,12 @@ by their command rather than through `moon` for the reason above:
 | `test` | `vitest run --project unit` | 10 files, 76 tests passed |
 | `test-integration` | `vitest run --project integration` | 2 files, 13 tests passed |
 | — | `bun knip` | clean |
+
+### 2026-08-13 — the open criterion has an owner now
+
+The sixth criterion — *the roster and the workflow definitions are not mounted where an agent can
+reach them* — was left to tickets 16 and 17 and **neither took it**. It is now ticket
+[50](50-do-not-mount-the-factorys-own-paths.md), which also states the hard part: the sandbox
+worktree is a git worktree and `.kojo/` is in the repository, so "do not mount" is a decision about
+what the worktree contains rather than a mount flag. Nothing built here is weakened by that ticket —
+rollback stays as the second line.

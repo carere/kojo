@@ -169,3 +169,11 @@ graded, and the ticket should start from it rather than re-deriving it:
   `tests/integration/cli/stampedRun.test.ts`'s `draft` row pattern was widened to read both shapes.
 - `architecture.md` §8 gained edges 12 and 13.
 - No Moon task, no Vitest project, no dependency, and no shared root file was touched.
+
+### 2026-08-13 — the carried-forward criterion has an owner now
+
+Ticket 28 built the waterfall and **did not pick this up**. Checked at head: every fixture run in
+`src/console/fixtures.ts` holds one sandbox at a time (`run-merged`'s two are sequential — the
+rebuild a gate forced), so `waterfall.spec.ts` has never been shown two lanes at once. The three
+handover points above are now the specification of ticket
+[53](53-the-waterfall-must-draw-concurrent-lanes.md).

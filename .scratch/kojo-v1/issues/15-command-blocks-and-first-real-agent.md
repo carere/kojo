@@ -149,3 +149,11 @@ with none left in it.** That is the trade to put to the owner — not "the last 
   **skipped**, never a pass.
 - `stampedRun.test.ts` now runs the stamped `review` with an agent-free `PATH`. Without that, every
   CI run of that suite would spawn a real `claude`, forever, for a test about the loader.
+
+### 2026-08-13 — the open criterion has an owner now
+
+*A real envelope that fails to decode drives the correction loop and the retry succeeds* is the same
+fact as ticket 48's fourth criterion, and neither bought it. It is now ticket
+[51](51-a-repaired-envelope-must-decode.md), together with the remedy ticket 48's audit ranks first:
+`correctionFor` never says a literal field must **equal** one of the listed words. The budget
+objection is gone — the owner authorised the spend on a subscription with a small model.

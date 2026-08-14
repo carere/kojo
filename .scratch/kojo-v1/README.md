@@ -38,3 +38,8 @@ do not compose would invalidate everything built on top of them.
 - **37** was added after ticket 19 found a real fault running a lane on Docker: a sandbox rebuilt
   after a gate can come back with a workspace the container cannot resolve. It is not in the
   original build order because nobody predicted it — it took a real container to surface.
+- **50–53** were opened on 2026-08-13 by an audit of the closed tickets. Each one carries a
+  criterion a closed ticket left unchecked and no other ticket took: the sandbox mount (from 14), a
+  repaired envelope that decodes (from 15 and 48), a real `pi` session resume (from 18), and the
+  waterfall over concurrent lanes (from 35). A closed ticket with an open box is not done; it is
+  work with no owner.

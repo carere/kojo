@@ -201,3 +201,11 @@ than rewritten, so the audited commit stays intact.
   for the table. The two unauthorised ones are a dogfood and a demo walk on the evening of
   2026-08-11, on `claude-sonnet-4-6` and `claude-opus-4-8`. Ticket 48 restated the total as seven and
   has been corrected; the calls themselves belong to an earlier wave.
+
+### 2026-08-13 — the unbought criterion has an owner now
+
+*The repair returns an envelope that decodes, and the phase record carries `corrections: 1`* is
+ticket [51](51-a-repaired-envelope-must-decode.md), with remedy 1 above — `correctionFor` stating
+that a literal field must **equal** one of the listed words — as the thing to build before spending.
+The three-call budget no longer bounds it: the owner authorised the spend against a subscription, on
+a small model. Report the count anyway.

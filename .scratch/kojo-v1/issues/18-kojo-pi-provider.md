@@ -75,3 +75,10 @@
   reasons on stderr. The criterion above is left unticked on purpose: a skipped suite is not a
   pass, and this one is the only thing that can falsify `--session-dir`, the encoding, and the
   claim that a second call re-enters rather than reopens.
+
+### 2026-08-13 — the open criterion has an owner now
+
+*An integration test resumes a real session and proves the second call costs one message* is ticket
+[52](52-prove-a-real-pi-session-resumes.md). The test is written and has never run: it needs the `pi`
+binary on `PATH` and `ANTHROPIC_API_KEY`, and neither is present here. That is metered API spend, not
+subscription usage, which is why it is its own ticket rather than a line in ticket 51.
