@@ -180,13 +180,19 @@ Each rung was added after a specific failure, and none was there at the start.
    appearing inside the container. `docker container prune -f` reclaimed 0 B before the worst of the
    three runs, so it is not stale containers either.
 
-   **And it is not the container runtime at all — corrected on 2026-08-15.** The same timeout shape
-   reproduced on a two-core GitHub runner with plain Docker on Linux, twice, on a *different* test
-   each time, at 185 s against a 180 s limit. Neither Docker Desktop nor OrbStack is implicated: the
-   limit was calibrated against a ~40 s container build on a ten-core Mac, and a slower machine
-   overruns it on the first edge-11 recovery. Ticket 62 raises it to 480 s and says what would prove
-   that reading wrong. What follows is what was measured about the Mac, and it stands as a
-   measurement of the Mac:
+   **And it is not the container runtime, nor a slow machine — corrected twice on 2026-08-15.** The
+   same shape reproduced on a two-core GitHub runner with plain Docker, twice, on a *different* test
+   each time at ~185 s. That read as a limit calibrated on a fast Mac, so it was raised to 480 s —
+   and the run that then passed is what refuted it: **`lane.test.ts` finishes all eight tests in
+   53 s on that same runner.** A failing single test at 185 s is therefore not slow work. It is
+   `acquire` running the edge-11 recovery to its end — up to `containerLimit` (three) container
+   rebuilds — and losing, which the macOS failure names outright as
+   `WorkspaceUnreachable{containers: 3}`.
+
+   So macOS and Linux are **one fault at two rates**, not two faults, and the timeout was hiding the
+   cause on one of them. Ticket 62 carries what is still unmeasured: the cost of a single rebuild on
+   a runner, which is the only number that would let the timeout be chosen rather than held. What
+   follows is what was measured about the Mac, and it stands as a measurement of the Mac:
 
    **The engine here is OrbStack, not Docker Desktop** — `docker context ls` shows `orbstack *`,
    `docker info` reports `orbstack | 29.4.0 | OrbStack | overlayfs`, and `orb version` is 2.2.2.

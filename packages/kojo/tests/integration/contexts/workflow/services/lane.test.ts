@@ -112,20 +112,33 @@ const seedRepository = (repo: string): void => {
  * would turn a 3-in-4 recovery into a suite that times out and reads as a code regression. Kept as a
  * cost measure, not as a correctness one.
  *
- * **The timeout itself was calibrated on this machine, and CI found that out** — ticket 62. It was
- * 180 s, chosen against the ~40 s container build above. On a two-core GitHub runner the same three
- * tests took **185 s** and were killed, twice, on a *different* test each time: the signature of a
- * limit that is slightly too small rather than of a hang, which would be identical every run. Raised
- * to 480 s, which is the same arithmetic with a build several times slower — a number to be measured
- * again rather than a number anybody knows. If a run ever spends the whole 480 s, that is the
- * evidence this is a hang after all, and it is worth more than the eight minutes it costs.
+ * **The timeout is 480 s, and it is a holding number rather than a calibrated one** — ticket 62.
+ *
+ * It was 180 s, chosen against the ~40 s build above. Two CI runs on a two-core runner killed a
+ * *different* test each time at ~185 s, which read as a limit slightly too small. Raising it made
+ * the run pass, and the passing run is what refuted that reading:
+ *
+ *     ✓ lane.test.ts (8 tests) 53347ms
+ *
+ * **Fifty-three seconds for the whole file on the same runner.** So the machine is not slow, and a
+ * failing single test at 185 s is not slow work — it is `acquire` running the edge-11 recovery to
+ * its end, rebuilding up to `containerLimit` (three) containers and losing. The local failure names
+ * that exhaustion outright: `WorkspaceUnreachable{… "containers": 3 …}`.
+ *
+ * So the timeout does not describe how long these tests take. It describes how long a *failed
+ * recovery* is allowed to take before something kills it, and 480 s is generous enough not to cut
+ * one short. What would make it a real number is the cost of one rebuild on a runner, which nobody
+ * has measured — see ticket 62 rather than adjusting it here on a hunch.
  *
  * `/tmp` rather than a platform switch: on macOS it resolves to `/private/tmp`, on Linux it is
  * already the right answer, and anywhere it is missing `os.tmpdir()` is no worse than today.
  */
 /**
- * How long one lane test may take, in milliseconds. See the note above: it is a measurement of the
- * slowest machine this suite is known to run on, not a guess about the fastest.
+ * How long one lane test may take, in milliseconds.
+ *
+ * Not a measurement of the work — the whole file is 53 s when it goes well. It is a ceiling on a
+ * *failed* edge-11 recovery, which rebuilds up to three containers before it gives up. See the note
+ * above, and ticket 62 for the number that would let this one be chosen rather than held.
  */
 const laneTimeout = 480_000;
 

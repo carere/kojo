@@ -51,13 +51,38 @@ to cwd}` fault ticket 37 and edge 11 already carry, which ticket 50's lane measu
 in 4 with its change and 1 in 4 with the whole ticket stashed**. At 180 s it was being killed before
 it could say that; at 480 s it fails on its own assertion and names the cause.
 
-So `lane.test.ts` is flaky on both platforms for **two different reasons**, and only one of them is
-about time:
+### The measurement that refuted this ticket's own reading
 
-| where | what | evidence |
-|---|---|---|
-| Linux, 2-core runner | killed at ~185 s against a 180 s limit, a different test each run | two CI runs |
-| macOS, OrbStack | `WorkspaceUnreachable` exit 127, ~1 in 4, now visible rather than masked | ticket 50's four-run control, and the 209 s run above |
+The run at 480 s **passed**, and its log carries the number that matters:
+
+    ✓ tests/integration/contexts/workflow/services/lane.test.ts (8 tests) 53347ms
+
+**Fifty-three seconds for the whole file, on the same two-core runner** where a single test had
+burned 185 s and been killed. So the runner is not slow, and *"a limit slightly too small"* — the
+reading this ticket was opened under — is wrong. A healthy file is 53 s; a failing test alone is
+three and a half times that.
+
+**What the time goes into is `containerLimit`.** `sandboxed.ts` rebuilds the container when the
+workspace it gets back does not answer, up to **three** times, and the local failure names exactly
+that exhaustion: `WorkspaceUnreachable{… "containers": 3 …}`. So a failing test is not slow work; it
+is the edge-11 recovery running its full course and losing.
+
+**Which makes it one fault, not two.** The table that stood here said Linux and macOS were flaky for
+different reasons. They are the same reason at different rates: the workspace-unreachable fault
+fires, the scope rebuilds up to three containers, and the run either recovers or exhausts. macOS
+shows the exhaustion (`containers: 3`, ~1 in 4 by ticket 50's four-run control); the Linux runs were
+killed part-way through the same recovery, so they showed a timeout instead of a cause.
+
+That is the **third** diagnosis this cluster of failures has produced and the third correction —
+after ticket 60's `catchAll` and ticket 61's git version. The pattern is worth naming: every one was
+a theory about *why the machine differed*, and every one was refuted by measuring the thing itself.
+
+### What is still not known
+
+How long one rebuild costs **on a runner**. Locally it is ~40 s; the image is four lines of alpine,
+so it ought to be quick there too, and three quick rebuilds do not obviously add up to 185 s. Until
+that is measured, the timeout stays at 480 s — not because 480 is right, but because lowering it
+would be a fourth theory, and this ticket has already paid for three.
 
 **Blocked by:** none.
 
@@ -65,8 +90,11 @@ about time:
 
 - [ ] The container tier passes on a two-core runner three times in a row, which is what would make
       *slow* the settled answer rather than the current one
-- [ ] What those three tests actually spend their time on is measured on a runner — a container
-      build, a workspace probe, a rebuild — rather than inferred from the docstring's arithmetic
+- [x] What the time goes into is measured rather than inferred: the edge-11 recovery rebuilding up
+      to `containerLimit` = 3 containers, named by `WorkspaceUnreachable{containers: 3}`. A healthy
+      file is 53 s for eight tests on the same runner
+- [ ] How long **one rebuild** costs on a runner, which is the number that would justify any
+      timeout at all. Locally ~40 s; on CI unmeasured
 - [ ] If any run reaches 480 s, the timeout is not raised again: the hang is found
 - [ ] `lane.test.ts`'s note and build-record §5 agree about what this is, and neither still blames a
       container runtime the fault has now outlived
