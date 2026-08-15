@@ -10,7 +10,7 @@ In precedence order. Where they disagree, the higher entry wins.
 1. [docs/research/effect-v4-api-audit.md](../../docs/research/effect-v4-api-audit.md) — the only
    file backed by executed code. Every API detail comes from here.
 2. [docs/design/typescript-effect.md](../../docs/design/typescript-effect.md) — the project as built.
-3. [docs/design/architecture.md](../../docs/design/architecture.md) — the model, D1–D9, the ten edges.
+3. [docs/design/architecture.md](../../docs/design/architecture.md) — the model, D1–D9, and the edges (ten when this was written; fourteen now).
 4. [docs/design/console.md](../../docs/design/console.md) — the Console.
 5. [docs/adr/](../../docs/adr) — three recorded decisions.
 6. [docs/context/](../../docs/context/map.md) — the ubiquitous language. Ticket and code vocabulary

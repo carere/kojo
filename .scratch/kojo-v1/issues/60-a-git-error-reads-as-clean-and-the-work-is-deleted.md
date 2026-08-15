@@ -72,14 +72,55 @@ changed"*. This is that rule, broken, one layer down and in somebody else's code
 
 **Blocked by:** none.
 
-**Status:** ready-for-agent — latent, never observed to fire
+**Status:** done — and it was not latent after all
 
-- [ ] A worktree Kojo cannot read is never deleted by a Kojo release path, proven by a test that
-      makes `git status` fail — which is also what would turn this from latent into measured
-- [ ] `architecture.md` §8 gains the edge, whichever shape is chosen
-- [ ] `SandcastleSandboxSource.test.ts`'s precondition stays, because it is what turned an
-      unexplained boolean into a diagnosis
+- [x] A worktree Kojo cannot read is never deleted by a Kojo release path, proven by a test that
+      makes `git status` fail — and the fault **was** reproduced first, so this is measured rather
+      than latent
+- [x] `architecture.md` §8 gains it as **edge 14**, with the trade stated
+- [x] `SandcastleSandboxSource.test.ts`'s precondition stays
 
 ## Comments
 
 *(none yet)*
+
+## Comments
+
+### 2026-08-15 — it fires, and the first attempt to make it fire is why the ticket nearly closed
+
+**Reproduced, on this machine, through Kojo's own release path.** Two corruptions, and only the
+second loses anything:
+
+| what was broken | `git status` | after release |
+|---|---|---|
+| the worktree's `.git` registration | `fatal: not a git repository` (128) | worktree **and** work still there |
+| only the index, `chmod 000` | `fatal: … index file open failed: Permission denied` (128) | **both gone** |
+
+The first is why this ticket spent a day marked latent: breaking the registration breaks
+`git worktree remove --force` too, so Sandcastle's swallowed failure is followed by a swallowed
+deletion and nothing happens. It reads like the fault cannot fire. **It can — it just needs the
+parent repository to stay able to remove the tree while the tree itself cannot answer.** An
+unreadable index is enough, and that is an ordinary thing: a permission change, a full disk, a
+half-written index from a killed process.
+
+So the wording that stood here — *"it has never been seen to fire"* — was true only of the one
+experiment that had been tried.
+
+**The fix asks the same question one step earlier and reads the answer the opposite way.**
+`preserveIfUnreadable` in `adapters/boundary.ts` runs the very command Sandcastle's decision rests
+on. A worktree that answers is released exactly as before; one that cannot is **not closed at all**,
+and the release logs where it is and how to remove it by hand.
+
+The trade is deliberate and is now edge 14: a leaked worktree and a container that outlives its
+scope, against deleted work. This repository has made that trade before — `Permissions.output`
+treats a failed `git diff` as an error rather than as an empty change-set, because *an empty answer
+from a failed command reads as nothing changed*. This is the same sentence one layer down.
+
+**Proven, and by the mutation.** Making `preserveIfUnreadable` always answer `false` — the state the
+ticket found — reddens exactly one test, with the message it was given: `the worktree was deleted`.
+The second test in the pair is what keeps the ordinary path honest: a readable worktree is still
+removed on release, so the guard cannot be passing by never releasing anything.
+
+**Not reported upstream.** Shape 2 of this ticket suggested it; the fix here does not need it, and a
+two-line change in somebody else's `dist` is not something this repository can land. The edge records
+what Sandcastle does so the next reader does not have to rediscover it.

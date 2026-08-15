@@ -456,3 +456,16 @@ That is the run's status, not a record of completed work. See
     `lifetimeMillis`, and the human has not even read the question yet. Not a fault and not fixable
     from here — the cost is recorded rather than hidden, and an author who puts a gate beside a long
     phase should expect to pay for the container that is doing nothing.
+14. **A repository git cannot read is one Sandcastle deletes.** Its release decides whether to keep
+    the worktree by running `git status --porcelain` in it, wrapped in a `catchAll` that turns *any*
+    failure into "clean", and then removes a clean one with `git worktree remove --force`. Measured
+    rather than read off the source, because the distinction decides whether it matters: break the
+    worktree's *registration* and both commands fail, so nothing is lost — but break only what
+    `git status` needs, and an unreadable index is enough, and **the worktree and the uncommitted
+    work in it are gone with no error anywhere.** §4 says the branch is the durable state, and this
+    is the one path that deletes it. Kojo asks the same question one step earlier and reads a failure
+    the opposite way: `preserveIfUnreadable` in `adapters/boundary.ts` declines to call `close()` at
+    all, leaving a worktree and a container behind and saying so. That trade is deliberate — a leaked
+    container is recoverable and deleted work is not — and it is the same rule
+    `Permissions.output` already applies to a failed `git diff`, because an empty answer from a
+    failed command reads as *nothing changed*. Ticket 60.

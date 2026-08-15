@@ -1,4 +1,5 @@
-import { realpathSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, posix } from "node:path";
@@ -153,6 +154,28 @@ const handleOf = (provider: SandboxProvider, sandbox: Sandbox): AcquiredSandbox 
 });
 
 /**
+ * Whether this worktree must be kept because nothing can say what is in it — ticket 60.
+ *
+ * The **same** command Sandcastle's own decision rests on, asked one step earlier and read the
+ * opposite way. Sandcastle maps a failure to *clean* and deletes; this maps a failure to *do not
+ * touch it*. A worktree that answers — dirty or clean — is released normally and Sandcastle decides
+ * as it always did; only the unanswerable case changes hands.
+ *
+ * Synchronous, and deliberately: it stands inside a finalizer, where an async failure would be a
+ * second thing to get wrong at exactly the moment the first thing already went wrong. A directory
+ * that is gone is not unreadable — there is nothing there to lose — so that answers `false` and the
+ * release proceeds, which keeps the ordinary teardown ordinary.
+ */
+const preserveIfUnreadable = (worktreePath: string): boolean => {
+  if (!existsSync(worktreePath)) return false;
+  const asked = spawnSync("git", ["status", "--porcelain"], {
+    cwd: worktreePath,
+    encoding: "utf8",
+  });
+  return asked.status !== 0;
+};
+
+/**
  * Acquire a sandbox for the life of the surrounding scope, and release it when the scope closes.
  *
  * Scoped, and that is the whole tear-down-and-rebuild decision. A suspending run is interrupted by
@@ -166,6 +189,23 @@ const handleOf = (provider: SandboxProvider, sandbox: Sandbox): AcquiredSandbox 
  *
  * Acquisition is uninterruptible — `acquireRelease`'s default — so an interrupt arriving mid-create
  * cannot leave a container nobody has a handle to.
+ *
+ * **The release asks one question before it hands over to Sandcastle, and it is ticket 60's.**
+ * Sandcastle decides whether to keep the worktree by running `git status --porcelain` in it —
+ * wrapped in a `catchAll` that turns *any* failure into "clean" — and then removes a clean one with
+ * `git worktree remove --force`. So a repository git cannot read is a repository Sandcastle deletes,
+ * uncommitted work and all, and says nothing about.
+ *
+ * That was recorded as latent until it was made to fire. Measured, on this machine: break the
+ * worktree's own registration and both commands fail, so nothing is lost; but make `git status`
+ * alone fail — an unreadable index is enough — and **the worktree and the work in it are gone**.
+ *
+ * So Kojo asks first. `preserveIfUnreadable` runs the same command Sandcastle will and, when it
+ * cannot get an answer, does not call `close()` at all. The cost is a leaked worktree and a
+ * container that outlives its scope; the alternative is deleted work. `architecture.md` §8 edge 14
+ * carries the trade, and it is the one this repository has already made twice — `Permissions.output`
+ * treats a failed `git diff` as an error for the same reason, because an empty answer from a failed
+ * command reads as *nothing changed*.
  */
 export const acquireSandbox = (
   options: AcquireSandboxOptions,
@@ -182,16 +222,24 @@ export const acquireSandbox = (
         }),
     }),
     (sandbox) =>
-      Effect.tryPromise({
-        try: () => sandbox.close(),
-        catch: (cause) =>
-          new SandboxError({
-            operation: "close",
-            target: sandbox.branch,
-            reason: reasonOf(cause),
-            cause,
-          }),
-      }).pipe(Effect.orDie),
+      preserveIfUnreadable(sandbox.worktreePath)
+        ? Effect.logWarning(
+            `the worktree at ${sandbox.worktreePath} could not be read, so it was left in place ` +
+              "rather than released: Sandcastle removes a worktree it reads as clean, and a " +
+              "repository git cannot answer about reads as clean. Anything uncommitted there is " +
+              "still there. Remove it by hand once you have looked: " +
+              `git worktree remove --force ${sandbox.worktreePath}`,
+          )
+        : Effect.tryPromise({
+            try: () => sandbox.close(),
+            catch: (cause) =>
+              new SandboxError({
+                operation: "close",
+                target: sandbox.branch,
+                reason: reasonOf(cause),
+                cause,
+              }),
+          }).pipe(Effect.orDie),
   ).pipe(Effect.map((sandbox) => handleOf(options.provider, sandbox)));
 
 /**
