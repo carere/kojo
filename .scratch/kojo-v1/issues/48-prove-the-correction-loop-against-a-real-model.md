@@ -47,7 +47,7 @@ thing only they can buy.
       repair's prompt is shown in the report
 - [x] The repair **re-enters the same session**, proven from the captured transcript rather than
       inferred: two top-level prompts in one session file
-- [ ] The repair returns an envelope that decodes, and the phase record carries `corrections: 1`
+- [x] The repair returns an envelope that decodes, and the phase record carries `corrections: 1` — bought on 2026-08-15 by ticket 51; the note below is what it took
       — **not bought.** The repair rewrote the sentence with the expected literal moved to the
       front, which is still not the literal, and the phase exhausted its one correction.
       `corrections` did move to 1 (the correction was built and sent, in-session), but a *repaired*

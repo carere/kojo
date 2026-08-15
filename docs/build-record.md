@@ -293,8 +293,8 @@ a measured one, and a misread measurement is not a measurement.
 
 ## 9. The real-agent ledger
 
-**Eleven real invocations were spent. Ten were ever authorised.** Nine and eight until wave 20,
-which spent two authorised calls on ticket 51.
+**Thirteen real invocations were spent. Twelve were ever authorised.** Nine and eight until wave 20,
+which spent two on ticket 51's second design and two more on its third — the two that bought it.
 
 Counted by walking all 348 `*.jsonl` under `~/.claude/projects/`, keeping the seven whose first
 top-level prompt carries a stamped factory phase identity, then counting top-level prompts — user
@@ -376,8 +376,8 @@ decode failure a *correction* can undo rather than one a *prompt* can cause.
 
 ## 10. Where the build stopped
 
-**As of 2026-08-15:** 54 tickets landed, 1 closed wontfix, **2 open — 51 and 55**. Unit **634**,
-integration **268 passing** with three named skips, browser **96**. Three projects in the `tsc` build.
+**As of 2026-08-15:** 57 tickets landed, 1 closed wontfix, **1 open — 58**, opened by the work that
+closed 51. Unit **649**, integration **274 passing** with three named skips, browser **96**. Three projects in the `tsc` build.
 `bun biome check .` and `bun knip` clean.
 
 Tickets 50–53 were not new work anybody thought of; they are criteria that closed
@@ -402,8 +402,16 @@ answer both conventions.
 [§12 of typescript-effect.md](design/typescript-effect.md) carries the authoritative version of what
 is and is not proven. The four things most worth knowing before picking this up:
 
-1. **The most load-bearing unproven thing in the build** — now ticket 51: no repaired envelope has
-   ever decoded, so no `corrections` counter has been read off a *succeeded* phase. No stand-in can close it — a
+1. **The most load-bearing unproven thing in the build is now bought** (ticket 51, 2026-08-15). A
+   repaired envelope decoded and `corrections: 1` was read off a phase whose outcome is `succeeded`.
+   It took three designs, and the first two are the finding: both asked a model to resolve a
+   conflict between the factory's prose and its envelope, and a model that reads the rendered
+   contract resolves it in the schema's favour. The third uses a constraint the contract **cannot
+   express** — a custom `makeFilter`, which Effect renders as `{"type":"string"}` — so the rule
+   reaches the agent only through the correction. **A failure a correction can undo that a prompt
+   could not have caused.** The premise is now a test rather than an assumption, which is what the
+   first two designs lacked; and the fault it exploits is a real one for factory authors, carried
+   forward as ticket 58. No stand-in can close it — a
    repair resumes the captured provider session, so a scripted repair always dies
    `resumeSession not found`. This is why ticket 48 needed real money at all.
 2. **No lane of Kojo's own factory can grade Kojo**, because `.kojo/` sits outside the

@@ -50,7 +50,7 @@
 
 - [x] A run with sandboxing disabled invokes a real agent and decodes a real envelope
 - [x] The factory's test, lint, and build commands are its own, invoked through the workspace
-- [ ] A real envelope that fails to decode drives the correction loop and the retry succeeds
+- [x] A real envelope that fails to decode drives the correction loop and the retry succeeds — bought on 2026-08-15 by ticket 51, on its third design
 - [x] Permissions are enforced against a real agent's real writes
 - [x] Credentials are read from the factory's environment and never written to the trace
 - [x] The whole path is exercised by an integration test that touches no in-memory adapter

@@ -59,29 +59,24 @@ bound that hides a disagreement is a worse factory. One correction must be enoug
 
 **Blocked by:** 15, 48 — both done.
 
-**Status:** partial — the remedy is built and delivered; the model would not produce the fault to
-repair, twice, and that refutation is the finding
+**Status:** done — bought on 2026-08-15, on the third design
 
 - [x] `correctionFor` states, for a field whose type is a set of literals, that the **whole value**
       must be exactly one of them and that nothing may come before or after it. Graded by a unit test
       over a real `SchemaError` issue tree, not over a hand-built string
 - [x] The whole loop is rehearsed against the scripted stand-in before a real call is made, and the
       rehearsal is what proves the new text reaches the agent
-- [ ] A real agent's first answer fails to decode, its repair **decodes**, and the run reaches its
-      gate — against a **small model**, named in the report. **Not bought.** Two runs against `fable`
-      and neither first answer failed at all: the model read the rendered contract and obeyed it,
-      once saying so inside its own answer. The run reached its gate, was answered and landed both
-      times; there was simply no repair to grade
-- [ ] `corrections: 1` is read off the **phase record in the trace database**, not inferred from the
-      session transcript. The reading was done exactly that way and the row says `corrections: 0`, so
-      the mechanism is proven and the number is not the one wanted
+- [x] A real agent's first answer fails to decode, its repair **decodes**, and the run reaches its
+      gate — against `fable`, a small model
+- [x] `corrections: 1` is read off the **phase record in the trace database**, not inferred from the
+      session transcript — on a phase whose `outcome` is `succeeded`
 - [x] The run happens in a throwaway repository, never this working tree, with permissions enforced
 - [x] The number of real invocations is reported with the method used to count them — top-level
       prompts in the session transcripts under `~/.claude/projects/`
 - [x] `realAgent.test.ts` stops being known red: the header's "never been read off one" paragraph is
       replaced by what was read off one — two runs, what each answered, what the trace held, and why
       it is still red at its last two lines
-- [ ] The ledger is updated in three places that must agree — `realAgent.test.ts`'s header,
+- [x] The ledger is updated in three places that must agree — `realAgent.test.ts`'s header,
       [typescript-effect.md §12](../../../docs/design/typescript-effect.md) and
       [build-record.md §9](../../../docs/build-record.md) — and ticket 48's fourth criterion is
       ticked with a pointer here. **The header is updated; the two documents are the integrator's,
@@ -177,3 +172,62 @@ reported as skipped by name.
 **Blast radius.** Two temporary git repositories stamped by a real `kojo init`, deleted with the
 scope. Never this working tree. The drafter ran inside `withPermissions` with `factoryOwnPaths`
 protected, as the stamped `review` wires it.
+
+### 2026-08-15 — bought, on the third design, and the design is the finding
+
+**Read off the trace database of a run that succeeded**, which is the criterion in one row:
+
+    name         draft
+    outcome      succeeded
+    corrections  1
+    resumed      1
+    model        fable
+    run outcome  succeeded
+
+**Two invocations, one session.** Counted the build's way — top-level prompts under
+`~/.claude/projects/` that carry no `tool_result` — in the one transcript named after the phase's own
+session id, `0db72b67…`: **2**. One cold turn, one repair, one conversation. The build's total moves
+from eleven to thirteen.
+
+**What the two earlier designs got wrong, and it was the same thing twice.** Both asked a model to
+resolve a conflict between the factory's prose and the factory's envelope. A model that reads the
+rendered contract resolves it in the schema's favour — correctly — so design 1 got a failure and a
+repair that missed by a hair, and design 2 got no failure at all, twice. The premise *this will fail
+to decode* was true when written and stopped being true, and **nothing graded the premise**, so two
+paid calls found out instead of a test.
+
+**The third design does not ask a model for anything.** It uses a constraint the rendered contract
+**cannot express**, measured against `contractFor`:
+
+    Schema.Literals(["low","medium","high"])  →  {"type":"string","enum":["low","medium","high"]}
+    Schema.check(Schema.isMaxLength(12))      →  {"type":"string","allOf":[{"maxLength":12}]}
+    Schema.check(Schema.makeFilter(…))        →  {"type":"string"}
+
+So the model is told `risk` is a string and nothing more. It cannot comply with a rule it has never
+seen, however carefully it reads — and the correction carries the filter's own message verbatim,
+path-precise, which is the only place in the whole conversation the rule appears. **A failure a
+correction can undo that a prompt could not have caused**, which is what ticket 48's audit asked the
+next design to be, in as many words.
+
+**And the finding is about Kojo rather than about a model, which makes it the useful half.** Every
+author-written `makeFilter` is invisible to the agent it grades. The rule here *is* expressible as a
+regular expression, and had the author written one, Effect would have rendered it and the agent would
+have complied on the first turn. What makes it invisible is the spelling an author reaches for when a
+rule is easier to say in code than in a pattern. So a factory can carry a constraint its own agent is
+never shown, and the correction loop is the only thing that recovers it — see ticket 58.
+
+**The premise is now a test.** `tests/unit/contexts/agent/services/riskNoteDesign.test.ts`, eleven
+assertions, none of which involves a model, and the load-bearing one quotes the whole of what the
+agent is told about the field:
+
+    expect(field.replace(/\s+/g, " ")).toBe('"risk": { "type": "string" }');
+
+It also reads `riskField` — the TypeScript injected into the stamped factory — and checks that the two
+expressions of the design still agree, because that is the seam that would rot next.
+
+**Rehearsed for free first, as the ticket demanded.** `correctionLoop.test.ts` walks the whole loop
+against a scripted agent: prose refused, correction carrying the rule, repair decoding, run landing
+at its gate. Three tests, no money. Only after that was anything spent.
+
+**Blast radius.** One temporary git repository stamped by a real `kojo init`, deleted with the scope.
+Never this working tree. The drafter ran inside `withPermissions` with `factoryOwnPaths` protected.

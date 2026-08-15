@@ -1,12 +1,15 @@
 import { execFileSync } from "node:child_process";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, FileSystem, Path, Schema } from "effect";
-import { decodeUnknown } from "../../../src/contexts/shared/lib/decode.ts";
-import { EnvelopeBase } from "../../../src/contexts/workflow/models/Envelope.ts";
-import { EnvelopeParseError } from "../../../src/contexts/workflow/models/EnvelopeParseError.ts";
-import { correctionFor } from "../../../src/contexts/workflow/services/corrections.ts";
-import { riskField, riskNoteRule, riskSubject, riskWords } from "../../support/riskNote.ts";
+import { Effect, FileSystem, Path } from "effect";
+import {
+  riskField,
+  riskNoteRule,
+  riskProse,
+  riskRepair,
+  riskRule,
+  riskSubject,
+} from "../../support/riskNote.ts";
 import { kojo, type Ran, throwawayRepo } from "../../support/throwawayRepo.ts";
 import { phaseOf, runIdOf, tokenOf, traceOf } from "../../support/traceOf.ts";
 
@@ -54,7 +57,14 @@ const changed = "notes/hello.txt";
  * cold turn's — ticket 48's model answered the right word with an explanation stapled to it — so
  * every rehearsal below that wants a refusal uses this one string.
  */
-const sentenceInRisk = "low — it only appends one line to a notes file";
+/**
+ * The answer a model writes when the contract has shown it nothing about the field's form.
+ *
+ * Imported rather than written here: `riskNoteDesign.test.ts` grades that this exact string is
+ * refused and that `riskRepair` is accepted, so a rehearsal that invented its own prose could pass
+ * while the design it rehearses had stopped working.
+ */
+const sentenceInRisk = riskProse;
 
 /** One `result` line, carrying a whole `Drafted` whose `risk` is whatever the turn decided. */
 const answers = (risk: string): string =>
@@ -238,7 +248,7 @@ describe("the correction loop, rehearsed against a scripted agent", () => {
   it.live(
     "drives the stamped factory to its gate when the scripted answer fits the envelope",
     () =>
-      rehearsal({ risk: riskWords[0] }, (fixture) =>
+      rehearsal({ risk: riskRepair }, (fixture) =>
         Effect.gen(function* () {
           const started = succeeded(
             yield* kojo(fixture.root, ["run", "review", riskSubject], {
@@ -256,9 +266,13 @@ describe("the correction loop, rehearsed against a scripted agent", () => {
           // The design really reached the agent: the factory's rule, and the contract that
           // contradicts it, were both in the one prompt the process was handed.
           const [cold = ""] = yield* fixture.prompts;
-          expect(cold).toContain("A single bare word is not a risk note.");
+          expect(cold).toContain("Nothing is reviewed here without a risk note");
           expect(cold).toContain('"enum"');
-          for (const word of riskWords) expect(cold).toContain(`"${word}"`);
+          // **What the cold turn is told about `risk`, and it is the design.** A custom filter
+          // renders as `{"type":"string"}`, so the contract carries the field and not its rule —
+          // which is why this design provokes a failure where two earlier ones stopped doing so.
+          expect(cold).toContain('"risk"');
+          expect(cold).not.toContain(riskRule);
 
           const document = yield* traceOf(fixture.root, runId);
           const draft = phaseOf(document, "draft");
@@ -384,7 +398,7 @@ describe("the correction loop, rehearsed against a scripted agent", () => {
   it.live(
     "hands the repair prompt to the agent, with the rule a literal field is refused for",
     () =>
-      rehearsal({ risk: sentenceInRisk, repairsWith: riskWords[0] }, (fixture) =>
+      rehearsal({ risk: sentenceInRisk, repairsWith: riskRepair }, (fixture) =>
         Effect.gen(function* () {
           const started = succeeded(
             yield* kojo(fixture.root, ["run", "review", riskSubject], {
@@ -411,14 +425,16 @@ describe("the correction loop, rehearsed against a scripted agent", () => {
            * can be built perfectly and sent nowhere.
            */
           expect(repair).toContain("was not a valid `Drafted`");
-          expect(repair).toContain('risk: Expected "low" | "medium" | "high"');
-          expect(repair).toContain("The whole value must be exactly one of those words");
-          expect(repair).toContain("no dash, no sentence, no explanation wrapped around it");
-          expect(repair).toContain('Write it as exactly\n  "low", "medium" or "high";');
+          // The rule, verbatim, under the field's name — and this is the **only** place in the
+          // whole conversation it appears. The contract could not carry it and the prompt does not
+          // teach it, so a repair that lands has learned it here or nowhere.
+          expect(repair).toContain("risk: ");
+          expect(repair).toContain(riskRule);
+          expect(cold).not.toContain(riskRule);
           // A repair is one more message, not a cold start: the identity and the contract that
           // caused the disagreement are not re-sent.
-          expect(cold).toContain("A single bare word is not a risk note.");
-          expect(repair).not.toContain("A single bare word is not a risk note.");
+          expect(cold).toContain("Nothing is reviewed here without a risk note");
+          expect(repair).not.toContain("Nothing is reviewed here without a risk note");
           expect(repair).not.toContain('"enum"');
 
           const document = yield* traceOf(fixture.root, runId);
@@ -466,62 +482,11 @@ describe("the correction loop, rehearsed against a scripted agent", () => {
 });
 
 /**
- * The throwaway factory's envelope, declared here so the decode under test is the real one.
+ * **The design proof moved out of this file**, to
+ * `tests/unit/contexts/agent/services/riskNoteDesign.test.ts`.
  *
- * Built from `riskWords`, which is also what `riskField` is built from, so the schema this asserts
- * against and the schema the target repository holds cannot say different things.
+ * It never needed a CLI: it decodes one string and renders one correction. What it did need, and
+ * did not have here, was an assertion on the **rendered contract** — the premise that a model is not
+ * shown the rule. That premise was true of design 1 and quietly stopped being true, and two paid
+ * calls found out instead of a test. It is graded there now, beside the design itself.
  */
-class Drafted extends EnvelopeBase.extend<Drafted>("Drafted")({
-  _tag: Schema.tag("Drafted"),
-  summary: Schema.String,
-  files: Schema.Array(Schema.String),
-  risk: Schema.Literals(riskWords),
-}) {}
-
-/**
- * **The design proof, and it costs nothing.**
- *
- * It sits beside the rehearsal rather than in the unit tier because it is the first paragraph of the
- * same argument: *this* prose, in *this* field, fails to decode, and the correction the loop builds
- * from the failure names the field and the words it wanted. Everything the real calls are then asked
- * for is the model's willingness to write the sentence the factory asked for.
- */
-describe("the designed decode failure", () => {
-  const prose = JSON.stringify({
-    _tag: "Drafted",
-    summary,
-    files: [changed],
-    risk: sentenceInRisk,
-  });
-
-  it.effect("refuses a sentence in the narrow field, naming the field and its three words", () =>
-    Effect.gen(function* () {
-      const outcome = yield* decodeUnknown(Schema.fromJsonString(Drafted))(prose).pipe(
-        Effect.flip,
-        Effect.map((error) =>
-          EnvelopeParseError.fromSchemaError(
-            { agent: "drafter", expected: "Drafted", raw: prose },
-            error,
-          ),
-        ),
-      );
-
-      expect(outcome.issues.map((issue) => issue.path)).toEqual([["risk"]]);
-      expect(outcome.issues[0]?.message).toBe('Expected "low" | "medium" | "high"');
-      // The rest of the answer was fine, which is what makes the field the whole of the complaint.
-      expect(outcome.raw).toBe(prose);
-
-      const correction = correctionFor(outcome);
-      expect(correction).toContain("was not a valid `Drafted`");
-      expect(correction).toContain('risk: Expected "low" | "medium" | "high"');
-      expect(correction).toContain("Answer again with the whole `Drafted`");
-      // And the sentence ticket 51 added, which is what the paid repair was never told: the answer
-      // above misses valid by exactly this rule, and by nothing else in the envelope.
-      expect(correction).toContain("The whole value must be exactly one of those words");
-      expect(correction).toContain('Write it as exactly\n  "low", "medium" or "high";');
-
-      // And the field the correction names is the field the target repository really holds.
-      expect(riskField).toContain("risk: Schema.Literals(");
-    }),
-  );
-});

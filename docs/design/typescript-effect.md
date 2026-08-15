@@ -1155,7 +1155,9 @@ inferred:
 | a real answer fails the envelope contract | yes | the drafter answered a valid `Drafted` whose `risk` held a sentence, and the decoder refused it: `risk: Expected "low" \| "medium" \| "high"` |
 | the correction is built from the issue tree, not a generic retry | yes | the second prompt in the session is Kojo's own: *"Your last answer was not a valid `Drafted`… These fields are wrong: - risk: Expected …"* — the field named, with the words it wanted |
 | the repair re-enters the same conversation | yes | **one** session file under `~/.claude/projects/`, two top-level prompts, one `sessionId` — the repair was a second turn, not a cold start |
-| the repair returns an envelope that decodes | **no** | the repair rewrote the sentence with the expected literal moved to the front — `"low — this is a one-line text addition to notes/hello.txt…"` — which is a prefix and not the value, so `withCorrections` exhausted its bound and the phase failed `EnvelopeParseError` |
+| the repair returns an envelope that decodes | **yes**, on 2026-08-15 | ticket 51, third design: `corrections: 1` and `resumed: true` read off a `draft` phase whose outcome is `succeeded`, on a run that landed. Two calls, one session, `fable` |
+| *(the row below is what it took to get there, and is kept)* | | |
+| the repair returns an envelope that decodes, **design 1** | no | the repair rewrote the sentence with the expected literal moved to the front — `"low — this is a one-line text addition to notes/hello.txt…"` — which is a prefix and not the value, so `withCorrections` exhausted its bound and the phase failed `EnvelopeParseError` |
 
 **Ticket 51 built the remedy, spent two more calls, and was refuted from the other side.**
 `correctionFor` now says the whole value must **equal** one of the listed words with nothing before
@@ -1171,7 +1173,20 @@ WAL sidecar intact, so the reading ticket 48 paid to fix works even though the n
 wanted. The criterion is still open, and the run itself was a small model driving the stamped factory
 end to end and landing it.
 
-The last row is a finding rather than an omission, and it is the one worth carrying: **a correction
+**How the last row was finally bought, and the answer is a finding about Kojo.** Two designs failed
+the same way — each asked a model to resolve a conflict between the factory's prose and its envelope,
+and a model that reads the rendered contract resolves it in the schema's favour, correctly. The third
+design uses a constraint the contract **cannot express**: a custom `Schema.makeFilter`, which Effect
+renders as `{"type":"string"}` while `Schema.Literals` renders an `enum` and `isMaxLength` renders a
+`maxLength`. So the agent is shown the field's type and never its rule, and the rule reaches it only
+through the correction — carried verbatim, path-precise, from the filter's own message. That is *a
+failure a correction can undo that a prompt could not have caused*, and it is reproducible against any
+model because it is a property of the rendering rather than of a model's judgement. The premise is
+graded by `riskNoteDesign.test.ts` rather than assumed, which is precisely what the first two designs
+lacked. The fault it exploits is a real one for factory authors — **every author-written filter is
+invisible to the agent it grades** — and is carried forward as ticket 58.
+
+The finding from design 1 stands on its own and is kept: **a correction
 turn moves the answer, but it does not fully escape the context that caused the fault.** The fault was
 provoked by a standing rule in the factory's own task template ("a single bare word is not a risk
 note"), repeated by the run's own subject; the repair re-enters a conversation that still holds both,
@@ -1286,7 +1301,8 @@ one safe.
 
 ### Where the build stopped
 
-Fifty-seven tickets: fifty-four landed, ticket 31 closed wontfix, and **two open — 51 and 55**.
+Fifty-eight tickets: fifty-seven landed, ticket 31 closed wontfix, and **one open — 58**, opened by
+the work that closed 51.
 
 Tickets 50–53 were opened by an audit of the *closed* ones, each carrying a criterion a done ticket
 left unchecked and no other ticket took; 50, 52 and 53 have since landed, and 51 stays open because
