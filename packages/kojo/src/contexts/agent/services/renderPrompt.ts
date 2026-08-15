@@ -66,7 +66,7 @@ const reachedDefinitions = (
  * top-level `$ref` is resolved, and whatever the result still points at is carried along as `$defs`
  * inside the same object. What the agent reads therefore resolves against itself.
  */
-const contractSchema = (envelope: Schema.Constraint): JsonSchema.JsonSchema => {
+export const contractSchema = (envelope: Schema.Constraint): JsonSchema.JsonSchema => {
   const document = JsonSchema.resolveTopLevel$ref(Schema.toJsonSchemaDocument(envelope));
   const reached = reachedDefinitions(document);
   return Object.keys(reached).length === 0

@@ -1,6 +1,7 @@
-import { Cause, Effect, FileSystem, Path, Result, Stream } from "effect";
+import { Cause, Effect, FileSystem, Path, Result, Schema, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as YamlRoster from "../../agent/adapters/YamlRoster.ts";
+import { invisibleChecks } from "../../agent/guards/invisibleChecks.ts";
 import { spendFrom, spendVariable } from "../../agent/models/AgentSpend.ts";
 import { Roster } from "../../agent/ports/Roster.ts";
 import { decodeUnknown } from "../../shared/lib/decode.ts";
@@ -23,6 +24,8 @@ import {
   containerFinding,
   credentialFinding,
   dependencyFinding,
+  type EnvelopesRead,
+  envelopeContractFinding,
   factoryFinding,
   imageFinding,
   imageNamed,
@@ -251,6 +254,16 @@ export const diagnose = (options: {
         text: environment ?? "",
         exported: (name) => (process.env[name] ?? "") !== "",
       }),
+    );
+
+    // --- the rules the agent is never shown ----------------------------------------------------
+    // Ticket 58. After the commands and before the roster, because it is a question about the
+    // *factory's own files* rather than about this machine, and it is answered by importing one of
+    // them exactly as the commands check does.
+    findings.push(
+      envelopeContractFinding(
+        split ? { _tag: "unreadable", reason: because } : yield* readEnvelopes(at("envelopes.ts")),
+      ),
     );
 
     // --- the roster, decoded and its prompts read ----------------------------------------------
@@ -489,6 +502,40 @@ const readCommands = (source: string): Effect.Effect<CommandsRead, never, Examin
     if (surviving === undefined) return { _tag: "unrecognised" } as const;
 
     return { _tag: "read", surviving, install: installOf(module.success) } as const;
+  });
+
+/**
+ * A target repository's own `envelopes.ts`, imported, and every schema it exports weighed against
+ * what the rendered contract shows — ticket 58.
+ *
+ * Imported rather than parsed, for the reason `readCommands` is: the question is what the *module*
+ * exports, and a factory that cannot be imported is a factory that cannot run either. Every export
+ * that is a schema is graded and everything else is ignored — an author's helper function beside
+ * their envelopes is not a fault.
+ */
+const readEnvelopes = (source: string): Effect.Effect<EnvelopesRead, never, Examiner> =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const there = yield* fileSystem.exists(source).pipe(Effect.orElseSucceed(() => false));
+    if (!there) return { _tag: "none" } as const;
+
+    const module = yield* Effect.tryPromise({
+      try: () => import(source) as Promise<unknown>,
+      catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
+    }).pipe(Effect.result);
+
+    if (Result.isFailure(module)) {
+      return { _tag: "unreadable", reason: module.failure } as const;
+    }
+    if (module.success === null || typeof module.success !== "object") {
+      return { _tag: "read", envelopes: [] } as const;
+    }
+
+    const envelopes = Object.entries(module.success as Record<string, unknown>)
+      .filter(([, value]) => Schema.isSchema(value as never))
+      .map(([name, value]) => ({ name, invisible: invisibleChecks(value as never) }));
+
+    return { _tag: "read", envelopes } as const;
   });
 
 /** The `install` entry of a loaded `commands.ts`, which names the binary the image must carry. */

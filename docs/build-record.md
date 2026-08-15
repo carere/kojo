@@ -134,6 +134,7 @@ thirteen by wave 12 and did not stop there. This is the single most useful list 
 
 | what | proof it graded nothing | source |
 |---|---|---|
+| `invisibleChecks` read `ast.propertySignatures` and the raw JSON Schema | right for a `Schema.Struct`, wrong for the `Schema.Class` every stamped factory holds — so it answered *nothing hidden* about every real envelope, while **fifteen** unit tests agreed with it because all of them were written over a struct. Caught by the doctor test, and the mutation that restores it still reddens exactly one test | ticket 58 |
 | `PhasePanel.tsx` contained a literal NUL byte | the file read as binary, so `grep` skipped it whole and silently, while tsc, biome and knip all passed | `6a310d1` |
 | The fixture layer could not produce a `null` | fixtures omit an absent key, `SqliteTraceReader` passed `undefined` → encoded as `null`. **85 browser specs stayed green over a run view that rendered nothing at all** | `75872e9` |
 | `checksOf`'s union | no fixture had a failed check that was not also in `ran`; deleting half the expression left 62 specs green | `6a310d1` |
@@ -376,8 +377,8 @@ decode failure a *correction* can undo rather than one a *prompt* can cause.
 
 ## 10. Where the build stopped
 
-**As of 2026-08-15:** 57 tickets landed, 1 closed wontfix, **1 open — 58**, opened by the work that
-closed 51. Unit **649**, integration **274 passing** with three named skips, browser **96**. Three projects in the `tsc` build.
+**As of 2026-08-15:** 58 tickets landed, 1 closed wontfix, **none open**. Unit **665**, integration
+**274 passing** with three named skips, browser **96**. Three projects in the `tsc` build.
 `bun biome check .` and `bun knip` clean.
 
 Tickets 50–53 were not new work anybody thought of; they are criteria that closed

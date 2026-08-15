@@ -14,6 +14,8 @@
  * - **Every failure carries a remedy**, because `failed` takes one as an argument.
  */
 
+import type { InvisibleCheck } from "../../agent/guards/invisibleChecks.ts";
+import { describeInvisible } from "../../agent/guards/invisibleChecks.ts";
 import type { AgentSpend } from "../../agent/models/AgentSpend.ts";
 import { describeSpend, spendVariable } from "../../agent/models/AgentSpend.ts";
 import { factoryDirectory, workflowsDirectory } from "../../shared/models/FactoryLayout.ts";
@@ -67,6 +69,74 @@ export const spendFinding = (spend: AgentSpend): Finding =>
       ? `${describeSpend(spend)}. Set ${spendVariable}=allow to make real calls`
       : describeSpend(spend),
   );
+
+// --- rules the agent is never shown ------------------------------------------------------------
+
+/** What was found in one envelope: its name, and the rules the contract cannot show. */
+export interface EnvelopeEvidence {
+  readonly name: string;
+  readonly invisible: ReadonlyArray<InvisibleCheck>;
+}
+
+/** How reading a factory's `envelopes.ts` came out. */
+export type EnvelopesRead =
+  | { readonly _tag: "read"; readonly envelopes: ReadonlyArray<EnvelopeEvidence> }
+  | { readonly _tag: "unreadable"; readonly reason: string }
+  | { readonly _tag: "none" };
+
+/**
+ * Whether this factory constrains anything its own agent is never shown — ticket 58.
+ *
+ * `contractFor` renders the envelope into the prompt, and Effect renders only the checks it has
+ * keywords for. A custom `Schema.makeFilter` renders as `{"type":"string"}`, so a rule written the
+ * natural way — as code — reaches the agent through **nothing but the correction it causes**.
+ *
+ * **`failed`, not a warning, and the reason is what it costs.** The run still succeeds: ticket 51
+ * measured the correction loop recovering exactly this. It recovers it by spending one extra agent
+ * turn, on every run, for ever — against a `corrections` bound that is finite, so two such rules in
+ * one envelope can exhaust it and fail a run that was never going to succeed on the first turn. A
+ * check that reported that as `ok` would be telling a person their factory is fine when it is
+ * quietly paying twice, which is the shape edge 6 is about.
+ *
+ * `skipped` when there is nothing to read, never `ok` — the rule the rest of this file follows.
+ */
+export const envelopeContractFinding = (read: EnvelopesRead): Finding => {
+  if (read._tag === "none") {
+    return skipped("envelopes", `no ${factoryDirectory}/envelopes.ts to look at`);
+  }
+  if (read._tag === "unreadable") {
+    return skipped("envelopes", `${factoryDirectory}/envelopes.ts did not load — ${read.reason}`);
+  }
+
+  const carrying = read.envelopes.filter((envelope) => envelope.invisible.length > 0);
+  const graded = read.envelopes.length;
+
+  if (graded === 0) {
+    return skipped("envelopes", `${factoryDirectory}/envelopes.ts exports no schema`);
+  }
+
+  if (carrying.length === 0) {
+    return ok(
+      "envelopes",
+      `${graded} envelope${graded === 1 ? "" : "s"} — every rule is in the contract`,
+    );
+  }
+
+  const named = carrying
+    .map((envelope) => `${envelope.name}: ${envelope.invisible.map(describeInvisible).join(", ")}`)
+    .join("; ");
+
+  return failed(
+    "envelopes",
+    `${named} — the agent is never shown ${carrying.length === 1 ? "this" : "these"}`,
+    "A `Schema.makeFilter` renders into the prompt as nothing, so the agent cannot satisfy it on a " +
+      "first answer: every run pays one correction turn to be told, and a phase whose `corrections` " +
+      "bound is spent fails for a rule it was never given. Say the rule where the agent can read it " +
+      "— a built-in check (`isMaxLength`, `isTrimmed`, `Schema.Literals`) renders into the contract, " +
+      "and so does a pattern. Where the rule genuinely cannot be a schema, write it into the " +
+      "agent's own `prompts/<agent>/user.md` as well, and keep the filter as the thing that enforces it.",
+  );
+};
 
 // --- the runtime -------------------------------------------------------------------------------
 

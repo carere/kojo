@@ -390,6 +390,60 @@ describe("kojo doctor on a factory somebody finished", () => {
         expect(ran.stdout).toContain("skipped  container");
         expect(ran.stdout).toContain("skipped  image");
         expect(ran.stdout).toContain("skipped  toolchain");
+
+        // **Ticket 58's negative case, and it is the one that decides whether the check is usable.**
+        // A stamped starter's envelope carries no filter, so every rule it has is in the contract
+        // and the line is `ok`. A check that warned here would fire on every factory `kojo init`
+        // writes, and would be turned off before it ever caught anything.
+        expect(flat(ran.stdout)).toContain("every rule is in the contract");
+        expect(flat(ran.stdout)).not.toContain("FAILED envelopes");
+      }),
+    ),
+  );
+
+  /**
+   * **The fault itself: a rule the agent is never shown** — ticket 58.
+   *
+   * The field added below is the shape an author reaches for when a house rule is easier to say in
+   * code than in a pattern. Effect renders a custom filter as `{"type":"string"}`, so the agent is
+   * told the field is a string and nothing else — and the rule reaches it only through the
+   * correction it causes, one wasted turn on every run for ever. Ticket 51 measured exactly that
+   * loop working, which is why this is `failed` rather than silence: the run succeeds, and it pays
+   * twice.
+   */
+  it.live("refuses a factory whose envelope constrains what the contract cannot show", () =>
+    inRepository(stamped, (root) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* finish(root, finishedCommands);
+
+        const envelopes = path.join(root, ".kojo", "envelopes.ts");
+        const source = yield* fileSystem.readFileString(envelopes);
+        const closes = source.lastIndexOf("}) {}");
+        expect(closes, "the stamped envelope no longer closes with `}) {}`").toBeGreaterThan(0);
+        yield* fileSystem.writeFileString(
+          envelopes,
+          `${source.slice(0, closes)}${[
+            "  risk: Schema.String.pipe(",
+            "    Schema.check(",
+            '      Schema.makeFilter((value: string) => (value.length > 4 ? undefined : "too short")),',
+            "    ),",
+            "  ),",
+            "",
+          ].join("\n")}${source.slice(closes)}`,
+        );
+
+        const ran = yield* kojo(root, ["doctor"]);
+
+        // It names the envelope, the field, and how many of its rules are hidden.
+        expect(flat(ran.stdout)).toContain("FAILED envelopes");
+        expect(flat(ran.stdout)).toContain("`risk` — 1 of 1 rule not shown");
+        // And it says what it costs, which is the half that makes it worth failing over.
+        expect(flat(ran.stdout)).toContain("every run pays one correction turn");
+        expect(flat(ran.stdout)).toContain("renders into the prompt as nothing");
+        // A failed check fails the factory, which is what a CI job is gated on.
+        expect(ran.status).not.toBe(0);
       }),
     ),
   );

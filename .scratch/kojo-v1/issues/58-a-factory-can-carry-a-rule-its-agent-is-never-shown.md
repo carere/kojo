@@ -53,18 +53,91 @@ and `riskNoteDesign.test.ts` will say so — that is what it is for. Whoever bui
 
 **Blocked by:** 51 — done.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Every refinement Effect renders, and every one it does not, is enumerated by a test rather
-      than by this list — the same shape as `agentSpawnSites.test.ts`
-- [ ] `kojo doctor` names each envelope field whose constraint the contract cannot show, per
-      workflow, and says what it costs
-- [ ] A factory with no such field is not warned about one, graded against a stamped starter
-- [ ] The decision on shape 2 is recorded either way, with its effect on every stamped factory's
-      prompt stated
-- [ ] `riskNote.ts` and `riskNoteDesign.test.ts` are left working, or ticket 51 is reopened with a
-      fourth design
+- [x] Every refinement Effect renders, and every one it does not, is enumerated by a test rather
+      than by this list — `tests/unit/contexts/agent/guards/invisibleChecks.test.ts`
+- [x] `kojo doctor` names each envelope field whose constraint the contract cannot show, and says
+      what it costs. Per **envelope** rather than per workflow — see the note below
+- [x] A factory with no such field is not warned about one, graded against a stamped starter *and*
+      against Kojo's own factory
+- [x] The decision on shape 2 is recorded, with its effect on every stamped factory's prompt stated
+- [x] `riskNote.ts` and `riskNoteDesign.test.ts` are left working — nothing doctors that fixture,
+      and ticket 51's design is untouched
 
 ## Comments
 
-*(none yet)*
+### 2026-08-15 — the doctor tells the author, and the guard measures the real contract
+
+**What landed.**
+
+- `src/contexts/agent/guards/invisibleChecks.ts` — the decision, pure, beside the renderer it is
+  about. It compares what a schema **declares** against what the contract **shows**.
+- `readiness.envelopeContractFinding` + `diagnose.readEnvelopes` — the `envelopes` line on every
+  `kojo doctor`, which imports the factory's own `envelopes.ts` exactly as the `commands` check
+  imports `commands.ts`.
+
+**The arithmetic, rather than a list of checks that render.** Every check Effect can express becomes
+one entry in the field's `allOf`; every check it cannot renders as nothing. So *declared minus shown*
+is the number of rules the agent cannot see, and it stays right when Effect teaches an existing check
+to render or adds a new one. A list of known-good checks would have to be maintained against a
+library nobody here controls, and would be wrong **silently** — which is the failure mode this whole
+ticket is about.
+
+**It is `failed`, not a warning.** The run still succeeds; ticket 51 measured the correction loop
+recovering exactly this. It recovers it by spending one extra agent turn on every run for ever,
+against a `corrections` bound that is finite — so two such rules in one envelope can exhaust it and
+fail a run that was never going to succeed on the first turn. A check reporting that as `ok` would
+tell a person their factory is fine while it quietly pays twice.
+
+**A false green, caught by the doctor test and not by the unit tests.** The first version of the
+guard read `ast.propertySignatures` and the raw JSON Schema document. Both are right for a
+`Schema.Struct` and wrong for a `Schema.Class`, which is what `EnvelopeBase.extend` produces and what
+every stamped factory holds: a class's AST is a `Declaration` carrying no properties, and its JSON
+Schema is a `$ref` into `definitions`. So it answered *nothing hidden* about every real envelope,
+and eight unit tests agreed with it because they were all written over `Schema.Struct`. It reads
+`.fields` and `contractSchema` now — the latter being the very function `contractFor` renders from,
+so the guard asks about the object the agent is actually handed rather than a second rendering that
+might one day differ. Two unit tests over an `EnvelopeBase` class were added, and they are the ones
+that would have caught it.
+
+**Per envelope, not per workflow, and the ticket asked for the other.** A workflow does not expose
+its envelopes — they are used inside the body, at the `agent()` call — so there is nothing to walk
+from a `LoadedWorkflow`. What a factory *does* expose is `envelopes.ts`, which is where `kojo init`
+puts them and where an author edits them. Every exported schema is graded and everything else is
+ignored, so a helper function beside the envelopes is not a fault.
+
+### The decision on shape 2: refused, and here is what it would have cost
+
+The other option was to append each filter's **message** to the rendered contract, so the rule
+reaches the agent on the cold turn and no correction is needed. Refused, for four reasons:
+
+1. **A filter's message is written for a decoder, not for an agent.** Ticket 51 measured this
+   directly: `correctionFor`'s own wording had to be rewritten — *"The whole value must be exactly
+   one of those words, with nothing before it and nothing after it"* — before a model could act on
+   it. Pasting decoder messages into every cold prompt ships that unrefined register to every agent
+   on every turn.
+2. **It changes the prompt every stamped factory sends**, for a fault most factories do not have.
+   Measured: Kojo's own three envelopes carry none, and a freshly stamped starter carries none. The
+   effect on a factory *with* a filter would be one extra line per filtered field on every cold
+   prompt; on a factory without one, nothing — which is to say the change buys nothing for the
+   common case and costs a permanent widening of the contract for the rare one.
+3. **It would make the contract and the schema two statements of one rule.** The JSON Schema is
+   *derived*; prose beside it would not be, and D5 exists to keep exactly that drift
+   inexpressible.
+4. **It would kill ticket 51's fixture**, whose premise is that the rule is invisible — the one
+   design in three that reliably produces a decode failure a correction can undo.
+
+Telling the author costs no prompt at all and lets them say the rule where a human reads it too. If
+shape 2 is ever built, `riskNoteDesign.test.ts` is what will say so, loudly, on the same day.
+
+**Proven, and by which mutation.**
+
+| mutation | what went red |
+|---|---|
+| every declared check counted as shown | 5 of the 16 — every case that names a hidden rule |
+| read the AST's `propertySignatures` again, as the first version did | **only** *finds a hidden rule on an EnvelopeBase class*, and nothing else in 16 — which is the measurement, not the anecdote: the fifteen struct-based tests let that false green ship |
+
+**Checks.** `bun tsc --build --force`, `bun biome check .`, `bun knip` clean. Unit **665**,
+integration **274 passing** with three named skips, browser **96**. No agent call, and nothing here
+could make one.
