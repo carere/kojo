@@ -35,9 +35,28 @@ interface Ran {
 }
 
 /** One whole `kojo` process, launched from inside the target repository, the way a person does. */
-const kojo = (root: string, args: ReadonlyArray<string>): Effect.Effect<Ran> =>
+const kojo = (
+  root: string,
+  args: ReadonlyArray<string>,
+  /**
+   * What the child is told about spending, when the test is about that line of the report.
+   *
+   * `undefined` **removes** the variable from the child rather than passing it through, so a test
+   * of the unset default grades the default wherever it runs. CI states `KOJO_AGENT_SPEND=refuse`
+   * out loud, and without this the report would say `=refuse` while the assertion looked for *not
+   * set* — a test that passed on a laptop and failed on the first push.
+   */
+  spend?: string,
+): Effect.Effect<Ran> =>
   Effect.sync(() => {
-    const finished = spawnSync(bun(), [cli, ...args], { cwd: root, encoding: "utf8" });
+    const { KOJO_AGENT_SPEND: _inherited, ...clean } = process.env;
+    const finished = spawnSync(bun(), [cli, ...args], {
+      cwd: root,
+      encoding: "utf8",
+      env: (spend === undefined
+        ? clean
+        : { ...clean, KOJO_AGENT_SPEND: spend }) as NodeJS.ProcessEnv,
+    });
     return {
       status: finished.status,
       stdout: finished.stdout ?? "",
@@ -231,16 +250,26 @@ describe("kojo doctor on a factory nobody has finished", () => {
   it.live("reports which spend mode this process is in, without failing the factory for it", () =>
     inRepository(stamped, (root) =>
       Effect.gen(function* () {
-        const ran = yield* kojo(root, ["doctor"]);
-
-        expect(flat(ran.stdout)).toContain("no agent may be spawned");
-        expect(flat(ran.stdout)).toContain("KOJO_AGENT_SPEND is not set");
-        expect(flat(ran.stdout)).toContain("no terminal is attached");
+        // **The unset default**, graded with the variable removed from the child, so this says the
+        // same thing on a laptop and under a CI that states a mode.
+        const byDefault = flat((yield* kojo(root, ["doctor"])).stdout);
+        expect(byDefault).toContain("no agent may be spawned");
+        expect(byDefault).toContain("KOJO_AGENT_SPEND is not set");
+        expect(byDefault).toContain("no terminal is attached");
         // The way out, on the line itself: an `ok` finding carries no remedy field.
-        expect(flat(ran.stdout)).toContain("Set KOJO_AGENT_SPEND=allow");
+        expect(byDefault).toContain("Set KOJO_AGENT_SPEND=allow");
         // And it is not a fault: this factory is refused for its placeholders and its empty
         // credential, and `spend` is not among the reasons.
-        expect(flat(ran.stdout)).not.toContain("FAILED spend");
+        expect(byDefault).not.toContain("FAILED spend");
+
+        // And the two modes a person can put it in, which is the half that makes the line worth
+        // printing: it reports what is set rather than what it assumes.
+        expect(flat((yield* kojo(root, ["doctor"], "allow")).stdout)).toContain(
+          "real agent calls are allowed",
+        );
+        expect(flat((yield* kojo(root, ["doctor"], "refuse")).stdout)).toContain(
+          "KOJO_AGENT_SPEND=refuse",
+        );
       }),
     ),
   );

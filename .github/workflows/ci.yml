@@ -1,7 +1,14 @@
 name: ci
 
+# **Both triggers, and the push one is not decoration.** A required status check called `Test` was
+# declared on `main` while this workflow ran on pull requests only, so a direct push produced no
+# status of that name and the rule gated nothing — it printed a warning on every push and stopped
+# none of them. A check that cannot fail is the same shape of lie as a test that passes while doing
+# no work, which this repository keeps a list of.
 on:
   pull_request:
+    branches: [main]
+  push:
     branches: [main]
 
 concurrency:
@@ -13,8 +20,19 @@ permissions:
 
 jobs:
   ci:
+    # The name branch protection matches on. Changing it silently un-gates `main`.
     name: Test
     runs-on: ubuntu-latest
+    # The container tier builds an image and starts real containers; the browser tier builds the
+    # Console first. Twenty minutes is roughly four times the observed run, which leaves room for a
+    # slow runner without letting a hung daemon hold the queue all day.
+    timeout-minutes: 30
+    env:
+      # **Said out loud rather than left to the default.** An unattended process is refused anyway —
+      # no terminal on stdin — but a guard this repository paid two unauthorised agent calls to
+      # learn is worth stating where somebody reading the workflow can see it. Nothing in CI may
+      # spend, and the real-agent suites stay skipped for want of `KOJO_REAL_AGENT`.
+      KOJO_AGENT_SPEND: refuse
     steps:
       - name: Git checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -22,6 +40,13 @@ jobs:
           fetch-depth: 0
           # pick the pr HEAD instead of the merge commit
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      # The suites stamp repositories and commit into them. A runner has no identity of its own, and
+      # `git commit` without one fails with a message about `user.email` rather than about the test.
+      - name: Git identity for the fixtures
+        run: |
+          git config --global user.name "kojo ci"
+          git config --global user.email "ci@kojo.invalid"
 
       - name: Setup toolchain
         uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
@@ -35,9 +60,39 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
-            
+
+      # --- the repo-wide checks, cheapest first --------------------------------------------------
+
       - name: TypeScript build
         run: bun tsc --build --verbose
 
       - name: Biome check
         run: bun biome check --verbose --no-errors-on-unmatched .
+
+      - name: Dead-code analysis
+        run: bun knip
+
+      # --- the tiers ------------------------------------------------------------------------------
+      # Every task is run **by name**, because a tier that is not named here is a tier nobody runs.
+      # Discover the list with `moon query tasks`; it is not hardcoded anywhere else.
+
+      - name: Unit tests
+        run: moon run kojo:test
+
+      # Two guards that are neither a test tier nor a lint: no bare promise reaches Kojo's published
+      # declarations, and the package refuses to build without the Console in it.
+      - name: Public types and package build
+        run: moon run kojo:check-public-types kojo:build
+
+      - name: Install Chromium for the browser tier
+        run: bun x playwright install --with-deps chromium
+        working-directory: apps/console
+
+      - name: Browser tests
+        run: moon run console:test-browser
+
+      # Last because it is the slowest and the only one that needs a container daemon. `ubuntu-latest`
+      # ships Docker; the suites build the one image they need and skip with a stated reason if the
+      # daemon is missing, so a runner without one says so rather than passing quietly.
+      - name: Container tests
+        run: moon run kojo:test-integration
