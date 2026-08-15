@@ -25,20 +25,28 @@ and, at the close path:
 assumed clean → the tree is deleted, uncommitted work and all.** The one case the preservation exists
 for is the one case the `catchAll` cannot distinguish from success.
 
-## How it was found
+## How it was found — and the diagnosis that came with it was wrong
 
-The first CI run of the container tier on a Linux runner, 2026-08-15.
+Found while chasing a CI failure this does **not** explain, and the correction is worth more than the
+original claim.
+
 `SandcastleSandboxSource.test.ts > cannot even be rebuilt while uncommitted work is in the way`
-failed with `expected false to be true`: the worktree the test had deliberately dirtied was **gone**
-after release, where it survives on macOS.
+failed on a Linux runner with `expected false to be true`, and the `catchAll` above was read as the
+cause: git fails → the tree reads clean → the tree is deleted. A precondition was added to that test
+— running the same `git status --porcelain` Sandcastle runs, asserting its exit code and its output —
+so that the next run would name it.
 
-The runner's log carries no git error, because there is none to carry — it is swallowed by the
-`catchAll` above. What differs on Linux is still unknown; `safe.directory` was ruled out (the log
-shows checkout adding one, and no `dubious ownership` anywhere).
+**It named the opposite.** Both preconditions passed: git could read the worktree, and the worktree
+was dirty and still there. The failure is on a later line and belongs to ticket 61. Nothing here
+caused it.
 
-The test now asserts its own precondition — it runs the same `git status --porcelain` Sandcastle runs
-and checks the exit code and the output — so the next run names the cause instead of showing
-`expected false to be true`. **That is a diagnosis, not a fix.**
+So this ticket is a **latent** fault rather than an observed one. The code above is quoted from
+`@ai-hero/sandcastle@0.12.0`'s `dist` and says what it says: any failure of `git status` is turned
+into *clean*, and the next statement force-removes the worktree. It has never been seen to fire. It
+is kept open because the consequence is silent data loss, not because anything has lost data.
+
+The precondition stays in that test regardless: it is what turned a guess into a refutation, and it
+is the reason the real cause was found on the next run rather than the fifth.
 
 ## Why it matters beyond the test
 
@@ -64,12 +72,10 @@ changed"*. This is that rule, broken, one layer down and in somebody else's code
 
 **Blocked by:** none.
 
-**Status:** ready-for-agent
+**Status:** ready-for-agent — latent, never observed to fire
 
-- [ ] What actually fails on Linux is measured rather than inferred — the next CI run's named
-      precondition is the cheapest way, and it costs one cycle
 - [ ] A worktree Kojo cannot read is never deleted by a Kojo release path, proven by a test that
-      makes `git status` fail
+      makes `git status` fail — which is also what would turn this from latent into measured
 - [ ] `architecture.md` §8 gains the edge, whichever shape is chosen
 - [ ] `SandcastleSandboxSource.test.ts`'s precondition stays, because it is what turned an
       unexplained boolean into a diagnosis
