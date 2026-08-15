@@ -45,6 +45,79 @@ was corrected against.
 waves in order, what the design record got wrong and how each error was found out, the catalogue of
 checks that passed while doing no work, and the real-agent spend. Read it before picking the work up.
 
+## Using it
+
+Kojo is two things in one package: `kojo init` stamps a factory into a repository, and the rest of
+the commands drive it. Everything below is what a person actually types.
+
+### 1. Stamp a factory
+
+```bash
+kojo init --agent claude --model sonnet --sandbox docker --template review
+```
+
+It writes `.kojo/` — a roster, a workflow, the envelopes an agent's answers are decoded against, the
+checks those answers are graded by, the command blocks a code phase runs, and a Dockerfile — plus
+two entries in the repository's `package.json` and a skill under `.claude/skills/kojo/`. Nothing it
+writes is a copy of the engine: the engine is a versioned dependency, so upgrading is a version bump
+and never a re-stamp. Running `init` again keeps every file you have edited.
+
+`--sandbox none` runs the agent on this machine instead of in a container. It is a real answer, not
+an opt-out — the run still cuts a branch and still merges — but it is the one mode with no boundary
+around the agent at all.
+
+### 2. Finish the factory, then ask whether it can run
+
+```bash
+npm install                # or bun / pnpm / yarn — init prints the one for your lockfile
+kojo doctor
+```
+
+**A freshly stamped factory fails `doctor` on purpose.** Three of the four entries in
+`.kojo/commands.ts` are placeholders that exit 78, because a scaffolder cannot know how your
+repository runs its own suite and a plausible-but-wrong command that exits 0 is worse than one that
+says it is fake. `doctor` loads every file, builds a payload against the engine's own schemas, and
+exits non-zero with a remedy per fault — so it is what a CI job gates on, not a summary.
+
+### 3. Run it
+
+```bash
+kojo run review "the change this run is about"
+kojo gate list                                    # what waits on a human, and for how long
+kojo gate answer <token> --choice approve
+```
+
+`kojo run` **does not block on a gate**. It prints where the run stopped and exits 0 — a suspended
+run is a success. Close the terminal; answer days later from anywhere, and the run continues from
+where it stopped rather than from the top. Every run works on a branch of its own, and an approved
+run merges that branch onto your trunk.
+
+```bash
+kojo ui                    # the Console: one factory's trace, and gates answered from a browser
+kojo watch factory         # unattended: drive the trigger, apply what is answered
+```
+
+`kojo ui` and `kojo watch` are daemons and never exit on their own. `kojo run` is the one that
+returns.
+
+### Spending, which is a switch rather than a habit
+
+An agent call costs money, and the process that makes it is often one nobody is watching. So the
+**invoker** asks one question before it starts a process, every time — `KOJO_AGENT_SPEND`:
+
+- **unset, with a terminal attached** — the call is made. This is you, at a keyboard.
+- **unset, with no terminal** — refused before a process exists. Nothing is spawned and nothing is
+  spent. That is CI, a cron, and an agent driving your shell.
+- **`allow`** — the call is made, wherever it runs. A factory that runs unattended needs this set
+  once, in the environment of whatever runs it.
+- **`stand-in:<absolute path>`** — a process may run only if the agent's binary really resolves to
+  that file. For rehearsing a workflow against a script.
+
+`stand-in:` is checked rather than believed: Kojo resolves the binary itself and refuses anything
+else. Putting a script in front of the real one on `PATH` is **not** the same claim — that is how
+this repository's own build spent two agent calls nobody had authorised. `kojo doctor` prints which
+of the four you are in.
+
 ## Tooling
 
 | Tool | Role |
@@ -58,6 +131,10 @@ checks that passed while doing no work, and the real-agent spend. Read it before
 | [lefthook](https://lefthook.dev) | git hooks |
 | [knip](https://knip.dev) | dead-code analysis |
 | [agent-browser](https://github.com/vercel-labs/agent-browser) | headless browser CLI — agents use it to explore the app |
+
+## Developing Kojo itself
+
+Everything above is Kojo in use. What follows is this repository.
 
 ## Getting started
 
