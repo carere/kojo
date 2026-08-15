@@ -1,10 +1,14 @@
-import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentProvider } from "@ai-hero/sandcastle";
 import { describe, expect, it } from "@effect/vitest";
 import { kojoPi } from "../../../../../src/contexts/agent/adapters/kojoPi.ts";
+import { spendVariable } from "../../../../../src/contexts/agent/models/AgentSpend.ts";
+import {
+  agentSpawnRefusal,
+  type RanAgent,
+  spawnAgentBinary,
+} from "../../../../support/spawnAgent.ts";
 
 /**
  * The one test that spends money, against the one thing nothing else can stand in for.
@@ -81,71 +85,79 @@ const hasCredential = (env: Readonly<Record<string, string | undefined>>): boole
 const missingIn = (
   piOnPath: boolean,
   env: Readonly<Record<string, string | undefined>>,
+  /** Why the spend switch refuses, when it does. See `agentSpawnRefusal`. */
+  spendRefusal: string | undefined,
 ): ReadonlyArray<string> => [
   ...(piOnPath ? [] : ["the `pi` binary is not on PATH"]),
   ...(hasCredential(env) ? [] : [`neither ${credentialVariables.join(" nor ")} is set`]),
+  ...(spendRefusal === undefined ? [] : [`${spendVariable} does not allow it — ${spendRefusal}`]),
 ];
 
 const binary = Bun.which("pi");
 const credentialed = hasCredential(process.env);
-const runnable = binary !== null && credentialed;
 
-const missing = missingIn(binary !== null, process.env);
+/**
+ * **The switch is part of the gate, and the spawn checks it again** — ticket 55.
+ *
+ * Two lines, and the second is the one that matters. Reading it here is what lets the suite *skip*
+ * honestly when nobody has said it may spend, instead of failing with a message about a refusal.
+ * Checking it again inside `spawnAgentBinary` is what makes flipping this constant by hand — which
+ * is exactly what a mutation of the gate does, and exactly how two `pi` calls were made on the day
+ * ticket 49 landed — cost nothing.
+ *
+ * `KOJO_PI_MODEL` is read here rather than below so the refusal can name the model it would have
+ * called, which is the same sentence a run would print.
+ */
+const spendRefusal =
+  binary === null
+    ? undefined
+    : agentSpawnRefusal({
+        provider: kojoPi({ model }),
+        binary: "pi",
+        model,
+        reason: "the pi session resume test",
+      });
+
+const runnable = binary !== null && credentialed && spendRefusal === undefined;
+
+const missing = missingIn(binary !== null, process.env, spendRefusal);
 
 if (!runnable) {
   console.warn(
     [
       "NOT PROVEN: kojoPi resuming a real pi session.",
       ...missing.map((reason) => `  - ${reason}`),
-      `  Install the pi CLI and export ${credentialVariables.join(" or ")} to run it.`,
+      `  Install the pi CLI, export ${credentialVariables.join(" or ")}, and set`,
+      `  ${spendVariable}=allow to run it. The last one is not a formality: this suite spawns pi`,
+      "  itself, so nothing else stands between an edit here and a bill.",
     ].join("\n"),
   );
 }
 
-interface Ran {
-  readonly stdout: string;
-  readonly exitCode: number;
-  /** Every event the provider's own parser found, in order. */
-  readonly events: ReturnType<AgentProvider["parseStreamLine"]>;
-}
-
 /**
- * One pi call, exactly as a Sandcastle sandbox would make it: the command through a shell, the
- * prompt down stdin, and the stream read back through the provider's own parser.
+ * One pi call, through the one helper allowed to start an agent binary.
+ *
+ * It used to build the command here and hand it to `node:child_process`, which is how this file
+ * sat outside the spend guard entirely. `spawnAgentBinary` does the same work — the command through
+ * a shell, the prompt down stdin, the stream through the provider's own parser — and asks
+ * `maySpawn` first. `agentSpawnSites.test.ts` is what keeps this the only such place.
  */
 const run = (
   provider: ReturnType<typeof kojoPi>,
   cwd: string,
   prompt: string,
   resumeSession?: string,
-): Promise<Ran> => {
-  const built = provider.buildPrintCommand({
+): Promise<RanAgent> =>
+  spawnAgentBinary({
+    provider,
+    cwd,
     prompt,
-    dangerouslySkipPermissions: true,
+    model,
+    reason: "the pi session resume test",
     ...(resumeSession === undefined ? {} : { resumeSession }),
   });
 
-  return new Promise((resolve, reject) => {
-    const child = spawn("sh", ["-c", built.command], { cwd, stdio: ["pipe", "pipe", "inherit"] });
-    let stdout = "";
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.on("error", reject);
-    child.on("close", (code) =>
-      resolve({
-        stdout,
-        exitCode: code ?? 0,
-        events: stdout.split("\n").flatMap((line) => provider.parseStreamLine(line)),
-      }),
-    );
-    child.stdin.write(built.stdin ?? "");
-    child.stdin.end();
-  });
-};
-
-const sessionIdOf = (ran: Ran): string => {
+const sessionIdOf = (ran: RanAgent): string => {
   const found = ran.events.find((event) => event.type === "session_id");
   expect(found, `no session id in pi's stream:\n${ran.stdout}`).toBeDefined();
   return found?.type === "session_id" ? found.sessionId : "";
@@ -165,23 +177,46 @@ describe("the gate on the real-agent test", () => {
     // the run. Without this, "accepts ANTHROPIC_OAUTH_TOKEN" would be a claim nothing measures on
     // a machine that has no token — and an untested branch of a gate is how a suite ends up
     // skipping for a reason that was never true.
-    expect(missingIn(true, { ANTHROPIC_API_KEY: "sk-not-a-real-key" })).toEqual([]);
-    expect(missingIn(true, { ANTHROPIC_OAUTH_TOKEN: "not-a-real-token" })).toEqual([]);
+    expect(missingIn(true, { ANTHROPIC_API_KEY: "sk-not-a-real-key" }, undefined)).toEqual([]);
+    expect(missingIn(true, { ANTHROPIC_OAUTH_TOKEN: "not-a-real-token" }, undefined)).toEqual([]);
 
     // Present but empty is absent. `kojo doctor` reads a stamped `.env` the same way, because a
     // variable somebody meant to fill in is not a credential.
-    expect(missingIn(true, { ANTHROPIC_API_KEY: "", ANTHROPIC_OAUTH_TOKEN: "" })).toEqual([
-      "neither ANTHROPIC_API_KEY nor ANTHROPIC_OAUTH_TOKEN is set",
-    ]);
+    expect(
+      missingIn(true, { ANTHROPIC_API_KEY: "", ANTHROPIC_OAUTH_TOKEN: "" }, undefined),
+    ).toEqual(["neither ANTHROPIC_API_KEY nor ANTHROPIC_OAUTH_TOKEN is set"]);
 
     // And the two reasons are independent: a binary without a credential names one thing, an
     // environment without either names the other, and neither hides the other.
-    expect(missingIn(false, { ANTHROPIC_OAUTH_TOKEN: "not-a-real-token" })).toEqual([
+    expect(missingIn(false, { ANTHROPIC_OAUTH_TOKEN: "not-a-real-token" }, undefined)).toEqual([
       "the `pi` binary is not on PATH",
     ]);
-    expect(missingIn(false, {})).toEqual([
+    expect(missingIn(false, {}, undefined)).toEqual([
       "the `pi` binary is not on PATH",
       "neither ANTHROPIC_API_KEY nor ANTHROPIC_OAUTH_TOKEN is set",
+    ]);
+  });
+
+  /**
+   * **The switch is a third reason to skip, and it is independent of the other two** — ticket 55.
+   *
+   * A machine with pi installed and a credential exported still must not spend unless somebody
+   * said so. Graded here against a synthetic refusal so it holds whatever this machine's own
+   * environment says, exactly as the credential half is.
+   */
+  it("counts the spend switch among the reasons, without hiding the others", () => {
+    const refused = "KOJO_AGENT_SPEND is not set and no terminal is attached";
+
+    expect(missingIn(true, { ANTHROPIC_OAUTH_TOKEN: "not-a-real-token" }, refused)).toEqual([
+      `${spendVariable} does not allow it — ${refused}`,
+    ]);
+
+    // All three at once, in the order a reader meets them: what is missing, then what is not
+    // permitted. None of the three hides another.
+    expect(missingIn(false, {}, refused)).toEqual([
+      "the `pi` binary is not on PATH",
+      "neither ANTHROPIC_API_KEY nor ANTHROPIC_OAUTH_TOKEN is set",
+      `${spendVariable} does not allow it — ${refused}`,
     ]);
   });
 });

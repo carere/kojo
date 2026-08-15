@@ -32,6 +32,22 @@ import { phaseOf, runIdOf, tokenOf, traceOf } from "../../support/traceOf.ts";
  * | 2026-08-14 16:06 | 1 | `fable` | ticket 51, first run — the design as ticket 48 left it |
  * | 2026-08-14 16:11 | 1 | `fable` | ticket 51, second run — the design sharpened once |
  *
+ * **And a second ledger, for `pi`, because this table has never covered it.** `pi` is spawned by
+ * `kojoPiRealSession.test.ts`, not by this file and not through `SandcastleAgentInvoker`, so none of
+ * the counting above ever saw it:
+ *
+ * | when (UTC) | calls | model | what it was |
+ * |---|---|---|---|
+ * | 2026-08-14 ~17 | 1 | `claude-haiku-4-5` | **a layout probe — outside every authorisation** |
+ * | 2026-08-14 ~17 | 1 | `claude-haiku-4-5` | **a mutation of `runnable` un-skipped the paid describe — outside every authorisation** |
+ * | 2026-08-15 01:05 | **2** | `claude-haiku-4-5` | ticket 52, authorised, and it bought the criterion |
+ *
+ * The two in bold cost nothing: Anthropic refused both with `400 … out of extra usage`, zero tokens
+ * in and out. **That is luck rather than a mechanism**, and the second one was a *correct* act — rung
+ * 3 of the ladder requires mutating a gate to prove it bites. Ticket 55 is what closed the hole they
+ * went through: that suite now spawns through `tests/support/spawnAgent.ts`, which asks the same
+ * `maySpawn` this file's runs go through, and `agentSpawnSites.test.ts` keeps it the only such place.
+ *
  * Ticket 15 was authorised five and spent five. Ticket 48 was authorised three, spent **two** on the
  * one run below, and left the third unspent. Ticket 51's spend was authorised by the owner without a
  * count, against a subscription and on a **small** model, and it spent **two** — one per run, because

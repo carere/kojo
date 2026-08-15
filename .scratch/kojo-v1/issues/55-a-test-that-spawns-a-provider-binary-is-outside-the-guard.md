@@ -52,19 +52,66 @@ money, and the thing that spends it is whatever spawns the process.* Candidates,
 
 **Blocked by:** 49 — done.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Every place in this repository that can spawn an agent binary is enumerated, by a check that
-      keeps being true — not by a list in a comment
-- [ ] A spawn that the switch refuses is refused wherever it is made, not only through
+- [x] Every place in this repository that can spawn an agent binary is enumerated, by a check that
+      keeps being true — `tests/unit/contexts/agent/guards/agentSpawnSites.test.ts`
+- [x] A spawn that the switch refuses is refused wherever it is made, not only through
       `SandcastleAgentInvoker`
-- [ ] A test proves it by attempting the spawn from a test that does not use the invoker
-- [ ] `kojoPiRealSession.test.ts`'s gate stops claiming a credential decides whether a call is
-      possible, or is shown to be right about this machine and says which store it means
-- [ ] The ledger in `realAgent.test.ts`'s header gains the two refused `pi` calls. They cost nothing
-      and they are still calls that were made and not authorised — the whole discipline of that
-      table is that it records what happened rather than what was meant
+- [x] A test proves it by attempting the spawn from a test that does not use the invoker
+- [x] `kojoPiRealSession.test.ts`'s gate names the spend switch as a third reason to skip, and says
+      which store pi may also be reading
+- [x] The ledger in `realAgent.test.ts`'s header gains the two refused `pi` calls, in a second table
+      of its own — because that header's counting method never covered `pi` at all
 
 ## Comments
 
 *(none yet)*
+
+## Comments
+
+### 2026-08-15 — the guard moved to the thing that spawns
+
+**Two lines, and the second is the one that survives a mutation.**
+
+1. **The gate reads the switch**, so a suite nobody has authorised *skips* honestly instead of
+   failing with a message about a refusal. `KOJO_AGENT_SPEND` is now a third reason in
+   `missingIn`, beside the binary and the credential, and it hides neither.
+2. **The spawn asks again.** `tests/support/spawnAgent.ts` calls the product's own `maySpawn` before
+   it starts anything. So flipping the gate constant by hand — which is exactly what mutating
+   `runnable` did, and exactly how one of the two unauthorised `pi` calls happened — cannot spend.
+
+It calls `maySpawn` rather than reimplementing the rule. A guard that agreed with the invoker by
+resemblance is a guard that will one day disagree with it.
+
+**The enumeration is a test, not a list.** The invariant: building a command is free and *spawning*
+is what costs, so a file is a spawn site when it **calls** `buildPrintCommand` and uses a
+child-process primitive. A *call* and not a mention — the first draft flagged five files, three of
+which merely explain `buildPrintCommand` in prose while spawning a `kojo` child or a `printf`, and a
+guard that fired on those would have been switched off within the week. `SandcastleAgentInvoker`
+calls it and spawns nothing itself, so it is not a site either; it is the other end of the same rule.
+What is left is exactly one file.
+
+The guard asserts its own search too — over a hundred files walked, the allowed file present, the
+file this ticket was opened over present — because the way a scanner fails quietly is by scanning
+nothing.
+
+**What it does not cover, written into the docstring rather than left to be discovered.** A file
+that hard-codes `pi` or `claude` as a command without going through a provider is not caught.
+Nothing does that today, and a check broad enough to catch it would fire on every test that writes a
+shell script named `claude` onto a `PATH` — and those scripts are the stand-ins, reached by a `kojo`
+child that goes through the guarded invoker.
+
+**Proven, and by which mutation.**
+
+| mutation | what went red |
+|---|---|
+| the helper ignores its own refusal and spawns anyway | 3 of the 5 guard tests, each on the evidence file the command would have written |
+| the pi suite spawns for itself again, as ticket 55 found it | `is the guarded helper, and nowhere else` — the enumeration, and nothing else in 638 |
+
+**The consequence to know about.** Running the paid pi suite now needs `KOJO_AGENT_SPEND=allow` as
+well as a credential. The run on 2026-08-15 that bought ticket 52 was made *before* this landed and
+needed only the credential; the same run today would skip, and say so naming the switch.
+
+**Spend: none.** Nothing here can reach a model — the provider in the guard's own test is a shell
+command that writes a file, and that file is the evidence a refusal came before the spawn.
