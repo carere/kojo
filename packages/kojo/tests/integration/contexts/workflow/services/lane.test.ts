@@ -108,13 +108,27 @@ const seedRepository = (repo: string): void => {
  * `sandboxed` now probes the workspace from inside the sandbox and rebuilds the container when it
  * does not answer, so a lane that trips this recovers instead of failing (architecture.md §8, edge
  * 11). What the anchoring still buys is **time**. Each occurrence costs a whole extra container
- * build — roughly 40 s here — and these tests carry a 180 s timeout, so a fixture under `$TMPDIR`
+ * build — roughly 40 s here — and these tests carry a timeout, so a fixture under `$TMPDIR`
  * would turn a 3-in-4 recovery into a suite that times out and reads as a code regression. Kept as a
  * cost measure, not as a correctness one.
+ *
+ * **The timeout itself was calibrated on this machine, and CI found that out** — ticket 62. It was
+ * 180 s, chosen against the ~40 s container build above. On a two-core GitHub runner the same three
+ * tests took **185 s** and were killed, twice, on a *different* test each time: the signature of a
+ * limit that is slightly too small rather than of a hang, which would be identical every run. Raised
+ * to 480 s, which is the same arithmetic with a build several times slower — a number to be measured
+ * again rather than a number anybody knows. If a run ever spends the whole 480 s, that is the
+ * evidence this is a hang after all, and it is worth more than the eight minutes it costs.
  *
  * `/tmp` rather than a platform switch: on macOS it resolves to `/private/tmp`, on Linux it is
  * already the right answer, and anywhere it is missing `os.tmpdir()` is no worse than today.
  */
+/**
+ * How long one lane test may take, in milliseconds. See the note above: it is a measurement of the
+ * slowest machine this suite is known to run on, not a guess about the fastest.
+ */
+const laneTimeout = 480_000;
+
 const fixtureRoot = ((): string => {
   try {
     return realpathSync("/tmp");
@@ -307,7 +321,7 @@ describe("a lane with a mid-lane gate, across three processes", () => {
           expect(git(fixed.repo, ["show", `${fixed.branch}:notes/finding.md`])).toContain("alpha:");
         }),
       ),
-    180000,
+    laneTimeout,
   );
 
   it.live(
@@ -347,7 +361,7 @@ describe("a lane with a mid-lane gate, across three processes", () => {
           );
         }),
       ),
-    180000,
+    laneTimeout,
   );
 
   it.live(
@@ -380,7 +394,7 @@ describe("a lane with a mid-lane gate, across three processes", () => {
           expect(agents[1]?.agent?.resumed).toBe(true);
         }),
       ),
-    180000,
+    laneTimeout,
   );
 });
 
