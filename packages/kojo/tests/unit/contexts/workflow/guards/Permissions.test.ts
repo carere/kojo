@@ -128,6 +128,49 @@ describe("enforcing what an agent was permitted", () => {
     }),
   );
 
+  /**
+   * **The whole of ticket 54, enforced rather than merely decided.** `permits` saying `false` is one
+   * thing; the file being gone from the repository afterwards is the thing that matters, and it is
+   * the half a `permits`-only test would have left unproven.
+   */
+  it.effect("deletes a file the agent created at the root of the factory's directory", () =>
+    Effect.gen(function* () {
+      const tree = fingerprintedTree({});
+
+      const outcome = yield* Effect.gen(function* () {
+        const before = yield* Permissions.snapshot;
+        const workspace = yield* Workspace;
+        yield* workspace.write(".kojo/evil.ts", "export const graded = () => true;");
+        return yield* Permissions.enforce(builder, before).pipe(Effect.result);
+      }).pipe(Effect.provide(tree.layer));
+
+      const breach = breachIn(outcome);
+      expect(breach.paths.map((rollback) => rollback.path)).toEqual([".kojo/evil.ts"]);
+      expect(breach.paths[0]?.outcome).toEqual({ _tag: "Deleted" });
+      expect(tree.changes.has(".kojo/evil.ts")).toBe(false);
+    }),
+  );
+
+  /**
+   * And the other side of the same rule: what an agent records is left exactly where it wrote it,
+   * under a scope that bars the directory it sits in.
+   */
+  it.effect("leaves what the agent recorded, under the directory it is barred from", () =>
+    Effect.gen(function* () {
+      const tree = fingerprintedTree({});
+
+      const outcome = yield* Effect.gen(function* () {
+        const before = yield* Permissions.snapshot;
+        const workspace = yield* Workspace;
+        yield* workspace.write(".kojo/artifacts/draft/report.md", "what I found");
+        return yield* Permissions.enforce(builder, before).pipe(Effect.result);
+      }).pipe(Effect.provide(tree.layer));
+
+      expect(Result.isSuccess(outcome)).toBe(true);
+      expect(tree.changes.has(".kojo/artifacts/draft/report.md")).toBe(true);
+    }),
+  );
+
   it.effect("restores a tracked file the agent edited outside its scope", () =>
     Effect.gen(function* () {
       const tree = fingerprintedTree({});
@@ -273,5 +316,73 @@ describe("guarding one agent call", () => {
       expect(breachIn(outcome).paths[0]?.path).toBe(".kojo/workflows/grader.ts");
       expect(tree.changes.has(".kojo/workflows/grader.ts")).toBe(false);
     }),
+  );
+});
+
+/**
+ * **The gap between the two lines of defence** — ticket 54.
+ *
+ * Ticket 14 barred the factory's own files and ticket 50 took them out of the tree the agent works
+ * in. Neither reaches a file the agent *creates* at the **root** of `.kojo/`: every entry of
+ * `factoryOwnPaths` named a file or a directory and none of them was `.kojo/` itself, so `permits`
+ * answered `true` under an `Unrestricted` scope; and a mask built from `git ls-files` cannot hide a
+ * path that has no index entry yet.
+ *
+ * It is reachable in this repository rather than only in principle —
+ * `.kojo/workflows/lane/common.ts` gives the builder, the fixer and the tidier `Unrestricted`.
+ *
+ * Ticket 50 shipped `.kojo/evil.ts` as the worked example of what rollback *does* catch, marked
+ * *Measured*. It was not measured; the adversarial pass ran `permits` and got `true`.
+ */
+describe("a file created at the root of the factory's own directory", () => {
+  it.each([
+    ".kojo/evil.ts",
+    ".kojo/notes.md",
+    ".kojo/kojo.config.yaml.bak",
+    ".kojo/sneaky/deep.ts",
+  ])("is barred from an unrestricted agent: %s", (path) => {
+    expect(Permissions.permits(builder, path)).toBe(false);
+  });
+
+  it("is barred from a limited agent too, which it already was", () => {
+    expect(Permissions.permits(scout, ".kojo/evil.ts")).toBe(false);
+  });
+
+  /**
+   * **And the exception, which is the whole reason this is a decision rather than a longer list.**
+   *
+   * Barring `.kojo/` wholesale would also bar the two directories an agent is *supposed* to write
+   * into: the artifacts a phase records, and the run's own data. Both stay writable, for every
+   * scope, and neither depends on an author remembering to list them.
+   */
+  it.each([
+    ".kojo/artifacts/draft/report.md",
+    ".kojo/artifacts/anything.txt",
+    ".kojo/data/runs/abc/output.json",
+  ])("does not bar what an agent is meant to record: %s", (path) => {
+    expect(Permissions.permits(builder, path)).toBe(true);
+    expect(Permissions.permits(scout, path)).toBe(true);
+  });
+
+  /**
+   * The composition, as a table, including the case the ticket asks about: a path that matches
+   * **both** the protected list and the always-writable one. The run's own runtime wins, and it has
+   * to — an agent that cannot record its work is an agent whose failure nobody can read.
+   */
+  it.each([
+    ["under both lists, always-writable wins", ".kojo/artifacts/x.md", true],
+    ["protected only", ".kojo/checks.ts", false],
+    ["protected only, at the root", ".kojo/evil.ts", false],
+    ["neither list", "src/main.ts", true],
+  ])("%s", (_case, path, allowed) => {
+    expect(Permissions.permits(builder, path)).toBe(allowed);
+  });
+
+  /** A path that merely *starts* with the directory's name is a different directory. */
+  it.each([".kojoland/x.ts", ".kojo-old/x.ts", "docs/.kojo/x.ts"])(
+    "does not bar something that only looks like it: %s",
+    (path) => {
+      expect(Permissions.permits(builder, path)).toBe(true);
+    },
   );
 });

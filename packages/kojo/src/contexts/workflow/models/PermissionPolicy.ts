@@ -42,15 +42,15 @@ export type WriteScope = typeof WriteScope.Type;
  *
  * So the two lines are not redundant, and neither one may be deleted on the strength of the other.
  *
- * **And there is a third case that neither line catches, measured rather than reasoned.** A file
- * created at the **root** of `.kojo/` — `.kojo/evil.ts` — is under no entry of this list, because
- * every entry names a file or a directory and none of them is `.kojo/` itself. `permits(Unrestricted,
- * ".kojo/evil.ts")` is therefore **true**, so no breach is raised and nothing is rolled back; and it
- * has no index entry, so the mask cannot hide it either. `.kojo/workflows/lane/common.ts` gives this
- * repository's own builder, fixer and tidier `Unrestricted`, so the gap is reachable here and not
- * only in principle. An earlier revision of this docstring used exactly that path as the example of
- * what rollback *does* catch, and was wrong. Widening the list to `.kojo/` would close it and would
- * also bar the artifacts directory and the run's own data, so it is a decision rather than a patch.
+ * **A file created at the root of `.kojo/` was once caught by neither line, and is now barred by
+ * `permits` itself** — ticket 54. Every entry of this list names a file or a directory and none of
+ * them is `.kojo/`, so `permits(Unrestricted, ".kojo/evil.ts")` answered **true**; and a mask built
+ * from `git ls-files` cannot hide a path with no index entry. The bar lives in the guard rather than
+ * in this list on purpose: it is **Kojo's** rule about Kojo's own directory, so a factory already
+ * stamped gets it without editing a workflow, and this list stays what it says it is — the specific
+ * files that decide how an agent is graded, and the list the sandbox mask is built from. `permits`
+ * grants {@link runOwnPaths} first, so the two directories an agent is *meant* to write into stay
+ * writable under every scope.
  */
 export const factoryOwnPaths: ReadonlyArray<string> = [
   ".kojo/kojo.config.yaml",
@@ -60,6 +60,17 @@ export const factoryOwnPaths: ReadonlyArray<string> = [
   ".kojo/commands.ts",
   ".kojo/prompts/",
 ];
+
+/**
+ * What a **run** records, which no factory may bar and no author has to remember — ticket 54.
+ *
+ * The artifacts a phase writes and the run's own data directory. `permits` grants these before it
+ * reads anything the author wrote, for the same reason `alwaysWritable` exists at all: an agent that
+ * cannot record its work is an agent whose failure nobody can read, and that ability must not hang
+ * on a list somebody could forget to fill in. Every stamped factory ships `alwaysWritable: []`, so
+ * left to the author these would have been barred the moment the directory itself was.
+ */
+export const runOwnPaths: ReadonlyArray<string> = [".kojo/artifacts/", ".kojo/data/"];
 
 /** Everything the guard needs to decide one path, gathered for one agent call. */
 export interface PermissionPolicy {

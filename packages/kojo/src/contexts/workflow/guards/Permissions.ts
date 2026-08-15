@@ -2,9 +2,10 @@ import { Effect, Result } from "effect";
 import type { ExecResult } from "../../sandbox/models/ExecResult.ts";
 import { WorkspaceError } from "../../sandbox/models/WorkspaceError.ts";
 import { Workspace } from "../../sandbox/ports/Workspace.ts";
+import { factoryDirectory } from "../../shared/models/FactoryLayout.ts";
 import { PathRollback, type RollbackOutcome } from "../../shared/models/PathRollback.ts";
 import { PermissionBreach } from "../models/PermissionBreach.ts";
-import { describeScope, type PermissionPolicy } from "../models/PermissionPolicy.ts";
+import { describeScope, type PermissionPolicy, runOwnPaths } from "../models/PermissionPolicy.ts";
 import { matchesPattern } from "./pathPattern.ts";
 
 /**
@@ -92,17 +93,29 @@ export const changedPaths = (before: Fingerprint, after: Fingerprint): ReadonlyA
     .sort();
 
 /**
- * The run's own runtime first, then the agent's own list, then what is protected.
+ * What a run records, then the run's own runtime, then the agent's own list, then what is protected
+ * — the factory's whole directory included.
  *
- * The middle test is what lets one agent be the maintainer of a path every other agent is barred
- * from: naming a path in a scope is what unlocks a protected one.
+ * **The third test is what lets one agent be the maintainer of a path every other agent is barred
+ * from**: naming a path in a scope is what unlocks a protected one, and it comes *before* both bars
+ * so that a librarian granted `.kojo/workflows/*.ts` still has it.
+ *
+ * **The fourth is Kojo's own, and it is not the author's to forget** — ticket 54. Everything under
+ * `.kojo/` is barred, not merely the six files `factoryOwnPaths` names: a file an agent *creates*
+ * at the root of that directory matched no entry, so it was permitted, and a mask built from
+ * `git ls-files` could not hide a path with no index entry either. It sits here rather than in the
+ * author's list so that a factory already stamped is covered without editing a workflow, and so the
+ * two directories an agent is *meant* to write into — `runOwnPaths`, granted first — stay writable
+ * under every scope.
  */
 export const permits = (policy: PermissionPolicy, path: string): boolean => {
   const under = (patterns: ReadonlyArray<string>) =>
     patterns.some((pattern) => matchesPattern(path, pattern));
 
+  if (under(runOwnPaths)) return true;
   if (under(policy.alwaysWritable)) return true;
   if (policy.writes._tag === "LimitedTo" && under(policy.writes.patterns)) return true;
+  if (under([`${factoryDirectory}/`])) return false;
   if (under(policy.protectedPaths)) return false;
   return policy.writes._tag === "Unrestricted";
 };

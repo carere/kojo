@@ -104,6 +104,8 @@ const fakeClaude = (options: {
    * the conversation, so the repair's answer is the script's, decided in advance.
    */
   readonly resumed?: { readonly risk: string; readonly transcript: string } | undefined;
+  /** A path the agent also writes, for a rehearsal about what it was not permitted to touch. */
+  readonly alsoWrites?: string | undefined;
 }): string =>
   [
     "#!/bin/sh",
@@ -113,6 +115,12 @@ const fakeClaude = (options: {
     `printf 'PROMPT-END\\n' >> ${quote(options.log)}`,
     // The work the envelope claims, because `diffMatchesClaims` goes and looks.
     `printf 'goodbye\\n' >> ${quote(changed)}`,
+    ...(options.alsoWrites === undefined
+      ? []
+      : [
+          `mkdir -p ${quote(pathOf(options.alsoWrites) || ".")}`,
+          `printf 'export const graded = () => true;\\n' > ${quote(options.alsoWrites)}`,
+        ]),
     `printf '%s\\n' ${quote(JSON.stringify({ type: "system", subtype: "init", session_id: "scripted-cold" }))}`,
     ...(options.resumed === undefined
       ? [`printf '%s\\n' ${quote(answers(options.risk))}`]
@@ -176,6 +184,8 @@ const rehearsal = <A, E>(
     readonly risk: string;
     /** What a resumed turn puts there, when this rehearsal wants the repair delivered at all. */
     readonly repairsWith?: string | undefined;
+    /** A path the scripted agent also writes, to rehearse what the permission guard does about it. */
+    readonly alsoWrites?: string | undefined;
   },
   use: (fixture: Rehearsal) => Effect.Effect<A, E, FileSystem.FileSystem | Path.Path>,
 ) =>
@@ -206,6 +216,7 @@ const rehearsal = <A, E>(
           ...(answer.repairsWith === undefined
             ? {}
             : { resumed: { risk: answer.repairsWith, transcript } }),
+          ...(answer.alsoWrites === undefined ? {} : { alsoWrites: answer.alsoWrites }),
         }),
       )
       .pipe(Effect.orDie);
@@ -490,3 +501,48 @@ describe("the correction loop, rehearsed against a scripted agent", () => {
  * shown the rule. That premise was true of design 1 and quietly stopped being true, and two paid
  * calls found out instead of a test. It is graded there now, beside the design itself.
  */
+
+/**
+ * **Ticket 54, end to end over a run** — the half a `permits` test cannot reach.
+ *
+ * A real `kojo run` against the stamped factory, with a scripted agent that writes a file at the
+ * **root** of `.kojo/` on its way past. Before this ticket the guard permitted it — no entry of
+ * `factoryOwnPaths` was `.kojo/` itself — so the file went onto the run's branch and, had the run
+ * been approved, onto the trunk. A file the agent wrote into the directory that decides how the
+ * agent is graded.
+ *
+ * The rehearsal costs nothing: the agent is a shell script, and the guard, the rollback, the phase
+ * record and the run's exit code are all real.
+ */
+describe("a file the agent writes into the factory's own directory", () => {
+  it.live("kills the run, says which path, and leaves the repository without it", () =>
+    rehearsal({ risk: riskRepair, alsoWrites: ".kojo/evil.ts" }, (fixture) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+
+        const ran = yield* kojo(fixture.root, ["run", "review", riskSubject], {
+          path: fixture.path,
+          spend: fixture.spend,
+          home: fixture.home,
+        });
+
+        // The run fails, and it fails for the reason rather than for a symptom.
+        expect(ran.status).not.toBe(0);
+        expect(ran.stderr).toContain("PermissionBreach");
+        expect(ran.stderr).toContain(".kojo/evil.ts");
+        expect(ran.stderr).toContain("drafter");
+
+        // **Detection alone would leave the repository holding the change.** The file the agent
+        // wrote is gone from the worktree the run was cut into, which is the half that matters.
+        const there = yield* fileSystem
+          .exists(path.join(fixture.root, ".kojo", "evil.ts"))
+          .pipe(Effect.orElseSucceed(() => false));
+        expect(there).toBe(false);
+
+        // And the trunk never saw it: the run died before its merge phase.
+        expect(ran.stdout).not.toContain("merge");
+      }),
+    ),
+  );
+});

@@ -37,10 +37,16 @@ import type { SandboxKind } from "../models/SandboxProvider.ts";
  *    it. Measured. `withPermissions` and `factoryOwnPaths` are what catch that, which is why
  *    rollback is a second line of defence rather than a formality — `permits` returns false for that
  *    path under either write scope.
- *  - **A file created at the *root* of `.kojo/` is caught by neither line**, and this one is worth
- *    knowing before trusting the pair. `.kojo/evil.ts` is under no entry of `factoryOwnPaths`, so
- *    `permits(Unrestricted, ".kojo/evil.ts")` is **true** and no breach is raised; and it has no
- *    index entry, so the mask never saw it. See the note on `factoryOwnPaths` itself.
+ *  - **The mask can never cover a file that does not exist yet, and it is not trying to.** A path
+ *    with no index entry has nothing to hide. That includes the case ticket 54 was opened for — a
+ *    file created at the *root* of `.kojo/` — which is now barred by `permits` rather than by
+ *    anything here. **This is a guard against reading, not against writing**, and the two lines are
+ *    divided exactly there: the mask stops an agent seeing its grader, and `withPermissions` stops
+ *    it writing one.
+ *
+ *    That division is also why this list stays the six specific files rather than widening to
+ *    `.kojo/`. A mask built from `.kojo/` would take the artifacts directory and the run's own data
+ *    out of the tree, which is where the agent is *meant* to write.
  *
  * Everything here is pure argv, so the whole of it is graded without a repository or a container.
  */
