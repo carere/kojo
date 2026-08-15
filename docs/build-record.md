@@ -123,6 +123,7 @@ thirteen by wave 12 and did not stop there. This is the single most useful list 
 
 | what | how it looked | source |
 |---|---|---|
+| **The whole toolchain was `latest`** | `.prototools` floated `bun` and `moon`, so a warm cache kept an old `moon` here while a fresh checkout installed 2.5.0 — under which the project graph would not build at all. Two `package.json` files were both named `kojo`, so moon 2.5 resolved the root project's own `dependsOn: [kojo]` to itself. **Every green check reported from a developer's machine was green only on that machine's version**, and nothing said so until CI ran the suite for the first time | the first CI run on `main`, 2026-08-15 |
 | A moon test task with zero tests in it | green | ticket 01 |
 | Root `tsconfig` with `references: []` | `bun tsc --build` exits 0, compiles nothing | `0ec7ae2` |
 | `moon run root:tsc` **erasing** those references | the fix for the above, undone on every run | `dd774bd` |

@@ -1,5 +1,12 @@
-bun = "latest"
-moon = "latest"
+# **Pinned, not `latest`, and this repository paid to learn why.** Both were `latest` until
+# 2026-08-15. A machine with a warm toolchain cache kept an older `moon` while a fresh checkout
+# installed a newer one, so the project graph built here and failed on CI — and every green check
+# reported from a developer's machine was green only on that machine's version. The same argument
+# this repository already applies to `effect` and `sandcastle`: drifting off the version a thing was
+# measured against invalidates the measurement. Moving a pin is a deliberate act with a run behind
+# it.
+bun = "1.3.14"
+moon = "2.5.0"
 
 [settings]
 detect-strategy = "only-prototools"

@@ -33,7 +33,7 @@
   // `packages/kojo/src/` and never attributes the import to the dependency entry that made it
   // resolvable. Removing the entry would leave the factory working here and broken for anybody who
   // installed Kojo, which is the fault this line is protecting.
-  "ignoreDependencies": ["@biomejs/biome", "kojo"],
+  "ignoreDependencies": ["@biomejs/biome"],
 
   "workspaces": {
     ".": {
