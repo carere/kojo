@@ -11,6 +11,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Path } from "effect";
 import * as InMemoryImageBuilder from "../../../src/contexts/scaffold/adapters/InMemoryImageBuilder.ts";
 import { initialise } from "../../../src/contexts/scaffold/services/initialise.ts";
+import { defaultTrunk } from "../../../src/contexts/shared/models/FactoryLayout.ts";
 import { thisEngine } from "../../support/engineDependency.ts";
 
 const cli = new URL("../../../src/main.ts", import.meta.url).pathname;
@@ -124,7 +125,7 @@ const stamped = Effect.gen(function* () {
     .pipe(Effect.orDie);
 
   yield* Effect.sync(() => {
-    git(root, ["init", "--quiet"]);
+    git(root, ["init", "--quiet", `--initial-branch=${defaultTrunk}`]);
     git(root, ["config", "user.name", "Kojo"]);
     git(root, ["config", "user.email", "kojo@example.invalid"]);
   });

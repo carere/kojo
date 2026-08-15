@@ -5,6 +5,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Layer } from "effect";
 import * as BindMountWorkspace from "../../../../../src/contexts/sandbox/adapters/BindMountWorkspace.ts";
 import { Workspace } from "../../../../../src/contexts/sandbox/ports/Workspace.ts";
+import { defaultTrunk } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
 import type { PhaseId } from "../../../../../src/contexts/shared/models/PhaseId.ts";
 import { makePhaseId } from "../../../../../src/contexts/shared/models/PhaseId.ts";
 import type { RunId } from "../../../../../src/contexts/shared/models/RunId.ts";
@@ -31,7 +32,7 @@ const identity = ["-c", "user.name=Kojo", "-c", "user.email=kojo@example.invalid
 /** A repository with one commit, and the artifacts of one phase beside it. */
 const setUp = Effect.gen(function* () {
   const workspace = yield* Workspace;
-  yield* workspace.git(["init", "--quiet"]);
+  yield* workspace.git(["init", "--quiet", `--initial-branch=${defaultTrunk}`]);
   yield* workspace.write("src/health.ts", "export const ok = true\n");
   yield* workspace.git(["add", "."]);
   yield* workspace.git([...identity, "commit", "--quiet", "--message", "seed"]);

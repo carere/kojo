@@ -2,6 +2,7 @@
 // TypeScript this module *writes*, not to the TypeScript it *is*. Making these template literals
 // would interpolate variables of this program into a stamped file that has its own.
 
+import { defaultTrunk } from "../../shared/models/FactoryLayout.ts";
 import type { FactoryChoices } from "../models/FactoryChoices.ts";
 import { ownedByYou, providerSource, type Starter } from "./starter.ts";
 
@@ -144,7 +145,7 @@ const workflow = (choices: FactoryChoices) => {
       " * it. Anything else and the merge refuses by name — it says which branch it found and which",
       " * one it wanted — rather than landing the work somewhere nobody expected it.",
       " */",
-      `const trunk = "main";`,
+      `const trunk = "${defaultTrunk}";`,
       "",
       "/**",
       " * Where the work runs.",

@@ -7,10 +7,11 @@ import * as BindMountWorkspace from "../../../../../src/contexts/sandbox/adapter
 import { acquireSandbox } from "../../../../../src/contexts/sandbox/adapters/boundary.ts";
 import { noSandbox } from "../../../../../src/contexts/sandbox/adapters/providers.ts";
 import { Workspace } from "../../../../../src/contexts/sandbox/ports/Workspace.ts";
+import { defaultTrunk } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
 
 const seed = Effect.gen(function* () {
   const workspace = yield* Workspace;
-  yield* workspace.git(["init", "--quiet"]);
+  yield* workspace.git(["init", "--quiet", `--initial-branch=${defaultTrunk}`]);
   yield* workspace.write("src/health.ts", "export const ok = true\n");
   yield* workspace.git(["add", "."]);
   yield* workspace.git([

@@ -165,7 +165,10 @@ const workflowSource = [
 const stamp = (): string => {
   const root = mkdtempSync(join(tmpdir(), "kojo-console-real-"));
 
-  git(root, ["init", "--quiet"]);
+  // `--initial-branch` stated rather than inherited: the factory stamped below lands on `main`, and
+  // a bare `git init` takes whatever the machine's `init.defaultBranch` says — `master` on a stock
+  // CI runner, which turns every merge phase into a refusal about a branch nobody chose. Ticket 59.
+  git(root, ["init", "--quiet", "--initial-branch=main"]);
   git(root, ["config", "user.name", "Kojo"]);
   git(root, ["config", "user.email", "kojo@example.invalid"]);
   writeFileSync(

@@ -14,6 +14,7 @@ import {
 import type { AcquiredSandbox } from "../../../../../src/contexts/sandbox/models/SandboxHandle.ts";
 import { WorkspaceError } from "../../../../../src/contexts/sandbox/models/WorkspaceError.ts";
 import { Workspace } from "../../../../../src/contexts/sandbox/ports/Workspace.ts";
+import { defaultTrunk } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
 import * as InMemoryTracer from "../../../../../src/contexts/trace/adapters/InMemoryTracer.ts";
 import { code } from "../../../../../src/contexts/workflow/services/phase/code.ts";
 import { workflow } from "../../../../../src/contexts/workflow/services/workflow.ts";
@@ -21,7 +22,7 @@ import { localIsolated } from "../../../../support/localIsolatedProvider.ts";
 
 const seed = Effect.gen(function* () {
   const workspace = yield* Workspace;
-  yield* workspace.git(["init", "--quiet"]);
+  yield* workspace.git(["init", "--quiet", `--initial-branch=${defaultTrunk}`]);
   yield* workspace.write("src/health.ts", "export const ok = true\n");
   yield* workspace.git(["add", "."]);
   yield* workspace.git([

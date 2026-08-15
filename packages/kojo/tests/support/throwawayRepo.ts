@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, symlinkSync } from "node:fs";
 import { Effect, FileSystem, Path } from "effect";
+import { defaultTrunk } from "../../src/contexts/shared/models/FactoryLayout.ts";
 
 /**
  * A repository nobody minds losing, with a finished factory in it.
@@ -248,7 +249,7 @@ export const throwawayRepo = (options: {
       });
 
     yield* Effect.sync(() => {
-      git(root, ["init", "--quiet"]);
+      git(root, ["init", "--quiet", `--initial-branch=${defaultTrunk}`]);
       git(root, ["config", "user.name", "Kojo"]);
       git(root, ["config", "user.email", "kojo@example.invalid"]);
     });

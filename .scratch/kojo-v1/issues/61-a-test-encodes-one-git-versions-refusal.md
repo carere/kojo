@@ -78,10 +78,6 @@ is not is the claim that git will save you if the guard is off.
 
 ## Comments
 
-*(none yet)*
-
-## Comments
-
 ### 2026-08-15 — the ticket's own diagnosis was wrong, and the fix is not to find the right one
 
 **Measured first, and it refuted the title.** Plain `git worktree add <path> <branch>` against a

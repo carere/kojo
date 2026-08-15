@@ -26,3 +26,18 @@ export const workflowsDirectory = "workflows";
 
 /** What a workflow module is called on disk. Kojo's runtime is Bun, so it is TypeScript. */
 export const workflowExtension = ".ts";
+
+/**
+ * The branch a stamped factory lands its accepted runs on, unless its author changes it.
+ *
+ * One name, for the same reason `factoryDirectory` is one: two halves of this build write it from
+ * opposite ends. `kojo init` stamps `const trunk = "main"` into the workflow it generates, and the
+ * repositories the test suites create have to start on that branch or every merge phase refuses —
+ * by name, with *the workspace is on X, and the merge targets Y*.
+ *
+ * **Before this existed, the fixtures did not say it at all.** They ran a bare `git init` and took
+ * whatever the machine's `init.defaultBranch` produced, which is `main` on the machine this was
+ * built on and `master` on a stock CI runner. Four suites went red on the first Linux run of the
+ * container tier, for a setting no test mentioned. See ticket 59.
+ */
+export const defaultTrunk = "main";

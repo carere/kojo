@@ -5,6 +5,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Option, Result } from "effect";
 import * as BindMountWorkspace from "../../../../../src/contexts/sandbox/adapters/BindMountWorkspace.ts";
 import { Workspace } from "../../../../../src/contexts/sandbox/ports/Workspace.ts";
+import { defaultTrunk } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
 import * as Permissions from "../../../../../src/contexts/workflow/guards/Permissions.ts";
 import { PermissionBreach } from "../../../../../src/contexts/workflow/models/PermissionBreach.ts";
 import {
@@ -32,7 +33,7 @@ const worktree = <A, E>(use: Effect.Effect<A, E, Workspace>) =>
 
 const setUp = Effect.gen(function* () {
   const workspace = yield* Workspace;
-  yield* workspace.git(["init", "--quiet"]);
+  yield* workspace.git(["init", "--quiet", `--initial-branch=${defaultTrunk}`]);
   yield* workspace.write("src/health.ts", "export const ok = true\n");
   yield* workspace.write(".kojo/checks.ts", "export const checks = []\n");
   yield* workspace.git(["add", "."]);

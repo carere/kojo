@@ -44,18 +44,19 @@ jobs:
       # The suites stamp repositories and commit into them. A runner has no identity of its own, and
       # `git commit` without one fails with a message about `user.email` rather than about the test.
       #
-      # **`init.defaultBranch` is the other half, and the first CI run is what found it.** The
-      # fixtures run `git init` and the factories they stamp target `main`; a runner's git still
-      # defaults to `master`, so four suites failed with *the workspace is on master, and the merge
-      # targets main* — a fixture passing on this machine's git configuration rather than on
-      # anything it states. Declared here so CI matches the trunk this repository uses everywhere
-      # (`.moon/workspace.yml`, `cog.toml`), and ticket 59 carries the deeper fix: a fixture should
-      # name its own branch rather than inherit one.
-      - name: Git configuration for the fixtures
+      # **`init.defaultBranch` is deliberately not set here.** It was, for one day: the first CI run
+      # of the container tier failed four suites with *the workspace is on master, and the merge
+      # targets main*, because the fixtures ran a bare `git init` and took whatever the machine
+      # offered. Declaring it made CI green and moved the assumption from one machine's
+      # configuration to another's. Ticket 59 fixed the fixtures instead — every one of them now
+      # passes `--initial-branch` built from `defaultTrunk`, the same constant `kojo init` stamps as
+      # the trunk — so a runner's `master` default is no longer something this repository has an
+      # opinion about. **Leaving it unset is what keeps that true**; if it comes back, the fixtures
+      # have quietly started inheriting again.
+      - name: Git identity for the fixtures
         run: |
           git config --global user.name "kojo ci"
           git config --global user.email "ci@kojo.invalid"
-          git config --global init.defaultBranch main
 
       - name: Setup toolchain
         uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4

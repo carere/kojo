@@ -16,6 +16,7 @@ import {
   acquisitionAttempt,
   correlationEnvironment,
 } from "../../../../../src/contexts/shared/models/Correlation.ts";
+import { defaultTrunk } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
 import type { RunId } from "../../../../../src/contexts/shared/models/RunId.ts";
 import { makeSandboxId } from "../../../../../src/contexts/shared/models/SandboxId.ts";
 
@@ -41,7 +42,7 @@ const commit = (message: string): ReadonlyArray<string> => [
 
 const seed = Effect.gen(function* () {
   const workspace = yield* Workspace;
-  yield* workspace.git(["init", "--quiet"]);
+  yield* workspace.git(["init", "--quiet", `--initial-branch=${defaultTrunk}`]);
   yield* workspace.write("src/health.ts", "export const ok = true\n");
   yield* workspace.git(["add", "."]);
   yield* workspace.git(commit("seed"));
