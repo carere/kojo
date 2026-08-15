@@ -43,10 +43,19 @@ jobs:
 
       # The suites stamp repositories and commit into them. A runner has no identity of its own, and
       # `git commit` without one fails with a message about `user.email` rather than about the test.
-      - name: Git identity for the fixtures
+      #
+      # **`init.defaultBranch` is the other half, and the first CI run is what found it.** The
+      # fixtures run `git init` and the factories they stamp target `main`; a runner's git still
+      # defaults to `master`, so four suites failed with *the workspace is on master, and the merge
+      # targets main* — a fixture passing on this machine's git configuration rather than on
+      # anything it states. Declared here so CI matches the trunk this repository uses everywhere
+      # (`.moon/workspace.yml`, `cog.toml`), and ticket 59 carries the deeper fix: a fixture should
+      # name its own branch rather than inherit one.
+      - name: Git configuration for the fixtures
         run: |
           git config --global user.name "kojo ci"
           git config --global user.email "ci@kojo.invalid"
+          git config --global init.defaultBranch main
 
       - name: Setup toolchain
         uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4

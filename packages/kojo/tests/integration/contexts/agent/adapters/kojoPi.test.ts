@@ -1,5 +1,5 @@
 import { realpathSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 // The package's only entry point for its core types and its stock agent providers, as
@@ -480,8 +480,21 @@ describe("finding a transcript pi wrote, without pi", () => {
    * — a resume that silently started cold.
    */
   it("finds it when asked with the unresolved twin of the directory pi recorded", async () => {
-    const asPiSeesIt = realpathSync(worktree);
-    expect(asPiSeesIt).not.toBe(worktree);
+    // **The symlink is built here rather than borrowed from the platform.** macOS hands `/var` back
+    // as a symlink to `/private/var`, so `mkdtemp` alone used to produce this case — and the test
+    // asserted that it had, which made it pass on a Mac and fail on the first Linux runner, where
+    // a temp directory is its own real path. The fault being graded is Kojo's, not the operating
+    // system's, so the two spellings of one directory are made on purpose.
+    const real = join(worktree, "real");
+    const twin = join(worktree, "twin");
+    await mkdir(real, { recursive: true });
+    await symlink(real, twin);
+
+    // Resolved on both sides: on macOS the temp root is itself a symlink, so the directory just
+    // created is already spelled two ways before this test adds a third.
+    const asPiSeesIt = realpathSync(twin);
+    expect(asPiSeesIt).toBe(realpathSync(real));
+    expect(asPiSeesIt).not.toBe(twin);
 
     const directory = join(root, encodePiSessionDirectory(asPiSeesIt));
     await mkdir(directory, { recursive: true });
@@ -489,8 +502,9 @@ describe("finding a transcript pi wrote, without pi", () => {
 
     const storage = piSessionStorage({ host: root });
 
-    expect(await storage.existsOnHost(worktree, session)).toBe(true);
-    expect(storage.hostSessionFilePath(worktree, session)).toBe(directory);
+    // Asked with the name the caller was handed; answered about the directory pi recorded.
+    expect(await storage.existsOnHost(twin, session)).toBe(true);
+    expect(storage.hostSessionFilePath(twin, session)).toBe(directory);
   });
 
   it("names pi's own sessions root when Kojo names none at all", () => {
