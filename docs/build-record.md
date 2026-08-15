@@ -190,9 +190,11 @@ Each rung was added after a specific failure, and none was there at the start.
    `WorkspaceUnreachable{containers: 3}`.
 
    So macOS and Linux are **one fault at two rates**, not two faults, and the timeout was hiding the
-   cause on one of them. Ticket 62 carries what is still unmeasured: the cost of a single rebuild on
-   a runner, which is the only number that would let the timeout be chosen rather than held. What
-   follows is what was measured about the Mac, and it stands as a measurement of the Mac:
+   cause on one of them. Three runs of one commit settled the rest: 53 s, 52 s, and **235 s — which
+   passed.** The recovery fires on some runs, costs ~180 s on top of the work, and *finishes*; the
+   two runs killed at 180 s were a correct recovery cut off part-way. 480 s is therefore about twice
+   the worst observed, and nothing has ever approached it. What follows is what was measured about
+   the Mac, and it stands as a measurement of the Mac:
 
    **The engine here is OrbStack, not Docker Desktop** — `docker context ls` shows `orbstack *`,
    `docker info` reports `orbstack | 29.4.0 | OrbStack | overlayfs`, and `orb version` is 2.2.2.

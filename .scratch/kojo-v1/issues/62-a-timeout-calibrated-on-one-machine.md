@@ -77,27 +77,48 @@ That is the **third** diagnosis this cluster of failures has produced and the th
 after ticket 60's `catchAll` and ticket 61's git version. The pattern is worth naming: every one was
 a theory about *why the machine differed*, and every one was refuted by measuring the thing itself.
 
-### What is still not known
+### And the third run answered what was left
 
-How long one rebuild costs **on a runner**. Locally it is ~40 s; the image is four lines of alpine,
-so it ought to be quick there too, and three quick rebuilds do not obviously add up to 185 s. Until
-that is measured, the timeout stays at 480 s — not because 480 is right, but because lowering it
-would be a fourth theory, and this ticket has already paid for three.
+Three runs of the same commit, all green:
+
+| run | `lane.test.ts` (8 tests) | |
+|---|---|---|
+| 1 | **53.3 s** | healthy |
+| 2 | **52.1 s** | healthy |
+| 3 | **235.2 s** | the recovery fired — **and finished** |
+
+Run 3 is the one worth having. It took 235 s and **passed**, so the edge-11 recovery ran and won.
+Against the old limit that run would have been killed at 180 s and reported as a failure — which is
+exactly what the two earlier CI runs were: not tests that were too slow, and not tests that hung,
+but **a correct recovery cut off before it could finish.**
+
+So the cost of a recovery on a runner is measured at last: **235 − 53 ≈ 180 s**, for a recovery that
+took at most `containerLimit` = 3 rebuilds. That is the number this ticket said it needed, and it
+makes 480 s a *chosen* ceiling rather than a held one — roughly twice the worst observed, with the
+margin on the side of letting a recovery finish rather than killing it.
+
+**No run has ever approached 480 s.** The largest is 235 s, so the "if it reaches 480 s it is a
+hang" test has not fired, and the hang reading is refuted on evidence rather than left open.
+
+What remains unexplained is only the *rate*: why the recovery fires on some runs and not others.
+That is edge 11 and ticket 37's territory — a transient disagreement about a path just deleted and
+recreated — and it is recovered from by design. This ticket was about the timeout, and the timeout
+now has a measurement under it.
 
 **Blocked by:** none.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The container tier passes on a two-core runner three times in a row, which is what would make
-      *slow* the settled answer rather than the current one
+- [x] The container tier passed on a two-core runner **three times in a row** — 53 s, 52 s, and
+      235 s, the last being a recovery that fired and finished
 - [x] What the time goes into is measured rather than inferred: the edge-11 recovery rebuilding up
       to `containerLimit` = 3 containers, named by `WorkspaceUnreachable{containers: 3}`. A healthy
       file is 53 s for eight tests on the same runner
-- [ ] How long **one rebuild** costs on a runner, which is the number that would justify any
-      timeout at all. Locally ~40 s; on CI unmeasured
-- [ ] If any run reaches 480 s, the timeout is not raised again: the hang is found
-- [ ] `lane.test.ts`'s note and build-record §5 agree about what this is, and neither still blames a
-      container runtime the fault has now outlived
+- [x] What a recovery costs on a runner: **~180 s** on top of the 53 s of work, measured off run 3,
+      which is what makes 480 s a chosen ceiling rather than a held one
+- [x] No run has reached 480 s. The largest is 235 s **and it passed**, so the hang reading is
+      refuted rather than left open
+- [x] `lane.test.ts`'s note and build-record §5 agree, and neither blames a container runtime
 
 ## Comments
 

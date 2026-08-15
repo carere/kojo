@@ -125,10 +125,15 @@ const seedRepository = (repo: string): void => {
  * its end, rebuilding up to `containerLimit` (three) containers and losing. The local failure names
  * that exhaustion outright: `WorkspaceUnreachable{… "containers": 3 …}`.
  *
- * So the timeout does not describe how long these tests take. It describes how long a *failed
- * recovery* is allowed to take before something kills it, and 480 s is generous enough not to cut
- * one short. What would make it a real number is the cost of one rebuild on a runner, which nobody
- * has measured — see ticket 62 rather than adjusting it here on a hunch.
+ * **And a third run measured what the recovery costs.** Three runs of one commit: 53 s, 52 s, and
+ * **235 s — the last of which passed.** The recovery fired and *finished*, at roughly 180 s on top
+ * of the work. So the two runs that were killed at 180 s were neither slow tests nor hung ones: they
+ * were a correct recovery cut off before it could complete.
+ *
+ * That makes 480 s a chosen ceiling — about twice the worst observed — with the margin deliberately
+ * on the side of letting a recovery finish rather than killing it. Nothing has ever approached it;
+ * the largest run is 235 s. **Do not lower this without a run that contradicts those numbers**, and
+ * if one ever does spend the whole 480 s, that is a hang and a different ticket.
  *
  * `/tmp` rather than a platform switch: on macOS it resolves to `/private/tmp`, on Linux it is
  * already the right answer, and anywhere it is missing `os.tmpdir()` is no worse than today.
@@ -136,9 +141,10 @@ const seedRepository = (repo: string): void => {
 /**
  * How long one lane test may take, in milliseconds.
  *
- * Not a measurement of the work — the whole file is 53 s when it goes well. It is a ceiling on a
- * *failed* edge-11 recovery, which rebuilds up to three containers before it gives up. See the note
- * above, and ticket 62 for the number that would let this one be chosen rather than held.
+ * Not a measurement of the work — the whole file is ~53 s when it goes well. It is a ceiling on an
+ * edge-11 recovery, which rebuilds up to three containers: measured at ~180 s on top of the work,
+ * on a run that recovered and passed. Twice that, so a recovery is never cut short. See the note
+ * above and ticket 62.
  */
 const laneTimeout = 480_000;
 
