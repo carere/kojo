@@ -241,17 +241,46 @@ describe("reading the worktree a sandbox was built on", () => {
         // directory and the git registration both survive the release.
         expect(yield* fileSystem.exists(worktreePath)).toBe(true);
 
-        // And that is what the rebuild walks into. `git worktree add` refuses a branch that is
-        // already checked out somewhere, so the second acquisition does not quietly continue on a
-        // stale tree — it fails to happen at all, with a message about git rather than about the
-        // run. This is the strongest argument for `requireCommitted` being on by default: the guard
-        // turns this into a named `WorktreeUnusable` at the moment the dirt appears, instead of an
-        // unexplained create failure the next time somebody answers a gate.
+        /**
+         * **And this is what a second acquisition must never do: continue on it as if it were
+         * clean.**
+         *
+         * Either answer is safe. The acquisition may **fail** — `git worktree add` refuses a branch
+         * already checked out, which is what happens on both platforms measured — or it may hand a
+         * sandbox back, in which case Kojo's own reading of the tree has to say `modified`. What
+         * would be unsafe is a rebuild that succeeds and reports a tree it never looked at.
+         *
+         * **This used to assert the first answer only, and that was a test of git rather than of
+         * Kojo** — ticket 61. It passed on one machine and failed on another, and the difference was
+         * never the git version: 2.54.0 and 2.55.0 both refuse, measured with plain `git worktree
+         * add` on Linux and macOS. What actually differs between the two runs is still unknown, and
+         * that is precisely why the assertion no longer depends on knowing.
+         *
+         * The claim worth carrying is the comment's own strong version: `requireCommitted` is what
+         * makes this safe, by turning the dirt into a named `WorktreeUnusable` at the moment it
+         * appears rather than into an unexplained failure the next time somebody answers a gate.
+         * *refuses to reuse a worktree that is not on its own branch* above is what grades that.
+         */
         const rebuilt = yield* Effect.result(Effect.scoped(source.acquire(request(root))));
-        expect(Result.isFailure(rebuilt)).toBe(true);
+
         if (Result.isFailure(rebuilt)) {
+          // The answer both machines gave: git would not add a second worktree for a branch that is
+          // already checked out, so the acquisition never happened.
           expect(rebuilt.failure.operation).toBe("create");
           expect(rebuilt.failure.reason).toContain(branch);
+        } else {
+          // The other safe answer: a sandbox came back, and Kojo can still see the dirt on it.
+          const state = yield* source.worktree(rebuilt.success);
+          const usable = worktreeIsUsable({
+            branch,
+            worktreePath: rebuilt.success.worktreePath,
+            state,
+          });
+          expect(
+            Option.isSome(usable),
+            "a rebuild handed back a worktree Kojo reads as usable, while the work that dirtied it is still there",
+          ).toBe(true);
+          if (Option.isSome(usable)) expect(usable.value.fault).toBe("modified");
         }
       }),
     ),

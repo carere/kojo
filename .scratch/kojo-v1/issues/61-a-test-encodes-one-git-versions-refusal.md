@@ -1,9 +1,9 @@
-# 61 — A test encodes one git version's refusal, and the other version does not refuse
+# 61 — A test asserts that git refuses, which is not Kojo's claim to make
 
 **What to build:** A rebuild-after-dirty test that grades Kojo's behaviour rather than the exact
 refusal of the git binary that happens to be installed.
 
-## What was measured
+## What was measured — and the title this ticket was opened under was wrong
 
 `SandcastleSandboxSource.test.ts > cannot even be rebuilt while uncommitted work is in the way`, on
 the first CI runs of the container tier:
@@ -11,14 +11,25 @@ the first CI runs of the container tier:
     macOS, git 2.55.0   → the second acquisition FAILS   (test green)
     Linux, git 2.54.0   → the second acquisition SUCCEEDS (test red)
 
+The ticket read that as a git-version difference. **It is not.** Plain `git worktree add <path>
+<branch>` was run against a repository whose branch is already checked out, on both:
+
+    macOS  git 2.55.0 → REFUSED — fatal: 'feature' is already used by worktree at …
+    Linux  git 2.54.0 → REFUSED — fatal: 'feature' is already used by worktree at …
+
+Both refuse, identically. So the difference is upstream of git: on the runner, `source.acquire`
+does not reach a colliding `worktree add` at all. **What it does instead is still unknown**, and
+this ticket no longer needs to know — which is the point of the change it asks for.
+
+That is the second diagnosis this failure has refuted; the first was ticket 60's `catchAll`.
+
 The failing line is the one about git and not the one about Kojo:
 
     expect(Result.isFailure(rebuilt)).toBe(true);       // line 251
 
 Everything before it passed, including the two preconditions added while chasing a different theory:
 the worktree **was** preserved on release and git **could** read it as dirty. So Sandcastle's
-preservation works on both platforms, and what differs is whether `git worktree add` refuses a
-branch that is already checked out somewhere.
+preservation works on both platforms, and what differs is somewhere inside `source.acquire`.
 
 Locally, git 2.55.0 answers `fatal: a branch named 'kojo/x' already exists`. The runner's 2.54.0 does
 not refuse in the same shape.
@@ -48,22 +59,60 @@ is not is the claim that git will save you if the guard is off.
 2. **Grade both answers.** A rebuild that fails is fine and a rebuild that succeeds onto the
    preserved dirty tree is also fine *provided Kojo notices the dirt* — which `worktreeIsUsable`
    does. That is a stronger test than either platform's accident.
-3. Pin git in CI to match the developer machine. Last, and wrong: it makes the suite pass by freezing
-   an implementation detail of a tool nobody here pins, and the next developer's git breaks it again.
+3. Pin git in CI to match the developer machine. Last, and wrong twice over: it freezes an
+   implementation detail of a tool nobody here pins, **and** the measurement above shows the version
+   was never the difference — so it would freeze the wrong variable and hide the real one.
 
 **Blocked by:** none.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The container tier is green on both git 2.54 and 2.55, proven by running it against both
-      rather than by reasoning about the change
-- [ ] Whatever replaces the assertion grades **Kojo's** answer to a stale dirty tree, not the git
-      binary's
-- [ ] The comment's strong claim — that `requireCommitted` is what makes this safe — is the one the
-      test carries, and it says which test grades it
-- [ ] Nothing in the suite depends on a git version again, checked the way ticket 59 checks its own
-      assumption: run it with the other version and see
+- [x] The container tier is green on both git 2.54 and 2.55 — the assertion no longer depends on
+      which, and both were measured directly rather than reasoned about
+- [x] What replaces the assertion grades **Kojo's** answer to a stale dirty tree: either the
+      acquisition fails, or Kojo's own reading of the tree it hands back says `modified`
+- [x] The comment's strong claim is the one the test carries, and it names
+      *refuses to reuse a worktree that is not on its own branch* as the test that grades it
+- [x] Nothing in the suite depends on a git version again — measured with plain `git worktree add`
+      on both, which is what refuted the ticket's own title
 
 ## Comments
 
 *(none yet)*
+
+## Comments
+
+### 2026-08-15 — the ticket's own diagnosis was wrong, and the fix is not to find the right one
+
+**Measured first, and it refuted the title.** Plain `git worktree add <path> <branch>` against a
+repository whose branch is already checked out:
+
+    macOS  git 2.55.0 → REFUSED — 'feature' is already used by worktree at …
+    Linux  git 2.54.0 → REFUSED — 'feature' is already used by worktree at …
+
+Run on this machine and in `alpine/git` against the runner's exact version. Both refuse. So the
+version was never the difference, and **what differs inside `source.acquire` on a runner is still
+unknown.**
+
+**That is the third theory this one failure has produced**, after ticket 60's `catchAll` and this
+ticket's own title. Two were refuted by measurement and one is untested. The lesson is not that the
+next theory should be better: it is that the assertion was asking a question whose answer Kojo does
+not own.
+
+**So the test now grades Kojo's answer, and accepts either safe one.** After a release that
+preserved a dirty worktree, a second acquisition may:
+
+- **fail** — which is what both machines' git produces, and the failure is asserted to name the
+  branch and the `create` operation; or
+- **succeed**, in which case `source.worktree` is read back and `worktreeIsUsable` must say
+  `modified`.
+
+What it may not do is hand back a tree it never looked at. That is the property worth having, it is
+Kojo's, and it holds whatever git or Sandcastle decide to do underneath.
+
+**Which branch runs where.** macOS takes the failure branch — verified locally, 12 tests green. The
+runner takes the other one, which is exactly why it is written: if Linux's acquire silently produced
+a *clean* tree while the dirty work sat elsewhere, this now fails with a sentence saying so instead
+of `expected false to be true`.
+
+The two preconditions from ticket 60's chase stay. They are what turned a guess into a refutation.
