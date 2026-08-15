@@ -1,6 +1,6 @@
 // Deep path, not the package barrel. The barrel re-exports BunRedis, which drags a Redis client in
 // behind it, and AGENTS.md forbids barrel imports repo-wide.
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Option, Result } from "effect";
@@ -216,6 +216,25 @@ describe("reading the worktree a sandbox was built on", () => {
             return sandbox.worktreePath;
           }),
         );
+
+        // **The precondition, asserted rather than assumed.** Sandcastle decides whether to preserve
+        // by running `git status --porcelain` in the worktree — and it wraps that in a `catchAll`
+        // that turns *any* failure into "clean", after which the worktree is removed with `--force`.
+        // So a bare `exists()` assertion cannot tell *preserved correctly* from *git could not
+        // answer and the work was deleted*, and on a Linux runner it fails as the latter with no
+        // clue which. Reading the same thing Sandcastle reads turns that into a named diagnosis.
+        const status = spawnSync("git", ["status", "--porcelain"], {
+          cwd: worktreePath,
+          encoding: "utf8",
+        });
+        expect(
+          status.status,
+          `git could not read the worktree, so Sandcastle would call it clean and delete it: ${status.stderr}`,
+        ).toBe(0);
+        expect(
+          status.stdout.trim(),
+          "the uncommitted change is not visible to git, so there is nothing for Sandcastle to preserve",
+        ).not.toBe("");
 
         // **Sandcastle preserves a dirty worktree on close.** It removes a clean one — the test
         // below this describe block asserts exactly that — but it will not throw away work, so the
