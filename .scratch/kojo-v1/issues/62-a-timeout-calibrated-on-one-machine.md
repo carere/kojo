@@ -44,6 +44,21 @@ knows.**
 It does not prove the tests are merely slow. If a run ever spends the whole 480 s, that is the
 evidence this is a hang after all, and it is worth more than the eight minutes it costs to learn.
 
+**And raising it immediately showed one thing the old limit was hiding.** The next local run failed
+`builds a container, tears it down at the gate, and builds another one on the answer` at **209 s** —
+*inside* the new limit, so not a timeout at all. That is the `WorkspaceUnreachable{exit 127 … chdir
+to cwd}` fault ticket 37 and edge 11 already carry, which ticket 50's lane measured at **1 failure
+in 4 with its change and 1 in 4 with the whole ticket stashed**. At 180 s it was being killed before
+it could say that; at 480 s it fails on its own assertion and names the cause.
+
+So `lane.test.ts` is flaky on both platforms for **two different reasons**, and only one of them is
+about time:
+
+| where | what | evidence |
+|---|---|---|
+| Linux, 2-core runner | killed at ~185 s against a 180 s limit, a different test each run | two CI runs |
+| macOS, OrbStack | `WorkspaceUnreachable` exit 127, ~1 in 4, now visible rather than masked | ticket 50's four-run control, and the 209 s run above |
+
 **Blocked by:** none.
 
 **Status:** ready-for-agent
