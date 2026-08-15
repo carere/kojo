@@ -377,8 +377,15 @@ decode failure a *correction* can undo rather than one a *prompt* can cause.
 
 ## 10. Where the build stopped
 
-**As of 2026-08-15:** 58 tickets landed, 1 closed wontfix, **none open**. Unit **665**, integration
-**274 passing** with three named skips, browser **96**. Three projects in the `tsc` build.
+**As of 2026-08-15:** 56 tickets landed, 1 closed wontfix, **1 open — ticket 54**. Unit **665**,
+integration **274 passing** with three named skips, browser **96**.
+
+Ticket 54 is the sibling of 50 and it is still open: a file an agent *creates* at the **root** of
+`.kojo/` is caught by neither line of defence, because no entry of `factoryOwnPaths` is `.kojo/`
+itself and the mask cannot hide a file that has no index entry. It is reachable in this repository —
+`lane/common.ts` gives the builder, fixer and tidier an `Unrestricted` scope. Closing it means
+deciding how `protectedPaths` and `alwaysWritable` compose, since barring `.kojo/` wholesale would
+also bar the artifacts directory an agent is *supposed* to write into. Three projects in the `tsc` build.
 `bun biome check .` and `bun knip` clean.
 
 Tickets 50–53 were not new work anybody thought of; they are criteria that closed
