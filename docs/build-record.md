@@ -9,9 +9,10 @@ The three other places the build wrote itself down, and what each is for:
 
 | where | what it holds |
 |---|---|
-| the commit log | the findings, one per commit — 21,000 words across 135 commits on `feat/kojo-v1` |
-| [`.scratch/kojo-v1/issues/`](../.scratch/kojo-v1/issues) | 49 tickets, 107 comment sections, under *What landed* / *Deviations from the design record* / *API findings* |
+| the commit log | the findings, one per commit — 21,000 words across 135 commits on `feat/kojo-v1`, and thirty more on `main` after it |
+| [`.scratch/kojo-v1/issues/`](../.scratch/kojo-v1/issues) | **62 tickets**, all closed, under *What landed* / *Deviations from the design record* / *API findings* |
 | [`typescript-effect.md` §12](design/typescript-effect.md) | where the build stopped: what is proven, what is not |
+| [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | the checks, and the only place that runs them somewhere other than one Mac |
 
 This file is the index over all three. It adds the one thing none of them has: the order.
 
@@ -19,7 +20,7 @@ This file is the index over all three. It adds the one thing none of them has: t
 
 ## 1. Shape
 
-Four stages, in this order. Each one exists because the one before it produced something the next
+Five stages, in this order. Each one exists because the one before it produced something the next
 could grade.
 
 1. **Design** — 12 commits on `main`, 2026-08-07 to 08-09. A grilling session produced
@@ -30,13 +31,21 @@ could grade.
    pinned at `effect@4.0.0-beta.106` and `sandcastle@0.12.0`. Recorded in
    [`effect-v4-api-audit.md`](research/effect-v4-api-audit.md), 43K.
 3. **Tickets** — the build order became 36 tracer-bullet tickets with explicit `Blocked by` edges
-   (`debe2e4`). Thirteen more were opened by the build itself; 49 exist now.
-4. **Waves** — 20 merge clusters on `feat/kojo-v1`, 2026-08-09 21:21 to 08-13 12:24. One wave per
-   level of the dependency graph: implementers in isolated git worktrees, then a **strictly serial**
-   integrator that runs the whole discovered suite after **each** merge.
+   (`debe2e4`). Thirteen more were opened by the build itself; 49 by the end of wave 18.
+4. **Waves** — 20 merge clusters, 2026-08-09 21:21 to 08-14. One wave per level of the dependency
+   graph: implementers in isolated git worktrees, then a **strictly serial** integrator that runs the
+   whole discovered suite after **each** merge.
+5. **Closing the tracker, and then leaving the machine** — 2026-08-13 to 08-15, on `main`. An audit
+   of the *closed* tickets found four criteria nobody owned; building those opened nine more; and
+   wiring CI so the declared `Test` check actually ran found four faults that no amount of work on
+   this Mac could have found. 62 tickets, all closed.
 
 The one decision that produced the wave model: **`Blocked by` means "needs the code", not "needs the
 ticket closed".** So merge cannot be a final step. It is part of the traversal.
+
+The one that produced stage 5: **a closed ticket with an open checkbox is work with no owner.** The
+status line at the top of a ticket is a claim; the boxes are the record. Reading the boxes rather
+than the line is what turned "one ticket left" into thirteen.
 
 ---
 
@@ -69,9 +78,16 @@ order the waves were launched; the tickets and dates come from the commit log.
 | **18** | 08-13 12:10 | 48 | The correction loop against a real model. Bought three of four criteria with two of three authorised calls. |
 | **19** | 08-13 | 49 | The guard that was mistaken for a flag, built — and, before it, an audit of every checkbox in every closed ticket, which found four criteria nobody owned and opened 50–53 for them. Cost: no agent call. |
 | **20** | 08-14 | 53, 50, 51, 52 | The first wave run as one workflow: a design pass on 50, four implementers in isolated worktrees, three adversarial verifiers, then a strictly serial integration. Every verifier refuted something. Two of the four tickets landed; two came back with better findings than the criteria they went for. Cost: two real calls, and two unauthorised `pi` calls that Anthropic refused at zero cost. |
+| **21** | 08-14 to 08-15 | 55, 56, 57, 52, 51, 58, 54 | Not a wave: seven tickets taken one at a time, each opened by the one before it. The spend guard moved to the thing that spawns (55); `--session-dir` was found to make pi's layout flat, which would have made 52's paid test fail for a reason resembling a credential (56, 57); then 52 was bought, then **51 on its third design** — the criterion unproven since ticket 15. 58 and 54 are what closing 51 and 50 exposed. Cost: four real calls, all authorised. |
+| **22** | 08-15 | 59, 60, 61, 62 | Wiring CI so the `Test` check declared on `main` actually ran. It had never run on a push and executed no tests. Its first four runs found four faults, none of which was reachable from this machine — see §6. |
 
 Ticket 31 (span export) is closed **wontfix** (`e5f8e08`): it blocked nothing through seventeen
-waves, and the claim it was written under was withdrawn by the wave-3 audit. Tickets 50–53 are open.
+waves, and the claim it was written under was withdrawn by the wave-3 audit. **Everything else is
+closed.**
+
+Waves 21 and 22 are numbered for continuity and are not waves. Nothing about them was parallel: each
+ticket was opened by the one before it, and the interesting property is the chain rather than the
+fan-out. Wave 20 was the only true wave after 18, and its lesson is in §6.
 
 ---
 
@@ -142,6 +158,9 @@ thirteen by wave 12 and did not stop there. This is the single most useful list 
 | The no-factory notice | a server value and a client fallback back each other up, so emptying **either one alone** left all ten specs green | `db6f74c` |
 | The Console's health assertion | it built its own engine rather than importing the CLI's, so it could not catch `ui.ts` regaining a runner address | `ff82902` |
 | Ticket 38's rename | graded `Runnable.name`; the names that collide are the definition's `_tag` and its idempotency key. Restoring both left the tier green | `517dcd6` |
+| A rebuild test asserted that **git** refuses | it built the state git itself rejects — a branch already checked out — so it passed on a stub, on every git version, and would pass with Kojo's rebuild path deleted. It graded git, not Kojo | ticket 61 |
+| A path test borrowed macOS's `/var` symlink | it asserted `mkdtemp` had handed it two spellings of one directory. On a Linux runner a temp directory is its own real path, so the test graded path resolution on a Mac and graded nothing elsewhere. It builds the symlink itself now | the first CI run on `main` |
+| Eleven fixtures took the branch `git init` gave them | they then stamped factories whose trunk is `main`, so four merge suites — the ones whose whole subject is *which branch a run lands on* — borrowed the one thing they had to control | ticket 59 |
 
 The shape they share: **a check that succeeds while doing no work.** After `dd774bd` the waves
 stopped trusting a green and started asserting the work happened — non-zero counts, no file failed to
@@ -256,6 +275,33 @@ factory that cannot run.
 Also from wave 15's walk, and worth keeping: `.sandcastle/` is untracked in the repository a run
 starts from, so the merge refused **every first run** (`40bb677`). Found by hand, not by the suite.
 
+### And what only running it somewhere else found
+
+Wave 22 wired CI so the `Test` check that `main`'s branch protection had been demanding actually
+existed. It had been declared for weeks; the workflow ran on pull requests only, so a push produced
+no status of that name, and the rule printed a warning and stopped nothing. **It also ran no tests** —
+six steps, types and lint, and nothing else.
+
+Its first four runs found four faults. Not one of them was reachable from the machine this was built
+on, and each is the same shape as the false greens in §4: *green on the machine that ran it.*
+
+1. **The whole toolchain floated.** `.prototools` pinned `bun` and `moon` at `latest`. A warm
+   toolchain cache kept an older `moon` here while a fresh checkout installed 2.5.0 — under which the
+   project graph **would not build at all**, because two `package.json` files were both named `kojo`
+   and the root project's own `dependsOn: [kojo]` resolved to itself. Every green check ever reported
+   from a developer's machine had been green only on that machine's version.
+2. **`git init` produces `master` on a stock runner.** Eleven fixtures took whatever the machine
+   offered and then stamped factories whose trunk is `main`, so four suites failed with *the
+   workspace is on master, and the merge targets main* — a setting no test mentioned. Ticket 59.
+3. **A test borrowed macOS's `/var` symlink.** It asserted that `mkdtemp` had handed it two spellings
+   of one directory, so it graded Kojo's path resolution on a Mac and graded nothing on Linux, where
+   a temp directory is its own real path. It builds the symlink itself now.
+4. **A test asserted that *git* refuses**, not that Kojo does. Ticket 61.
+
+The pattern is the same one wave 15 found by walking the loop, one level out: **a suite that has only
+ever run in one place is a suite that has been graded by that place.** Walking the loop found what
+testing could not see; running it elsewhere found what one machine could not see.
+
 ---
 
 ## 7. My own errors
@@ -283,6 +329,30 @@ diff it did not make mattered.
 existing when ticket 12 made the payload positional, and the demo was later renamed `demo-hello`.
 The command was failing on an unknown flag and I was reading the output above it.
 
+### Stage 5's own, and two of them are the same mistake
+
+**I committed twice while claiming something the files did not yet say.** The ticket-54 commit
+message ended *"Every ticket in `.scratch/kojo-v1/` is now closed"* while ticket 54's own file still
+read `ready-for-agent`, and the ticket-62 commit described an observation the ticket did not carry.
+Both times the cause was identical: an edit script run from `packages/kojo` instead of the repository
+root, whose failure I did not check before the `git commit` in the same chained command. That is the
+**unchecked-exit-status-before-the-next-step** mistake from wave 17, twice more, in a cheaper form.
+Both were corrected in follow-up commits rather than amended away.
+
+**I told the owner to restart Docker Desktop.** They run OrbStack. I had never checked which engine
+was installed — `docker context ls` says `orbstack *` and Docker Desktop is a leftover context
+nothing uses — and I had inferred a file-sharing fault from a product that was not running. The
+remedy was wrong, the product was wrong, and the diagnosis behind both was wrong: the tier passed at
+normal speed on a quiet machine minutes later, with nothing restarted.
+
+**I said work was on a branch when it was on `main`.** After fast-forwarding `main` for ticket 55 I
+stayed on it and never switched back, so ticket 51 landed directly on the trunk while I reported it
+as sitting on a feature branch awaiting review.
+
+**I left a polling loop running for five hours.** A `sleep`-until-condition watcher I started to
+wait for a background test run outlived the thing it was watching. Harmless, and the owner spotted it
+before I did.
+
 ---
 
 ## 8. Refuted proofs
@@ -306,6 +376,27 @@ Roughly one per wave. The pattern is not that the code was wrong — it usually 
 The last one matters most as a method note: the audit that caught it read the same transcript that
 bought the original claim, so **the correction cost nothing**. An unmeasured design must not replace
 a measured one, and a misread measurement is not a measurement.
+
+### Stage 5, where the refutations outnumbered the proofs
+
+| ticket | the claim | what measuring showed |
+|---|---|---|
+| 50 | `.kojo/evil.ts` is what rollback catches when the mask cannot — marked **Measured** in two docstrings | `permits(Unrestricted, ".kojo/evil.ts")` is **true**. No entry of `factoryOwnPaths` is `.kojo/` itself, so a file at the root of the directory was caught by neither line. It was reasoned from the shape of the list, not measured. Ticket 54 |
+| 58 | `invisibleChecks` finds an envelope's unshown rules | It read `ast.propertySignatures` and the raw JSON Schema — right for a `Schema.Struct`, wrong for the `Schema.Class` every stamped factory holds. It answered *nothing hidden* about every real envelope while **fifteen** unit tests agreed, because all fifteen were written over a struct. Caught by the doctor test |
+| 51 | The narrow field and the prose rule will make a real model's first answer fail to decode | It did against `sonnet`; against `fable` it did not, twice. A model that reads the rendered contract resolves the conflict in the schema's favour, **correctly** — and said so inside its own envelope. The premise had been true when written and nothing graded it |
+| 60 | The `catchAll` that reads a failed `git status` as *clean* caused the CI failure | Both preconditions added to prove it passed on the runner: git could read the worktree and it was dirty. The failure was on a later line. Refuted by the very test written to confirm it |
+| 61 | The rebuild difference is a git version — 2.54 against 2.55 | Plain `git worktree add` against a branch already checked out **refuses identically** on both, measured on this machine and in `alpine/git`. The version was never the variable; what differs inside `acquire` on a runner is still unknown |
+| 62 | The 180 s limit is slightly too small for a two-core runner | The passing run says `lane.test.ts (8 tests) 53347ms`. The runner is not slow. A failing test at 185 s is the edge-11 recovery running its full course — and a later run took 235 s and **passed**, so the two killed runs were a correct recovery cut off part-way |
+| 60 | It has never been seen to fire — *latent* | It fires. Breaking the worktree's registration breaks the removal too, so nothing is lost and it reads as unreachable; break **only** what `git status` needs and the parent can still force-remove the tree. The worktree and the uncommitted work in it are gone. The first experiment was the wrong experiment |
+
+**Four consecutive diagnoses of one CI failure were wrong** — 60's `catchAll`, 61's git version,
+62's tight limit, and 60's own *latent*. Every one was a theory about *why the machines differed*,
+and every one fell to measuring the thing itself rather than reasoning about the difference. The
+tickets record the refutations beside the conclusions, because the conclusions are worth much less.
+
+The method that worked, each time, was the same and it is cheap: **run the thing on both sides and
+compare, rather than explaining why they differ.** Plain `git worktree add` on two platforms;
+`init.defaultBranch=master` on the machine that had `main`; the same corruption applied two ways.
 
 ---
 
@@ -394,10 +485,25 @@ decode failure a *correction* can undo rather than one a *prompt* can cause.
 
 ## 10. Where the build stopped
 
-**As of 2026-08-15:** 57 tickets landed, 1 closed wontfix, **none open**. Unit **682**, integration
-**275 passing** with three named skips, browser **96**.
+**As of 2026-08-16:** **61 tickets landed, 1 closed wontfix, none open.** Unit **682**, container
+**277 passing** with three named skips, browser **96**. CI green on `main`, and green means the
+tests ran.
 
-The last of them was ticket 54, the sibling of 50: a file an agent *creates* at the **root** of
+That last clause is the change worth naming. For most of this build, *green* meant a developer's
+machine had agreed with itself. `main` demanded a status check called `Test` that no workflow
+produced, so the rule warned and stopped nothing, and the workflow that did run checked types and
+lint and no more. Wave 22 made the name real: knip, unit, guards, browser, and the container tier,
+on a push as well as a pull request, with `KOJO_AGENT_SPEND: refuse` in the environment so no step
+can spend by accident. It went red four times before it went green, and each red is in §6.
+
+The four tickets after 54 are all one story — CI finding what one machine cannot. 59: fixtures that
+inherited their branch from `git init`, now naming it from a single `defaultTrunk`. 61: a test that
+asserted *git* refuses rather than that Kojo does. 62: a timeout calibrated on a ten-core Mac, and
+the measurement that replaced the theory behind it. 60: a `catchAll` that read an unreadable
+worktree as clean, which turned out to delete uncommitted work rather than being latent — the last
+ticket in the tracker, and the only one of the four whose fault was a real data loss.
+
+Before them was ticket 54, the sibling of 50: a file an agent *creates* at the **root** of
 `.kojo/` was caught by neither line, because no entry of `factoryOwnPaths` is `.kojo/` itself and a
 mask built from `git ls-files` cannot hide a path with no index entry. The bar went into `permits`
 rather than into the list — so a factory already stamped is covered without editing a workflow, and
@@ -452,3 +558,26 @@ is and is not proven. The four things most worth knowing before picking this up:
 
 The build corrected roughly one overstated proof per wave, **including in its own last wave**. Read
 that as the working rate, not as a phase that ended.
+
+### What an empty tracker does and does not mean
+
+The tracker is empty. Every box in every ticket is checked, and the ones that could not be checked
+are marked wontfix with the reason beside them rather than left to look done. That is the whole of
+what it means.
+
+Three things it does not mean, each recorded where the work is rather than as an open ticket:
+
+- **The rate at which edge 11 fires is still unexplained.** The recovery is measured (~180 s on a
+  runner, up to three container rebuilds) and it wins when it is allowed to finish. *Why the
+  workspace probe disagrees about a path just recreated* is ticket 37's territory and nobody has
+  measured it.
+- **What differs inside `acquire` on a runner is still unknown.** Ticket 61 refuted the git-version
+  reading and fixed the test that was grading git; it did not find the difference.
+- **Ticket 48's last authorisation is unspent**, and what it should buy has changed: a decode
+  failure a *correction* can undo rather than one a prompt can cause. Ticket 51 bought the mechanism
+  by building exactly that; 48's own criterion — that `correctionFor`'s sharpened literal rule is
+  what does the work — is still an assumption.
+
+And the one thing worth carrying forward as method rather than as work: **this build's last four
+diagnoses were all wrong, and all four fell to the same move** — run the thing on both machines and
+compare, instead of explaining why the machines differ.
