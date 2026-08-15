@@ -1301,8 +1301,7 @@ one safe.
 
 ### Where the build stopped
 
-Fifty-eight tickets: fifty-six landed, ticket 31 closed wontfix, and **one open — ticket 54**, the
-sibling of 50: a file created at the root of `.kojo/` is caught by neither line of defence.
+Fifty-eight tickets: **fifty-seven landed**, ticket 31 closed wontfix, and **none open**.
 
 Tickets 50–53 were opened by an audit of the *closed* ones, each carrying a criterion a done ticket
 left unchecked and no other ticket took; 50, 52 and 53 have since landed, and 51 stays open because
