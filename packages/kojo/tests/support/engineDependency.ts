@@ -1,5 +1,6 @@
 import type { EngineDependency } from "../../src/contexts/scaffold/models/EngineDependency.ts";
 import { engineDependency } from "../../src/contexts/scaffold/services/resolveEngine.ts";
+import { enginePackage } from "../../src/contexts/shared/models/FactoryLayout.ts";
 
 /**
  * The two entries a stamped repository must declare, as the two tiers each need them.
@@ -13,7 +14,12 @@ import { engineDependency } from "../../src/contexts/scaffold/services/resolveEn
 /** A published pair, invented. Nothing resolves it; it is only ever written into a file. */
 export const someEngine: EngineDependency = {
   reach: "published",
-  kojo: { name: "kojo", specifier: "9.9.9", version: "9.9.9", directory: "/somewhere/kojo" },
+  kojo: {
+    name: enginePackage,
+    specifier: "9.9.9",
+    version: "9.9.9",
+    directory: "/somewhere/kojo",
+  },
   effect: {
     name: "effect",
     specifier: "4.0.0-test",

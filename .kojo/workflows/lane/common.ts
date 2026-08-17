@@ -7,15 +7,15 @@
 // *top level* of `.kojo/workflows/` is a `kojo run` name, so anything nested here is a module the
 // workflow imports and never a name a person can type.
 
+import * as SandcastleAgentInvoker from "@carere/kojo/contexts/agent/adapters/SandcastleAgentInvoker";
+import type { SandboxHooks } from "@carere/kojo/contexts/sandbox/models/SandboxHooks";
+import { WorkspaceError } from "@carere/kojo/contexts/sandbox/models/WorkspaceError";
+import { Workspace } from "@carere/kojo/contexts/sandbox/ports/Workspace";
+import { Judgement } from "@carere/kojo/contexts/workflow/models/Acceptance";
+import type { PermissionPolicy } from "@carere/kojo/contexts/workflow/models/PermissionPolicy";
+import { factoryOwnPaths } from "@carere/kojo/contexts/workflow/models/PermissionPolicy";
+import { code } from "@carere/kojo/contexts/workflow/services/phase/code";
 import { Effect } from "effect";
-import * as SandcastleAgentInvoker from "kojo/contexts/agent/adapters/SandcastleAgentInvoker";
-import type { SandboxHooks } from "kojo/contexts/sandbox/models/SandboxHooks";
-import { WorkspaceError } from "kojo/contexts/sandbox/models/WorkspaceError";
-import { Workspace } from "kojo/contexts/sandbox/ports/Workspace";
-import { Judgement } from "kojo/contexts/workflow/models/Acceptance";
-import type { PermissionPolicy } from "kojo/contexts/workflow/models/PermissionPolicy";
-import { factoryOwnPaths } from "kojo/contexts/workflow/models/PermissionPolicy";
-import { code } from "kojo/contexts/workflow/services/phase/code";
 import { commands } from "../../commands.ts";
 
 /**

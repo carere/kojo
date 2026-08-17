@@ -5,7 +5,6 @@
 // Deep path, not the package barrel. The barrel re-exports BunRedis, which drags a Redis client in
 // behind it, and AGENTS.md forbids barrel imports repo-wide.
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, symlinkSync } from "node:fs";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Path } from "effect";
@@ -13,6 +12,7 @@ import * as InMemoryImageBuilder from "../../../src/contexts/scaffold/adapters/I
 import { initialise } from "../../../src/contexts/scaffold/services/initialise.ts";
 import { defaultTrunk } from "../../../src/contexts/shared/models/FactoryLayout.ts";
 import { thisEngine } from "../../support/engineDependency.ts";
+import { linkEngine } from "../../support/linkEngine.ts";
 
 const cli = new URL("../../../src/main.ts", import.meta.url).pathname;
 const packageRoot = new URL("../../../", import.meta.url).pathname.replace(/\/$/, "");
@@ -162,18 +162,7 @@ const stamped = Effect.gen(function* () {
   yield* fileSystem
     .makeDirectory(path.join(root, "node_modules"), { recursive: true })
     .pipe(Effect.orDie);
-  yield* Effect.sync(() => {
-    const link = (from: string, to: string) => {
-      if (!existsSync(to)) symlinkSync(from, to);
-    };
-    link(packageRoot, path.join(root, "node_modules", "kojo"));
-    for (const dependency of ["effect", "@ai-hero", "@effect", "@types"]) {
-      link(
-        path.join(packageRoot, "node_modules", dependency),
-        path.join(root, "node_modules", dependency),
-      );
-    }
-  });
+  yield* Effect.sync(() => linkEngine({ root, packageRoot }));
 
   return root;
 });
@@ -334,12 +323,12 @@ describe("kojo run in a repository with a factory in it", () => {
 /** A workflow with an agent phase and no invoker under it. What `AbsentAgentInvoker` is for. */
 const unwiredWorkflow = [
   'import { Effect, Schema } from "effect";',
-  'import { AgentInvocationError } from "kojo/contexts/agent/models/AgentInvocationError";',
-  'import { WorkspaceError } from "kojo/contexts/sandbox/models/WorkspaceError";',
-  'import { CheckViolation } from "kojo/contexts/workflow/models/CheckViolation";',
-  'import { EnvelopeParseError } from "kojo/contexts/workflow/models/EnvelopeParseError";',
-  'import { agent } from "kojo/contexts/workflow/services/phase/agent";',
-  'import { workflow } from "kojo/contexts/workflow/services/workflow";',
+  'import { AgentInvocationError } from "@carere/kojo/contexts/agent/models/AgentInvocationError";',
+  'import { WorkspaceError } from "@carere/kojo/contexts/sandbox/models/WorkspaceError";',
+  'import { CheckViolation } from "@carere/kojo/contexts/workflow/models/CheckViolation";',
+  'import { EnvelopeParseError } from "@carere/kojo/contexts/workflow/models/EnvelopeParseError";',
+  'import { agent } from "@carere/kojo/contexts/workflow/services/phase/agent";',
+  'import { workflow } from "@carere/kojo/contexts/workflow/services/workflow";',
   'import { Drafted } from "../envelopes.ts";',
   "",
   "export const unwired = workflow(",
@@ -381,11 +370,11 @@ const unwiredWorkflow = [
  */
 const gatedWorkflow = [
   'import { Duration, Effect, Schema } from "effect";',
-  'import { GateRejected } from "kojo/contexts/gate/models/GateRejected";',
-  'import * as OnExpiry from "kojo/contexts/gate/models/OnExpiry";',
-  'import { code } from "kojo/contexts/workflow/services/phase/code";',
-  'import { gate } from "kojo/contexts/workflow/services/phase/gate";',
-  'import { workflow } from "kojo/contexts/workflow/services/workflow";',
+  'import { GateRejected } from "@carere/kojo/contexts/gate/models/GateRejected";',
+  'import * as OnExpiry from "@carere/kojo/contexts/gate/models/OnExpiry";',
+  'import { code } from "@carere/kojo/contexts/workflow/services/phase/code";',
+  'import { gate } from "@carere/kojo/contexts/workflow/services/phase/gate";',
+  'import { workflow } from "@carere/kojo/contexts/workflow/services/workflow";',
   "",
   "export const paperwork = workflow(",
   "  {",
@@ -566,8 +555,8 @@ describe("a workflow file that is not a workflow", () => {
             source,
             [
               'import { Effect, Schema } from "effect";',
-              'import { code } from "kojo/contexts/workflow/services/phase/code";',
-              'import { workflow } from "kojo/contexts/workflow/services/workflow";',
+              'import { code } from "@carere/kojo/contexts/workflow/services/phase/code";',
+              'import { workflow } from "@carere/kojo/contexts/workflow/services/workflow";',
               "",
               "export const renamed = workflow(",
               "  {",
@@ -633,8 +622,8 @@ describe("a workflow file that is not a workflow", () => {
  */
 const mineNotYours = [
   'import { Effect, Schema } from "effect";',
-  'import { code } from "kojo/contexts/workflow/services/phase/code";',
-  'import { workflow } from "kojo/contexts/workflow/services/workflow";',
+  'import { code } from "@carere/kojo/contexts/workflow/services/phase/code";',
+  'import { workflow } from "@carere/kojo/contexts/workflow/services/workflow";',
   "",
   "export const mine = workflow(",
   "  {",

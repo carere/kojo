@@ -5,7 +5,8 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { enginePackage } from "@carere/kojo/contexts/shared/models/FactoryLayout";
 
 /**
  * The one server in this suite that is **not** a fixture: a factory stamped here, a run started by
@@ -74,17 +75,17 @@ const git = (root: string, args: ReadonlyArray<string>): string =>
  */
 const workflowSource = [
   'import { Duration, Effect, Schema } from "effect";',
-  'import { GateRejected } from "kojo/contexts/gate/models/GateRejected";',
-  'import * as OnExpiry from "kojo/contexts/gate/models/OnExpiry";',
-  'import { noSandbox } from "kojo/contexts/sandbox/adapters/providers";',
-  'import { SandboxError } from "kojo/contexts/sandbox/models/SandboxError";',
-  'import { WorkspaceError } from "kojo/contexts/sandbox/models/WorkspaceError";',
-  'import { WorkspaceUnreachable } from "kojo/contexts/sandbox/models/WorkspaceUnreachable";',
-  'import { WorktreeUnusable } from "kojo/contexts/sandbox/models/WorktreeUnusable";',
-  'import { code } from "kojo/contexts/workflow/services/phase/code";',
-  'import { gate } from "kojo/contexts/workflow/services/phase/gate";',
-  'import { sandboxed } from "kojo/contexts/workflow/services/sandboxed";',
-  'import { workflow } from "kojo/contexts/workflow/services/workflow";',
+  'import { GateRejected } from "@carere/kojo/contexts/gate/models/GateRejected";',
+  'import * as OnExpiry from "@carere/kojo/contexts/gate/models/OnExpiry";',
+  'import { noSandbox } from "@carere/kojo/contexts/sandbox/adapters/providers";',
+  'import { SandboxError } from "@carere/kojo/contexts/sandbox/models/SandboxError";',
+  'import { WorkspaceError } from "@carere/kojo/contexts/sandbox/models/WorkspaceError";',
+  'import { WorkspaceUnreachable } from "@carere/kojo/contexts/sandbox/models/WorkspaceUnreachable";',
+  'import { WorktreeUnusable } from "@carere/kojo/contexts/sandbox/models/WorktreeUnusable";',
+  'import { code } from "@carere/kojo/contexts/workflow/services/phase/code";',
+  'import { gate } from "@carere/kojo/contexts/workflow/services/phase/gate";',
+  'import { sandboxed } from "@carere/kojo/contexts/workflow/services/sandboxed";',
+  'import { workflow } from "@carere/kojo/contexts/workflow/services/workflow";',
   "",
   "export const paperwork = workflow(",
   "  {",
@@ -159,7 +160,7 @@ const workflowSource = [
  *
  * The three things it needs that a bare temp directory does not are the same three
  * `tests/integration/cli/stampedRun.test.ts` names: a git repository with a commit for the branch to
- * fork from, `node_modules/kojo` linked to the package under test so the stamped file's `kojo/...`
+ * fork from, `node_modules/@carere/kojo` linked to the package under test so the stamped file's `@carere/kojo/...`
  * imports reach *this* engine, and `--sandbox none`, which is a real answer rather than an opt-out.
  */
 const stamp = (): string => {
@@ -203,7 +204,12 @@ const stamp = (): string => {
   git(root, ["commit", "--quiet", "--message", "stamp a factory"]);
 
   mkdirSync(join(root, "node_modules"), { recursive: true });
-  symlinkSync(packageRoot, join(root, "node_modules", "kojo"));
+  // The engine is scoped, so `node_modules/@carere` has to exist before the link inside it can.
+  // Built from `enginePackage` so this path and the specifier the stamped files import stay one
+  // string — a link at the wrong path makes `doctor` report *cannot resolve the engine* about a
+  // repository that has it, and the run then fails for a reason that reads like a Kojo bug.
+  mkdirSync(join(root, "node_modules", dirname(enginePackage)), { recursive: true });
+  symlinkSync(packageRoot, join(root, "node_modules", enginePackage));
   for (const dependency of ["effect", "@ai-hero", "@effect", "@types"]) {
     symlinkSync(
       join(packageRoot, "node_modules", dependency),

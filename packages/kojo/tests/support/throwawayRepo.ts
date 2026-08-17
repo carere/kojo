@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, symlinkSync } from "node:fs";
 import { Effect, FileSystem, Path } from "effect";
 import { defaultTrunk } from "../../src/contexts/shared/models/FactoryLayout.ts";
+import { linkEngine } from "./linkEngine.ts";
 
 /**
  * A repository nobody minds losing, with a finished factory in it.
@@ -21,9 +21,9 @@ import { defaultTrunk } from "../../src/contexts/shared/models/FactoryLayout.ts"
  *   three placeholders that print `KOJO-PLACEHOLDER` and exit 78, so `verify` records
  *   `accepted: false` and `requireAcceptance` refuses however a human answers. Editing it is the
  *   first thing a person does with a new factory, and it is the first thing done here.
- * - **`node_modules/kojo` links to the package under test**, which is what `bun install` leaves a
- *   target repository holding, and is how the stamped file's `kojo/…` imports resolve to the engine
- *   being graded rather than to a published copy of it.
+ * - **`node_modules/@carere/kojo` links to the package under test** — see `linkEngine.ts`. That is
+ *   what `bun install` leaves a target repository holding, and is how the stamped file's
+ *   `@carere/kojo/…` imports resolve to the engine being graded rather than to a published copy.
  */
 
 const packageRoot = new URL("../../", import.meta.url).pathname.replace(/\/$/, "");
@@ -131,7 +131,7 @@ const realCommands = [
   "// actually runs. Until that is done, every acceptance refuses — which is the honest answer for",
   "// a factory nobody has finished.",
   "",
-  'import { isPlaceholder } from "kojo/contexts/scaffold/models/Placeholder";',
+  'import { isPlaceholder } from "@carere/kojo/contexts/scaffold/models/Placeholder";',
   "",
   "export const commands = {",
   '  install: "true",',
@@ -326,18 +326,7 @@ export const throwawayRepo = (options: {
     yield* fileSystem
       .makeDirectory(path.join(root, "node_modules"), { recursive: true })
       .pipe(Effect.orDie);
-    yield* Effect.sync(() => {
-      const link = (from: string, to: string) => {
-        if (!existsSync(to)) symlinkSync(from, to);
-      };
-      link(packageRoot, path.join(root, "node_modules", "kojo"));
-      for (const dependency of ["effect", "@ai-hero", "@effect", "@types"]) {
-        link(
-          path.join(packageRoot, "node_modules", dependency),
-          path.join(root, "node_modules", dependency),
-        );
-      }
-    });
+    yield* Effect.sync(() => linkEngine({ root, packageRoot }));
 
     return { root };
   });

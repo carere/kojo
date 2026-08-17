@@ -1,7 +1,7 @@
 // Deep path, not the package barrel. The barrel re-exports BunRedis, which drags a Redis client in
 // behind it, and AGENTS.md forbids barrel imports repo-wide.
 import { execFileSync } from "node:child_process";
-import { existsSync, symlinkSync } from "node:fs";
+import { existsSync } from "node:fs";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Path } from "effect";
@@ -12,6 +12,7 @@ import {
 } from "../../../../../src/contexts/scaffold/models/FactoryChoices.ts";
 import { initialise } from "../../../../../src/contexts/scaffold/services/initialise.ts";
 import { thisEngine } from "../../../../support/engineDependency.ts";
+import { linkEngine } from "../../../../support/linkEngine.ts";
 
 /**
  * **The test that grades whether ticket 15 can happen.**
@@ -98,18 +99,7 @@ const stampedInto = (template: TemplateName) =>
 
     // `kojo` is the package under test; everything else is what it and the stamped files resolve
     // through. This is `bun install` in a target repository, with nothing copied.
-    yield* Effect.sync(() => {
-      const link = (from: string, to: string) => {
-        if (!existsSync(to)) symlinkSync(from, to);
-      };
-      link(packageRoot, path.join(root, "node_modules", "kojo"));
-      for (const dependency of ["effect", "@ai-hero", "@effect", "@types"]) {
-        link(
-          path.join(packageRoot, "node_modules", dependency),
-          path.join(root, "node_modules", dependency),
-        );
-      }
-    });
+    yield* Effect.sync(() => linkEngine({ root, packageRoot }));
 
     return root;
   });

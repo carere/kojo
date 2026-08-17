@@ -1,7 +1,22 @@
 {
-  "name": "kojo",
+  "name": "@carere/kojo",
   "version": "0.0.0",
   "description": "Software factory builder — Effect workflows driving AI coding agents in sandboxes",
+  "keywords": [
+    "agent",
+    "ai",
+    "effect",
+    "factory",
+    "sandbox",
+    "workflow"
+  ],
+  "homepage": "https://github.com/carere/kojo#readme",
+  "bugs": "https://github.com/carere/kojo/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/carere/kojo.git",
+    "directory": "packages/kojo"
+  },
   "license": "MIT",
   "author": "Kevin Abatan <contact@carere.dev> (https://github.com/carere)",
   "type": "module",
@@ -11,6 +26,10 @@
   "bin": {
     "kojo": "./src/main.ts"
   },
+  "files": [
+    "console",
+    "src"
+  ],
   "dependencies": {
     "@ai-hero/sandcastle": "0.12.0",
     "@effect/platform-bun": "4.0.0-beta.106",
@@ -21,5 +40,11 @@
     "@effect/vitest": "4.0.0-beta.106",
     "@types/bun": "^1.3.14",
     "vitest": "^4.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
   }
 }

@@ -1,7 +1,7 @@
 // `@effect/platform-bun` is imported by deep path, never by its barrel: the barrel re-exports
 // BunRedis, and loading it would end the run before a single test did anything.
 import { spawnSync } from "node:child_process";
-import { existsSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Path, type PlatformError } from "effect";
@@ -11,6 +11,7 @@ import { GateRequest } from "../../../src/contexts/gate/models/GateRequest.ts";
 import { GateRepository } from "../../../src/contexts/gate/ports/GateRepository.ts";
 import * as SqliteDatabase from "../../../src/contexts/shared/adapters/SqliteDatabase.ts";
 import type { RunId } from "../../../src/contexts/shared/models/RunId.ts";
+import { linkEngine } from "../../support/linkEngine.ts";
 
 const cli = new URL("../../../src/main.ts", import.meta.url).pathname;
 const packageRoot = new URL("../../../", import.meta.url).pathname.replace(/\/$/, "");
@@ -435,11 +436,11 @@ describe("the gate list", () => {
  */
 const twoGatesWorkflow = [
   'import { Duration, Effect, Schema } from "effect";',
-  'import { GateRejected } from "kojo/contexts/gate/models/GateRejected";',
-  'import * as OnExpiry from "kojo/contexts/gate/models/OnExpiry";',
-  'import { code } from "kojo/contexts/workflow/services/phase/code";',
-  'import { gate } from "kojo/contexts/workflow/services/phase/gate";',
-  'import { workflow } from "kojo/contexts/workflow/services/workflow";',
+  'import { GateRejected } from "@carere/kojo/contexts/gate/models/GateRejected";',
+  'import * as OnExpiry from "@carere/kojo/contexts/gate/models/OnExpiry";',
+  'import { code } from "@carere/kojo/contexts/workflow/services/phase/code";',
+  'import { gate } from "@carere/kojo/contexts/workflow/services/phase/gate";',
+  'import { workflow } from "@carere/kojo/contexts/workflow/services/workflow";',
   "",
   "export const twoGates = workflow(",
   "  {",
@@ -508,18 +509,7 @@ const inTwoGateFactory = <A, E>(
     yield* fileSystem.writeFileString(path.join(workflows, "two-gates.ts"), twoGatesWorkflow);
 
     yield* fileSystem.makeDirectory(path.join(root, "node_modules"), { recursive: true });
-    yield* Effect.sync(() => {
-      const link = (from: string, to: string) => {
-        if (!existsSync(to)) symlinkSync(from, to);
-      };
-      link(packageRoot, path.join(root, "node_modules", "kojo"));
-      for (const dependency of ["effect", "@ai-hero", "@effect", "@types"]) {
-        link(
-          path.join(packageRoot, "node_modules", dependency),
-          path.join(root, "node_modules", dependency),
-        );
-      }
-    });
+    yield* Effect.sync(() => linkEngine({ root, packageRoot }));
 
     return yield* use(root);
   }).pipe(Effect.scoped, Effect.provide(BunServices.layer));

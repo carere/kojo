@@ -5,7 +5,6 @@
 // Deep path, not the package barrel. The barrel re-exports BunRedis, which drags a Redis client in
 // behind it, and AGENTS.md forbids barrel imports repo-wide.
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, symlinkSync } from "node:fs";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Path, type Scope } from "effect";
@@ -14,6 +13,7 @@ import { placeholderMarker } from "../../../src/contexts/scaffold/models/Placeho
 import { initialise } from "../../../src/contexts/scaffold/services/initialise.ts";
 import { defaultTrunk } from "../../../src/contexts/shared/models/FactoryLayout.ts";
 import { thisEngine } from "../../support/engineDependency.ts";
+import { linkEngine } from "../../support/linkEngine.ts";
 
 const cli = new URL("../../../src/main.ts", import.meta.url).pathname;
 const packageRoot = new URL("../../../", import.meta.url).pathname.replace(/\/$/, "");
@@ -108,25 +108,14 @@ const repository = Effect.gen(function* () {
   return root;
 });
 
-/** The links `bun install` would have left, so a stamped file's `kojo/...` imports resolve. */
-const linkEngine = (root: string, path: Path.Path) =>
+/** The links `bun install` would have left, so a stamped file's `@carere/kojo/...` imports resolve. */
+const installed = (root: string, path: Path.Path) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
     yield* fileSystem
       .makeDirectory(path.join(root, "node_modules"), { recursive: true })
       .pipe(Effect.orDie);
-    yield* Effect.sync(() => {
-      const link = (from: string, to: string) => {
-        if (!existsSync(to)) symlinkSync(from, to);
-      };
-      link(packageRoot, path.join(root, "node_modules", "kojo"));
-      for (const dependency of ["effect", "@ai-hero", "@effect", "@types"]) {
-        link(
-          path.join(packageRoot, "node_modules", dependency),
-          path.join(root, "node_modules", dependency),
-        );
-      }
-    });
+    yield* Effect.sync(() => linkEngine({ root, packageRoot }));
   });
 
 /**
@@ -158,7 +147,7 @@ const stamped = Effect.gen(function* () {
     git(root, ["commit", "--quiet", "--message", "stamp a factory"]);
   });
 
-  yield* linkEngine(root, path);
+  yield* installed(root, path);
   return root;
 });
 
@@ -176,7 +165,7 @@ const inRepository = <A, E>(
  * commands were replaced. A comment is not a command, and this file is what says so.
  */
 const finishedCommands = [
-  `import { isPlaceholder } from "kojo/contexts/scaffold/models/Placeholder";`,
+  `import { isPlaceholder } from "@carere/kojo/contexts/scaffold/models/Placeholder";`,
   "",
   "/**",
   " * Every real invocation this factory makes.",
@@ -377,8 +366,8 @@ describe("kojo doctor building a payload rather than only loading a workflow", (
 /** A workflow that loads and whose payload one typed word cannot fill. */
 const countedWorkflow = [
   'import { Effect, Schema } from "effect";',
-  'import { code } from "kojo/contexts/workflow/services/phase/code";',
-  'import { workflow } from "kojo/contexts/workflow/services/workflow";',
+  'import { code } from "@carere/kojo/contexts/workflow/services/phase/code";',
+  'import { workflow } from "@carere/kojo/contexts/workflow/services/workflow";',
   "",
   "export const counted = workflow(",
   "  {",
@@ -484,7 +473,7 @@ describe("kojo doctor in a repository with no factory", () => {
     inRepository(repository, (root) =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
-        yield* linkEngine(root, path);
+        yield* installed(root, path);
 
         const ran = yield* kojo(root, ["doctor"]);
 

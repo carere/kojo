@@ -36,6 +36,7 @@ import {
   toolchainFinding,
   workflowsFinding,
 } from "../../../../../src/contexts/scaffold/services/readiness.ts";
+import { enginePackage } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
 import { someEngine } from "../../../../support/engineDependency.ts";
 
 const ran = (exitCode: number, output = "") => ({ ran: true, exitCode, output });
@@ -258,13 +259,13 @@ describe("whether this factory and this engine hold the same effect", () => {
   it("refuses two copies of kojo for a different reason, because the remedy is different", () => {
     const finding = dependencyFinding({
       engine: mine,
-      kojo: { name: "kojo", version: "0.0.1", directory: "/repo/node_modules/kojo" },
+      kojo: { name: enginePackage, version: "0.0.1", directory: "/repo/node_modules/kojo" },
       effect: same,
       manager: "bun",
     });
 
     expect(finding.standing).toBe("failed");
-    expect(finding.detail).toContain("two copies of kojo");
+    expect(finding.detail).toContain(`two copies of ${enginePackage}`);
     expect(finding.remedy).toContain("different services");
   });
 

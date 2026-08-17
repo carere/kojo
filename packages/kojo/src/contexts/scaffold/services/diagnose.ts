@@ -6,6 +6,7 @@ import { spendFrom, spendVariable } from "../../agent/models/AgentSpend.ts";
 import { Roster } from "../../agent/ports/Roster.ts";
 import { decodeUnknown } from "../../shared/lib/decode.ts";
 import {
+  enginePackage,
   factoryDirectory,
   workflowExtension,
   workflowsDirectory,
@@ -223,7 +224,7 @@ export const diagnose = (options: {
     const toolchain = yield* detectPackageManager(root);
     const dependencies = dependencyFinding({
       engine,
-      kojo: installedPackage(at(), "kojo"),
+      kojo: installedPackage(at(), enginePackage),
       effect: installedPackage(at(), "effect"),
       manager: toolchain.manager,
     });

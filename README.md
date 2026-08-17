@@ -50,6 +50,20 @@ checks that passed while doing no work, and the real-agent spend. Read it before
 Kojo is two things in one package: `kojo init` stamps a factory into a repository, and the rest of
 the commands drive it. Everything below is what a person actually types.
 
+### 0. Install it
+
+```bash
+bun add -g @carere/kojo
+```
+
+**Kojo runs on [Bun](https://bun.sh), and that is a requirement rather than a preference.** The
+`kojo` binary starts with `#!/usr/bin/env bun`, the engine depends on `@effect/platform-bun`, and
+the trace is `bun:sqlite`. Under Node it does not start. The package ships TypeScript sources —
+there is no build step and no `dist/`, because Bun runs them directly and a deep import into a
+compiled bundle would be a worse contract than the one the no-barrel rule already makes.
+
+The package is `@carere/kojo`; the command it installs is `kojo`.
+
 ### 1. Stamp a factory
 
 ```bash

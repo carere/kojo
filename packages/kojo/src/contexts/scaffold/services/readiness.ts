@@ -18,7 +18,11 @@ import type { InvisibleCheck } from "../../agent/guards/invisibleChecks.ts";
 import { describeInvisible } from "../../agent/guards/invisibleChecks.ts";
 import type { AgentSpend } from "../../agent/models/AgentSpend.ts";
 import { describeSpend, spendVariable } from "../../agent/models/AgentSpend.ts";
-import { factoryDirectory, workflowsDirectory } from "../../shared/models/FactoryLayout.ts";
+import {
+  enginePackage,
+  factoryDirectory,
+  workflowsDirectory,
+} from "../../shared/models/FactoryLayout.ts";
 import type { ResolvedPackage } from "../../shared/models/ResolvedPackage.ts";
 import { describeSplit, identify } from "../../shared/models/ResolvedPackage.ts";
 import type { Declared, EngineDependency } from "../models/EngineDependency.ts";
@@ -286,7 +290,7 @@ export const dependencyFinding = (evidence: DependencyEvidence): Finding => {
 
   const here = { kojo: evidence.kojo, effect: evidence.effect };
   const missing = [
-    ...(here.kojo === undefined ? ["kojo"] : []),
+    ...(here.kojo === undefined ? [enginePackage] : []),
     ...(here.effect === undefined ? ["effect"] : []),
   ];
   if (here.kojo === undefined || here.effect === undefined) {
@@ -320,7 +324,7 @@ export const dependencyFinding = (evidence: DependencyEvidence): Finding => {
             `built against — and run \`${install}\` so one copy serves both.`
         : "The factory would import a different engine from the one running this command, so its " +
             "ports are different services and no layer can satisfy them. Declare " +
-            `\`"kojo": "${mine.specifier}"\` in package.json and run \`${install}\`.`,
+            `\`"${enginePackage}": "${mine.specifier}"\` in package.json and run \`${install}\`.`,
     );
   }
 

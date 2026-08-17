@@ -1,0 +1,152 @@
+name: release
+
+# **Manual, and only manual.** There is no `push`, no tag trigger and no `schedule`, on purpose: a
+# publish is irreversible — npm lets you unpublish for 72 hours and never reuse the version — so the
+# decision to make one belongs to a human at the Actions tab, not to whatever last landed on `main`.
+#
+# The flow this fits into, and each step is a separate deliberate act:
+#
+#   1. `cog bump --package kojo --auto`   writes the version, the changelog and the tag, and pushes
+#   2. Actions → release → Run workflow    type that version, and this runs
+#
+# Bumping does not publish and publishing does not bump. That is why the version is typed here
+# rather than read off the branch: typing it is the confirmation, and the job refuses if what you
+# typed is not what `packages/kojo/package.json` says.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The version to publish — must equal packages/kojo/package.json (e.g. 0.1.0)"
+        required: true
+        type: string
+      dry_run:
+        description: "Pack and check everything, publish nothing"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # The same refusal CI states. Nothing in a release may spend, and saying so here means the
+      # guard is not relying on the runner happening to have no terminal.
+      KOJO_AGENT_SPEND: refuse
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup toolchain
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        with:
+          auto-install: true
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The gate that makes typing the version meaningful. Without it the input is decoration and
+      # the job would publish whatever the branch happens to hold.
+      - name: The version you typed is the version in the manifest
+        run: |
+          # `2>/dev/null` because bun announces the `.env` it loaded on stderr, and that line would
+          # otherwise end up inside the version string.
+          declared=$(bun pm pkg get version --cwd packages/kojo 2>/dev/null | tr -d '"' | tr -d '[:space:]')
+          typed="${{ inputs.version }}"
+          if [ "$declared" != "$typed" ]; then
+            echo "::error::you asked to publish $typed, but packages/kojo/package.json says $declared."
+            echo "::error::run \`cog bump --package kojo --auto\` first, or type the version it wrote."
+            exit 1
+          fi
+          echo "publishing @carere/kojo@$declared"
+
+      # `0.0.0` is the unreleased placeholder. Publishing it would burn the first real version
+      # number on a package nobody bumped.
+      - name: Refuse the unreleased placeholder
+        run: |
+          if [ "${{ inputs.version }}" = "0.0.0" ]; then
+            echo "::error::0.0.0 is the unreleased placeholder. Bump before releasing."
+            exit 1
+          fi
+
+      # --- everything CI runs, because a release is not a lighter gate than a merge ---------------
+
+      - name: Git identity for the fixtures
+        run: |
+          git config --global user.name "kojo release"
+          git config --global user.email "release@kojo.invalid"
+
+      - name: TypeScript build
+        run: bun tsc --build --verbose
+
+      - name: Biome check
+        run: bun biome check --verbose --no-errors-on-unmatched .
+
+      - name: Dead-code analysis
+        run: bun knip
+
+      - name: Unit tests
+        run: moon run kojo:test
+
+      - name: Container tests
+        run: moon run kojo:test-integration
+
+      # --- the tarball ----------------------------------------------------------------------------
+
+      # `kojo:build` depends on `console:build`, so this is what puts the Console shell inside the
+      # package. Skip it and `kojo ui` serves a placeholder to everybody who installs Kojo.
+      - name: Public types and package build
+        run: moon run kojo:check-public-types kojo:build
+
+      # The tarball is inspected before it is sent, because `files` and `.gitignore` disagreeing is
+      # exactly how the Console went missing once already. Two assertions: the shell is in, and the
+      # tests are out.
+      - name: The tarball holds what it should
+        working-directory: packages/kojo
+        run: |
+          bun pm pack --destination /tmp/kojo-release --quiet
+          tarball=$(ls /tmp/kojo-release/*.tgz)
+          echo "$tarball"
+          tar -tzf "$tarball" > /tmp/contents.txt
+
+          if ! grep -q '^package/console/index.html$' /tmp/contents.txt; then
+            echo "::error::the Console shell is not in the tarball — kojo ui would serve a placeholder."
+            exit 1
+          fi
+          if grep -q '^package/tests/' /tmp/contents.txt; then
+            echo "::error::the test suite is in the tarball."
+            exit 1
+          fi
+          echo "console shell present, tests absent, $(wc -l < /tmp/contents.txt) entries"
+
+      # Auth through `~/.npmrc` rather than an environment variable. `bun publish` has no `--token`
+      # flag, and the registry line in an npmrc is the one form every client agrees on.
+      - name: Publish to npm
+        if: ${{ !inputs.dry_run }}
+        working-directory: packages/kojo
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::error::the NPM_TOKEN repository secret is not set, so nothing can be published."
+            exit 1
+          fi
+          printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > ~/.npmrc
+          bun publish --access public
+          rm -f ~/.npmrc
+
+      - name: Dry run — nothing was published
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "::notice::dry run. Everything above passed; no tarball was sent."
+          echo "::notice::re-run with 'Pack and check everything, publish nothing' unticked to publish."

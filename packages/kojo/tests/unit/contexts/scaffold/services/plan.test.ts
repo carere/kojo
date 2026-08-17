@@ -22,6 +22,7 @@ import {
   plan,
   starters,
 } from "../../../../../src/contexts/scaffold/services/plan.ts";
+import { enginePackage } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
 import { someEngine } from "../../../../support/engineDependency.ts";
 
 const choicesFor = (template: TemplateName, manager: "bun" | "npm" = "bun"): FactoryChoices => ({
@@ -92,7 +93,7 @@ describe("what a stamped factory is made of", () => {
       const stamped = plan(choicesFor(template));
 
       for (const file of stamped.files.filter((candidate) => candidate.path.endsWith(".ts"))) {
-        // Every reference to Kojo is a bare package specifier — `from "kojo/..."` — which is a
+        // Every reference to Kojo is a bare package specifier — `from "@carere/kojo/..."` — which is a
         // dependency, resolved from node_modules at the version the target repository pins. A
         // relative reach out of `.kojo/` would be a vendored copy wearing an import's clothes, and it
         // is the one thing this ticket must not ship: stamped source is drift you cannot upgrade away.
@@ -101,9 +102,10 @@ describe("what a stamped factory is made of", () => {
         );
         for (const specifier of reaches) {
           expect(specifier.startsWith("../../")).toBe(false);
-          if (specifier.includes("kojo")) expect(specifier.startsWith("kojo/")).toBe(true);
+          if (specifier.includes("kojo"))
+            expect(specifier.startsWith(`${enginePackage}/`)).toBe(true);
         }
-        expect(file.content).toContain('from "kojo/');
+        expect(file.content).toContain(`from "${enginePackage}/`);
       }
     },
   );
@@ -224,7 +226,7 @@ describe("the commands a fresh factory ships", () => {
     // computable without parsing: the stamped file exports the question.
     const commands = contentAt(plan(choicesFor("review")).files, ".kojo/commands.ts");
     expect(commands).toContain(
-      'import { isPlaceholder } from "kojo/contexts/scaffold/models/Placeholder"',
+      'import { isPlaceholder } from "@carere/kojo/contexts/scaffold/models/Placeholder"',
     );
     expect(commands).toContain("export const survivingPlaceholders");
   });

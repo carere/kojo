@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Path, Result, Stdio, Terminal } from "effect";
 import { TestConsole } from "effect/testing";
@@ -73,6 +74,30 @@ describe("the kojo command", () => {
       expect(Result.isFailure(outcome)).toBe(true);
     }),
   );
+
+  /**
+   * The version the CLI prints is the version the registry serves.
+   *
+   * This is a release guard rather than a behaviour test. `version` was a literal `"0.0.0"` carrying
+   * a comment that said it must track `package.json`, and nothing made it — so the first published
+   * release would have reported `0.0.0`, and so would every release after it. Nothing would have
+   * failed; `kojo --version` would simply have lied.
+   *
+   * It reads the manifest here rather than trusting the same call the source makes, so the two
+   * cannot agree by both being wrong.
+   *
+   * **It is vacuous at `0.0.0` and arms itself on the first bump.** A hardcoded `"0.0.0"` matches an
+   * unreleased manifest, so mutating the source alone proves nothing today. Mutating both — bump the
+   * manifest, write the constant down — is what reddens it, and that is exactly the state every
+   * release after the first is in.
+   */
+  it("prints the version the package.json beside it declares", () => {
+    const manifest = new URL("../../../package.json", import.meta.url);
+    const declared = JSON.parse(readFileSync(manifest, "utf8")) as { readonly version: string };
+
+    expect(version).toBe(declared.version);
+    expect(version).not.toBe("unknown");
+  });
 });
 
 /**

@@ -4,7 +4,7 @@ This is the factory used to develop Kojo, running in Kojo's own repository. It i
 a stamped starter: `kojo init` cannot produce a router and three lanes, and the point of this
 directory is that the taxonomy belongs to the author (architecture.md **D1**). So it was written
 here, by hand, against the same public API a stamped factory imports — every reference to the engine
-is `from "kojo/..."`, resolved through `node_modules/kojo`, and nothing under `.kojo/` is a copy of
+is `from "@carere/kojo/..."`, resolved through `node_modules/kojo`, and nothing under `.kojo/` is a copy of
 engine source.
 
 Read [`workflows/factory.ts`](workflows/factory.ts) first. It is the product.

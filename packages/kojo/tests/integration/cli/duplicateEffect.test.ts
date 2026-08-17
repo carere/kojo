@@ -2,7 +2,7 @@
 // behind it, and AGENTS.md forbids barrel imports repo-wide.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, readdirSync, symlinkSync } from "node:fs";
+import { cpSync, readdirSync, symlinkSync } from "node:fs";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Path } from "effect";
@@ -11,6 +11,7 @@ import { initialise } from "../../../src/contexts/scaffold/services/initialise.t
 import { defaultTrunk } from "../../../src/contexts/shared/models/FactoryLayout.ts";
 import { installedPackage } from "../../../src/contexts/shared/services/resolvePackage.ts";
 import { thisEngine } from "../../support/engineDependency.ts";
+import { linkEngine } from "../../support/linkEngine.ts";
 
 /**
  * **The failure this ticket exists to prevent, reproduced.**
@@ -105,16 +106,9 @@ const twoCopies = Effect.gen(function* () {
     .makeDirectory(path.join(root, "node_modules"), { recursive: true })
     .pipe(Effect.orDie);
   yield* Effect.sync(() => {
-    const link = (from: string, to: string) => {
-      if (!existsSync(to)) symlinkSync(from, to);
-    };
-    link(packageRoot, path.join(root, "node_modules", "kojo"));
-    for (const dependency of ["@ai-hero", "@effect", "@types"]) {
-      link(
-        path.join(packageRoot, "node_modules", dependency),
-        path.join(root, "node_modules", dependency),
-      );
-    }
+    // No `effect` in the list: the second copy below is the whole subject, and a link would
+    // realpath back onto the first.
+    linkEngine({ root, packageRoot, dependencies: ["@ai-hero", "@effect", "@types"] });
     // The second copy. Not a link — a link would realpath back onto the first, which is exactly
     // the arrangement that works.
     cpSync(mine.directory, path.join(root, "node_modules", "effect"), {

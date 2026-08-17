@@ -1,13 +1,13 @@
 // Deep path, not the package barrel. The barrel re-exports BunRedis, which drags a Redis client in
 // behind it, and AGENTS.md forbids barrel imports repo-wide.
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, symlinkSync } from "node:fs";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Path } from "effect";
 import * as InMemoryImageBuilder from "../../../src/contexts/scaffold/adapters/InMemoryImageBuilder.ts";
 import { initialise } from "../../../src/contexts/scaffold/services/initialise.ts";
 import { thisEngine } from "../../support/engineDependency.ts";
+import { linkEngine } from "../../support/linkEngine.ts";
 
 /**
  * **The walk-through this ticket came from, as a test.**
@@ -135,7 +135,7 @@ const fakeClaude = [
  * done this, so a test of the merge has to do it too.
  */
 const editedCommands = [
-  'import { isPlaceholder } from "kojo/contexts/scaffold/models/Placeholder";',
+  'import { isPlaceholder } from "@carere/kojo/contexts/scaffold/models/Placeholder";',
   "",
   "export const commands = {",
   '  install: "true",',
@@ -224,18 +224,7 @@ const stamped = Effect.gen(function* () {
   yield* fileSystem
     .makeDirectory(path.join(root, "node_modules"), { recursive: true })
     .pipe(Effect.orDie);
-  yield* Effect.sync(() => {
-    const link = (from: string, to: string) => {
-      if (!existsSync(to)) symlinkSync(from, to);
-    };
-    link(packageRoot, path.join(root, "node_modules", "kojo"));
-    for (const dependency of ["effect", "@ai-hero", "@effect", "@types"]) {
-      link(
-        path.join(packageRoot, "node_modules", dependency),
-        path.join(root, "node_modules", dependency),
-      );
-    }
-  });
+  yield* Effect.sync(() => linkEngine({ root, packageRoot }));
 
   // **Outside the repository, and that is not tidiness.** The merge refuses a trunk with untracked
   // files on it, so a `bin/` of the test's own inside `root` would make this suite fail for a
