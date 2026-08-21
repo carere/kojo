@@ -1,5 +1,5 @@
 import { useSolux } from "@carere/solux";
-import { For, type JSX, Show } from "solid-js";
+import { createMemo, For, type JSX, Show } from "solid-js";
 import {
   Gantt,
   GanttCanvas,
@@ -186,6 +186,42 @@ const Span = (props: {
  * It reads the clock through the port, never the machine, so a browser test freezes it and the
  * growing span stops growing.
  */
+/**
+ * Everything about a view that reaches the screen, as one string.
+ *
+ * Compared instead of the view itself because two views can be different objects and the same
+ * picture — which is the normal case on a live run, where the clock moves and the in-flight span
+ * grows by a fraction of a pixel that nothing can see.
+ *
+ * **It is stated in drawn pixels, not in timestamps.** An in-flight phase ends at `now` and the axis
+ * also ends at `now`, so both move together every tick and the bar does not move at all. A signature
+ * over the raw times would differ every second and prove nothing.
+ */
+const drawnAs = (view: WaterfallView): string =>
+  [
+    Math.round(view.width),
+    view.scale,
+    view.ticks.map((tick) => `${Math.round(tick.offset)}@${tick.label}`).join(","),
+    view.segments
+      .map(
+        (segment) =>
+          `${segment.kind}:${Math.round(segment.offset)}:${Math.round(segment.width)}:${segment.label ?? ""}`,
+      )
+      .join(","),
+    view.rows
+      .map(
+        (row) =>
+          `${row.rowId}:${row.depth}:${row.held}:${Math.round(view.xOf(row.from ?? view.from))}:${Math.round(view.xOf(row.to ?? view.to))}`,
+      )
+      .join(","),
+    view.spans
+      .map(
+        (span) =>
+          `${span.phaseId}:${span.state}:${span.corrections}:${span.errorTag ?? ""}:${span.breaches.length}:${Math.round(view.xOf(span.startedAt))}:${Math.round(spanWidth(view, span))}`,
+      )
+      .join(","),
+  ].join("|");
+
 export const Waterfall = (props: {
   readonly doc: RunDoc;
   /** What a click on a span does. It opens the detail panel, which is a route. */
@@ -196,18 +232,41 @@ export const Waterfall = (props: {
   const now = useNow();
   const store = useSolux<WaterfallState>();
 
-  const view = (): WaterfallView =>
-    waterfall(props.doc, now(), {
-      width: axisWidth * store.state.zoom,
-      breaks: store.state.breaks,
-      // Two floors, because a break over a bar and a break over a gap cost different things —
-      // see `BreakRule.deadFloorMillis`. Only `share` is under the reader's control.
-      rule: {
-        share: store.state.share,
-        floorMillis: defaultBreakRule.floorMillis,
-        deadFloorMillis: defaultBreakRule.deadFloorMillis,
-      },
-    });
+  /**
+   * The view, computed once per change rather than once per read — and it only counts as a change
+   * when something drawn actually moves.
+   *
+   * **Two faults, and the second is the one a person sees.** It was a plain function, so every
+   * `view()` in the tree below re-ran the whole layout: six times per render, plus once more inside
+   * every row. And because each run produced fresh arrays of fresh objects, Solid's `<For>` — which
+   * is keyed by reference — destroyed and rebuilt every tick label, every row and every span.
+   *
+   * On a run that is still going that happened **once a second**, for ever: the clock ticks, and an
+   * in-flight phase re-renders. Measured on `run-scout`, whose `explore` phase is in flight: the
+   * span element was a different node on every sample while its width never left 136 px. Nothing
+   * about the picture changed and the whole picture was rebuilt anyway, which is the flash.
+   *
+   * `equals` is what stops it. When the freshly computed view draws the same thing, the memo keeps
+   * the **previous** object and tells nobody, so every `<For>` sees the array it already has and the
+   * DOM survives. A live span still grows — the signature is in whole pixels, so it updates the
+   * moment it moves one, and not before.
+   */
+  const view = createMemo(
+    (): WaterfallView =>
+      waterfall(props.doc, now(), {
+        width: axisWidth * store.state.zoom,
+        breaks: store.state.breaks,
+        // Two floors, because a break over a bar and a break over a gap cost different things —
+        // see `BreakRule.deadFloorMillis`. Only `share` is under the reader's control.
+        rule: {
+          share: store.state.share,
+          floorMillis: defaultBreakRule.floorMillis,
+          deadFloorMillis: defaultBreakRule.deadFloorMillis,
+        },
+      }),
+    undefined,
+    { equals: (before, after) => drawnAs(before) === drawnAs(after) },
+  );
 
   const breaks = () => view().segments.filter((segment) => segment.kind === "break");
 

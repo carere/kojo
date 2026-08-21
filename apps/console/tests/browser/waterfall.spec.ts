@@ -646,3 +646,45 @@ test.describe("a very long axis is still an axis", () => {
     });
   }
 });
+
+/**
+ * A live run redraws without rebuilding, which is what stops the picture flashing.
+ *
+ * **This is the one test in the suite that must not freeze the clock.** Everything else sets
+ * `__KOJO_NOW__` so a screenshot holds still; the fault here only exists while the clock moves, so
+ * freezing it would remove the subject and the test would pass over a bug.
+ *
+ * The fault: `view()` was a plain function, so every read re-ran the layout and produced fresh
+ * objects, and `<For>` is keyed by reference — so every tick label, row and span was destroyed and
+ * rebuilt once a second, for ever, on any run that had not finished. Measured on `run-scout`, whose
+ * `explore` phase is in flight: a different DOM node every sample, while the span's width never left
+ * 136 px. Nothing changed and everything was rebuilt.
+ */
+test.describe("a run that is still going does not rebuild itself every second", () => {
+  test("the in-flight span survives the clock ticking", async ({ page }) => {
+    // No `openRun` here, and no `__KOJO_NOW__`: the live clock is the subject.
+    await page.goto(`${consoleAt.busy}/runs/run-scout`);
+
+    const span = page.locator('[data-phase="run-scout/explore/1"]');
+    await expect(span).toBeVisible();
+
+    // Counted inside one evaluate, by node identity, because that is the thing a person sees: a
+    // rebuilt element repaints. Three seconds covers three clock ticks and three polls.
+    const rebuilds = await page.evaluate(async () => {
+      const selector = '[data-phase="run-scout/explore/1"]';
+      let node = document.querySelector(selector);
+      let count = 0;
+      for (let sample = 0; sample < 12; sample += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        const current = document.querySelector(selector);
+        if (current !== node) {
+          count += 1;
+          node = current;
+        }
+      }
+      return count;
+    });
+
+    expect(rebuilds, "the span was rebuilt while nothing about it changed").toBe(0);
+  });
+});
