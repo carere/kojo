@@ -608,3 +608,41 @@ test.describe("a short phase is still a phase you can reach", () => {
     }
   });
 });
+
+/**
+ * A gate nobody answers for months, which is the shape that broke the axis in the field.
+ *
+ * A suspended run's axis runs to *now*, so the longer it waits the longer the axis. There is no
+ * fixture months long, and there does not need to be: the clock is an argument, so pushing it
+ * forward turns `run-approve` into exactly that run.
+ *
+ * The step table used to end at `1d` and fall back to its last entry whenever nothing was coarse
+ * enough — which drew one tick per day however many days there were. Measured on the pure model:
+ * 41 ticks at 24 px for a 40-day axis, 121 at 8 px for 120 days, 401 at 2.4 px for 400 days. The
+ * labels overprinted into a grey smear, which is what a person reported seeing.
+ */
+test.describe("a very long axis is still an axis", () => {
+  const day = 24 * 60 * 60 * 1000;
+
+  for (const days of [40, 400]) {
+    test(`ticks stay apart and readable on a ${days}-day axis`, async ({ page }) => {
+      await openRun(page, "busy", "run-approve", { now: frozenNow + days * day });
+
+      // Wall-clock is the mode that cannot elide the wait, so it is the worst case.
+      await page.locator("[data-axis]").click();
+      await expect(page.locator("[data-axis]")).toHaveAttribute("data-axis", "wall-clock");
+
+      const xs = await page
+        .locator("[data-tick]")
+        .evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().x));
+      expect(xs.length).toBeGreaterThan(1);
+
+      const sorted = [...xs].sort((left, right) => left - right);
+      const gaps = sorted.slice(1).map((x, index) => x - (sorted[index] ?? 0));
+      const tightest = Math.min(...gaps);
+
+      // `tickGap` is 72px in the model. Anything under about half of that is labels touching.
+      expect(tightest, `${xs.length} ticks, tightest gap ${tightest}px`).toBeGreaterThan(36);
+    });
+  }
+});

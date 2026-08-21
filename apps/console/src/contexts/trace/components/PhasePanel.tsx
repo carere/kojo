@@ -137,7 +137,7 @@ export const PhasePanel = (props: {
         }
       >
         <Pane name="identity" title="Identity">
-          <div class="grid grid-cols-2 gap-2">
+          <div class="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             <Field name="run" label="run">
               {props.runId}
             </Field>
@@ -180,7 +180,7 @@ export const PhasePanel = (props: {
             }
           >
             {(agent) => (
-              <div class="grid grid-cols-2 gap-2">
+              <div class="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                 <Field name="agent-name" label="agent">
                   {agent().agent}
                 </Field>
@@ -235,7 +235,7 @@ export const PhasePanel = (props: {
           >
             {(verification) => (
               <div class="flex flex-col gap-2">
-                <div class="grid grid-cols-2 gap-2">
+                <div class="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                   <Field name="envelope" label="envelope">
                     {verification().envelope}
                   </Field>

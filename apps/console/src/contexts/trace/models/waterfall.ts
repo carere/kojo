@@ -497,8 +497,30 @@ export const waterfall = (doc: RunDoc, now: number, options: WaterfallOptions): 
     return width;
   };
 
-  const step = steps.find((candidate) => candidate.millis * perMilli >= tickGap) ??
-    steps[steps.length - 1] ?? { millis: 1_000, label: "1s" };
+  /**
+   * The step, and it must always be coarse enough — the table is not allowed to run out.
+   *
+   * `steps` ends at one day, and the old code fell back to that last entry whenever nothing in the
+   * table was coarse enough. On an axis longer than a day or two that draws one tick **per day**
+   * however many days there are, with no lower bound on the spacing: measured on a wall-clock axis
+   * of 40 days, 41 ticks at 24 px; at 120 days, 121 ticks at 8 px; at 400 days, 401 ticks at 2.4 px.
+   * The labels overprint into a grey smear and the axis stops being readable at all.
+   *
+   * So when the table runs out the coarsest entry is *multiplied* until one tick clears `tickGap`.
+   * `1d` becomes `7d`, `30d`, whatever the axis needs. Wall-clock mode is meant to look bad — that
+   * is the case the toggle exists to show — but it has to look bad *honestly*, and a smear is not a
+   * measurement of anything.
+   */
+  const fitting = steps.find((candidate) => candidate.millis * perMilli >= tickGap);
+  const coarsest = steps[steps.length - 1] ?? { millis: 86_400_000, label: "1d" };
+  const multiple =
+    perMilli > 0 && Number.isFinite(perMilli)
+      ? Math.max(1, Math.ceil(tickGap / (coarsest.millis * perMilli)))
+      : 1;
+  const step = fitting ?? {
+    millis: coarsest.millis * multiple,
+    label: `${multiple * (coarsest.millis / 86_400_000)}d`,
+  };
 
   /**
    * A break's own label sits in the header, so a tick that would land under it is dropped.

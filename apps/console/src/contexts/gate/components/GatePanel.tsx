@@ -115,7 +115,7 @@ export const GatePanel = (props: {
             <Field name="description" label="what is being decided">
               {asking()?.request.description ?? record()?.gate}
             </Field>
-            <div class="grid grid-cols-2 gap-2">
+            <div class="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               <Field name="run" label="run">
                 {props.runId}
               </Field>
@@ -148,7 +148,7 @@ export const GatePanel = (props: {
         </Pane>
 
         <Pane name="waiting" title="What the wait cost">
-          <div class="grid grid-cols-2 gap-2">
+          <div class="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             <Field name="requested" label="asked at">
               {instant(asking()?.request.requestedAt ?? record()?.requestedAt ?? 0)}
             </Field>
@@ -184,7 +184,10 @@ export const GatePanel = (props: {
             fallback={
               // Settled, and the askings table never had it — or no longer does. The trace's record
               // is the authority here, and it carries everything but the token.
-              <div class="grid grid-cols-2 gap-2" data-gate-from="trace">
+              <div
+                class="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+                data-gate-from="trace"
+              >
                 <Field name="choice" label="choice" when={record()?.choice !== undefined}>
                   {record()?.choice}
                 </Field>

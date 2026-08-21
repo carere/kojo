@@ -148,7 +148,7 @@ export const SandboxPanel = (props: {
         </Show>
 
         <Pane name="provider" title="What it is">
-          <div class="grid grid-cols-2 gap-2">
+          <div class="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             <Field
               name="provider"
               label="provider"
@@ -224,7 +224,7 @@ export const SandboxPanel = (props: {
         </Pane>
 
         <Pane name="lifetime" title="Its life">
-          <div class="grid grid-cols-2 gap-2">
+          <div class="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             <Field name="acquired" label="acquired" when={acquiredAt() !== undefined}>
               {instant(acquiredAt() ?? 0)}
             </Field>

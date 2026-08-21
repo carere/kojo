@@ -213,17 +213,56 @@ export const Waterfall = (props: {
 
   return (
     <section class="flex flex-col gap-2" data-waterfall>
-      <div class="flex flex-wrap items-center gap-2 text-xs">
+      <div class="flex flex-wrap items-center gap-3 text-xs">
+        {/*
+         * **The label used to name the action while the attribute named the state**, so the button
+         * read `Break the axis` at exactly the moment the axis was *not* broken, and there was no
+         * way to tell which of the two you were looking at. It is a switch now: the box says whether
+         * it is on, the words never change, and what it does is written beside it in full rather
+         * than left for the reader to infer from a word.
+         */}
         <button
           type="button"
           data-axis={store.state.breaks ? "broken" : "wall-clock"}
-          class="border-border hover:bg-muted rounded-md border px-2 py-1"
+          aria-pressed={store.state.breaks}
+          title="A break hides a stretch of the run where nothing was happening, so the phases either side of it keep a readable width. The hidden time is written on the wall."
+          class={cn(
+            "flex items-center gap-2 rounded-md border px-2 py-1",
+            store.state.breaks ? "border-foreground bg-muted" : "border-border hover:bg-muted",
+          )}
           onClick={() => store.dispatch(axisToggled())}
         >
-          {store.state.breaks ? "Wall-clock" : "Break the axis"}
+          <span
+            aria-hidden="true"
+            class={cn(
+              "flex h-3 w-3 items-center justify-center rounded-[3px] border text-[9px] leading-none",
+              store.state.breaks
+                ? "border-foreground bg-foreground text-background"
+                : "border-border",
+            )}
+          >
+            {store.state.breaks ? "✓" : ""}
+          </span>
+          Hide long waits
         </button>
+
         <span class="text-muted-foreground" data-scale={view().scale}>
           scale {view().scale}
+        </span>
+
+        {/*
+         * What the switch is actually doing to what you are looking at, in words. Without this the
+         * only way to know whether anything was hidden — and how much — was to spot a wall in the
+         * chart and read the label on it.
+         */}
+        <span class="text-muted-foreground" data-axis-note>
+          {store.state.breaks
+            ? breaks().length === 0
+              ? "· nothing long enough to hide"
+              : `· ${breaks().length} ${breaks().length === 1 ? "gap" : "gaps"} hidden: ${breaks()
+                  .map((segment) => segment.label)
+                  .join(", ")}`
+            : "· every gap drawn to scale"}
         </span>
         <span class="ml-auto flex items-center gap-1">
           <button

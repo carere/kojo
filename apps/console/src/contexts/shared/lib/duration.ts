@@ -104,6 +104,15 @@ export const tickLabel = (elapsedMillis: number, stepMillis: number): string => 
   const minutes = Math.floor((span % hour) / minute);
   const seconds = Math.round((span % minute) / second);
 
+  // A step of a day or coarser is on a wall-clock axis spanning weeks or months. Hours there are
+  // the same mistake seconds are at a one-minute step, only louder: a 30-day step would label its
+  // ticks `8640h 0m`, and nobody converts that back into a date in their head.
+  if (stepMillis >= day) {
+    const days = Math.floor(span / day);
+    const restHours = Math.floor((span % day) / hour);
+    return restHours > 0 ? `${days}d ${restHours}h` : `${days}d`;
+  }
+
   // A step of a minute or coarser can never land between two seconds, so seconds are noise.
   if (stepMillis >= minute) {
     if (hours > 0) return `${hours}h ${minutes}m`;
