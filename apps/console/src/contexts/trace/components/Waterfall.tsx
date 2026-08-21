@@ -14,6 +14,7 @@ import { axisDuration } from "../../shared/lib/duration.ts";
 import { useNow } from "../../shared/ports/Now.tsx";
 import type { PhaseKind, PhaseState, RunDoc } from "../models/RunDoc.ts";
 import {
+  defaultBreakRule,
   type PhaseSpan,
   spansOfRow,
   spanWidth,
@@ -83,6 +84,23 @@ const Span = (props: {
   const left = () => props.view.xOf(props.span.startedAt);
   const width = () => spanWidth(props.view, props.span);
   const breached = () => props.span.breaches.length > 0;
+  /**
+   * A span drawn wider than it really is has to paint over its neighbours, or it cannot be clicked.
+   *
+   * `spanWidth` floors the drawn width at two pixels so a very short phase still exists on screen,
+   * but nothing reserves that space: `left` is the un-floored position, and the spans of a row are
+   * sorted by start time, so the *next* phase is later in the DOM and paints on top of the floor.
+   * Measured on the shipped fixtures: `in_progress` at x=201 w=2 sits under `route` at x=201.2
+   * w=8.2, and `elementFromPoint` at its centre returns `route`. The short phase was unhoverable
+   * and unclickable — and the browser suite already knew, because `realFactory.ts` pays 650 ms of
+   * real sleep to give its phases enough width to be clicked.
+   *
+   * Raising the floor is not the fix: `Waterfall.tsx` records the decision that a span's width is
+   * its duration, and a wider bar would be a lie about how long the phase took. So the narrow one
+   * keeps its two pixels and wins the stack instead.
+   */
+  const floored = () =>
+    props.view.xOf(props.span.endedAt) - props.view.xOf(props.span.startedAt) < width();
 
   return (
     <button
@@ -110,7 +128,7 @@ const Span = (props: {
         props.store.state.hovered === props.span.phaseId ? "brightness-110" : undefined,
         props.store.state.selected === props.span.phaseId ? "ring-foreground ring-2" : undefined,
       )}
-      style={{ left: `${left()}px`, width: `${width()}px` }}
+      style={{ left: `${left()}px`, width: `${width()}px`, "z-index": floored() ? 2 : 1 }}
       onMouseEnter={() => props.store.dispatch(hovered(props.span.phaseId))}
       onMouseLeave={() => props.store.dispatch(unhovered())}
       // A click is a **navigation**, not a dispatch. The detail panel is a nested route, so what is
@@ -182,7 +200,13 @@ export const Waterfall = (props: {
     waterfall(props.doc, now(), {
       width: axisWidth * store.state.zoom,
       breaks: store.state.breaks,
-      rule: { share: store.state.share, floorMillis: 10 * 60 * 1_000 },
+      // Two floors, because a break over a bar and a break over a gap cost different things —
+      // see `BreakRule.deadFloorMillis`. Only `share` is under the reader's control.
+      rule: {
+        share: store.state.share,
+        floorMillis: defaultBreakRule.floorMillis,
+        deadFloorMillis: defaultBreakRule.deadFloorMillis,
+      },
     });
 
   const breaks = () => view().segments.filter((segment) => segment.kind === "break");

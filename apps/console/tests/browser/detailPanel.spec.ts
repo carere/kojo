@@ -429,3 +429,126 @@ test.describe("a run that does not exist is an answer, not an outage", () => {
     expect(asked.filter((url) => url.endsWith("/api/runs/run-nope"))).toHaveLength(1);
   });
 });
+
+/**
+ * The geometry the panel and the timeline have to hold, which no assertion covered before.
+ *
+ * These are the three faults a person reported after using the Console on a real run, and every one
+ * of them was invisible to a suite that only ever asked what the panel *said*. They are written as
+ * measurements rather than as pixel expectations, so they keep meaning something when the layout is
+ * tuned again.
+ */
+test.describe("the panel is below the timeline, and neither one clips the other", () => {
+  const scroller = (page: Page): Locator => page.locator("[data-waterfall] div.overflow-x-auto");
+
+  test("the whole axis is reachable with the panel open, at every desktop width", async ({
+    page,
+  }) => {
+    // Before the panel moved below, a 448-pixel dock ate the axis: 382 pixels of a 1148-pixel
+    // canvas were unreachable at 1280, and the 41-hour break wall sat outside the scroller
+    // entirely — so the one thing the run view exists to show could not be seen at all.
+    await openRun(page, "busy", "/runs/run-merged/phases/hotfix/1");
+    await expect(panel(page)).toBeVisible();
+
+    for (const width of [1280, 1440, 1600, 1920]) {
+      await page.setViewportSize({ width, height: 900 });
+      const hidden = await scroller(page).evaluate((node) => node.scrollWidth - node.clientWidth);
+      expect(hidden, `${width}px hides ${hidden}px of the axis`).toBe(0);
+    }
+  });
+
+  test("the panel takes the full width rather than a column of it", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openRun(page, "busy", "/runs/run-merged/phases/hotfix/1");
+
+    const panelBox = await panel(page).boundingBox();
+    const waterfallBox = await page.locator("[data-waterfall]").boundingBox();
+    expect(panelBox).not.toBeNull();
+    expect(waterfallBox).not.toBeNull();
+    if (panelBox === null || waterfallBox === null) return;
+
+    // Below, not beside: the panel starts under the timeline rather than to the right of it.
+    expect(panelBox.y).toBeGreaterThan(waterfallBox.y);
+    // And it is as wide as the timeline's own column, give or take a border.
+    expect(Math.abs(panelBox.width - waterfallBox.width)).toBeLessThan(4);
+  });
+
+  test("the page scrolls once, not twice", async ({ page }) => {
+    // The panel used to carry `max-h-[80vh]` and its own `overflow-y`, which put a second scrollbar
+    // inside the first. The cap measured against the viewport while the panel began wherever flow
+    // put it, so on a run with a gate card above it the panel started at y=484 in a 720-pixel
+    // window and read through a porthole.
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await openRun(page, "busy", "/runs/run-approve/phases/hotfix/1");
+
+    const ownScrollbar = await panel(page).evaluate(
+      (node) => node.scrollHeight > node.clientHeight + 1,
+    );
+    expect(ownScrollbar).toBe(false);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth),
+    ).toBe(0);
+  });
+});
+
+/**
+ * A failed run says what killed it before anybody clicks.
+ *
+ * The cause used to live only inside the failing span, at nine pixels and clipped by the span's own
+ * width. `run-broken` is a failed run with no gate, which is why this component must not reuse the
+ * gate card's attribute — a spec asserts that run has no gate card.
+ */
+test.describe("why a run failed is on the page, not behind a click", () => {
+  test("names the failing phase and links to it", async ({ page }) => {
+    await openRun(page, "busy", "/runs/run-broken");
+
+    const outcome = page.locator("[data-run-outcome]");
+    await expect(outcome).toBeVisible();
+    await expect(outcome).toHaveAttribute("data-run-outcome", "failed");
+
+    // The failing phase is named, and its name is a link into its own panel.
+    const link = outcome.locator("[data-outcome-link]");
+    await expect(link).toHaveCount(1);
+    await link.click();
+    await expect(panel(page)).toBeVisible();
+    expect(page.url()).toContain("/phases/");
+  });
+
+  test("a run that succeeded says nothing at all", async ({ page }) => {
+    await openRun(page, "busy", "/runs/run-merged");
+    await expect(page.locator("[data-run-outcome]")).toHaveCount(0);
+  });
+});
+
+/**
+ * The timeline stays on screen while the panel is read.
+ *
+ * This is what the side dock was really buying, and it is the property that had to survive moving
+ * the panel below. Adjacency was the means; staying visible was the requirement.
+ */
+test.describe("the timeline is pinned while the panel is read", () => {
+  test("scrolling the panel does not take the waterfall off screen", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await openRun(page, "busy", "/runs/run-approve/phases/hotfix/1");
+    await expect(panel(page)).toBeVisible();
+
+    const waterfall = page.locator("[data-waterfall]");
+    await expect(waterfall).toBeVisible();
+
+    // Scroll to the bottom of the page — the worst case for a panel below the timeline.
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+    await page.waitForTimeout(100);
+
+    const box = await waterfall.boundingBox();
+    expect(box).not.toBeNull();
+    if (box === null) return;
+
+    // Pinned near the top, and **both bounds are load-bearing**. The first version of this test
+    // asserted only `y < 48`, which a waterfall scrolled clean off the top satisfies perfectly:
+    // measured at y=-574 with the sticky removed, and the test stayed green. A check that passes
+    // while doing no work is the one thing this repository keeps a list of.
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.y).toBeLessThan(48);
+    expect(box.height).toBeGreaterThan(0);
+  });
+});

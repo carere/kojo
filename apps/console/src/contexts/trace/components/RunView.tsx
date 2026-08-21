@@ -18,6 +18,7 @@ import type { RunViewMode } from "../models/view.ts";
 import { type PhaseSpan, spansOf } from "../models/waterfall.ts";
 import { waterfallStore } from "../services/waterfallStore.ts";
 import { PhaseTable } from "./PhaseTable.tsx";
+import { RunOutcome } from "./RunOutcome.tsx";
 import { Waterfall } from "./Waterfall.tsx";
 
 /**
@@ -27,7 +28,7 @@ import { Waterfall } from "./Waterfall.tsx";
  * waterfall says *what happened*, and the detail panel says everything else. If you deleted the
  * waterfall the page would still be useful; if you deleted the header it would not.
  *
- * **The panel is a nested route rendered beside the waterfall, never over it.** `<Outlet />` is the
+ * **The panel is a nested route rendered below the waterfall, never over it.** `<Outlet />` is the
  * dock: a phase or an acquisition is a URL, so it survives being pasted, and the position somebody
  * clicked from stays on screen while they read it.
  *
@@ -199,6 +200,12 @@ export const RunView = (props: {
              * keeps its card too: an answer nobody applied is still an answer nobody applied, and
              * hiding it is the exact failure adr/gate/0001 was written against.
              */}
+            {/*
+             * Why the run died, above the gate card and directly under the header. It renders on a
+             * failed or breached run and on nothing else, so a healthy run's page is unchanged.
+             */}
+            <RunOutcome doc={document()} runId={props.runId} mode={props.mode} />
+
             <Show when={openGate()}>
               {(waiting) => (
                 <Show when={!isTerminal(status()) || awaitingApply(waiting(), document().gates)}>
@@ -243,8 +250,21 @@ export const RunView = (props: {
             </div>
 
             <SoluxProvider store={store}>
-              <div class="flex flex-col items-start gap-4 lg:flex-row">
-                <div class="flex w-full min-w-0 flex-1 flex-col gap-2">
+              <div class="flex flex-col gap-4">
+                {/*
+                 * The timeline stays on screen while the panel is read, and that is what the side
+                 * dock was really buying — adjacency was the means, not the requirement. console.md
+                 * §4 lists header, then waterfall, then panel, in vertical order; nothing in the
+                 * record asks for a column beside.
+                 *
+                 * `bg-background` and `z-10` are load-bearing: a sticky block with no ground of its
+                 * own shows the page sliding through it. `max-h-[60vh]` is a cap the fixtures cannot
+                 * show the need for — every one of them tops out at three scope rows — but a run
+                 * holding ten acquisitions builds a 520-pixel block that would then own most of the
+                 * window for ever. It also finally gives `GanttHeader`'s own `sticky top-0` a
+                 * scrolling ancestor to stick to, which it has never had.
+                 */}
+                <div class="bg-background flex w-full min-w-0 flex-col gap-2 lg:sticky lg:top-0 lg:z-10 lg:max-h-[60vh] lg:overflow-x-hidden lg:overflow-y-auto lg:pt-2">
                   <Show
                     when={spansOf(document(), now()).length > 0}
                     fallback={

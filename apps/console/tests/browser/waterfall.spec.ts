@@ -565,3 +565,46 @@ test.describe("the way in", () => {
     await expect(page.locator("[data-waterfall]")).toBeVisible();
   });
 });
+
+/**
+ * The two axis faults a person hit on a real run, both of which the fixtures were too tidy to show.
+ */
+test.describe("a short phase is still a phase you can reach", () => {
+  test("the narrow span wins the hit test against the wide one beside it", async ({ page }) => {
+    await openRun(page, "busy", "run-merged");
+
+    // `spanWidth` floors a very short phase at two pixels so it exists on screen, but nothing
+    // reserves that space — and the spans of a row are sorted by start time, so the *next* phase is
+    // later in the DOM and painted straight over it. Measured before the fix: `in_progress` at
+    // x=201 w=2 sat under `route` at x=201.2 w=8.2, and a click at its centre opened `route`.
+    //
+    // The suite already knew, without saying so: `realFactory.ts` pays 650 ms of real sleep to give
+    // its phases enough width to be clickable.
+    const narrow = page.locator('[data-phase="run-merged/in_progress/1"]');
+    await expect(narrow).toBeVisible();
+
+    const hit = await narrow.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      const top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+      const owner = top?.closest("[data-phase]");
+      return owner instanceof HTMLElement ? owner.dataset.phase : null;
+    });
+
+    expect(hit).toBe("run-merged/in_progress/1");
+  });
+
+  test("no two ticks are drawn at the same place", async ({ page }) => {
+    // A phase edge is a segment boundary, so a closing edge and the next opening edge are the same
+    // instant. The tick loop emitted both, and two labels overprinted at one pixel wherever an edge
+    // landed on an exact multiple of the step. run-lanes did it three times over.
+    for (const run of ["run-merged", "run-lanes", "run-scout", "run-breach"]) {
+      await openRun(page, "busy", run);
+      const offsets = await page
+        .locator("[data-tick]")
+        .evaluateAll((nodes) =>
+          nodes.map((node) => Math.round(node.getBoundingClientRect().x * 10) / 10),
+        );
+      expect(new Set(offsets).size, `${run} draws ${offsets.length} ticks`).toBe(offsets.length);
+    }
+  });
+});

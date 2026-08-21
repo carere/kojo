@@ -9,7 +9,8 @@ import { keepView } from "../models/view.ts";
  * detail has to be deep-linkable, because it is the thing a person pastes into a chat when they ask a
  * colleague why a run died; but replacing the waterfall with a full page would throw away the
  * position they clicked from, and the whole job is investigation *in context*. So the route is
- * nested, the waterfall stays on screen beside it, and closing the panel is a link back to the run
+ * nested, the waterfall stays on screen above it — pinned there, rather than beside it — and
+ * closing the panel is a link back to the run
  * rather than a piece of component state.
  *
  * Two subjects share this shell: a phase, and a **sandbox acquisition**. The band on the waterfall is
@@ -28,7 +29,17 @@ export const DetailPanel = (props: {
 }): JSX.Element => (
   <aside
     data-detail-panel={props.subject}
-    class="border-border bg-background flex w-full shrink-0 flex-col gap-4 rounded-lg border p-4 lg:max-h-[80vh] lg:w-[24rem] lg:overflow-y-auto xl:w-[28rem]"
+    // Full width, below the timeline, and with no height cap.
+    //
+    // **The `lg:max-h-[80vh]` this used to carry was never right.** It measures against the
+    // viewport, but the panel starts wherever flow put it — so on a run with a gate card above it
+    // the panel began at y=484 in a 720-pixel window and its own scrollbar owned the rest. A cap
+    // that assumes it starts at the top of the screen cannot work anywhere it does not.
+    //
+    // A 448-pixel dock also cost the timeline a third of its width: the axis is a fixed 1136-pixel
+    // canvas, and beside a panel it was clipped on every screen size measured. One page scroll
+    // beats two nested ones.
+    class="border-border bg-background flex w-full flex-col gap-4 rounded-lg border p-4"
   >
     <header class="flex flex-col gap-2">
       <div class="flex items-start justify-between gap-2">

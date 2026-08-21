@@ -1,4 +1,4 @@
-import { axisDuration } from "../../shared/lib/duration.ts";
+import { axisDuration, tickLabel } from "../../shared/lib/duration.ts";
 import { acquiredAtOf, nameOf } from "./ids.ts";
 import type { PhaseKind, PhaseState, RunDoc } from "./RunDoc.ts";
 
@@ -56,11 +56,31 @@ export interface BreakRule {
    * A run of two phases is *always* dominated by the longer one, and breaking an eight-second span
    * would replace a readable bar with a label saying `8s`. Ten minutes is the point below which a
    * stretch is still something a person can read on a timeline.
+   *
+   * **This argument is about a stretch with a bar in it.** See {@link deadFloorMillis}.
    */
   readonly floorMillis: number;
+  /**
+   * The same floor, for a stretch nothing runs in.
+   *
+   * The argument above does not reach dead time: a break over a span replaces a readable bar, and a
+   * break over nothing replaces nothing. One floor for both was measured making the axis useless on
+   * an ordinary run — 65.6 seconds of idle at the end of a 67-second run took 939 of 960 pixels,
+   * because it cleared the share test and was saved only by the ten-minute floor. Every phase in
+   * that run was then crammed into the leading 20 pixels, and the step table read that squashed
+   * scale and chose `10s` ticks for 1.4 seconds of work.
+   *
+   * Thirty seconds, because that is about where a gap stops being the shape of the run and starts
+   * being a wait. Below it, dead time is still something worth seeing the width of.
+   */
+  readonly deadFloorMillis: number;
 }
 
-export const defaultBreakRule: BreakRule = { share: 0.6, floorMillis: 10 * 60 * 1_000 };
+export const defaultBreakRule: BreakRule = {
+  share: 0.6,
+  floorMillis: 10 * 60 * 1_000,
+  deadFloorMillis: 30 * 1_000,
+};
 
 /**
  * One row of the waterfall: a scope, not a lane.
@@ -335,7 +355,11 @@ export const collapsedOf = (
 
   for (;;) {
     const live = stretches
-      .map((stretch, index) => ({ index, millis: stretch.to - stretch.from }))
+      .map((stretch, index) => ({
+        index,
+        millis: stretch.to - stretch.from,
+        dense: stretch.dense,
+      }))
       .filter((entry) => !collapsed.has(entry.index));
     // Never the last one standing: an axis of nothing but breaks says nothing at all.
     if (live.length < 2) return collapsed;
@@ -344,7 +368,10 @@ export const collapsedOf = (
     const worst = live.reduce((longest, entry) =>
       entry.millis > longest.millis ? entry : longest,
     );
-    if (worst.millis < rule.floorMillis || worst.millis <= total * rule.share) return collapsed;
+    // The floor depends on what is in the stretch, not on how long it is. A dense stretch is a bar
+    // somebody can read; a dead one is a gap, and a gap has nothing to lose by being elided.
+    const floor = worst.dense ? rule.floorMillis : rule.deadFloorMillis;
+    if (worst.millis < floor || worst.millis <= total * rule.share) return collapsed;
 
     collapsed.add(worst.index);
   }
@@ -352,6 +379,12 @@ export const collapsedOf = (
 
 /** The steps a tick may take, from a second up to a day. The reui default starts three orders up. */
 const steps: ReadonlyArray<{ readonly millis: number; readonly label: string }> = [
+  // Below a second, because collapsing dead time can leave very little linear content behind. A
+  // real run measured after that change had 0.77 s of work left on the axis; with the table
+  // bottoming out at `1s` it carried exactly one tick, which is an axis nobody can measure by.
+  { millis: 100, label: "100ms" },
+  { millis: 200, label: "200ms" },
+  { millis: 500, label: "500ms" },
   { millis: 1_000, label: "1s" },
   { millis: 2_000, label: "2s" },
   { millis: 5_000, label: "5s" },
@@ -481,15 +514,34 @@ export const waterfall = (doc: RunDoc, now: number, options: WaterfallOptions): 
     }));
 
   const ticks: Array<AxisTick> = [];
+  /**
+   * One tick per instant, and the label picked by the step rather than by the magnitude.
+   *
+   * **`at < segment.to`, not `<=`.** Every phase edge is a segment boundary, so a closing edge and
+   * the next segment's opening edge are the same instant; with `<=` both emitted, and two ticks
+   * overprinted at one pixel wherever a phase edge landed on an exact multiple of the step. Two of
+   * seven fixtures did it, one of them three times over. The last segment's closing tick is emitted
+   * once, below, because nothing follows it to open.
+   *
+   * `seen` is belt and braces for the same fault: a break's ends can also coincide.
+   */
+  const seen = new Set<number>();
+  const push = (at: number): void => {
+    if (seen.has(at)) return;
+    const offset = xOf(at);
+    if (shaded.some((zone) => offset >= zone.from && offset <= zone.to)) return;
+    seen.add(at);
+    ticks.push({ at, offset, label: tickLabel(at - from, step.millis) });
+  };
+
   for (const segment of segments) {
     if (segment.kind === "break") continue;
     const first = Math.ceil((segment.from - from) / step.millis) * step.millis + from;
-    for (let at = first; at <= segment.to; at += step.millis) {
-      const offset = xOf(at);
-      if (shaded.some((zone) => offset >= zone.from && offset <= zone.to)) continue;
-      ticks.push({ at, offset, label: axisDuration(at - from) });
-    }
+    for (let at = first; at < segment.to; at += step.millis) push(at);
   }
+  // The closing edge of the axis itself, which the loops above deliberately stop short of.
+  const closing = Math.floor((to - from) / step.millis) * step.millis + from;
+  if (closing > from || ticks.length === 0) push(closing);
 
   return { rows, spans, segments, ticks, width, from, to, scale: step.label, xOf };
 };
