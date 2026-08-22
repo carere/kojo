@@ -241,7 +241,7 @@ export const RunView = (props: {
                 <Stamp name="config" label="config">
                   {document().run.run.configDigest}
                 </Stamp>
-                <Stamp name="idempotency-key" label="deduplicated by">
+                <Stamp name="idempotency-key" label="idempotency key">
                   {document().run.run.idempotencyKey}
                 </Stamp>
                 <Stamp
