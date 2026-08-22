@@ -688,3 +688,75 @@ test.describe("a run that is still going does not rebuild itself every second", 
     expect(rebuilds, "the span was rebuilt while nothing about it changed").toBe(0);
   });
 });
+
+/**
+ * The timeline fills the card, pans when it overflows, and zooms under the modifier.
+ *
+ * The axis used to be a hardcoded 960 pixels. `Waterfall.tsx` recorded the reason — *a constant so
+ * a span's width is the same on every machine* — and the price was that every card narrower than
+ * 1136 pixels clipped the run and every card wider than it wasted the room. The property that
+ * actually mattered is kept: the browser tier freezes the viewport, so these numbers are stable.
+ */
+test.describe("the timeline uses the room it is given", () => {
+  const scroller = (page: Page): Locator => page.locator("[data-waterfall] div.overflow-x-auto");
+
+  test("the axis grows and shrinks with the card", async ({ page }) => {
+    await openRun(page, "busy", "run-merged");
+
+    const canvasNow = async (): Promise<number> =>
+      Number(await page.locator("[data-canvas]").getAttribute("data-canvas"));
+
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await expect.poll(canvasNow).toBeGreaterThan(0);
+    const narrow = await canvasNow();
+
+    // **Polled for the change, not read once.** The axis is measured by a `ResizeObserver`, which
+    // reports after layout — so a read taken straight after `setViewportSize` returns the old
+    // number, and the first version of this test failed against working code for that reason.
+    await page.setViewportSize({ width: 1920, height: 900 });
+    await expect
+      .poll(canvasNow, { message: "the axis never grew when the window did" })
+      .toBeGreaterThan(narrow + 200);
+
+    // And it fits: nothing of the timeline is out of reach at zoom 1.
+    const hidden = await scroller(page).evaluate((node) => node.scrollWidth - node.clientWidth);
+    expect(hidden).toBe(0);
+  });
+
+  test("zooming in makes it pan, and the pan reaches the end", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openRun(page, "busy", "run-merged");
+    expect(await scroller(page).evaluate((node) => node.scrollWidth - node.clientWidth)).toBe(0);
+
+    await page.locator('[data-zoom="in"]').click();
+    await page.locator('[data-zoom="in"]').click();
+
+    const overflow = await scroller(page).evaluate((node) => node.scrollWidth - node.clientWidth);
+    expect(overflow, "a zoomed timeline has to have somewhere to pan to").toBeGreaterThan(100);
+
+    // Panning right actually moves it, which is what `overflow-x-auto` is there for.
+    await scroller(page).evaluate((node) => {
+      node.scrollLeft = node.scrollWidth;
+    });
+    expect(await scroller(page).evaluate((node) => node.scrollLeft)).toBeGreaterThan(100);
+  });
+
+  test("modifier and wheel zooms the timeline instead of the page", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openRun(page, "busy", "run-merged");
+
+    const canvasNow = async (): Promise<number> =>
+      Number(await page.locator("[data-canvas]").getAttribute("data-canvas"));
+    const before = await canvasNow();
+
+    // A wheel carrying the modifier. `ctrlKey` is also what a trackpad pinch sends.
+    await page.locator("[data-waterfall]").dispatchEvent("wheel", {
+      deltaY: -120,
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    await expect.poll(canvasNow).toBeGreaterThan(before);
+  });
+});

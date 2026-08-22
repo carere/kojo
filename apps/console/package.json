@@ -8,6 +8,7 @@
   "private": true,
   "dependencies": {
     "@carere/solux": "4.0.1",
+    "@tanstack/solid-hotkeys": "0.10.0",
     "@tanstack/solid-query": "5.101.4",
     "@tanstack/solid-router": "1.170.24",
     "@tanstack/solid-start": "1.168.41",

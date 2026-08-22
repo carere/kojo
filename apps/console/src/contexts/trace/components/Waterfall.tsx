@@ -1,5 +1,6 @@
 import { useSolux } from "@carere/solux";
-import { createMemo, For, type JSX, Show } from "solid-js";
+import { createHotkey } from "@tanstack/solid-hotkeys";
+import { createMemo, createSignal, For, type JSX, onCleanup, onMount, Show } from "solid-js";
 import {
   Gantt,
   GanttCanvas,
@@ -49,8 +50,48 @@ import {
  * | gate wait | a break carrying its duration |
  */
 
-/** How wide the axis is at zoom 1. A constant so a span's width is the same on every machine. */
-const axisWidth = 960;
+/**
+ * How wide the axis is at zoom 1 when nothing has measured the card yet.
+ *
+ * **It used to be the answer rather than the fallback**, with the reason written here: *a constant
+ * so a span's width is the same on every machine*. That reason was real — a screenshot of a run
+ * meant the same thing everywhere — but the price turned out to be higher than the property was
+ * worth. A fixed 960 plus a 176-pixel sidebar is a 1136-pixel canvas, so every card narrower than
+ * that clipped the timeline and every card wider than it left the space empty. Measured with the
+ * detail panel open at 1280: 382 pixels of axis unreachable, including the wall of the 41-hour
+ * break — the one thing the run view exists to show.
+ *
+ * The property is kept where it actually mattered: **the browser tier freezes the viewport**, so
+ * every fixture still draws to the same number in a test, and the spans are graded as ratios of
+ * `data-canvas` rather than as absolute pixels. What changed is that a person's window now decides
+ * how much room the run gets, which is what a person expects a window to do.
+ */
+const fallbackAxisWidth = 960;
+
+/**
+ * The narrowest axis worth drawing, below which the card scrolls instead of squeezing.
+ *
+ * A phone-width card would otherwise hand the timeline about 200 pixels and draw every phase in a
+ * run on top of every other. Under this the canvas stops shrinking and `Gantt`'s own
+ * `overflow-x-auto` takes over, which is the honest answer: the run does not fit, so it scrolls.
+ */
+const minimumAxisWidth = 480;
+
+/**
+ * What the axis gives back so its own last label fits.
+ *
+ * A tick is positioned by its `left` edge and its text runs to the right, so the final tick hangs
+ * past the end of the canvas — measured at 11 px for `41h 26m`, which was enough to raise a
+ * horizontal scrollbar on a timeline that otherwise fitted exactly. Reserving the room is the fix;
+ * moving the label would put it left of the instant it names, and the position of a tick is the
+ * whole of what it says.
+ *
+ * Wide enough for the longest label the formatter makes at a fine step — `41h 12m 0s`.
+ */
+const lastLabelWidth = 56;
+
+/** `Gantt` draws a one-pixel border, and the canvas has to fit inside it rather than under it. */
+const ganttBorder = 2;
 
 /** A colour per kind, named after the kind. Nobody reading a component holds a colour in their head. */
 const kindTone: Record<PhaseKind, string> = {
@@ -251,10 +292,71 @@ export const Waterfall = (props: {
    * DOM survives. A live span still grows — the signature is in whole pixels, so it updates the
    * moment it moves one, and not before.
    */
+  /**
+   * How much room the card is giving the timeline, watched rather than assumed.
+   *
+   * The section is the measured element because `Gantt` is `w-full` inside it with nothing between
+   * them, so the two always agree — and measuring the section avoids putting a `ref` through a
+   * component that only spreads its props.
+   *
+   * A `ResizeObserver` rather than a window listener: the card changes width when the detail panel
+   * opens or the sidebar collapses, and neither of those resizes the window.
+   */
+  const [available, setAvailable] = createSignal(fallbackAxisWidth + sidebarWidth);
+  /**
+   * A signal rather than a bare `let`, because the hotkeys below are scoped to this element and
+   * have to register only once it exists. `createHotkey` takes its options as an accessor for
+   * exactly this: the registration waits for the target to be attached.
+   */
+  const [card, setCard] = createSignal<HTMLElement>();
+
+  /**
+   * `Mod` + wheel zooms, and a wheel with no modifier is left alone.
+   *
+   * **A wheel event is the one thing a hotkey library cannot do**, so this is a listener rather
+   * than a `createHotkey`: `@tanstack/hotkeys` binds keys, and its whole API surface has no wheel,
+   * pointer or scroll in it. The keyboard half below is what it is for.
+   *
+   * `passive: false` is required, and it is why this is attached by hand rather than with `onWheel`.
+   * `Mod` + wheel is the browser's own page zoom; without `preventDefault` the page would zoom and
+   * the timeline would zoom at the same time. A trackpad pinch arrives here too — the browser sends
+   * it as a wheel with `ctrlKey` set — so pinching the timeline zooms the timeline, which is what
+   * somebody pinching a timeline means.
+   *
+   * A plain wheel is deliberately untouched. The scroller already pans left and right natively, and
+   * a timeline that swallowed vertical scroll would trap the page behind it.
+   */
+  const onWheel = (event: WheelEvent): void => {
+    if (!event.metaKey && !event.ctrlKey) return;
+    event.preventDefault();
+    store.dispatch(event.deltaY < 0 ? zoomedIn() : zoomedOut());
+  };
+
+  onMount(() => {
+    const element = card();
+    if (element === undefined) return;
+
+    element.addEventListener("wheel", onWheel, { passive: false });
+    onCleanup(() => element.removeEventListener("wheel", onWheel));
+
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      const measured = entries[0]?.contentRect.width;
+      if (measured !== undefined && measured > 0) setAvailable(measured);
+    });
+    observer.observe(element);
+    onCleanup(() => observer.disconnect());
+  });
+
+  /** The lane, once the row labels, the border and the last tick's label have taken their room. */
+  const axisWidth = (): number =>
+    Math.max(available() - sidebarWidth - ganttBorder - lastLabelWidth, minimumAxisWidth) *
+    store.state.zoom;
+
   const view = createMemo(
     (): WaterfallView =>
       waterfall(props.doc, now(), {
-        width: axisWidth * store.state.zoom,
+        width: axisWidth(),
         breaks: store.state.breaks,
         // Two floors, because a break over a bar and a break over a gap cost different things —
         // see `BreakRule.deadFloorMillis`. Only `share` is under the reader's control.
@@ -268,10 +370,38 @@ export const Waterfall = (props: {
     { equals: (before, after) => drawnAs(before) === drawnAs(after) },
   );
 
+  /**
+   * The keyboard half, scoped to the timeline rather than to the page.
+   *
+   * `target` is the card, so these only fire while something inside the timeline has focus — which
+   * is why the section carries `tabindex`. Page-wide bindings would be worse than none: `+` and `-`
+   * belong to whatever a person is typing into, and this Console has a textarea on the same screen
+   * for answering a gate.
+   *
+   * Bare keys rather than `Mod+=` and `Mod+-` on purpose. Those two are the browser's own page zoom,
+   * and taking them from a person who meant to make the whole page bigger is not a trade this
+   * feature is worth.
+   */
+  createHotkey(
+    "=",
+    () => store.dispatch(zoomedIn()),
+    () => ({ target: card() ?? null }),
+  );
+  createHotkey(
+    "-",
+    () => store.dispatch(zoomedOut()),
+    () => ({ target: card() ?? null }),
+  );
+  createHotkey(
+    "0",
+    () => store.dispatch(zoomReset()),
+    () => ({ target: card() ?? null }),
+  );
+
   const breaks = () => view().segments.filter((segment) => segment.kind === "break");
 
   return (
-    <section class="flex flex-col gap-2" data-waterfall>
+    <section class="flex flex-col gap-2" data-waterfall ref={setCard} tabindex="0">
       <div class="flex flex-wrap items-center gap-3 text-xs">
         {/*
          * **The label used to name the action while the attribute named the state**, so the button
