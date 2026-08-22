@@ -10,6 +10,35 @@ const second = 1_000;
 const minute = 60 * second;
 const hour = 60 * minute;
 const day = 24 * hour;
+const week = 7 * day;
+const year = 365 * day;
+
+/**
+ * Where hours stop being the useful unit, and where days do.
+ *
+ * Two days, because {@link axisDuration}'s argument for hours is comparability with the phases
+ * beside it, and that argument holds while the number is one a person can still place against a
+ * six-minute phase. `41h 12m` is such a number. `4164h 41m` is not — it is a hundred and seventy
+ * three days written in a unit nobody converts, and it was what a break on a long-waiting gate
+ * actually printed.
+ */
+const hoursStop = 2 * day;
+const daysStop = 14 * day;
+
+/**
+ * A long span, in the coarsest pair of units that still says it exactly.
+ *
+ * **Weeks rather than months, and that is a deliberate choice rather than an oversight.** A month is
+ * 28 to 31 days, so a duration written in months means a different quantity depending on when it
+ * started — and every other number on this surface is exact. A week is seven days, always. Two units
+ * of an exact unit beat one unit of an approximate one, which is the same rule the rest of this
+ * module already follows.
+ */
+const coarse = (span: number): string => {
+  if (span < daysStop) return `${Math.floor(span / day)}d ${Math.floor((span % day) / hour)}h`;
+  if (span < year) return `${Math.floor(span / week)}w ${Math.floor((span % week) / day)}d`;
+  return `${Math.floor(span / year)}y ${Math.floor((span % year) / week)}w`;
+};
 
 /**
  * A span of time, at two units of precision and no more.
@@ -38,16 +67,22 @@ export const humanDuration = (millis: number): string => {
   if (span < minute) return `${Math.round(span / second)}s`;
   if (span < hour) return `${Math.floor(span / minute)}m ${Math.round((span % minute) / second)}s`;
   if (span < day) return `${Math.floor(span / hour)}h ${Math.floor((span % hour) / minute)}m`;
-  return `${Math.floor(span / day)}d ${Math.floor((span % day) / hour)}h`;
+  return coarse(span);
 };
 
 /**
  * A duration on the time axis, in hours rather than days.
  *
- * The same two units, with the day step left out on purpose. console.md's break says *41h 12m*, and
- * it has to: *1d 17h* is the same quantity written so that nobody can compare it with the *2m 0s*
- * phase beside it without doing arithmetic, and comparing is the only reason the number is there. A
- * factory run is measured in hours, so hours is where this stops.
+ * The same two units, and hours are held **past** the day step rather than for ever. console.md's
+ * break says *41h 12m* and it has to: *1d 17h* is the same quantity written so that nobody can
+ * compare it with the *2m 0s* phase beside it without doing arithmetic, and comparing is the only
+ * reason the number is there.
+ *
+ * **That argument was written assuming a factory run is measured in hours, and a waiting one is
+ * not.** A gate nobody answers keeps counting, and the label on its break printed *4164h 41m* —
+ * a hundred and seventy three days, in a unit that has stopped meaning anything. Hours hold to two
+ * days, which covers every break the design record and the fixtures carry, and {@link coarse} takes
+ * it from there.
  *
  * Below a minute it falls back to {@link humanDuration}, because a break that elided eight seconds
  * would otherwise read *0h 0m*.
@@ -55,6 +90,8 @@ export const humanDuration = (millis: number): string => {
 export const axisDuration = (millis: number): string => {
   const span = Math.max(0, Math.abs(millis));
   if (span < hour) return humanDuration(span);
+  // Above two days the argument for hours runs out — see `hoursStop`.
+  if (span >= hoursStop) return coarse(span);
   return `${Math.floor(span / hour)}h ${Math.floor((span % hour) / minute)}m`;
 };
 

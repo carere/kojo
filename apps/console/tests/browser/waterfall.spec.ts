@@ -760,3 +760,39 @@ test.describe("the timeline uses the room it is given", () => {
     await expect.poll(canvasNow).toBeGreaterThan(before);
   });
 });
+
+/**
+ * A wait long enough that hours stop meaning anything.
+ *
+ * `axisDuration` held hours for ever, on a recorded argument: a break's label has to be comparable
+ * with the phases beside it, and `1d 17h` cannot be compared with `2m 0s` without arithmetic. That
+ * argument assumed a factory run is measured in hours. A gate nobody answers is not — the label on
+ * one printed `4164h 41m`, which is a hundred and seventy three days.
+ *
+ * Hours now hold to two days, which covers every break the fixtures and the design record carry,
+ * and the scale goes to days, then weeks, then years above it.
+ */
+test.describe("a break states a long wait in a unit somebody reads", () => {
+  const day = 24 * 60 * 60 * 1000;
+
+  test("the canonical forty-one hour break is unchanged", async ({ page }) => {
+    // console.md fixes this form, and two specs above assert it. It is the reason for the boundary.
+    await openRun(page, "busy", "run-merged");
+    await expect(page.locator("[data-break-label]").first()).toHaveText(/41h 12m/);
+  });
+
+  test("a gate held for months is stated in weeks, not in thousands of hours", async ({ page }) => {
+    // `run-approve` is suspended, so its axis runs to now — pushing the clock forward is what turns
+    // it into a gate nobody has answered since the spring.
+    await openRun(page, "busy", "run-approve", { now: frozenNow + 173 * day });
+
+    const label = page.locator("[data-break-label]").first();
+    await expect(label).toBeVisible();
+
+    const text = (await label.textContent()) ?? "";
+    expect(text, `a break reading "${text}" is not a duration anybody converts`).not.toMatch(
+      /\d{3,}h/,
+    );
+    expect(text).toMatch(/\d+w \d+d/);
+  });
+});
