@@ -53,6 +53,34 @@ const elapsedOf = (doc: RunDoc, now: number): string => {
   return axisDuration(until - doc.run.run.startedAt);
 };
 
+/**
+ * One provenance fact in the run header: its name, then its value, on one line.
+ *
+ * The panel's `Field` stacks the label above the value, which is right in a panel and wrong here —
+ * the header sits above the timeline on every run and doubling its height is a real cost. Same
+ * vocabulary, same `data-field` hook the browser tier already uses, laid out for a header.
+ */
+const Stamp = (props: {
+  readonly name: string;
+  readonly label: string;
+  readonly children?: JSX.Element;
+  readonly absent?: string;
+  readonly when?: boolean;
+}): JSX.Element => (
+  // `data-stamp`, **not** `data-field`. The panel already owns `data-field`, and a header that
+  // borrowed it made `[data-field="branch"]` match two elements on one page — a spec that had been
+  // addressing the sandbox panel's branch suddenly could not say which one it meant.
+  <span data-stamp={props.name} class="flex items-baseline gap-1.5">
+    <span class="text-muted-foreground text-[10px] tracking-[0.08em] uppercase">{props.label}</span>
+    <Show
+      when={props.when ?? true}
+      fallback={<span class="text-muted-foreground/70 text-xs italic">{props.absent ?? "—"}</span>}
+    >
+      <span class="text-foreground/80 font-mono text-xs">{props.children}</span>
+    </Show>
+  </span>
+);
+
 export const RunView = (props: {
   readonly runId: string;
   readonly mode: RunViewMode;
@@ -183,10 +211,48 @@ export const RunView = (props: {
                   {elapsedOf(document(), now())}
                 </span>
               </div>
-              <p class="text-muted-foreground font-mono text-xs">
-                {document().run.run.engineVersion} · {document().run.run.engineCommit} ·{" "}
-                {document().run.run.host} · {document().run.run.configDigest}
-              </p>
+              {/*
+               * What produced the run, each value said with the name of what it is.
+               *
+               * **It was four unlabelled monospace tokens joined by middots** — `0.0.0 ·
+               * development · fixture-host · sha256:fixture` — and a person looking at it could not
+               * tell which was the engine and which was the factory. That is not a guess: somebody
+               * read this line and asked what each part of it was.
+               *
+               * Inline rather than the panel's stacked `Field`, because this is a header. A stacked
+               * label doubles the height of a block that sits above the timeline on every run, and
+               * how far down the page the timeline starts is something people already complain
+               * about.
+               *
+               * Two of the six were recorded and drawn nowhere: the key the run was deduplicated by,
+               * which answers *did two triggers make one run*, and the branch, which the README calls
+               * the durable state of a run.
+               */}
+              <div class="flex flex-wrap items-baseline gap-x-5 gap-y-1" data-run-stamp>
+                <Stamp name="engine" label="engine">
+                  {document().run.run.engineVersion}
+                </Stamp>
+                <Stamp name="commit" label="commit">
+                  {document().run.run.engineCommit}
+                </Stamp>
+                <Stamp name="host" label="host">
+                  {document().run.run.host}
+                </Stamp>
+                <Stamp name="config" label="config">
+                  {document().run.run.configDigest}
+                </Stamp>
+                <Stamp name="idempotency-key" label="deduplicated by">
+                  {document().run.run.idempotencyKey}
+                </Stamp>
+                <Stamp
+                  name="branch"
+                  label="branch"
+                  absent="no sandbox was acquired"
+                  when={document().sandboxes[0] !== undefined}
+                >
+                  {document().sandboxes[0]?.branch}
+                </Stamp>
+              </div>
             </header>
 
             {/*

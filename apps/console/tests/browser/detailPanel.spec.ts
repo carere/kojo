@@ -552,3 +552,42 @@ test.describe("the timeline is pinned while the panel is read", () => {
     expect(box.height).toBeGreaterThan(0);
   });
 });
+
+/**
+ * The run header names what produced the run, rather than listing four values and hoping.
+ *
+ * It used to be `0.0.0 · development · fixture-host · sha256:fixture` — four monospace tokens on one
+ * line with nothing to say which was which. A person reading it asked what each part was, which is
+ * the only evidence a legibility claim can really have.
+ *
+ * Graded on `data-stamp` and not on the wording, and deliberately on a **different** attribute from
+ * the panel's `data-field`: a header that borrowed that one made `[data-field="branch"]` match two
+ * elements on the same page.
+ */
+test.describe("what produced a run is labelled, not merely printed", () => {
+  test("every provenance value is named", async ({ page }) => {
+    await openRun(page, "busy", "/runs/run-merged");
+
+    const stamp = (name: string): Locator => page.locator(`[data-stamp="${name}"]`);
+    for (const name of ["engine", "commit", "host", "config", "idempotency-key", "branch"]) {
+      await expect(stamp(name), `${name} is missing from the run header`).toHaveCount(1);
+    }
+
+    // The two that were on the wire and drawn nowhere.
+    await expect(stamp("idempotency-key")).toContainText("hotfix/run-merged");
+    await expect(stamp("branch")).toContainText("kojo/run-merged");
+
+    // Each carries its own name, so the value is never a bare token.
+    await expect(stamp("config")).toContainText("config");
+    await expect(stamp("config")).toContainText("sha256:fixture");
+  });
+
+  test("a run that acquired no sandbox says so rather than drawing a blank", async ({ page }) => {
+    // `absent` is a first-class state on this surface: no branch means no sandbox was taken, which
+    // is a fact about the run and not a value the Console failed to load.
+    await openRun(page, "busy", "/runs/run-scout");
+    const branch = page.locator('[data-stamp="branch"]');
+    await expect(branch).toHaveCount(1);
+    await expect(branch).not.toHaveText(/^branch$/);
+  });
+});

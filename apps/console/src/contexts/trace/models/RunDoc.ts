@@ -158,6 +158,14 @@ export interface RunDoc {
     readonly run: {
       readonly runId: string;
       readonly workflow: string;
+      /**
+       * What the run was deduplicated by — the workflow's own key for this payload.
+       *
+       * The wire has always carried it; this type did not, so nothing could draw it. It answers
+       * *did two triggers for one ticket make one run*, which is a question about the run and about
+       * no phase in it.
+       */
+      readonly idempotencyKey: string;
       readonly startedAt: number;
       readonly engineVersion: string;
       readonly engineCommit: string;
