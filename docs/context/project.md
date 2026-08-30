@@ -29,6 +29,11 @@ Project. The user changes or confirms it explicitly; two linked Git worktrees ar
 even when they share Git objects.
 _Avoid_: Project ID, workspace
 
+**Available Project**:
+An active Project whose confirmed location Kojo can use. Availability of the Project does not imply
+that its Factory or Project Workflows are available.
+_Avoid_: healthy Project, Available Factory
+
 **Unavailable Project**:
 An active Project whose location cannot be used or whose restored location waits for user
 confirmation. Its Project ID and history remain available.

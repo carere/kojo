@@ -7,7 +7,7 @@ Kojo uses the multi-context layout. The context slugs are the bounded contexts o
 ## Contexts
 
 - [**project**](./project.md): which repository paths this host has registered with Kojo
-- **workflow**: the four primitives and the contract between phases — not yet written
+- [**workflow**](./workflow.md): the authored factory, its workflows, and the contract between phases
 - **agent**: who the agents are, and one agent call — not yet written
 - **sandbox**: the isolation boundary and the working copy — not yet written
 - [**gate**](./gate.md): how a human is asked, and how the answer gets back
