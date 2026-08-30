@@ -23,6 +23,16 @@ The stable identity of a Project inside one Daemon. It does not change when the 
 changes or becomes unavailable.
 _Avoid_: repository path, factory name
 
+**Project Runner**:
+The replaceable execution owner that serves one active Project. Its replacement does not change
+the Project or Run identities.
+_Avoid_: Daemon, worker, server
+
+**Project Runner instance ID**:
+The opaque identity that the Daemon gives to one Project Runner process lifetime. A replacement
+Project Runner gets a new instance ID.
+_Avoid_: process ID, Project ID, runner name
+
 **Project location**:
 The canonical absolute Host path of the exact Git working tree that the user registered for a
 Project. The user changes or confirms it explicitly; two linked Git worktrees are two Projects,

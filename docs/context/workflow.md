@@ -18,7 +18,8 @@ _Avoid_: ADW, pipeline, job
 
 **Project Workflow**:
 A Workflow declared by one top-level source file in a Project's Factory. A demonstration installed
-in the Factory is a Project Workflow like any other Workflow.
+in the Factory is a Project Workflow like any other Workflow. Project ID plus Workflow name
+identifies one Project Workflow.
 _Avoid_: built-in Workflow, demo Workflow
 
 **Workflow name**:
@@ -90,9 +91,33 @@ _Avoid_: deleted Workflow, Invalid Workflow
 One named unit of a Workflow. Its kinds are actor, code, and agent.
 _Avoid_: step, node, task
 
+**Phase path**:
+The stable identity of a Phase inside one Project Workflow. It combines the stable sandbox scope
+name, when present, with the authored Phase name.
+_Avoid_: Phase ID, sandbox acquisition ID
+
+**Phase ID**:
+The identity of one Phase record: Run ID, Phase path, and attempt. It is unique inside one Daemon.
+_Avoid_: Phase name, Phase path
+
 **Run**:
 One execution of one Workflow Revision.
 _Avoid_: session, job
+
+**Run ID**:
+The opaque identity of a Run, unique inside one Daemon. It does not expose the Project Workflow or
+its idempotency key and survives Project Runner replacement.
+_Avoid_: Project ID, branch name, idempotency key
+
+**Idempotency key**:
+The authored identity of one unit of work inside one Project Workflow. Project ID, Workflow name,
+and this key deduplicate Runs across Workflow Revisions.
+_Avoid_: Run ID, trigger ID
+
+**Run Claim**:
+One Project Runner instance's fenced authority to drive a Run. The Run ID identifies the claim; the
+holder is a Project Runner instance ID, not a process ID or Project location.
+_Avoid_: lock file, Envelope claim, issue assignment
 
 **Envelope**:
 A phase's typed output that carries context forward and selects branches.

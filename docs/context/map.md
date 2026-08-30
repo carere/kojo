@@ -22,10 +22,14 @@ it has no context file and no ADR directory.
 
 ## Relationships
 
-- **project -> workflow**: a project locates the repository whose factory declares the workflows
-  that Kojo can discover and run.
+- **project -> workflow**: a Project locates the repository whose Factory declares the Workflows
+  that Kojo can discover and run. Project ID plus Workflow name identifies one Project Workflow.
+- **project -> workflow execution**: one Project Runner serves one active Project. A Project Runner
+  instance can hold a fenced Run Claim, but the Daemon remains the state owner.
 - **workflow -> trace**: every phase the workflow runs writes one phase record. The workflow owns
   what a phase *is*; the trace owns what a phase *recorded*.
+- **workflow -> gate**: a Run reaches a Gate by its Gate path. Each Asking belongs to that Run and
+  gets one public gate token.
 - **gate -> trace**: a gate writes one gate record, which carries the human latency. The gate owns
   the decision; the trace owns its measurement.
 - **trace -> gate**: the Console reads the trace, and answers gates through the gate context's own

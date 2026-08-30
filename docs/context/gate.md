@@ -30,12 +30,18 @@ _Avoid_: response, callback
 One occasion on which a gate was put to a human. A gate asked three times by the reviewed loop is
 three askings, each with its own token, its own deadline, and its own human latency. It is what a
 gate record and the askings list are keyed by, because a gate answered on the third round tells you
-nothing about how long the first two waited.
+nothing about how long the first two waited. Run ID, Gate path, asking number, and escalation stage
+identify one Asking.
 _Avoid_: attempt, round, instance
 
+**Gate path**:
+The stable identity of a Gate inside one Run. It combines the stable sandbox scope name, when
+present, with the authored Gate name.
+_Avoid_: Gate token, Asking
+
 **Gate token**:
-The value that identifies one exact suspension. Holding the token is what lets any process answer a
-gate.
+The random, opaque capability that the Daemon gives to one exact Asking. Holding it is what lets a
+client answer the Gate.
 _Avoid_: gate id, handle
 
 **Recorded**:
