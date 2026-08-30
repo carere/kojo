@@ -6,6 +6,7 @@ Kojo uses the multi-context layout. The context slugs are the bounded contexts o
 
 ## Contexts
 
+- [**project**](./project.md): which repository paths this host has registered with Kojo
 - **workflow**: the four primitives and the contract between phases — not yet written
 - **agent**: who the agents are, and one agent call — not yet written
 - **sandbox**: the isolation boundary and the working copy — not yet written
@@ -21,6 +22,8 @@ it has no context file and no ADR directory.
 
 ## Relationships
 
+- **project -> workflow**: a project locates the repository whose factory declares the workflows
+  that Kojo can discover and run.
 - **workflow -> trace**: every phase the workflow runs writes one phase record. The workflow owns
   what a phase *is*; the trace owns what a phase *recorded*.
 - **gate -> trace**: a gate writes one gate record, which carries the human latency. The gate owns
