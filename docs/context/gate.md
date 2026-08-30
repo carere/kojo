@@ -22,8 +22,8 @@ It never waits.
 _Avoid_: prompt, notification
 
 **Answer**:
-The half that replies. Whatever mechanism was used, it ultimately returns the gate token and a
-verdict to the engine.
+The half that replies with a gate token and Verdict for the Daemon to record. It does not execute
+the Run that will apply the Verdict.
 _Avoid_: response, callback
 
 **Asking**:
@@ -45,8 +45,8 @@ client answer the Gate.
 _Avoid_: gate id, handle
 
 **Recorded**:
-An answer that is persisted but not yet acted on. A recorded answer is real and will apply, but the
-run has not moved.
+A valid Verdict that the Daemon has durably stored but the Run has not yet applied. Delayed
+application does not invalidate an answer recorded before its Asking's Deadline.
 _Avoid_: pending, queued
 
 **Applied**:
@@ -61,13 +61,18 @@ auditing at all.
 _Avoid_: reviewer, approver, user
 
 **Deadline**:
-The time after which a gate stops waiting. Every gate has one, because a run that waits forever is a
-leak.
+The absolute time before which the Daemon must durably record a Verdict for an Asking. An answer
+recorded at or after this time is too late, regardless of when the Run can continue.
 _Avoid_: timeout, expiry time
 
+**Expired Asking**:
+An Asking that has reached its Deadline without an on-time Recorded Verdict. Its expiry branch can
+still be waiting for execution.
+_Avoid_: answered Gate, Applied answer
+
 **Expiry branch**:
-What the run does when a deadline passes — escalate, auto-reject, or fail. Declared with the gate,
-never inferred.
+What the Run does when its Asking expires without an on-time Recorded Verdict — escalate,
+auto-reject, or fail. Declared with the Gate, never inferred.
 _Avoid_: fallback, default action
 
 **Human latency**:

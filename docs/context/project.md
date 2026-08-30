@@ -24,8 +24,8 @@ changes or becomes unavailable.
 _Avoid_: repository path, factory name
 
 **Project Runner**:
-The replaceable execution owner that serves one active Project. Its replacement does not change
-the Project or Run identities.
+The replaceable execution owner for one Project. A Project and its Runs keep their identities when
+their Project Runner stops or is replaced.
 _Avoid_: Daemon, worker, server
 
 **Project Runner instance ID**:

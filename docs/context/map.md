@@ -11,7 +11,7 @@ Kojo uses the multi-context layout. The context slugs are the bounded contexts o
 - **agent**: who the agents are, and one agent call — not yet written
 - **sandbox**: the isolation boundary and the working copy — not yet written
 - [**gate**](./gate.md): how a human is asked, and how the answer gets back
-- **trigger**: what starts a run, and what it is deduplicated by — not yet written
+- [**trigger**](./trigger.md): what requests automatic Runs, and how a user controls those requests
 - [**trace**](./trace.md): what a run recorded, and how a human reads it
 
 Until a context file exists, the vocabulary table in
@@ -24,12 +24,18 @@ it has no context file and no ADR directory.
 
 - **project -> workflow**: a Project locates the repository whose Factory declares the Workflows
   that Kojo can discover and run. Project ID plus Workflow name identifies one Project Workflow.
-- **project -> workflow execution**: one Project Runner serves one active Project. A Project Runner
-  instance can hold a fenced Run Claim, but the Daemon remains the state owner.
+- **project -> workflow execution**: the Daemon supplies a Project Runner on demand for one Project;
+  an idle Project need not have a live Project Runner. A Project Runner instance can hold a fenced
+  Run Claim, but the Daemon remains the state owner.
+- **trigger -> workflow**: a Trigger supplies Run requests for one Project Workflow. Project
+  automation and the Workflow's trigger state control new automatic execution, including queued
+  trigger-created Runs that have not started, but not manual Runs or existing Run continuations.
 - **workflow -> trace**: every phase the workflow runs writes one phase record. The workflow owns
   what a phase *is*; the trace owns what a phase *recorded*.
 - **workflow -> gate**: a Run reaches a Gate by its Gate path. Each Asking belongs to that Run and
   gets one public gate token.
+- **gate -> workflow execution**: the Daemon records Verdicts and schedules Run continuations for
+  answers and deadlines. A Project Runner applies them; answering clients do not execute Runs.
 - **gate -> trace**: a gate writes one gate record, which carries the human latency. The gate owns
   the decision; the trace owns its measurement.
 - **trace -> gate**: the Console reads the trace, and answers gates through the gate context's own

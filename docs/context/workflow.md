@@ -29,9 +29,9 @@ _Avoid_: export name, file path, Workflow ID
 
 **Workflow Revision**:
 An immutable version of a Project Workflow, its Factory-owned source dependencies, and its package
-identities. A Run uses one Workflow Revision from start to completion, even if the author changes
-or removes the current source. The revision remains in Daemon data while any retained Run refers to
-it.
+identities. A Run uses one Workflow Revision from the time its request is accepted until completion,
+even if the author changes or removes the current source. The revision remains in Daemon data while
+any retained Run refers to it.
 _Avoid_: current Workflow, cached Workflow
 
 **Candidate Revision**:
@@ -103,6 +103,21 @@ _Avoid_: Phase name, Phase path
 **Run**:
 One execution of one Workflow Revision.
 _Avoid_: session, job
+
+**Run admission**:
+The Daemon's durable acceptance of a new Run request, with its Run identity and Workflow Revision
+fixed before execution. It is separate from whether the completed Run is good.
+_Avoid_: Acceptance, Run execution, Trigger acknowledgement
+
+**Queued Run**:
+A Run accepted by the Daemon whose initial execution or continuation is waiting to be scheduled.
+Its wait reason, such as lack of capacity or an automation pause, is distinct from a Gate suspension.
+_Avoid_: suspended Run, waiting for a human
+
+**Run continuation**:
+Further execution of a Run that has already started. It keeps that Run's identity and Workflow
+Revision rather than creating a new Run.
+_Avoid_: new Run, new trigger event
 
 **Run ID**:
 The opaque identity of a Run, unique inside one Daemon. It does not expose the Project Workflow or
