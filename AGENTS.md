@@ -58,8 +58,7 @@ Sandcastle's `CONTEXT.md` is its terminology reference and worth matching where 
 
 ### Issue tracker
 
-Issues live as markdown files under `.scratch/<feature-slug>/` in this repo. See
-`docs/agents/issue-tracker.md`.
+Issues live in this repository's GitHub Issues. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

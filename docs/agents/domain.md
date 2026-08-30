@@ -19,6 +19,7 @@ If these files do not exist, proceed silently. Do not suggest creating them upfr
 docs/
 ├── context/
 │   ├── map.md
+│   ├── project.md
 │   ├── workflow.md
 │   ├── agent.md
 │   ├── sandbox.md
@@ -27,6 +28,7 @@ docs/
 │   └── trace.md
 └── adr/
     ├── root/        # system-wide decisions
+    ├── project/
     ├── workflow/
     ├── agent/
     ├── sandbox/
