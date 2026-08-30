@@ -42,6 +42,8 @@ const empty: Held = { phaseId: "", rows: [], cursor: beginning };
 export const useOccurrences = (options: {
   readonly runId: Accessor<string>;
   readonly phaseId: Accessor<string>;
+  /** Whether this phase can have agent activity that a person can inspect. */
+  readonly enabled: Accessor<boolean>;
   /** Whether the phase is the one the run is inside right now. */
   readonly live: Accessor<boolean>;
 }): OccurrenceStream => {
@@ -49,6 +51,7 @@ export const useOccurrences = (options: {
 
   const query = useQuery(() => ({
     queryKey: ["occurrences", options.runId(), options.phaseId()],
+    enabled: options.enabled(),
     queryFn: async (): Promise<OccurrencePageDoc> => {
       const phaseId = options.phaseId();
       const carried = held();

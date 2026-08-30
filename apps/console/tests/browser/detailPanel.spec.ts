@@ -90,12 +90,10 @@ test.describe("the panel is a nested route, not a page", () => {
 });
 
 test.describe("a phase shows what its record carries", () => {
-  test("identity, the agent, the verdict, the effect on the repo, and where it ran", async ({
-    page,
-  }) => {
+  test("summary, agent details, repository changes, and where it ran", async ({ page }) => {
     await openRun(page, "busy", "/runs/run-merged/phases/hotfix/1");
 
-    await expect(field(page, "run")).toContainText("run-merged");
+    await expect(field(page, "run")).toHaveCount(0);
     await expect(field(page, "attempt")).toContainText("1");
     await expect(field(page, "duration")).toContainText("6m 0s");
     await expect(field(page, "started")).toContainText("UTC");
@@ -110,10 +108,11 @@ test.describe("a phase shows what its record carries", () => {
     await expect(field(page, "tokens-out")).toContainText("900");
     await expect(field(page, "context")).toContainText("22,500");
 
-    await expect(field(page, "envelope")).toContainText("Answer");
-    await expect(field(page, "decoded")).toContainText("yes");
-    await expect(field(page, "corrections")).toContainText("0");
-    await expect(page.locator('[data-check-held="true"]')).toHaveCount(1);
+    // Successful verification is quiet. Technical envelope and check details do not compete with
+    // the facts a person uses to understand the phase.
+    await expect(page.locator('[data-pane="errors"]')).toHaveCount(0);
+    await expect(field(page, "envelope")).toHaveCount(0);
+    await expect(field(page, "corrections")).toHaveCount(0);
 
     await expect(field(page, "claimed")).toContainText("src/server.ts");
     await expect(field(page, "changed")).toContainText("src/server.ts");
@@ -130,28 +129,33 @@ test.describe("a phase shows what its record carries", () => {
     await expect(page.locator('[data-where="host"]')).toContainText("needed no container");
   });
 
-  test("a code phase asked nobody, which is a fact rather than a gap", async ({ page }) => {
+  test("a code phase shows no agent-only section or request", async ({ page }) => {
+    const asked = watch(page);
     await openRun(page, "busy", "/runs/run-merged/phases/merge/1");
 
-    await expect(page.locator('[data-agent="none"]')).toBeVisible();
-    await expect(page.locator('[data-verdict="none"]')).toBeVisible();
+    await expect(page.locator('[data-pane="agent"]')).toHaveCount(0);
+    await expect(page.locator('[data-pane="errors"]')).toHaveCount(0);
+    await expect(page.locator('[data-pane="occurrences"]')).toHaveCount(0);
+    await expect(page.locator('[data-pane="prompt"]')).toHaveCount(0);
+    await expect(page.locator('[data-pane="session"]')).toHaveCount(0);
+    expect(asked.filter((url) => url.includes("/occurrences"))).toHaveLength(0);
   });
 
-  test("an envelope that never decoded is not an answer every check held", async ({ page }) => {
+  test("an invalid answer is stated as an error without verification terms", async ({ page }) => {
     await openRun(page, "busy", "/runs/run-refused/phases/draft/1");
 
-    await expect(field(page, "decoded")).toContainText("no");
-    await expect(field(page, "error-tag")).toContainText("EnvelopeParseError");
-    // Zero corrections **and** not correctable: the pair says the phase never got a second chance,
-    // which is a different history from one that corrected three times and still died.
-    await expect(field(page, "corrections")).toContainText("0");
-    await expect(field(page, "correctable")).toContainText("no");
+    await expect(page.locator('[data-pane="errors"]')).toContainText(
+      "The agent answer did not match the required format.",
+    );
+    await expect(field(page, "decoded")).toHaveCount(0);
+    await expect(field(page, "correctable")).toHaveCount(0);
   });
 
   test("a check that did not hold is marked apart from the ones that did", async ({ page }) => {
     await openRun(page, "busy", "/runs/run-broken/phases/implement/1");
 
     await expect(field(page, "corrections")).toContainText("3");
+    await expect(page.locator('[data-pane="errors"]')).toBeVisible();
     await expect(page.locator('[data-check="the tests pass"]')).toHaveAttribute(
       "data-check-held",
       "false",
@@ -268,32 +272,34 @@ test.describe("the three artifacts are fetched on demand", () => {
     await expect(page.locator("[data-waterfall]")).toBeVisible();
   });
 
-  test("a phase that kept nothing degrades all three and still renders its record", async ({
-    page,
-  }) => {
+  test("an agent phase with no agent artifacts still renders its errors", async ({ page }) => {
     await openRun(page, "busy", "/runs/run-breach/phases/edit/1");
 
-    for (const kind of ["prompt", "session", "diff"]) {
+    for (const kind of ["prompt", "session"]) {
       await page.locator(`[data-artifact="${kind}"]`).click();
       await expect(page.locator(`[data-artifact="${kind}"]`)).toHaveAttribute(
         "data-artifact-state",
         "absent",
       );
     }
-    await expect(field(page, "error-tag")).toContainText("PermissionBreach");
+    await expect(page.locator('[data-artifact="diff"]')).toHaveCount(0);
+    await expect(
+      page.locator('[data-pane="errors"] [data-error="PermissionBreach"]'),
+    ).toContainText("outside its permission policy");
   });
 
-  test("a phase still running has no artifacts to fetch, and says why", async ({ page }) => {
+  test("a running agent phase has no agent artifacts to fetch, and says why", async ({ page }) => {
     await openRun(page, "busy", "/runs/run-scout/phases/explore/1");
 
-    await expect(page.locator('[data-artifact="diff"]')).toHaveAttribute(
+    await expect(page.locator('[data-artifact="prompt"]')).toHaveAttribute(
       "data-artifact-state",
       "not-yet",
     );
+    await expect(page.locator('[data-artifact="diff"]')).toHaveCount(0);
   });
 });
 
-test.describe("occurrences", () => {
+test.describe("agent activity", () => {
   test("stream into the panel while the phase is in flight", async ({ page }) => {
     const asked = watch(page);
     await openRun(page, "busy", "/runs/run-scout/phases/explore/1");
@@ -341,10 +347,13 @@ test.describe("occurrences", () => {
     await expect(page.locator("[data-waterfall] [data-occurrence]")).toHaveCount(0);
   });
 
-  test("a phase that recorded none says so rather than showing an empty list", async ({ page }) => {
-    await openRun(page, "busy", "/runs/run-merged/phases/merge/1");
+  test("an agent that recorded none says so rather than showing an empty list", async ({
+    page,
+  }) => {
+    await openRun(page, "busy", "/runs/run-merged/phases/route/1");
 
     await expect(page.locator('[data-occurrences="none"]')).toBeVisible();
+    await expect(page.locator('[data-pane="occurrences"]')).toContainText("Agent activity");
   });
 });
 

@@ -188,25 +188,25 @@ used to say.
 
 From the phase record, which already carries all of it:
 
-- **identity** — run id, phase id, parent phase id, kind, name, owner, attempt, start, end, duration
-- **the agent** — name, provider, model, session id, cold or resumed, tokens in and out,
-  context-window occupancy after the turn
-- **the verdict** — envelope type, whether it decoded, which checks ran, which failed, how many
-  corrections it took, the terminal error tag
-- **the effect on the repo** — files claimed changed, files actually changed, commits produced, any
-  permission breach with its rollback outcome
+- **summary** — attempt, start, end, duration, and the workflow's description
+- **agent** — only for an agent phase: name, model, session id, cold or resumed, tokens in and out,
+  reported context-window occupancy, and correction turns when there were any
+- **errors** — only when there are errors: a plain explanation of the terminal error and the checks
+  that failed. Envelope and verification details are trace internals, not the question a person asks
+  here
+- **repository changes** — only when the record carries them: files the phase reported, files that
+  actually changed, commits produced, and permission breaches with their rollback outcomes
 - **where it ran** — the sandbox acquisition, or the host
 
 Three artifacts are **not** in the trace and are fetched on demand:
 
-- **the rendered prompt** — system and user, as the agent received it
-- **the captured agent session** — the transcript. Without it, D4's claim that corrections re-enter
-  the same session is unauditable: you see `corrections: 2` and nothing about what was said
-- **the diff** — read from git on the run's branch. The record lists *which* files changed; git
-  supplies the content, so the trace never stores blobs
+- **the prompt sent to the agent** — only for an agent phase: system and user, as received
+- **the agent conversation** — only for an agent phase: the transcript, including corrections
+- **the code diff** — only when the phase produced a commit; read from git on the run's branch
 
-**Occurrences** — the phase's tool calls and `exec` invocations — stream into the panel while the
-phase is in flight, and are listed once it is not. They live here and only here.
+**Agent activity** is the user-facing name for the trace's occurrences. Tool calls, `exec`
+invocations, and iterations stream into the panel while an agent phase is in flight and are listed
+once it is not. Code phases do not fetch or show this agent-only information.
 
 ### A sandbox acquisition
 

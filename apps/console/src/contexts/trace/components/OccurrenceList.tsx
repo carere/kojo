@@ -5,7 +5,7 @@ import { axisDuration } from "../../shared/lib/duration.ts";
 import type { OccurrenceLine } from "../models/OccurrenceDoc.ts";
 
 /**
- * What repeated inside one phase — its tool calls, its `exec` invocations, its iterations.
+ * What the agent did inside one phase — its tool calls, its `exec` invocations, its iterations.
  *
  * **They live here and only here.** console.md §5 keeps the waterfall phase-grained: a corrected
  * phase is one span and a phase that ran four hundred tool calls is one span, because the timeline
@@ -25,7 +25,7 @@ export const OccurrenceList = (props: {
 }): JSX.Element => (
   <Pane
     name="occurrences"
-    title={props.live ? "Occurrences — streaming" : "Occurrences"}
+    title={props.live ? "Agent activity — live" : "Agent activity"}
     class="gap-1"
   >
     <Show
@@ -33,8 +33,8 @@ export const OccurrenceList = (props: {
       fallback={
         <p data-occurrences="none" class="text-muted-foreground text-xs italic">
           {props.live
-            ? "Nothing has been recorded inside this phase yet."
-            : "This phase recorded no tool call and ran no command."}
+            ? "The agent has not recorded a tool call or command yet."
+            : "The agent recorded no tool call and ran no command."}
         </p>
       }
     >

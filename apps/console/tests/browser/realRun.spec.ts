@@ -118,9 +118,11 @@ test.describe("the run view over a run kojo run produced", () => {
     await expect(panel).toHaveAttribute("data-detail-panel", "phase");
     await expect(panel).toContainText("stamp");
     await expect(panel).toContainText("Stamp the form before anybody signs it");
-    // A code phase asked nothing and graded nothing, and the panel says so rather than drawing a
-    // blank — which is the same *absent* this ticket made unambiguous on the wire.
-    await expect(panel.locator('[data-agent="none"]')).toHaveCount(1);
+    // Agent-only information does not appear on a code phase.
+    await expect(panel.locator('[data-pane="agent"]')).toHaveCount(0);
+    await expect(panel.locator('[data-pane="occurrences"]')).toHaveCount(0);
+    await expect(panel.locator('[data-pane="prompt"]')).toHaveCount(0);
+    await expect(panel.locator('[data-pane="session"]')).toHaveCount(0);
   });
 
   /**
