@@ -1,0 +1,95 @@
+import {
+  type DecodeResult,
+  decodeClosedRecord,
+  decodeFailure,
+  decodeInteger,
+  decodeJsonValue,
+  decodeSuccess,
+} from "../../shared/codecs/json.ts";
+import { decodeRunnerIdentity, decodeSha256 } from "../../shared/models/identity.ts";
+import { decodeArtifactChunkBody } from "../contracts/artifact.ts";
+import type { RunnerFrame } from "../contracts/frame.ts";
+import { decodeHelloBody, decodeWelcomeBody } from "../contracts/handshake.ts";
+import { isExecutionMutationKind, isRunnerOperationKind } from "../contracts/operations.ts";
+
+const prefixIssues = <A>(
+  result: DecodeResult<A>,
+  prefix: ReadonlyArray<number | string>,
+): DecodeResult<A> =>
+  result.ok
+    ? result
+    : {
+        ok: false,
+        issues: result.issues.map((issue) => ({ ...issue, path: [...prefix, ...issue.path] })),
+      };
+
+export const decodeRunnerFrame = (input: unknown): DecodeResult<RunnerFrame> => {
+  const base = decodeClosedRecord(input, [
+    "version",
+    "kind",
+    "requestId",
+    "daemonInstanceId",
+    "runnerInstanceId",
+    "runId",
+    "revisionId",
+    "claimGeneration",
+    "body",
+  ]);
+  if (!base.ok) return base;
+  if (base.value.version !== 1)
+    return decodeFailure(["version"], "Expected Runner protocol version 1");
+  if (!isRunnerOperationKind(base.value.kind))
+    return decodeFailure(["kind"], "Unknown Runner operation kind");
+
+  const requestId = decodeRunnerIdentity(base.value.requestId, ["requestId"]);
+  if (!requestId.ok) return requestId;
+  const daemonInstanceId = decodeRunnerIdentity(base.value.daemonInstanceId, ["daemonInstanceId"]);
+  if (!daemonInstanceId.ok) return daemonInstanceId;
+  const runnerInstanceId = decodeRunnerIdentity(base.value.runnerInstanceId, ["runnerInstanceId"]);
+  if (!runnerInstanceId.ok) return runnerInstanceId;
+
+  const isExecutionMutation = isExecutionMutationKind(base.value.kind);
+  const executionKeys = ["runId", "revisionId", "claimGeneration"] as const;
+  if (!isExecutionMutation) {
+    const unexpected = executionKeys.find((key) => key in base.value);
+    if (unexpected !== undefined)
+      return decodeFailure([unexpected], "Unexpected execution mutation field");
+  }
+
+  let body: DecodeResult<unknown>;
+  if (base.value.kind === "Hello") {
+    body = prefixIssues(decodeHelloBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "Welcome") {
+    body = prefixIssues(decodeWelcomeBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "WriteArtifactChunk") {
+    body = prefixIssues(decodeArtifactChunkBody(base.value.body), ["body"]);
+  } else {
+    body = prefixIssues(decodeJsonValue(base.value.body), ["body"]);
+  }
+  if (!body.ok) return body;
+
+  const common = {
+    version: 1 as const,
+    kind: base.value.kind,
+    requestId: requestId.value,
+    daemonInstanceId: daemonInstanceId.value,
+    runnerInstanceId: runnerInstanceId.value,
+    body: body.value,
+  };
+  if (!isExecutionMutation) return decodeSuccess(common as RunnerFrame);
+
+  const runId = decodeRunnerIdentity(base.value.runId, ["runId"]);
+  if (!runId.ok) return runId;
+  const revisionId = decodeSha256(base.value.revisionId, ["revisionId"]);
+  if (!revisionId.ok) return revisionId;
+  const claimGeneration = decodeInteger(base.value.claimGeneration, ["claimGeneration"], {
+    minimum: 1,
+  });
+  if (!claimGeneration.ok) return claimGeneration;
+  return decodeSuccess({
+    ...common,
+    runId: runId.value,
+    revisionId: revisionId.value,
+    claimGeneration: claimGeneration.value,
+  } as RunnerFrame);
+};

@@ -56,6 +56,9 @@ resolver = "Npm"
 # and is built *into* the engine's tarball rather than published beside it.
 [monorepo.packages]
 kojo = { path = "packages/kojo", public_api = true }
+kojo-client-contracts = { path = "packages/kojo-client-contracts", public_api = true }
+kojo-runner-contracts = { path = "packages/kojo-runner-contracts", public_api = true }
+kojo-runtime = { path = "packages/kojo-runtime", public_api = true }
 console = { path = "apps/console", public_api = false }
 
 [[changelog.authors]]
