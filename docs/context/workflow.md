@@ -27,11 +27,16 @@ The stable name of a Project Workflow inside its Project. It is the source file 
 extension and must agree with the name declared by the Workflow.
 _Avoid_: export name, file path, Workflow ID
 
+**Factory asset**:
+A declared non-source input retained with a Workflow Revision, such as a prompt template or roster
+configuration. Its content stays fixed for every Run that uses that revision.
+_Avoid_: Artifact, live Project file, credential
+
 **Workflow Revision**:
-An immutable version of a Project Workflow, its Factory-owned source dependencies, and its package
-identities. A Run uses one Workflow Revision from the time its request is accepted until completion,
-even if the author changes or removes the current source. The revision remains in Daemon data while
-any retained Run refers to it.
+An immutable version of a Project Workflow, its required Factory source and declared assets, and
+its exact required package content, excluding credentials and live Project files. A Run keeps its
+Workflow Revision from admission, and the revision remains available while any retained Run refers
+to it, independent of changes to the current Factory or installed packages.
 _Avoid_: current Workflow, cached Workflow
 
 **Candidate Revision**:
