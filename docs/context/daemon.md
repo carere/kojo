@@ -26,8 +26,8 @@ _Avoid_: Daemon instance ID, Project ID
 
 **Daemon drain**:
 A planned hold on further Run dispatch across all Projects while executing Runs reach suspension
-or completion before a Daemon lifecycle operation. It is separate from an automation pause.
-_Avoid_: automation pause, Run cancellation, Gate suspension
+or completion before a Daemon lifecycle operation. It is separate from stopping a Workflow's Trigger.
+_Avoid_: Workflow stop, Run cancellation, Gate suspension
 
 **Managed Daemon release**:
 An immutable installation of exact Kojo and runtime versions retained independently of the global

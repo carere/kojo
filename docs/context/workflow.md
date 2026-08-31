@@ -27,6 +27,21 @@ The stable name of a Project Workflow inside its Project. It is the source file 
 extension and must agree with the name declared by the Workflow.
 _Avoid_: export name, file path, Workflow ID
 
+**Workflow activity**:
+The user's start or stop control for a Project Workflow. When the Workflow has a Trigger, its
+activity controls permission to run that Trigger; there is no separate Trigger enablement.
+_Avoid_: Project automation, Trigger selection, Workflow availability
+
+**Active Workflow**:
+A Project Workflow that the user has started. Its declared Trigger, when present, may request Runs
+subject to availability and execution checks; activity alone is not proof of polling or execution.
+_Avoid_: Available Workflow, executing Run
+
+**Inactive Workflow**:
+A Project Workflow that has not been started or that the user has stopped. Its Trigger cannot
+request new Runs, but previously admitted Runs can still finish unless cancellation is requested.
+_Avoid_: Invalid Workflow, Removed Workflow, Cancelled Run
+
 **Factory asset**:
 A declared non-source input retained with a Workflow Revision, such as a prompt template or roster
 configuration. Its content stays fixed for every Run that uses that revision.
@@ -116,7 +131,7 @@ _Avoid_: Acceptance, Run execution, Trigger acknowledgement
 
 **Queued Run**:
 A Run accepted by the Daemon whose initial execution or continuation is waiting to be scheduled.
-Its wait reason, such as lack of capacity or an automation pause, is distinct from a Gate suspension.
+Its wait reason, such as lack of capacity or a package switch, is distinct from a Gate suspension.
 _Avoid_: suspended Run, waiting for a human
 
 **Run continuation**:
@@ -133,7 +148,7 @@ _Avoid_: Run continuation, automatic retry, Factory Refresh
 **Run cancellation**:
 A durable request to stop a Run without further Workflow execution. It does not undo completed
 external actions or establish that resource cleanup is complete.
-_Avoid_: Gate suspension, automation pause, Run failure
+_Avoid_: Gate suspension, Workflow stop, Run failure
 
 **Cancelled Run**:
 A terminal Run whose cancellation has taken effect and whose execution has stopped. It does not

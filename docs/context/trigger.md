@@ -1,7 +1,7 @@
 # Trigger
 
-What requests automatic Runs, and how a user controls those requests independently of manual Runs
-and existing Run continuations.
+What requests automatic Runs for an active Project Workflow. Workflow activity controls whether its
+Trigger may run; the Trigger has no separate user-controlled enablement.
 
 ## Language
 
@@ -25,17 +25,6 @@ It is not an accepted Run or a failed execution.
 _Avoid_: failed Run, Trigger acknowledgement
 
 **Faulted trigger**:
-A Trigger that cannot process events because of a fault. Its fault is separate from the user's
-automation settings.
-_Avoid_: Paused trigger, Invalid Workflow
-
-**Project automation**:
-The Project-wide control for starting Runs through individually enabled Workflow triggers. It does
-not control manual Runs or existing Run continuations.
-_Avoid_: Project availability, enabled Project
-
-**Automation pause**:
-A user-imposed hold on new automatic execution for one Project or Project Workflow, including
-trigger-created Queued Runs that have not started execution. It does not stop manual Runs, already
-executing Runs, or their continuations.
-_Avoid_: Run cancellation, Gate suspension, Archived Project
+A Trigger that cannot process events because of a fault. Its fault is an observation, separate from
+whether the user has started or stopped its Workflow.
+_Avoid_: Inactive Workflow, Invalid Workflow

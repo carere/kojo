@@ -10,13 +10,13 @@ and [earlier package layout](../design/typescript-effect.md) do not yet implemen
   durable client operation receipts
 - [**project**](./project.md): the Project catalogue and location lifecycle, Project Runner
   supervision, Resource leases, and Project recovery
-- [**workflow**](./workflow.md): the Factory, Workflow Revisions and their retention, Phase
-  contracts, Run admission and scheduling, Run Claims, correctness state, wake-ups, Run recovery,
+- [**workflow**](./workflow.md): the Factory, Workflow activity, Workflow Revisions and their retention,
+  Phase contracts, Run admission and scheduling, Run Claims, correctness state, wake-ups, Run recovery,
   and cancellation
 - **agent**: who the agents are, and one agent call — not yet written
 - **sandbox**: the isolation boundary and the working copy — not yet written
 - [**gate**](./gate.md): Askings, Verdicts, Deadlines, and Recorded and Applied states
-- [**trigger**](./trigger.md): what requests automatic Runs, and how a user controls those requests
+- [**trigger**](./trigger.md): what requests automatic Runs for an active Workflow
 - [**trace**](./trace.md): observability records and their read models, plus Artifact metadata,
   content access, and retention separate from Trace-record retention
 
@@ -43,9 +43,12 @@ For the accepted package and transaction boundaries, see
   an idle Project need not have a live Project Runner. A Project Runner instance can hold a fenced
   Run Claim, but the Daemon remains the state owner. Project recovery establishes resource safety;
   Run recovery establishes whether an interrupted Run can continue.
-- **trigger -> workflow**: a Trigger supplies Run requests for one Project Workflow. Project
-  automation and the Workflow's trigger state control new automatic execution, including queued
-  trigger-created Runs that have not started, but not manual Runs or existing Run continuations.
+- **workflow -> trigger**: Workflow activity controls whether its declared Trigger may run. There is
+  no separate Project automation switch or Trigger enablement. Trigger faults and polling delays
+  remain observations, not additional user settings.
+- **trigger -> workflow**: a Trigger supplies Run requests for its active Project Workflow. Stopping
+  that Workflow prevents new Trigger requests; already admitted Runs remain eligible to finish.
+  Explicit forced stop also requests cancellation of the Workflow's nonterminal Runs.
 - **workflow -> trace**: Phase execution supplies Phase records. Workflow owns execution truth;
   Trace owns its observations, which can be incomplete after process loss.
 - **workflow -> agent**: the Workflow author selects the agents and agent invoker, supplies the
