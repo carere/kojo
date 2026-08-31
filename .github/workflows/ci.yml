@@ -86,8 +86,11 @@ jobs:
       # Every task is run **by name**, because a tier that is not named here is a tier nobody runs.
       # Discover the list with `moon query tasks`; it is not hardcoded anywhere else.
 
-      - name: Unit tests
-        run: moon run kojo:test
+      - name: Contract and runtime tests
+        run: moon run kojo-client-contracts:test kojo-runner-contracts:test kojo-runtime:test kojo-runtime:test-integration
+
+      - name: Unit tests and package graph
+        run: moon run kojo:test kojo:check-packages
 
       # Two guards that are neither a test tier nor a lint: no bare promise reaches Kojo's published
       # declarations, and the package refuses to build without the Console in it.

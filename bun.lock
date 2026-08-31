@@ -23,6 +23,7 @@
       "name": "@kojo/console",
       "version": "0.0.0",
       "dependencies": {
+        "@carere/kojo-client-contracts": "workspace:*",
         "@carere/solux": "4.0.1",
         "@tanstack/solid-hotkeys": "0.10.0",
         "@tanstack/solid-query": "5.101.4",
@@ -49,6 +50,8 @@
       },
       "dependencies": {
         "@ai-hero/sandcastle": "0.12.0",
+        "@carere/kojo-client-contracts": "workspace:*",
+        "@carere/kojo-runner-contracts": "workspace:*",
         "@effect/platform-bun": "4.0.0-beta.106",
         "@effect/sql-sqlite-bun": "4.0.0-beta.106",
         "effect": "4.0.0-beta.106",
@@ -57,6 +60,37 @@
         "@effect/vitest": "4.0.0-beta.106",
         "@types/bun": "^1.3.14",
         "vitest": "^4.1.0",
+      },
+    },
+    "packages/kojo-client-contracts": {
+      "name": "@carere/kojo-client-contracts",
+      "version": "0.0.0",
+      "devDependencies": {
+        "vitest": "^4.1.0",
+      },
+    },
+    "packages/kojo-runner-contracts": {
+      "name": "@carere/kojo-runner-contracts",
+      "version": "0.0.0",
+      "devDependencies": {
+        "vitest": "^4.1.0",
+      },
+    },
+    "packages/kojo-runtime": {
+      "name": "@carere/kojo-runtime",
+      "version": "0.0.0",
+      "dependencies": {
+        "@ai-hero/sandcastle": "0.12.0",
+        "@carere/kojo-runner-contracts": "workspace:*",
+        "@effect/platform-bun": "4.0.0-beta.106",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.3.14",
+        "effect": "4.0.0-beta.106",
+        "vitest": "^4.1.0",
+      },
+      "peerDependencies": {
+        "effect": "4.0.0-beta.106",
       },
     },
   },
@@ -118,6 +152,12 @@
     "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@2.5.7", "", { "os": "win32", "cpu": "x64" }, "sha512-V+0wu/nrj2S+MhP4EQ0uHNolP0IALEsz45pg0WoKkHfDeh0+ItHwP/p7bX5RPoMOl9NkpHYWdYPhIcy2mACHvQ=="],
 
     "@carere/kojo": ["@carere/kojo@workspace:packages/kojo"],
+
+    "@carere/kojo-client-contracts": ["@carere/kojo-client-contracts@workspace:packages/kojo-client-contracts"],
+
+    "@carere/kojo-runner-contracts": ["@carere/kojo-runner-contracts@workspace:packages/kojo-runner-contracts"],
+
+    "@carere/kojo-runtime": ["@carere/kojo-runtime@workspace:packages/kojo-runtime"],
 
     "@carere/solux": ["@carere/solux@4.0.1", "", { "dependencies": { "radash": "^12.1.0", "rxjs": "^7.8.2", "solid-js": "^1.9.5", "ts-pattern": "^5.6.2" } }, "sha512-gvBdl1gtL2WyhuVNtlDr7Qq2slGZD6y4cCFAgUQAnfg7UC2jORKAMNaYWA93602/jvsgZNm6Uwcs4oqroqGFPw=="],
 

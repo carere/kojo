@@ -52,6 +52,10 @@
       // the one server in the browser tier that stamps a factory and runs `kojo run` — see
       // `tests/browser/realFactory.ts`.
       "entry": ["tests/browser/realFactory.ts"]
+    },
+    "packages/kojo": {
+      // These are Moon task entry points. No TypeScript module imports a command-line guard.
+      "entry": ["src/scripts/*.ts"]
     }
   }
 }

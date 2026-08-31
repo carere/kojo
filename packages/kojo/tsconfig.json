@@ -4,5 +4,13 @@
   "compilerOptions": {
     "types": ["bun"],
     "outDir": "../../.moon/cache/types/packages/kojo"
-  }
+  },
+  "references": [
+    {
+      "path": "../kojo-client-contracts"
+    },
+    {
+      "path": "../kojo-runner-contracts"
+    }
+  ]
 }

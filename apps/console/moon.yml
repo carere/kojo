@@ -1,6 +1,9 @@
 layer: application
 language: typescript
 
+dependsOn:
+  - kojo-client-contracts
+
 tasks:
   # The front end alone. The API keeps coming from `kojo ui`, which the Vite config proxies to — a
   # dev server that also served the trace would be the second runtime console.md §7 rejected.

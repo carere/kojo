@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.options.json",
+  "include": ["src/**/*.ts", "tests/**/*.ts"],
+  "compilerOptions": {
+    "types": ["bun"],
+    "outDir": "../../.moon/cache/types/packages/kojo-runtime"
+  },
+  "references": [
+    {
+      "path": "../kojo-runner-contracts"
+    }
+  ]
+}

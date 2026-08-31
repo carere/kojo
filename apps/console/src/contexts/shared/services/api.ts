@@ -78,6 +78,10 @@ export const fetchJson = async <A>(path: string): Promise<A> => {
   return (await response.json()) as A;
 };
 
+/** @public The versioned bootstrap read used by the Daemon Console migration. */
+export const fetchCompatibility = (): Promise<BootstrapResponse> =>
+  fetchJson<BootstrapResponse>("/_kojo/compat");
+
 /**
  * The one write this Console makes: a verdict, against a token.
  *
@@ -113,3 +117,5 @@ export const fetchText = async (path: string): Promise<string> => {
   }
   return await response.text();
 };
+
+import type { BootstrapResponse } from "@carere/kojo-client-contracts/contexts/client/contracts/bootstrap";

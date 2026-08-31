@@ -1,0 +1,14 @@
+{
+  "manifestVersion": 1,
+  "packageName": "@carere/kojo-runtime",
+  "packageVersion": "0.0.0",
+  "runner": "./src/runner/main.ts",
+  "validator": "./src/validator/main.ts",
+  "runnerProtocols": [1],
+  "requiredFeatures": [],
+  "effectPeer": "4.0.0-beta.106",
+  "bun": {
+    "minimum": "1.3.14"
+  },
+  "hosts": ["darwin", "linux"]
+}

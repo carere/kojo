@@ -1,0 +1,19 @@
+layer: library
+language: typescript
+
+dependsOn:
+  - kojo-runner-contracts
+
+tasks:
+  test:
+    command: bun node_modules/.bin/vitest run --project unit
+    inputs:
+      - src/**/*
+      - tests/unit/**/*
+      - vitest.config.ts
+  test-integration:
+    command: bun node_modules/.bin/vitest run --project integration
+    inputs:
+      - src/**/*
+      - tests/integration/**/*
+      - vitest.config.ts

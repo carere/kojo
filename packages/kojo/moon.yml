@@ -1,7 +1,21 @@
 layer: library
 language: typescript
 
+dependsOn:
+  - kojo-client-contracts
+  - kojo-runner-contracts
+
 tasks:
+  check-packages:
+    command: bun src/scripts/check-package-graph.ts
+    inputs:
+      - /apps/console/package.json
+      - /moon.yml
+      - /packages/*/package.json
+      - /packages/*/runtime-manifest.json
+      - /tsconfig.json
+    options:
+      cache: false
   # Both test tasks launch Vitest through `bun`, and the `bun` is not decoration. `vitest.mjs` has a
   # `#!/usr/bin/env node` shebang, so invoking the binary directly runs the whole suite — workers and
   # all — under Node. Kojo's runtime is Bun: it depends on `@effect/platform-bun` and

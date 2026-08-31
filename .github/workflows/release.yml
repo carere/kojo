@@ -6,7 +6,7 @@ name: release
 #
 # The flow this fits into, and each step is a separate deliberate act:
 #
-#   1. `cog bump --package kojo --auto`   writes the version, the changelog and the tag, and pushes
+#   1. bump the four public packages to one version and sync runtime-manifest.json
 #   2. Actions → release → Run workflow    type that version, and this runs
 #
 # Bumping does not publish and publishing does not bump. That is why the version is typed here
@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "The version to publish — must equal packages/kojo/package.json (e.g. 0.1.0)"
+        description: "The version to publish — must equal all four public package manifests"
         required: true
         type: string
       dry_run:
@@ -55,20 +55,24 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # The gate that makes typing the version meaningful. Without it the input is decoration and
-      # the job would publish whatever the branch happens to hold.
-      - name: The version you typed is the version in the manifest
+      # The gate that makes typing the version meaningful. All public packages are one coordinated
+      # release in this expand step, and the runtime manifest repeats its package version.
+      - name: The version you typed is the version in every public manifest
         run: |
-          # `2>/dev/null` because bun announces the `.env` it loaded on stderr, and that line would
-          # otherwise end up inside the version string.
-          declared=$(bun pm pkg get version --cwd packages/kojo 2>/dev/null | tr -d '"' | tr -d '[:space:]')
           typed="${{ inputs.version }}"
-          if [ "$declared" != "$typed" ]; then
-            echo "::error::you asked to publish $typed, but packages/kojo/package.json says $declared."
-            echo "::error::run \`cog bump --package kojo --auto\` first, or type the version it wrote."
+          for package in kojo-client-contracts kojo-runner-contracts kojo-runtime kojo; do
+            declared=$(bun pm pkg get version --cwd "packages/$package" 2>/dev/null | tr -d '"' | tr -d '[:space:]')
+            if [ "$declared" != "$typed" ]; then
+              echo "::error::you asked to publish $typed, but packages/$package/package.json says $declared."
+              exit 1
+            fi
+          done
+          runtime=$(bun -e 'console.log((await Bun.file("packages/kojo-runtime/runtime-manifest.json").json()).packageVersion)')
+          if [ "$runtime" != "$typed" ]; then
+            echo "::error::runtime-manifest.json says $runtime, not $typed."
             exit 1
           fi
-          echo "publishing @carere/kojo@$declared"
+          echo "publishing the Kojo package set at $typed"
 
       # `0.0.0` is the unreleased placeholder. Publishing it would burn the first real version
       # number on a package nobody bumped.
@@ -95,8 +99,8 @@ jobs:
       - name: Dead-code analysis
         run: bun knip
 
-      - name: Unit tests
-        run: moon run kojo:test
+      - name: Contract, runtime, and unit tests
+        run: moon run kojo-client-contracts:test kojo-runner-contracts:test kojo-runtime:test kojo-runtime:test-integration kojo:test kojo:check-packages
 
       - name: Container tests
         run: moon run kojo:test-integration
@@ -111,29 +115,42 @@ jobs:
       # The tarball is inspected before it is sent, because `files` and `.gitignore` disagreeing is
       # exactly how the Console went missing once already. Two assertions: the shell is in, and the
       # tests are out.
-      - name: The tarball holds what it should
-        working-directory: packages/kojo
+      - name: The tarballs hold what they should
         run: |
-          bun pm pack --destination /tmp/kojo-release --quiet
-          tarball=$(ls /tmp/kojo-release/*.tgz)
-          echo "$tarball"
-          tar -tzf "$tarball" > /tmp/contents.txt
-
-          if ! grep -q '^package/console/index.html$' /tmp/contents.txt; then
+          mkdir -p /tmp/kojo-release
+          for package in kojo-client-contracts kojo-runner-contracts kojo-runtime kojo; do
+            (cd "packages/$package" && bun pm pack --destination /tmp/kojo-release --quiet)
+          done
+          kojo_tarball=$(ls /tmp/kojo-release/carere-kojo-*.tgz | grep -v -- '-contracts-' | grep -v -- '-runtime-')
+          tar -tzf "$kojo_tarball" > /tmp/kojo-contents.txt
+          if ! grep -q '^package/console/index.html$' /tmp/kojo-contents.txt; then
             echo "::error::the Console shell is not in the tarball — kojo ui would serve a placeholder."
             exit 1
           fi
-          if grep -q '^package/tests/' /tmp/contents.txt; then
-            echo "::error::the test suite is in the tarball."
-            exit 1
-          fi
-          echo "console shell present, tests absent, $(wc -l < /tmp/contents.txt) entries"
+          for tarball in /tmp/kojo-release/*.tgz; do
+            tar -tzf "$tarball" > /tmp/package-contents.txt
+            if grep -q '^package/tests/' /tmp/package-contents.txt; then
+              echo "::error::$tarball contains its test suite."
+              exit 1
+            fi
+            if ! grep -q '^package/LICENSE$' /tmp/package-contents.txt; then
+              echo "::error::$tarball has no LICENSE."
+              exit 1
+            fi
+          done
+          runtime_tarball=$(ls /tmp/kojo-release/carere-kojo-runtime-*.tgz)
+          tar -tzf "$runtime_tarball" > /tmp/runtime-contents.txt
+          for required in package/runtime-manifest.json package/src/runner/main.ts package/src/validator/main.ts; do
+            grep -q "^$required$" /tmp/runtime-contents.txt || {
+              echo "::error::the runtime tarball is missing $required."
+              exit 1
+            }
+          done
 
       # Auth through `~/.npmrc` rather than an environment variable. `bun publish` has no `--token`
       # flag, and the registry line in an npmrc is the one form every client agrees on.
       - name: Publish to npm
         if: ${{ !inputs.dry_run }}
-        working-directory: packages/kojo
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -142,7 +159,9 @@ jobs:
             exit 1
           fi
           printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > ~/.npmrc
-          bun publish --access public
+          for package in kojo-client-contracts kojo-runner-contracts kojo-runtime kojo; do
+            (cd "packages/$package" && bun publish --access public)
+          done
           rm -f ~/.npmrc
 
       - name: Dry run — nothing was published
