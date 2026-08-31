@@ -53,9 +53,8 @@ _Avoid_: attachment, blob, payload
 ### The Console
 
 **Console**:
-The web surface a human reads a run through, served by `kojo ui`. It is a delivery mechanism for
-this context, not a bounded context of its own. It reads the trace, and it answers gates through the
-gate context.
+The Daemon's local web surface for Project and Run inspection and applicable user actions. It reads
+Trace and records Gate answers without owning Run execution; it is not a bounded context of its own.
 _Avoid_: visualizer, observer, orchestrator, obs, dashboard
 
 **Waterfall**:

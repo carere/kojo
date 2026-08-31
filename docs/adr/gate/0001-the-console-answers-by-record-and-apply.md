@@ -1,5 +1,20 @@
 # The Console answers a gate by recording it, not by resolving it
 
+## Status for the Daemon design
+
+The record-versus-apply decision remains in force. The accepted client contract in
+[Define local Daemon transport and client access](https://github.com/carere/kojo/issues/58)
+replaces this ADR's token-only access policy: answering requires access as the Daemon's OS user
+and a Gate token for the exact Asking. A token does not grant general Daemon or Project access.
+
+The Daemon serves the Console and records Verdicts through its client API. Clients do not open the
+database or execute Runs. The old client-engine, Runner heartbeat, polling, and `kojo watch`
+details below describe the earlier implementation, not the planned Daemon contract. See also
+[Define the Daemon–Project Runner protocol and recovery](https://github.com/carere/kojo/issues/55).
+These are planning decisions; this record does not claim that the runtime has changed.
+
+## Original rationale and implementation
+
 Answering a gate resolves a `DurableDeferred`, which is a write to the engine's storage —
 *correctness*, not the trace's *observability*. The obvious implementation is for `kojo ui` to hold
 a **runner** and carry the answered run forward itself. It does not. The Console writes the verdict

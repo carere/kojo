@@ -13,6 +13,16 @@ _Avoid_: server, worker
 The durable database and files owned by a Daemon, independent of every registered Project path.
 _Avoid_: machine state, Project data
 
+**Daemon instance ID**:
+The identity of one Daemon process lifetime. A replacement Daemon gets a new instance ID without
+changing the identity of its retained Daemon data.
+_Avoid_: process ID, Project Runner instance ID, Daemon data identity
+
+**Daemon data identity**:
+The identity of one lifetime of retained Daemon data. It survives Daemon restarts, changes after a
+data purge, and scopes client request identities so old requests cannot become new work.
+_Avoid_: Daemon instance ID, Project ID
+
 **Daemon drain**:
 A planned hold on further Run dispatch across all Projects while executing Runs reach suspension
 or completion before a Daemon lifecycle operation. It is separate from an automation pause.

@@ -1,8 +1,8 @@
 # Gate
 
 How a human is asked to decide, and how the answer gets back. A gate suspends a run for an unbounded
-time, so asking and answering are deliberately two separate halves that may run in different
-processes, on different machines, on different days.
+time, so asking and answering are deliberately two separate halves that may run in different local
+processes on different days.
 
 ## Language
 
@@ -40,8 +40,8 @@ present, with the authored Gate name.
 _Avoid_: Gate token, Asking
 
 **Gate token**:
-The random, opaque capability that the Daemon gives to one exact Asking. Holding it is what lets a
-client answer the Gate.
+The random, opaque capability that lets a client with access as the Daemon's OS user answer one
+exact Asking. It does not grant general access to the Daemon or its Projects.
 _Avoid_: gate id, handle
 
 **Recorded**:

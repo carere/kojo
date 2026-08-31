@@ -43,7 +43,8 @@ it has no context file and no ADR directory.
 - **gate -> trace**: a gate writes one gate record, which carries the human latency. The gate owns
   the decision; the trace owns its measurement.
 - **trace -> gate**: the Console reads the trace, and answers gates through the gate context's own
-  answering half. The Console gets no privilege that any other answering adapter lacks. See
+  answering half. Answering requires access as the Daemon's OS user and a token for the exact
+  Asking; the Console gets no additional answering privilege. See
   [docs/adr/gate/0001-the-console-answers-by-record-and-apply.md](../adr/gate/0001-the-console-answers-by-record-and-apply.md).
 - **sandbox -> trace**: each sandbox acquisition writes one sandbox record. A rebuild after a
   suspension is a second acquisition, so it is a second record.
