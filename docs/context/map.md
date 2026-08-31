@@ -32,6 +32,9 @@ it has no context file and no ADR directory.
   trigger-created Runs that have not started, but not manual Runs or existing Run continuations.
 - **workflow -> trace**: every phase the workflow runs writes one phase record. The workflow owns
   what a phase *is*; the trace owns what a phase *recorded*.
+- **workflow -> agent**: the Workflow author selects the agents and agent invoker, supplies the
+  associated accounts and credentials, and owns spending control. Kojo executes the authored
+  agent calls without a separate spend-authorization contract.
 - **workflow -> gate**: a Run reaches a Gate by its Gate path. Each Asking belongs to that Run and
   gets one public gate token.
 - **gate -> workflow execution**: the Daemon records Verdicts and schedules Run continuations for

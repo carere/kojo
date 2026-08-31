@@ -338,10 +338,11 @@ stable Kojo entry point, or install a stable launcher. The service definition mu
 paths and an explicit, limited `PATH` for child tools. Apple also recommends explicit program paths
 to prevent `PATH` substitution. See [Apple's shell environment guidance](https://developer.apple.com/library/archive/documentation/OpenSource/Conceptual/ShellScripting/ShellScriptSecurity/ShellScriptSecurity.html).
 
-The daemon has no terminal. Therefore, an agent invocation will be refused by Kojo unless
-`KOJO_AGENT_SPEND=allow` is explicitly present in the daemon environment. Installation must ask for
-this permission. It must not silently copy the current shell environment. The service definition
-can store this non-secret switch.
+At the time of this research, Kojo's invoker refused agent calls without a terminal unless
+`KOJO_AGENT_SPEND=allow` was present. The resulting recommendation to request spend permission during
+installation is superseded by [Define agent-spend authorization under the
+Daemon](https://github.com/carere/kojo/issues/57). That decision requires removal of the spend guard;
+it is not a service-manager constraint. This research note does not change the current runtime.
 
 Tokens and other secrets must not be copied into the plist or unit. Environment values pass to
 child processes and can leak. Store secrets in a user-only file or platform credential store, and
@@ -391,7 +392,8 @@ The platform adapter can hide commands, but it must not hide different guarantee
 5. Use manager-directed stop with a finite cleanup timeout.
 6. Add a Kojo-owned control endpoint or lock for singleton enforcement and health checks.
 7. Use absolute executable paths. Do not depend on a shell profile or the interactive `PATH`.
-8. Ask explicitly before setting `KOJO_AGENT_SPEND=allow` for a daemon.
+8. Apply [Define agent-spend authorization under the Daemon](https://github.com/carere/kojo/issues/57)
+   in place of the original recommendation to configure `KOJO_AGENT_SPEND` during installation.
 9. Detect unsupported Linux hosts and denied linger policy with actionable errors.
 10. Never undo systemd linger automatically unless Kojo can prove ownership and the user confirms
     the effect on other services.
