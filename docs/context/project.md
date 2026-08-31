@@ -33,6 +33,11 @@ The replaceable execution owner for one Project. A Project and its Runs keep the
 their Project Runner stops or is replaced.
 _Avoid_: Daemon, worker, server
 
+**Project execution package**:
+The versioned package that supplies a Project's Factory authoring contract and its Project Runner.
+Its version can differ from global Kojo when their execution protocols are compatible.
+_Avoid_: global Kojo, Project Runner process
+
 **Project Runner instance ID**:
 The opaque identity that the Daemon gives to one Project Runner process lifetime. A replacement
 Project Runner gets a new instance ID.
