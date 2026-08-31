@@ -59,5 +59,6 @@ _Avoid_: unregistered Project, Archived Project
 
 **Archived Project**:
 A Project that the user removed from the active catalogue without deleting its Project ID or
-history. It has no active location until the user explicitly restores it.
+history. It has no active location or executing Project Runner; retained Runs need explicit restore
+before they can use its location again.
 _Avoid_: deleted Project, Unavailable Project

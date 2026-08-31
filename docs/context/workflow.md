@@ -28,18 +28,19 @@ extension and must agree with the name declared by the Workflow.
 _Avoid_: export name, file path, Workflow ID
 
 **Workflow activity**:
-The user's start or stop control for a Project Workflow. When the Workflow has a Trigger, its
+Whether a user's start remains in effect for a Project Workflow. When the Workflow has a Trigger,
 activity controls permission to run that Trigger; there is no separate Trigger enablement.
 _Avoid_: Project automation, Trigger selection, Workflow availability
 
 **Active Workflow**:
-A Project Workflow that the user has started. Its declared Trigger, when present, may request Runs
-subject to availability and execution checks; activity alone is not proof of polling or execution.
+A Project Workflow whose start remains in effect. With a Trigger, it permits Run requests subject
+to availability and execution checks; without a Trigger, it stays active only while admitted Runs
+remain nonterminal.
 _Avoid_: Available Workflow, executing Run
 
 **Inactive Workflow**:
-A Project Workflow that has not been started or that the user has stopped. Its Trigger cannot
-request new Runs, but previously admitted Runs can still finish unless cancellation is requested.
+A Project Workflow with no start in effect. Its Trigger cannot request new Runs, but previously
+admitted Runs can still finish subject to availability and recovery unless cancellation is requested.
 _Avoid_: Invalid Workflow, Removed Workflow, Cancelled Run
 
 **Factory asset**:
