@@ -124,6 +124,22 @@ Further execution of a Run that has already started. It keeps that Run's identit
 Revision rather than creating a new Run.
 _Avoid_: new Run, new trigger event
 
+**Run recovery**:
+The checks that establish whether an interrupted Run can safely continue with its pinned Workflow
+Revision and recorded results. An uncertain external action can hold the Run for user action
+without making the Run terminal.
+_Avoid_: Run continuation, automatic retry, Factory Refresh
+
+**Run cancellation**:
+A durable request to stop a Run without further Workflow execution. It does not undo completed
+external actions or establish that resource cleanup is complete.
+_Avoid_: Gate suspension, automation pause, Run failure
+
+**Cancelled Run**:
+A terminal Run whose cancellation has taken effect and whose execution has stopped. It does not
+continue automatically, and unresolved external actions or resource faults remain visible.
+_Avoid_: suspended Run, failed Run, Run recovery
+
 **Run ID**:
 The opaque identity of a Run, unique inside one Daemon. It does not expose the Project Workflow or
 its idempotency key and survives Project Runner replacement.

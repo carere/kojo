@@ -43,6 +43,17 @@ The opaque identity that the Daemon gives to one Project Runner process lifetime
 Project Runner gets a new instance ID.
 _Avoid_: process ID, Project ID, runner name
 
+**Resource lease**:
+A Daemon-owned durable record of the intended acquisition, ownership, and confirmed release of a
+resource used for Project execution. It remains relevant after its Project Runner stops.
+_Avoid_: Run Claim, Sandbox record, process lifetime
+
+**Project recovery**:
+The reconciliation of a Project's execution resources and ownership before a replacement Project
+Runner can accept work. An unresolved resource risk can prevent execution without changing the
+Project's location or Factory validity.
+_Avoid_: Factory Refresh, Project restoration, Run retry
+
 **Project location**:
 The canonical absolute Host path of the exact Git working tree that the user registered for a
 Project. The user changes or confirms it explicitly; two linked Git worktrees are two Projects,

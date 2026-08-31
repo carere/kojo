@@ -26,7 +26,8 @@ it has no context file and no ADR directory.
   that Kojo can discover and run. Project ID plus Workflow name identifies one Project Workflow.
 - **project -> workflow execution**: the Daemon supplies a Project Runner on demand for one Project;
   an idle Project need not have a live Project Runner. A Project Runner instance can hold a fenced
-  Run Claim, but the Daemon remains the state owner.
+  Run Claim, but the Daemon remains the state owner. Project recovery establishes resource safety;
+  Run recovery establishes whether an interrupted Run can continue.
 - **trigger -> workflow**: a Trigger supplies Run requests for one Project Workflow. Project
   automation and the Workflow's trigger state control new automatic execution, including queued
   trigger-created Runs that have not started, but not manual Runs or existing Run continuations.
@@ -46,3 +47,6 @@ it has no context file and no ADR directory.
   [docs/adr/gate/0001-the-console-answers-by-record-and-apply.md](../adr/gate/0001-the-console-answers-by-record-and-apply.md).
 - **sandbox -> trace**: each sandbox acquisition writes one sandbox record. A rebuild after a
   suspension is a second acquisition, so it is a second record.
+- **sandbox and agent -> project**: execution resources have Daemon-owned Resource leases that
+  survive Project Runner replacement. Trace records do not establish resource ownership or
+  confirmed release.
