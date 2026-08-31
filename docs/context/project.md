@@ -13,6 +13,11 @@ _Avoid_: server, worker
 The durable database and files owned by a Daemon, independent of every registered Project path.
 _Avoid_: machine state, Project data
 
+**Daemon drain**:
+A planned hold on further Run dispatch across all Projects while executing Runs reach suspension
+or completion before a Daemon lifecycle operation. It is separate from an automation pause.
+_Avoid_: automation pause, Run cancellation, Gate suspension
+
 **Project**:
 A durable registration that identifies one repository location for the current OS user on one
 Host. Its factory can be available, missing, or invalid; the Project is not the factory itself.
