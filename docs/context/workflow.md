@@ -1,7 +1,7 @@
 # Workflow
 
-How a Factory declares the programs that Kojo can run. The context owns Workflow identity,
-availability, revisions, phases, and the contracts that move results between phases.
+The programs a Factory declares and the Runs that execute them. The context owns Workflow
+identity, availability, revisions, Phases, Run admission and scheduling, and execution correctness.
 
 ## Language
 

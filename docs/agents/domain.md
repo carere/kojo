@@ -19,6 +19,7 @@ If these files do not exist, proceed silently. Do not suggest creating them upfr
 docs/
 ├── context/
 │   ├── map.md
+│   ├── daemon.md
 │   ├── project.md
 │   ├── workflow.md
 │   ├── agent.md
@@ -28,6 +29,7 @@ docs/
 │   └── trace.md
 └── adr/
     ├── root/        # system-wide decisions
+    ├── daemon/
     ├── project/
     ├── workflow/
     ├── agent/
@@ -40,10 +42,10 @@ docs/
 `docs/context/map.md` is the multi-context discriminator. Use context slugs consistently between
 `docs/context/<context>.md` and `docs/adr/<context>/`.
 
-The slugs are the bounded contexts of `src/contexts/<bounded-context>/`, listed in
-[docs/design/typescript-effect.md §2](../design/typescript-effect.md). `shared` is a code bucket for
-elements used by several contexts, not a bounded context, so it has no context file and no ADR
-directory.
+The context map names the accepted bounded contexts of `src/contexts/<bounded-context>/`, including
+planned boundaries not yet implemented in the earlier design or code. `shared` is a code bucket
+for elements used by several contexts, not a bounded context, so it has no context file and no ADR
+directory. The tree above shows the layout; create an ADR directory only when a decision needs it.
 
 ## Use the context vocabulary
 

@@ -40,11 +40,10 @@ branch. It does **not** ask Sandcastle for a per-acquisition worktree path.
   terms: when the workspace is genuinely gone, host git in that directory fails too, so the run would
   die naming `git rev-parse` — the same unhelpful message in a different accent. Graded: reversing
   the two makes `unreachableWorkspace.test.ts` fail with `SandboxError` instead.
-- **A discarded container is released at once and recorded `failed`.** Each attempt runs in a scope
-  forked from the scope's own, closed with a failure exit the moment the container is thrown away, so
-  a scope that builds three never holds two and each of the three leaves a trace row with its own
-  cost. `failed` rather than a new outcome: it is the same word an acquisition gets when the worktree
-  check rejects it, and it is the same fact — the container was built and was not usable.
+- **A discarded container is scheduled for immediate release and recorded `failed`.** Each attempt
+  runs in a scope that is closed with a failure exit when the container is discarded. Scope closure
+  starts cleanup; it does not prove provider release. A failed Sandbox record describes an unusable
+  acquisition, not confirmed cleanup.
 - **Three containers is an argument, not a measurement.** Ticket 19 measured the fault at 1 in 6
   acquisitions under `/Users` and 3 in 4 under `$TMPDIR`, never at 1 in 1, so independent draws are
   what the bound is worth. What no test shows is that a rebuild clears the *Docker VM's* stale view
@@ -52,3 +51,13 @@ branch. It does **not** ask Sandcastle for a per-acquisition worktree path.
 - **`WorkspaceUnreachable` joins the error union every `sandboxed` author declares.** It is a
   `Schema.TaggedError` because the engine persists what it records, and the scaffold templates carry
   it so a stamped factory compiles.
+
+## Daemon recovery boundary
+
+[Define Daemon context and port boundaries](https://github.com/carere/kojo/issues/62) keeps provider
+operations in `sandbox` and durable Resource leases and Project recovery in `project`. Preserve
+the workspace probe and bounded rebuild policy, but establish safe cleanup through lease evidence
+before a replacement acquisition. An uncertain release keeps the applicable Project recovery hold;
+neither a finalizer nor a Trace record proves that no old container remains. Preserve dirty or
+unreadable worktrees under the accepted recovery contract. These are planned guarantees, not a
+claim that the current scope finalizers implement durable leases.

@@ -13,6 +13,26 @@ details below describe the earlier implementation, not the planned Daemon contra
 [Define the Daemon–Project Runner protocol and recovery](https://github.com/carere/kojo/issues/55).
 These are planning decisions; this record does not claim that the runtime has changed.
 
+## Accepted port and state ownership
+
+Under [Define Daemon context and port boundaries](https://github.com/carere/kojo/issues/62), the
+shared client handlers call Gate use cases. Separate client transport adapters establish local
+access before an answer can be recorded. The Daemon's Gate repository owns Askings, Verdicts,
+Deadlines, and Recorded and Applied state; these are correctness records, not Trace projections.
+
+The Daemon commits a Recorded Verdict and its continuation request together, with the mutation
+receipt. Its scheduler supplies a Project Runner when execution is eligible. The Runner applies
+the answer through scoped protocol operations and its local Effect engine adapter. No answering
+client constructs an engine, writes a DurableDeferred directly, or opens SQLite.
+
+Clients read authoritative Gate and Run state to distinguish Recorded, Applied, expiry, and
+recovery holds. A live Runner is neither required to record an answer nor proof that its application
+is ready. Notifications request a fresh read; they do not establish application. An idle Project
+needs no Runner, and starting `kojo watch` is not a prerequisite for applying an accepted answer.
+
+The original implementation details below are historical. They do not define the planned
+transport, access policy, liveness checks, polling interval, or source of Gate status.
+
 ## Original rationale and implementation
 
 Answering a gate resolves a `DurableDeferred`, which is a write to the engine's storage —
@@ -33,7 +53,7 @@ The reason is that the gate port already splits request from answer precisely so
 ([architecture.md §5](../../design/architecture.md)). The Console is one more answering half. It
 earns no privilege that a Slack adapter or a webhook lacks.
 
-## Considered Options
+### Historical options
 
 - **`kojo ui` hosts a runner.** Rejected because opening a browser tab would become an act of
   execution, and because the Console would then need the whole engine's dependency graph to render a
@@ -50,7 +70,7 @@ earns no privilege that a Slack adapter or a webhook lacks.
   terminal wrapper and it fails whenever the CLI is not on that process's `PATH`.
 - **Record and apply.** Chosen.
 
-## Consequences
+### Historical consequences
 
 - **The Console must never show a recorded answer as an applied one.** If no runner is live, the run
   stays suspended, and an "approved ✓" that means nothing is the single failure that destroys trust

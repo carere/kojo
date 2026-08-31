@@ -1,5 +1,16 @@
 # An absent field is absent on the wire, never null
 
+## Status for the Daemon design
+
+The absent-optional-field contract remains in force for the shared client API.
+[Define Daemon context and port boundaries](https://github.com/carere/kojo/issues/62) places its
+schemas and types in an independent, browser-safe contract package. The Console, CLI, and Daemon
+handlers can all depend on it without making the Console depend on `packages/kojo`. This replaces
+the earlier package-dependency reason for rejecting shared schemas; it does not permit `null` for
+an absent field. The package split is planned, not implemented.
+
+## Original fault and wire decision
+
 Every record the Console reads carries optional fields — `inFlight`, `sandboxId`, `errorTag`,
 `breaches`, `repo`, `agent`, `verification`, `imageDigest`, `contextTokens`, `answerer`. Each of them
 means the same thing when it is not there: *this run has no phase in flight*, *this phase ran on the
@@ -61,13 +72,14 @@ same function through the same schema, and a drift is a compile error.
   wire and buys nothing for the next reader of this API — and there is one, because `kojo ui` serves
   JSON that a person can `curl`. The Console is not made defensive against a shape the server is now
   unable to send.
-- **Build both sides from one schema.** The strongest version: `apps/console` imports the schema and
-  a drift is a type error in the Console itself. Not taken. `apps/console` deliberately depends on
+- **Build both sides from one schema.** Originally not taken: `apps/console` deliberately depends on
   nothing in `packages/kojo` — `tests/browser/harness.ts` records why — and `packages/kojo:build`
   already depends on `console:build`, so a dependency the other way is a cycle in the project graph.
-  What stands in for it is `tests/browser/realRun.spec.ts`: a run produced by `kojo run` against a
+  The original check is `tests/browser/realRun.spec.ts`: a run produced by `kojo run` against a
   stamped factory, rendered in a browser. A drift between the two layers stops that page rendering,
-  which is the same defect stated as the thing a person would actually meet.
+  which is the same defect stated as the thing a person would actually meet. The planned independent
+  contract package removes that cycle, so shared schemas are now accepted. Wire validation must
+  still verify the encoded response; shared types alone do not prove the bytes are correct.
 
 ## Consequences
 

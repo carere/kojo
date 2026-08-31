@@ -1,47 +1,9 @@
 # Project
 
-How a host knows which repositories Kojo manages. A project identifies the repository where Kojo
-expects to find a factory for the current OS user.
+Which repositories Kojo manages, and how their execution ownership and resource safety are
+established. A Project identifies the repository where Kojo expects to find a Factory.
 
 ## Language
-
-**Daemon**:
-The single long-lived Kojo process and state owner for one OS user on one Host.
-_Avoid_: server, worker
-
-**Daemon data**:
-The durable database and files owned by a Daemon, independent of every registered Project path.
-_Avoid_: machine state, Project data
-
-**Daemon instance ID**:
-The identity of one Daemon process lifetime. A replacement Daemon gets a new instance ID without
-changing the identity of its retained Daemon data.
-_Avoid_: process ID, Project Runner instance ID, Daemon data identity
-
-**Daemon data identity**:
-The identity of one lifetime of retained Daemon data. It survives Daemon restarts, changes after a
-data purge, and scopes client request identities so old requests cannot become new work.
-_Avoid_: Daemon instance ID, Project ID
-
-**Daemon drain**:
-A planned hold on further Run dispatch across all Projects while executing Runs reach suspension
-or completion before a Daemon lifecycle operation. It is separate from an automation pause.
-_Avoid_: automation pause, Run cancellation, Gate suspension
-
-**Managed Daemon release**:
-An immutable installation of exact Kojo and Bun versions retained independently of the global CLI
-installation. One release is active; other retained releases can support activation or recovery.
-_Avoid_: global Kojo, Project execution package, Workflow Revision
-
-**Daemon lifecycle operation**:
-A durable request to change the Daemon's service or active managed release. Its identity and
-outcome survive the requesting client and the replacement of a Daemon instance.
-_Avoid_: Run, client connection, Daemon drain
-
-**Daemon lifecycle controller**:
-The exclusive owner of a Daemon lifecycle operation across Daemon instance replacement. Its
-authority covers service and installation transitions, not Run execution or Daemon database access.
-_Avoid_: Daemon, Project Runner, native service manager
 
 **Project**:
 A durable registration that identifies one repository location for the current OS user on one
@@ -54,8 +16,8 @@ changes or becomes unavailable.
 _Avoid_: repository path, factory name
 
 **Project Runner**:
-The replaceable execution owner for one Project. A Project and its Runs keep their identities when
-their Project Runner stops or is replaced.
+The replaceable execution owner for one Project, under the Daemon's authority. A Project and its
+Runs keep their identities when their Project Runner stops or is replaced.
 _Avoid_: Daemon, worker, server
 
 **Project execution package**:

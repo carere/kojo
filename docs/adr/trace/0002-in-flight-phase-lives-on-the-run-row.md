@@ -19,8 +19,9 @@ nothing is reassembled by a join.
   [§9](../../design/typescript-effect.md) exists to forbid, and it would make the phase's own record
   reassemblable from two places.
 - **A provisional phase record, upserted on entry and completed on exit.** Rejected: it breaks
-  "written once, on exit, on every path", and that guarantee is what makes an *interrupted* phase
-  still leave a complete record — which is when a trace matters most.
+  the completed-record model. A cooperative interruption can still run the finalizer and write
+  the record. Process loss can prevent that write; the earlier claim that every interrupted Phase
+  leaves a complete record was too strong.
 
 ## Consequences
 
@@ -29,3 +30,12 @@ nothing is reassembled by a join.
 - Occurrences stay the right home for live tool calls, because §9 already sanctions them for genuine
   repetition inside a phase. They are shown only in the phase detail, never on the waterfall, so the
   waterfall stays phase-grained.
+
+## Daemon recovery boundary
+
+The in-flight field remains a mutable Trace projection. It can be stale after process loss and
+cannot establish that a Phase is still executing, completed, or safe to repeat. Under
+[Define Daemon context and port boundaries](https://github.com/carere/kojo/issues/62), authoritative
+Run state and recovery evidence belong to `workflow`; Resource leases belong to `project`.
+The Console must use those owners' status when execution is uncertain. This qualifies the record's
+failure guarantees without changing the Waterfall decision or claiming recovery is implemented.

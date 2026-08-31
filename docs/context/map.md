@@ -1,18 +1,24 @@
 # Context Map
 
-Kojo uses the multi-context layout. The context slugs are the bounded contexts of
-`src/contexts/<bounded-context>/`, listed in
-[docs/design/typescript-effect.md §2](../design/typescript-effect.md).
+Kojo uses the multi-context layout. The context slugs name the bounded contexts of
+`src/contexts/<bounded-context>/`. This map includes the accepted Daemon design; the existing code
+and [earlier package layout](../design/typescript-effect.md) do not yet implement all these boundaries.
 
 ## Contexts
 
-- [**project**](./project.md): which repository paths this host has registered with Kojo
-- [**workflow**](./workflow.md): the authored factory, its workflows, and the contract between phases
+- [**daemon**](./daemon.md): the per-user service, managed releases, lifecycle operations, and
+  durable client operation receipts
+- [**project**](./project.md): the Project catalogue and location lifecycle, Project Runner
+  supervision, Resource leases, and Project recovery
+- [**workflow**](./workflow.md): the Factory, Workflow Revisions and their retention, Phase
+  contracts, Run admission and scheduling, Run Claims, correctness state, wake-ups, Run recovery,
+  and cancellation
 - **agent**: who the agents are, and one agent call — not yet written
 - **sandbox**: the isolation boundary and the working copy — not yet written
-- [**gate**](./gate.md): how a human is asked, and how the answer gets back
+- [**gate**](./gate.md): Askings, Verdicts, Deadlines, and Recorded and Applied states
 - [**trigger**](./trigger.md): what requests automatic Runs, and how a user controls those requests
-- [**trace**](./trace.md): what a run recorded, and how a human reads it
+- [**trace**](./trace.md): observability records and their read models, plus Artifact metadata,
+  content access, and retention separate from Trace-record retention
 
 Until a context file exists, the vocabulary table in
 [docs/design/architecture.md §6](../design/architecture.md) is authoritative for that context.
@@ -20,8 +26,17 @@ Until a context file exists, the vocabulary table in
 `shared` is a code bucket for elements used by several contexts. It is not a bounded context, so
 it has no context file and no ADR directory.
 
+For the accepted package and transaction boundaries, see
+[Domain ownership survives Daemon replacement](../adr/root/0001-daemon-context-and-package-boundaries.md).
+
 ## Relationships
 
+- **daemon -> project and workflow**: lifecycle operations coordinate Daemon drain and replacement.
+  The Daemon retains state ownership and Project Runner supervision; the lifecycle controller
+  does not acquire either authority while the endpoint is absent.
+- **daemon -> domain operations**: durable client operation receipts retain accepted outcomes.
+  The context that owns an operation retains its domain rules; receipt ownership does not move
+  those rules into daemon.
 - **project -> workflow**: a Project locates the repository whose Factory declares the Workflows
   that Kojo can discover and run. Project ID plus Workflow name identifies one Project Workflow.
 - **project -> workflow execution**: the Daemon supplies a Project Runner on demand for one Project;
@@ -31,8 +46,8 @@ it has no context file and no ADR directory.
 - **trigger -> workflow**: a Trigger supplies Run requests for one Project Workflow. Project
   automation and the Workflow's trigger state control new automatic execution, including queued
   trigger-created Runs that have not started, but not manual Runs or existing Run continuations.
-- **workflow -> trace**: every phase the workflow runs writes one phase record. The workflow owns
-  what a phase *is*; the trace owns what a phase *recorded*.
+- **workflow -> trace**: Phase execution supplies Phase records. Workflow owns execution truth;
+  Trace owns its observations, which can be incomplete after process loss.
 - **workflow -> agent**: the Workflow author selects the agents and agent invoker, supplies the
   associated accounts and credentials, and owns spending control. Kojo executes the authored
   agent calls without a separate spend-authorization contract.
@@ -51,3 +66,6 @@ it has no context file and no ADR directory.
 - **sandbox and agent -> project**: execution resources have Daemon-owned Resource leases that
   survive Project Runner replacement. Trace records do not establish resource ownership or
   confirmed release.
+- **trace -> workflow and project**: Artifact retention is separate from Trace-record retention.
+  Workflow Revision content, execution correctness, uncertain-action evidence, and Resource leases
+  remain with their owners; an Artifact reference alone does not establish a safe execution outcome.

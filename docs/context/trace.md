@@ -1,8 +1,7 @@
 # Trace
 
-What a run recorded, and how a human reads it. The trace is observability, not correctness: if you
-lose it, you lose nothing you cannot rebuild. It holds one wide record per unit of work, and the
-Console is the surface a human reads those records through.
+What a Run recorded, and how a human reads it. Trace is observability, not execution correctness;
+lost observations need not be recoverable, and their absence does not establish an execution outcome.
 
 ## Language
 
@@ -19,8 +18,8 @@ config digest, host, image digest — and it is updated in place as the run's st
 _Avoid_: session, adw
 
 **Phase record**:
-Everything known about one phase, written once, on exit, on every path. It is the canonical wide
-record of the trace. Anything a phase did that is not on its record is not answerable.
+One wide record of the observations of a Phase attempt, written once on exit. Process loss can
+prevent that write; a missing record does not establish the Phase's outcome.
 _Avoid_: phase event, span row
 
 **Gate record**:
@@ -39,16 +38,15 @@ its phase record lacks, and no question may need one to answer it.
 _Avoid_: event, log line
 
 **In-flight phase**:
-The phase a run is executing right now, held on the run record and updated in place. It is not a
-phase record. It is the run's current status, and the phase record replaces it on exit. See
+The latest observation of a Run's executing Phase, separate from its completed Phase records.
+It can be stale after process loss and does not establish execution authority. See
 [docs/adr/trace/0002-in-flight-phase-lives-on-the-run-row.md](../adr/trace/0002-in-flight-phase-lives-on-the-run-row.md).
 _Avoid_: phase start, running phase event
 
 **Artifact**:
-A file a phase produced or consumed that is too large for the trace — the rendered prompt, the
-captured agent session, the diff. The trace records that it exists; the artifact is read from disk
-or from git on demand.
-_Avoid_: attachment, blob, payload
+A file retained for a Run, such as a rendered prompt, captured agent session, or diff. Its retention
+is separate from Trace records, and its presence alone does not establish execution or cleanup.
+_Avoid_: attachment, blob, payload, Factory asset, Workflow Revision
 
 ### The Console
 

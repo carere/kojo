@@ -7,8 +7,8 @@ processes on different days.
 ## Language
 
 **Gate**:
-A human decision point that suspends the run. The run stops, releases everything it holds, and
-continues when an answer arrives.
+A human decision point that suspends a Run until a valid answer or its declared expiry branch
+permits continuation. Suspension does not itself establish that resource cleanup is complete.
 _Avoid_: checkpoint, approval step, validator. In SSSF a "gate" validates an envelope; in Kojo that
 is a **check**, which the workflow context owns.
 
