@@ -28,6 +28,21 @@ A planned hold on further Run dispatch across all Projects while executing Runs 
 or completion before a Daemon lifecycle operation. It is separate from an automation pause.
 _Avoid_: automation pause, Run cancellation, Gate suspension
 
+**Managed Daemon release**:
+An immutable installation of exact Kojo and Bun versions retained independently of the global CLI
+installation. One release is active; other retained releases can support activation or recovery.
+_Avoid_: global Kojo, Project execution package, Workflow Revision
+
+**Daemon lifecycle operation**:
+A durable request to change the Daemon's service or active managed release. Its identity and
+outcome survive the requesting client and the replacement of a Daemon instance.
+_Avoid_: Run, client connection, Daemon drain
+
+**Daemon lifecycle controller**:
+The exclusive owner of a Daemon lifecycle operation across Daemon instance replacement. Its
+authority covers service and installation transitions, not Run execution or Daemon database access.
+_Avoid_: Daemon, Project Runner, native service manager
+
 **Project**:
 A durable registration that identifies one repository location for the current OS user on one
 Host. Its factory can be available, missing, or invalid; the Project is not the factory itself.
