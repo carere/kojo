@@ -1,9 +1,11 @@
+import { Effect } from "effect";
 import {
   installManagedRelease,
   type ManagedInstallationOptions,
 } from "../adapters/ManagedInstallation.ts";
 import type { DaemonPaths } from "../models/DaemonPaths.ts";
 import type { DaemonStatus } from "../models/DaemonStatus.ts";
+import { LifecycleError } from "../models/LifecycleError.ts";
 import type { NativeService } from "../ports/NativeService.ts";
 import { inspectDaemon } from "./daemonStatus.ts";
 
@@ -13,9 +15,18 @@ export interface DaemonLifecycle {
   readonly stop: () => Promise<DaemonStatus>;
   readonly enable: () => Promise<DaemonStatus>;
   readonly disable: (stopNow: boolean) => Promise<DaemonStatus>;
-  readonly keepRunningAfterLogout: () => Promise<DaemonStatus>;
+  readonly keepRunningAfterLogout: Effect.Effect<DaemonStatus, LifecycleError>;
   readonly status: () => Promise<DaemonStatus>;
 }
+
+const lifecycleError = (cause: unknown): LifecycleError =>
+  cause instanceof LifecycleError
+    ? cause
+    : new LifecycleError(
+        "LIFECYCLE_FAILED",
+        cause instanceof Error ? cause.message : String(cause),
+        cause,
+      );
 
 export const manageDaemon = (
   paths: DaemonPaths,
@@ -50,10 +61,17 @@ export const manageDaemon = (
       nativeService.disable(stopNow);
       return status();
     },
-    keepRunningAfterLogout: async () => {
-      nativeService.keepRunningAfterLogout();
-      return status();
-    },
+    keepRunningAfterLogout: Effect.try({
+      try: () => nativeService.keepRunningAfterLogout(),
+      catch: lifecycleError,
+    }).pipe(
+      Effect.flatMap(() =>
+        Effect.tryPromise({
+          try: status,
+          catch: lifecycleError,
+        }),
+      ),
+    ),
     status,
   };
 };
