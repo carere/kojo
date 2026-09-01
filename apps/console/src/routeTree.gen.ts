@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root.tsx'
 import { Route as IndexRouteImport } from './routes/index.tsx'
 import { Route as DaemonRouteImport } from './routes/daemon.tsx'
 import { Route as GatesRouteImport } from './routes/gates.tsx'
+import { Route as RunsRouteImport } from './routes/runs.tsx'
 import { Route as RunsRunIdRouteImport } from './routes/runs.$runId.tsx'
 import { Route as RunsRunIdGatesGateAskingRouteImport } from './routes/runs.$runId.gates.$gate.$asking.tsx'
 import { Route as RunsRunIdPhasesNameAttemptRouteImport } from './routes/runs.$runId.phases.$name.$attempt.tsx'
@@ -32,10 +33,15 @@ const GatesRoute = GatesRouteImport.update({
   path: '/gates',
   getParentRoute: () => rootRouteImport,
 } as any)
-const RunsRunIdRoute = RunsRunIdRouteImport.update({
-  id: '/runs/$runId',
-  path: '/runs/$runId',
+const RunsRoute = RunsRouteImport.update({
+  id: '/runs',
+  path: '/runs',
   getParentRoute: () => rootRouteImport,
+} as any)
+const RunsRunIdRoute = RunsRunIdRouteImport.update({
+  id: '/$runId',
+  path: '/$runId',
+  getParentRoute: () => RunsRoute,
 } as any)
 const RunsRunIdGatesGateAskingRoute =
   RunsRunIdGatesGateAskingRouteImport.update({
@@ -60,6 +66,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/daemon': typeof DaemonRoute
   '/gates': typeof GatesRoute
+  '/runs': typeof RunsRouteWithChildren
   '/runs/$runId': typeof RunsRunIdRouteWithChildren
   '/runs/$runId/gates/$gate/$asking': typeof RunsRunIdGatesGateAskingRoute
   '/runs/$runId/phases/$name/$attempt': typeof RunsRunIdPhasesNameAttemptRoute
@@ -69,6 +76,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/daemon': typeof DaemonRoute
   '/gates': typeof GatesRoute
+  '/runs': typeof RunsRouteWithChildren
   '/runs/$runId': typeof RunsRunIdRouteWithChildren
   '/runs/$runId/gates/$gate/$asking': typeof RunsRunIdGatesGateAskingRoute
   '/runs/$runId/phases/$name/$attempt': typeof RunsRunIdPhasesNameAttemptRoute
@@ -79,6 +87,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/daemon': typeof DaemonRoute
   '/gates': typeof GatesRoute
+  '/runs': typeof RunsRouteWithChildren
   '/runs/$runId': typeof RunsRunIdRouteWithChildren
   '/runs/$runId/gates/$gate/$asking': typeof RunsRunIdGatesGateAskingRoute
   '/runs/$runId/phases/$name/$attempt': typeof RunsRunIdPhasesNameAttemptRoute
@@ -90,6 +99,7 @@ export interface FileRouteTypes {
     | '/'
     | '/daemon'
     | '/gates'
+    | '/runs'
     | '/runs/$runId'
     | '/runs/$runId/gates/$gate/$asking'
     | '/runs/$runId/phases/$name/$attempt'
@@ -99,6 +109,7 @@ export interface FileRouteTypes {
     | '/'
     | '/daemon'
     | '/gates'
+    | '/runs'
     | '/runs/$runId'
     | '/runs/$runId/gates/$gate/$asking'
     | '/runs/$runId/phases/$name/$attempt'
@@ -108,6 +119,7 @@ export interface FileRouteTypes {
     | '/'
     | '/daemon'
     | '/gates'
+    | '/runs'
     | '/runs/$runId'
     | '/runs/$runId/gates/$gate/$asking'
     | '/runs/$runId/phases/$name/$attempt'
@@ -118,7 +130,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   DaemonRoute: typeof DaemonRoute
   GatesRoute: typeof GatesRoute
-  RunsRunIdRoute: typeof RunsRunIdRouteWithChildren
+  RunsRoute: typeof RunsRouteWithChildren
 }
 
 declare module '@tanstack/solid-router' {
@@ -144,12 +156,19 @@ declare module '@tanstack/solid-router' {
       preLoaderRoute: typeof GatesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/runs': {
+      id: '/runs'
+      path: '/runs'
+      fullPath: '/runs'
+      preLoaderRoute: typeof RunsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/runs/$runId': {
       id: '/runs/$runId'
-      path: '/runs/$runId'
+      path: '/$runId'
       fullPath: '/runs/$runId'
       preLoaderRoute: typeof RunsRunIdRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof RunsRoute
     }
     '/runs/$runId/gates/$gate/$asking': {
       id: '/runs/$runId/gates/$gate/$asking'
@@ -192,11 +211,21 @@ const RunsRunIdRouteWithChildren = RunsRunIdRoute._addFileChildren(
   RunsRunIdRouteChildren,
 )
 
+interface RunsRouteChildren {
+  RunsRunIdRoute: typeof RunsRunIdRouteWithChildren
+}
+
+const RunsRouteChildren: RunsRouteChildren = {
+  RunsRunIdRoute: RunsRunIdRouteWithChildren,
+}
+
+const RunsRouteWithChildren = RunsRoute._addFileChildren(RunsRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   DaemonRoute: DaemonRoute,
   GatesRoute: GatesRoute,
-  RunsRunIdRoute: RunsRunIdRouteWithChildren,
+  RunsRoute: RunsRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

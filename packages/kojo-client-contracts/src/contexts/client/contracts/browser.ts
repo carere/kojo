@@ -20,5 +20,5 @@ export interface DaemonDocument {
   readonly architecture: string;
   readonly startedAt: string;
   readonly accessExpiresAt: string;
-  readonly projectCount: 0;
+  readonly projectCount: number;
 }

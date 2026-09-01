@@ -4,6 +4,7 @@ import type {
   BrowserSessionResponse,
   DaemonDocument,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/browser";
+import type { ProjectSnapshot } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
 
 interface StoredSession {
   readonly credential: string;
@@ -115,9 +116,9 @@ const currentAccess = (): Promise<StoredSession> => {
   return access;
 };
 
-export const readDaemon = async (): Promise<DaemonDocument> => {
+const authorizedRead = async <A>(path: string): Promise<A> => {
   const session = await currentAccess();
-  const response = await fetch("/api/v1/daemon", {
+  const response = await fetch(path, {
     headers: {
       accept: "application/json",
       authorization: `Bearer ${session.credential}`,
@@ -130,5 +131,11 @@ export const readDaemon = async (): Promise<DaemonDocument> => {
     throw new ConsoleAccessError("access-required", "Run `kojo ui` again to open this Console.");
   }
   if (!response.ok) throw new ConsoleAccessError("api-refused", "The Daemon API refused the read.");
-  return (await response.json()) as DaemonDocument;
+  return (await response.json()) as A;
 };
+
+export const readDaemon = (): Promise<DaemonDocument> =>
+  authorizedRead<DaemonDocument>("/api/v1/daemon");
+
+export const readProjects = (): Promise<ProjectSnapshot> =>
+  authorizedRead<ProjectSnapshot>("/api/v1/projects");

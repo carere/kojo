@@ -1,28 +1,7 @@
-import { Link } from "@tanstack/solid-router";
 import { type JSX, Match, Switch } from "solid-js";
+import { ConsoleNavigation } from "../../shared/components/ConsoleNavigation.tsx";
 import { useDaemon } from "../hooks/useDaemon.ts";
 import { ConsoleAccessError } from "../services/browserAccess.ts";
-
-const Navigation = (): JSX.Element => (
-  <nav aria-label="Console" class="flex flex-wrap gap-2 lg:flex-col">
-    <Link class="rounded-md px-3 py-2 text-sm hover:bg-muted" to="/">
-      Projects
-    </Link>
-    <Link class="rounded-md px-3 py-2 text-sm hover:bg-muted" to="/">
-      Runs
-    </Link>
-    <Link class="rounded-md px-3 py-2 text-sm hover:bg-muted" to="/gates">
-      Gate
-    </Link>
-    <Link
-      aria-current="page"
-      class="rounded-md bg-foreground px-3 py-2 text-sm text-background"
-      to="/daemon"
-    >
-      Daemon
-    </Link>
-  </nav>
-);
 
 const Detail = (props: { readonly name: string; readonly value: string }): JSX.Element => (
   <div class="border-border border-b py-3 last:border-0">
@@ -35,10 +14,7 @@ export const DaemonConsole = (): JSX.Element => {
   const daemon = useDaemon();
   return (
     <div class="mx-auto grid min-h-screen max-w-6xl gap-8 p-4 lg:grid-cols-[13rem_1fr] lg:p-8">
-      <aside class="border-border border-b pb-4 lg:border-r lg:border-b-0 lg:pr-6">
-        <p class="mb-4 font-semibold text-lg">Kojo Console</p>
-        <Navigation />
-      </aside>
+      <ConsoleNavigation current="Daemon" />
       <main>
         <header class="mb-8 flex flex-wrap items-start justify-between gap-4">
           <div>

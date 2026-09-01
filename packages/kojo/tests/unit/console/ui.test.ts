@@ -62,7 +62,8 @@ describe("the ui command", () => {
       expect(Result.isFailure(mine)).toBe(true);
       // The complaint is about the port rather than about the command, which is what says the
       // command was found and its own flags were parsed.
-      expect(complaintsOf(mine)).not.toContain("ui");
+      expect(complaintsOf(mine)).toContain("port");
+      expect(complaintsOf(mine)).not.toContain("Unrecognized command");
     }),
   );
 
