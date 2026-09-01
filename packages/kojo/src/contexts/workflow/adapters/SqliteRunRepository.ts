@@ -988,6 +988,80 @@ export class SqliteRunRepository {
       catch: failure,
     });
 
+  /** Fence one lost Project Runner and return its same Run to continuation scheduling. */
+  readonly recoverProjectRunnerFailure = (
+    authority: RunAuthority,
+    queuedAt: string,
+    detail: string,
+  ): Effect.Effect<void, RunStoreError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            this.#assertAuthority(authority);
+            const run = this.#runRow(authority.runId);
+            this.#database.run("DELETE FROM workflow_slots WHERE run_id = ?", [authority.runId]);
+            this.#database.run("UPDATE workflow_runs SET state = 'queued' WHERE run_id = ?", [
+              authority.runId,
+            ]);
+            this.#database.run(
+              `INSERT INTO workflow_queue (
+                 run_id, project_id, admission_sequence, queued_at, queue_kind, queue_reason
+               ) VALUES (?, ?, ?, ?, 'continuation', 'runner-starting')
+               ON CONFLICT(run_id) DO UPDATE SET queued_at = excluded.queued_at,
+                 queue_kind = 'continuation', queue_reason = 'runner-starting'`,
+              [authority.runId, run.project_id, run.admission_sequence, queuedAt],
+            );
+            this.#database.run(
+              `INSERT INTO workflow_run_recovery (run_id, state, interrupted_at, detail)
+               VALUES (?, 'interrupted-sibling', ?, ?)
+               ON CONFLICT(run_id) DO UPDATE SET interrupted_at = excluded.interrupted_at,
+                 detail = excluded.detail`,
+              [authority.runId, queuedAt, detail],
+            );
+          })
+          .immediate(),
+      catch: failure,
+    });
+
+  /** Release only Project-recovery holds. Workflow activity and other Run faults do not change. */
+  readonly repairProjectRecoveryHolds = (
+    projectId: string,
+    queuedAt: string,
+  ): Effect.Effect<number, RunStoreError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            const held = this.#database
+              .query<{ readonly run_id: string; readonly admission_sequence: number }, [string]>(
+                `SELECT r.run_id, r.admission_sequence
+                   FROM workflow_runs r
+                   JOIN workflow_run_holds h ON h.run_id = r.run_id
+                  WHERE r.project_id = ? AND h.code = 'PROJECT_RECOVERY_REQUIRED'
+                  ORDER BY r.admission_sequence`,
+              )
+              .all(projectId);
+            for (const run of held) {
+              this.#database.run("DELETE FROM workflow_run_holds WHERE run_id = ?", [run.run_id]);
+              this.#database.run("UPDATE workflow_runs SET state = 'queued' WHERE run_id = ?", [
+                run.run_id,
+              ]);
+              this.#database.run(
+                `INSERT INTO workflow_queue (
+                   run_id, project_id, admission_sequence, queued_at, queue_kind, queue_reason
+                 ) VALUES (?, ?, ?, ?, 'continuation', 'runner-starting')
+                 ON CONFLICT(run_id) DO UPDATE SET queued_at = excluded.queued_at,
+                   queue_kind = 'continuation', queue_reason = 'runner-starting'`,
+                [run.run_id, projectId, run.admission_sequence, queuedAt],
+              );
+            }
+            return held.length;
+          })
+          .immediate(),
+      catch: failure,
+    });
+
   readonly readResult = (
     authority: RunAuthority,
     phasePath: string,

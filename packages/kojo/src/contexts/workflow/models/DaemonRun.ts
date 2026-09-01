@@ -23,7 +23,8 @@ export interface RunExecutionFault {
     | "RETAINED_HOST_INCOMPATIBLE"
     | "RETAINED_BUN_INCOMPATIBLE"
     | "RETAINED_EFFECT_INCOMPATIBLE"
-    | "RETAINED_PROTOCOL_INCOMPATIBLE";
+    | "RETAINED_PROTOCOL_INCOMPATIBLE"
+    | "PROJECT_RECOVERY_REQUIRED";
   readonly detail: string;
   readonly remedy: string;
   readonly retry?: "after-repair" | "after-compatible-release";

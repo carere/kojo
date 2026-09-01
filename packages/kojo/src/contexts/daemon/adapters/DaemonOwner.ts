@@ -27,6 +27,7 @@ import {
 import { Cause, Effect, Option } from "effect";
 import { SqliteDaemonGateRepository } from "../../gate/adapters/SqliteDaemonGateRepository.ts";
 import { GateApi } from "../../gate/services/GateApi.ts";
+import { SqliteProjectRecoveryRepository } from "../../project/adapters/SqliteProjectRecoveryRepository.ts";
 import { SqliteProjectRepository } from "../../project/adapters/SqliteProjectRepository.ts";
 import { ProjectApi } from "../../project/services/ProjectApi.ts";
 import { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRepository.ts";
@@ -239,6 +240,7 @@ export const startDaemon = (
     const instanceId = crypto.randomUUID();
     const authority = browserAuthority({ now });
     const projectRepository = new SqliteProjectRepository(database);
+    const projectRecoveryRepository = new SqliteProjectRecoveryRepository(database);
     const runRepository = new SqliteRunRepository(database);
     const revisionRepository = new SqliteRevisionRepository(database, paths.dataRoot);
     const triggerRepository = new SqliteTriggerRepository(database);
@@ -257,6 +259,7 @@ export const startDaemon = (
       dataRoot: paths.dataRoot,
       now,
       projects: projectRepository,
+      projectRecovery: projectRecoveryRepository,
       runs: runRepository,
       revisions: revisionRepository,
       triggers: triggerRepository,
@@ -526,6 +529,23 @@ export const startDaemon = (
         );
       }
     };
+    const repairProjectRunner = async (projectId: string): Promise<Response> => {
+      const project = (await Effect.runPromise(projectRepository.projects)).find(
+        (candidate) => candidate.projectId === projectId,
+      );
+      if (project === undefined) {
+        return problem(404, "project-not-found", "the selected Project was not found");
+      }
+      try {
+        return noStoreJson(await Effect.runPromise(runApi.repairProject(projectId)), 202);
+      } catch (cause) {
+        return problem(
+          409,
+          "project-repair-refused",
+          cause instanceof Error ? cause.message : "Project repair was refused",
+        );
+      }
+    };
     let refreshCoordinatorStopped = false;
     const refreshFingerprints = new Map<string, string>();
     const projectRefreshes = new Map<string, Promise<void>>();
@@ -768,6 +788,12 @@ export const startDaemon = (
           if (request.method === "POST" && cancelOneRun !== null) {
             return cancelRun(request, cancelOneRun[1] ?? "invalid");
           }
+          const repairOneProject = url.pathname.match(
+            /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/actions\/repair$/,
+          );
+          if (request.method === "POST" && repairOneProject !== null) {
+            return repairProjectRunner(repairOneProject[1] ?? "invalid");
+          }
           const projectAskings = url.pathname.match(
             /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/askings$/,
           );
@@ -886,6 +912,13 @@ export const startDaemon = (
         if (request.method === "POST" && cancelOneRun !== null) {
           if (!isJson(request)) return problem(415, "json-required", "Cancel requires JSON");
           return cancelRun(request, cancelOneRun[1] ?? "invalid");
+        }
+        const repairOneProject = url.pathname.match(
+          /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/actions\/repair$/,
+        );
+        if (request.method === "POST" && repairOneProject !== null) {
+          if (!isJson(request)) return problem(415, "json-required", "Repair requires JSON");
+          return repairProjectRunner(repairOneProject[1] ?? "invalid");
         }
         const projectAskings = url.pathname.match(
           /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/askings$/,

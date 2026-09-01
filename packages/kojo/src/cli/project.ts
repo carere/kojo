@@ -218,15 +218,36 @@ const repair = Command.make(
   "repair",
   {
     project: projectArgument,
-    revision: revisionFlag,
+    revision: revisionFlag.pipe(Flag.optional),
     from: Flag.directory("from", { mustExist: true }).pipe(
       Flag.withDescription("A directory containing one verified exact-content copy"),
+      Flag.optional,
     ),
   },
   Effect.fn(function* ({ project, revision, from }) {
+    if (Option.isNone(revision) && Option.isNone(from)) {
+      const recovery = yield* daemonRequest<{
+        readonly state: "healthy" | "recovering" | "held";
+        readonly cycle: number;
+        readonly attempts: number;
+        readonly safety: "safe" | "pending" | "uncertain";
+      }>(`/api/v1/projects/${encodeURIComponent(project)}/actions/repair`, {
+        method: "POST",
+        body: {},
+      }).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
+      yield* Console.log(
+        recovery.state === "healthy"
+          ? `Project ${project} needs no recovery.`
+          : `Project ${project} recovery cycle ${recovery.cycle} started with ${recovery.attempts} attempts used; safety is ${recovery.safety}.`,
+      );
+      return;
+    }
+    if (Option.isNone(revision) || Option.isNone(from)) {
+      return yield* commandFailed("exact-content repair requires both --revision and --from");
+    }
     const document = yield* daemonRequest<RevisionDetails>(
-      `/api/v1/projects/${encodeURIComponent(project)}/revisions/${encodeURIComponent(revision)}/actions/repair`,
-      { method: "POST", body: { from } },
+      `/api/v1/projects/${encodeURIComponent(project)}/revisions/${encodeURIComponent(revision.value)}/actions/repair`,
+      { method: "POST", body: { from: from.value } },
     ).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
     yield* Console.log(`Repaired exact Workflow Revision ${document.revisionId}.`);
     yield* Console.log(

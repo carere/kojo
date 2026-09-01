@@ -36,6 +36,7 @@ const channelError = (cause: unknown): RunnerChannelError =>
 /** Read bounded length-prefixed Runner frames without losing coalesced socket bytes. */
 class SocketFrameReader {
   #buffer: Uint8Array<ArrayBufferLike> = new Uint8Array();
+  #failure: Error | undefined;
   #waiting:
     | {
         readonly resolve: (frame: RunnerFrame) => void;
@@ -43,7 +44,7 @@ class SocketFrameReader {
       }
     | undefined;
 
-  constructor(socket: Socket) {
+  constructor(private readonly socket: Socket) {
     socket.on("data", (chunk: Buffer) => {
       this.#buffer = concat(this.#buffer, chunk);
       this.#drain();
@@ -53,6 +54,7 @@ class SocketFrameReader {
   }
 
   read(): Promise<RunnerFrame> {
+    if (this.#failure !== undefined) return Promise.reject(this.#failure);
     if (this.#waiting !== undefined)
       return Promise.reject(new Error("only one Runner frame read can be pending"));
     return new Promise((resolve, reject) => {
@@ -83,9 +85,12 @@ class SocketFrameReader {
   }
 
   #fail(cause: Error): void {
+    if (this.#failure !== undefined) return;
+    this.#failure = cause;
     const waiting = this.#waiting;
     this.#waiting = undefined;
     waiting?.reject(cause);
+    this.socket.destroy();
   }
 }
 
@@ -103,17 +108,133 @@ export const makeRunnerFrameReader = (socket: Socket): RunnerFrameReader => {
   };
 };
 
+const writeRawRunnerFrame = (
+  socket: Socket,
+  encoded: Uint8Array,
+): Effect.Effect<void, RunnerChannelError> => {
+  return Effect.tryPromise({
+    try: () =>
+      new Promise<void>((resolve, reject) => {
+        socket.write(encoded, (cause) => (cause == null ? resolve() : reject(cause)));
+      }),
+    catch: channelError,
+  });
+};
+
+export const MAX_ORDINARY_REQUESTS = 64;
+export const MAX_ORDINARY_BUFFER_BYTES = 8 * 1024 * 1024;
+export const MAX_CRITICAL_REQUESTS = 8;
+export const MAX_CRITICAL_BUFFER_BYTES = 1024 * 1024;
+
+const critical = (frame: RunnerFrame): boolean =>
+  frame.kind === "Health" ||
+  frame.kind === "CancelRun" ||
+  frame.kind === "Shutdown" ||
+  frame.kind === "Stopped";
+
+class CapacityPool {
+  #requests = 0;
+  #bytes = 0;
+  #failure: Error | undefined;
+  readonly #waiters: Array<{
+    readonly bytes: number;
+    readonly resolve: () => void;
+    readonly reject: (cause: Error) => void;
+  }> = [];
+
+  constructor(
+    private readonly requestLimit: number,
+    private readonly byteLimit: number,
+  ) {}
+
+  async acquire(bytes: number): Promise<void> {
+    if (this.#failure !== undefined) throw this.#failure;
+    if (bytes > this.byteLimit)
+      throw new Error("the Runner frame exceeds its channel buffer class");
+    if (this.#waiters.length === 0 && this.#available(bytes)) {
+      this.#requests += 1;
+      this.#bytes += bytes;
+      return;
+    }
+    await new Promise<void>((resolve, reject) => this.#waiters.push({ bytes, resolve, reject }));
+  }
+
+  release(bytes: number): void {
+    this.#requests -= 1;
+    this.#bytes -= bytes;
+    this.#drain();
+  }
+
+  fail(cause: Error): void {
+    if (this.#failure !== undefined) return;
+    this.#failure = cause;
+    for (const waiter of this.#waiters.splice(0)) waiter.reject(cause);
+  }
+
+  #available(bytes: number): boolean {
+    return this.#requests < this.requestLimit && this.#bytes + bytes <= this.byteLimit;
+  }
+
+  #drain(): void {
+    while (this.#waiters.length > 0) {
+      const waiter = this.#waiters[0];
+      if (waiter === undefined || !this.#available(waiter.bytes)) return;
+      this.#waiters.shift();
+      this.#requests += 1;
+      this.#bytes += waiter.bytes;
+      waiter.resolve();
+    }
+  }
+}
+
+export interface RunnerFrameWriter {
+  readonly write: (frame: RunnerFrame) => Effect.Effect<void, RunnerChannelError>;
+}
+
+const writers = new WeakMap<Socket, RunnerFrameWriter>();
+
 export const writeRunnerFrame = (
   socket: Socket,
   frame: RunnerFrame,
 ): Effect.Effect<void, RunnerChannelError> => {
-  const encoded = encodeLengthPrefixedFrame(frame);
-  if (!encoded.ok) return Effect.fail(channelError(new Error(failureText(encoded.issues))));
-  return Effect.tryPromise({
-    try: () =>
-      new Promise<void>((resolve, reject) => {
-        socket.write(encoded.value, (cause) => (cause == null ? resolve() : reject(cause)));
-      }),
-    catch: channelError,
-  });
+  let writer = writers.get(socket);
+  if (writer === undefined) {
+    writer = makeRunnerFrameWriter(socket);
+    writers.set(socket, writer);
+  }
+  return writer.write(frame);
+};
+
+/**
+ * Apply backpressure to ordinary traffic without taking capacity from health, cancellation, and
+ * shutdown. Capacity is released only after the socket accepts the complete frame.
+ */
+export const makeRunnerFrameWriter = (socket: Socket): RunnerFrameWriter => {
+  const ordinary = new CapacityPool(MAX_ORDINARY_REQUESTS, MAX_ORDINARY_BUFFER_BYTES);
+  const control = new CapacityPool(MAX_CRITICAL_REQUESTS, MAX_CRITICAL_BUFFER_BYTES);
+  const fail = (cause: Error): void => {
+    ordinary.fail(cause);
+    control.fail(cause);
+  };
+  socket.once("error", fail);
+  socket.once("close", () => fail(new Error("the private Runner channel closed")));
+  return {
+    write: (frame) => {
+      const encoded = encodeLengthPrefixedFrame(frame);
+      if (!encoded.ok) return Effect.fail(channelError(new Error(failureText(encoded.issues))));
+      const pool = critical(frame) ? control : ordinary;
+      const payloadBytes = encoded.value.byteLength - 4;
+      return Effect.tryPromise({
+        try: async () => {
+          await pool.acquire(payloadBytes);
+          try {
+            await Effect.runPromise(writeRawRunnerFrame(socket, encoded.value));
+          } finally {
+            pool.release(payloadBytes);
+          }
+        },
+        catch: channelError,
+      });
+    },
+  };
 };
