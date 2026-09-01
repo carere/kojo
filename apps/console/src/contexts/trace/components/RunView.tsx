@@ -229,6 +229,21 @@ export const RunView = (props: {
                * the durable state of a run.
                */}
               <div class="flex flex-wrap items-baseline gap-x-5 gap-y-1" data-run-stamp>
+                <Show when={document().daemon}>
+                  {(daemon) => (
+                    <>
+                      <Stamp name="project" label="Project">
+                        {daemon().projectId}
+                      </Stamp>
+                      <Stamp name="revision" label="Pinned revision">
+                        {daemon().revisionId}
+                      </Stamp>
+                      <Stamp name="execution" label="Execution">
+                        {daemon().queueReason ?? daemon().state}
+                      </Stamp>
+                    </>
+                  )}
+                </Show>
                 <Stamp name="engine" label="engine">
                   {document().run.run.engineVersion}
                 </Stamp>

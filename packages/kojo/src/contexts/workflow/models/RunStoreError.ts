@@ -1,0 +1,13 @@
+import { Data } from "effect";
+
+export class RunStoreError extends Data.TaggedError("RunStoreError")<{
+  readonly code:
+    | "DEDUP_COLLISION"
+    | "REQUEST_CONFLICT"
+    | "RUN_NOT_FOUND"
+    | "RUN_NOT_ELIGIBLE"
+    | "STALE_AUTHORITY"
+    | "STORE_FAILED";
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}

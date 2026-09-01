@@ -22,6 +22,7 @@
     "./contexts/project/codecs/frame": "./src/contexts/project/codecs/frame.ts",
     "./contexts/project/codecs/framing": "./src/contexts/project/codecs/framing.ts",
     "./contexts/project/contracts/artifact": "./src/contexts/project/contracts/artifact.ts",
+    "./contexts/project/contracts/execution": "./src/contexts/project/contracts/execution.ts",
     "./contexts/project/contracts/frame": "./src/contexts/project/contracts/frame.ts",
     "./contexts/project/contracts/handshake": "./src/contexts/project/contracts/handshake.ts",
     "./contexts/project/contracts/operations": "./src/contexts/project/contracts/operations.ts",

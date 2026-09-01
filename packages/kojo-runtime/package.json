@@ -119,6 +119,8 @@
     "./contexts/workflow/models/RunClaim": "./src/contexts/workflow/models/RunClaim.ts",
     "./contexts/workflow/models/RunFailure": "./src/contexts/workflow/models/RunFailure.ts",
     "./contexts/workflow/models/RunLocked": "./src/contexts/workflow/models/RunLocked.ts",
+    "./contexts/workflow/adapters/DaemonWorkflowEngine": "./src/contexts/workflow/adapters/DaemonWorkflowEngine.ts",
+    "./contexts/workflow/ports/DaemonExecutionRepository": "./src/contexts/workflow/ports/DaemonExecutionRepository.ts",
     "./contexts/workflow/ports/RunLock": "./src/contexts/workflow/ports/RunLock.ts",
     "./contexts/workflow/services/CurrentRun": "./src/contexts/workflow/services/CurrentRun.ts",
     "./contexts/workflow/services/acceptance": "./src/contexts/workflow/services/acceptance.ts",

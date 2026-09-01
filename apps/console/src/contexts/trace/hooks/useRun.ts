@@ -1,4 +1,5 @@
 import { type UseQueryResult, useQuery } from "@tanstack/solid-query";
+import { readRun } from "../../daemon/services/browserAccess.ts";
 import { fetchJson, refused } from "../../shared/services/api.ts";
 import { pollMillis } from "../../shared/services/queryClient.ts";
 import type { RunDoc } from "../models/RunDoc.ts";
@@ -25,7 +26,47 @@ import type { RunDoc } from "../models/RunDoc.ts";
 export const useRun = (runId: () => string): UseQueryResult<RunDoc, Error> =>
   useQuery(() => ({
     queryKey: ["run", runId()],
-    queryFn: () => fetchJson<RunDoc>(`/api/runs/${encodeURIComponent(runId())}`),
+    queryFn: async () => {
+      try {
+        const run = await readRun(runId());
+        return {
+          daemon: {
+            projectId: run.projectId,
+            revisionId: run.revisionId,
+            state: run.state,
+            ...(run.queueReason === undefined ? {} : { queueReason: run.queueReason }),
+          },
+          run: {
+            run: {
+              runId: run.runId,
+              workflow: run.workflowName,
+              idempotencyKey: "retained by the Daemon",
+              startedAt: Date.parse(run.startedAt ?? run.admittedAt),
+              engineVersion: "Project runtime",
+              engineCommit: run.revisionId.slice(0, 12),
+              configDigest: run.packageGraphId.slice(0, 12),
+              host: "local Host",
+            },
+            ...(run.state === "succeeded" || run.state === "failed" ? { outcome: run.state } : {}),
+            ...(run.finishedAt === undefined ? {} : { finishedAt: Date.parse(run.finishedAt) }),
+          },
+          phases: run.phases.map((phase) => ({
+            phaseId: `${run.runId}/${phase.phasePath}/${phase.attempt}`,
+            name: phase.phasePath,
+            description: phase.description,
+            kind: phase.kind,
+            outcome: phase.outcome,
+            attempt: phase.attempt,
+            startedAt: Date.parse(phase.startedAt),
+            endedAt: Date.parse(phase.endedAt),
+          })),
+          gates: [],
+          sandboxes: [],
+        } satisfies RunDoc;
+      } catch {
+        return fetchJson<RunDoc>(`/api/runs/${encodeURIComponent(runId())}`);
+      }
+    },
     refetchInterval: (query: {
       readonly state: {
         readonly data: RunDoc | undefined;

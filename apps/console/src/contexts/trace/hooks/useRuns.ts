@@ -1,4 +1,5 @@
 import { type UseQueryResult, useQuery } from "@tanstack/solid-query";
+import { readRuns } from "../../daemon/services/browserAccess.ts";
 import { fetchJson } from "../../shared/services/api.ts";
 import { pollMillis } from "../../shared/services/queryClient.ts";
 import { allSettled, type RunLine } from "../models/RunLine.ts";
@@ -18,7 +19,23 @@ import { allSettled, type RunLine } from "../models/RunLine.ts";
 export const useRuns = (): UseQueryResult<ReadonlyArray<RunLine>, Error> =>
   useQuery(() => ({
     queryKey: ["runs"],
-    queryFn: () => fetchJson<ReadonlyArray<RunLine>>("/api/runs"),
+    queryFn: async () => {
+      try {
+        const snapshot = await readRuns();
+        return snapshot.runs.map(
+          (run): RunLine => ({
+            run: {
+              runId: run.runId,
+              workflow: run.workflowName,
+              startedAt: Date.parse(run.startedAt ?? run.admittedAt),
+            },
+            ...(run.state === "succeeded" || run.state === "failed" ? { outcome: run.state } : {}),
+          }),
+        );
+      } catch {
+        return fetchJson<ReadonlyArray<RunLine>>("/api/runs");
+      }
+    },
     refetchInterval: (query: {
       readonly state: { readonly data: ReadonlyArray<RunLine> | undefined };
     }) => (allSettled(query.state.data ?? []) ? (false as const) : pollMillis),

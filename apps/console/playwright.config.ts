@@ -8,6 +8,7 @@ export default defineConfig({
   testMatch: [
     "authenticatedConsole.spec.ts",
     "projectCatalogue.spec.ts",
+    "runConsole.spec.ts",
     "workflowCatalogue.spec.ts",
   ],
   fullyParallel: true,

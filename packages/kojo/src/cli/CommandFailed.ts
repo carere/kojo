@@ -18,6 +18,9 @@ export class CommandFailed extends Schema.TaggedError<CommandFailed>()("CommandF
   message: Schema.String,
 }) {
   readonly [Runtime.errorReported] = false;
+  get [Runtime.errorExitCode](): number {
+    return 1;
+  }
 }
 
 /** Says what is wrong in one line, then fails so the exit code says it too. */

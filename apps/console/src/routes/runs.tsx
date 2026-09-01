@@ -1,4 +1,3 @@
-import { createFileRoute } from "@tanstack/solid-router";
-import { Runs } from "../contexts/trace/components/Runs.tsx";
+import { createFileRoute, Outlet } from "@tanstack/solid-router";
 
-export const Route = createFileRoute("/runs")({ component: Runs });
+export const Route = createFileRoute("/runs")({ component: Outlet });

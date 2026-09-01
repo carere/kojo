@@ -27,7 +27,7 @@ import { type Compensating, compensating } from "./compensation.ts";
 /** @public */
 export const workflow = <
   const Tag extends string,
-  Payload extends Schema.Struct.Fields,
+  Payload extends Schema.Struct.Fields | Schema.Top,
   Success extends Schema.Top,
   Error extends Schema.Top,
   R,
@@ -38,18 +38,29 @@ export const workflow = <
     readonly success: Success;
     readonly error: Error;
     /** What a run is deduplicated by. Two triggers for one unit of work must not open two runs. */
-    readonly idempotencyKey: (payload: Schema.Struct.Type<Payload>) => string;
+    readonly idempotencyKey: (
+      payload: Payload extends Schema.Struct.Fields ? Schema.Struct.Type<Payload> : Payload["Type"],
+    ) => string;
   },
   body: (
-    payload: Schema.Struct.Type<Payload>,
+    payload: Payload extends Schema.Struct.Fields ? Schema.Struct.Type<Payload> : Payload["Type"],
     compensation: Compensating<Tag, Error["Type"]>,
   ) => Effect.Effect<Success["Type"], Error["Type"], R>,
 ) => {
+  type AuthoredPayload = Payload extends Schema.Struct.Fields
+    ? Schema.Struct.Type<Payload>
+    : Payload["Type"];
+  const scalar = typeof options.payload === "function" && "ast" in options.payload;
+  const fields = scalar
+    ? { value: options.payload as Schema.Top }
+    : (options.payload as Schema.Struct.Fields);
+  const authored = (payload: Record<string, unknown>): AuthoredPayload =>
+    (scalar ? payload.value : payload) as AuthoredPayload;
   const definition = Workflow.make(options.name, {
-    payload: options.payload,
+    payload: fields,
     success: options.success,
     error: options.error,
-    idempotencyKey: options.idempotencyKey,
+    idempotencyKey: (payload) => options.idempotencyKey(authored(payload)),
   });
 
   const layer = definition.toLayer((payload, executionId) =>
@@ -59,7 +70,8 @@ export const workflow = <
       // The engine deduplicates on this and never hands it back, so the run row is where it is
       // recorded. Computed from the payload the same way the definition computes it, on the replay
       // too — it is a pure function of a payload the engine restores unchanged.
-      const idempotencyKey = options.idempotencyKey(payload);
+      const authoredPayload = authored(payload);
+      const idempotencyKey = options.idempotencyKey(authoredPayload);
 
       // Inside an activity, for the same reason the phase record is: a resumed run replays this
       // body from the top, so a write out here would leave one "run started" per suspension, each
@@ -87,7 +99,7 @@ export const workflow = <
         }),
       });
 
-      return yield* body(payload, compensating(definition, runId)).pipe(
+      return yield* body(authoredPayload, compensating(definition, runId)).pipe(
         Effect.onExit((exit) =>
           tracer.runFinished(
             runId,
@@ -107,5 +119,12 @@ export const workflow = <
     }),
   );
 
-  return { definition, layer } as const;
+  return {
+    definition,
+    layer,
+    authoredPayloadSchema: scalar ? (options.payload as Schema.Top) : Schema.Struct(fields),
+    authoredIdempotencyKey: options.idempotencyKey as (payload: unknown) => string,
+    encodeEnginePayload: (payload: unknown): Record<string, unknown> =>
+      scalar ? { value: payload } : (payload as Record<string, unknown>),
+  } as const;
 };

@@ -63,6 +63,10 @@
         "tests/support/daemon/authenticatedConsoleServer.ts",
         "tests/support/daemon/consoleGrant.ts"
       ]
+    },
+    "packages/kojo-runtime": {
+      // Imported only by the fresh Runner-process tests through an exact filesystem registration.
+      "ignoreFiles": ["tests/fixtures/runner/**"]
     }
   }
 }

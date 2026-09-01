@@ -19,10 +19,13 @@ import type {
   BrowserSessionResponse,
   DaemonDocument,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/browser";
+import { decodeJsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Effect } from "effect";
 import { SqliteProjectRepository } from "../../project/adapters/SqliteProjectRepository.ts";
 import { ProjectApi } from "../../project/services/ProjectApi.ts";
+import { SqliteRunRepository } from "../../workflow/adapters/SqliteRunRepository.ts";
 import { RevisionCaptureError } from "../../workflow/models/RevisionCaptureError.ts";
+import { RunApi } from "../../workflow/services/RunApi.ts";
 import { refreshFactory } from "../../workflow/services/refreshFactory.ts";
 import type { DaemonPaths } from "../models/DaemonPaths.ts";
 import type { DaemonEndpoint } from "../models/Endpoint.ts";
@@ -201,6 +204,9 @@ export const startDaemon = (
     if (existsSync(databasePath)) assertPrivateNode(databasePath, "file");
     database = new Database(databasePath, { create: true, strict: true });
     chmodSync(databasePath, 0o600);
+    database.run("PRAGMA foreign_keys = ON");
+    database.run("PRAGMA journal_mode = WAL");
+    database.run("PRAGMA synchronous = FULL");
     database.run(
       "CREATE TABLE IF NOT EXISTS daemon_metadata (name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)",
     );
@@ -223,6 +229,7 @@ export const startDaemon = (
     const instanceId = crypto.randomUUID();
     const authority = browserAuthority({ now });
     const projectRepository = new SqliteProjectRepository(database);
+    const runRepository = new SqliteRunRepository(database);
     const projectApi = new ProjectApi({
       dataIdentity,
       instanceId,
@@ -231,6 +238,57 @@ export const startDaemon = (
       repository: projectRepository,
       dataRoot: paths.dataRoot,
     });
+    const runApi = new RunApi({
+      dataIdentity,
+      instanceId,
+      dataRoot: paths.dataRoot,
+      now,
+      projects: projectRepository,
+      runs: runRepository,
+    });
+    const startRun = async (
+      request: Request,
+      projectId: string,
+      workflowName: string,
+    ): Promise<Response> => {
+      try {
+        const input = await requestJson(request);
+        if (input === null || typeof input !== "object" || Array.isArray(input)) {
+          return problem(400, "invalid-start", "the Start request must be a JSON object");
+        }
+        const record = input as Record<string, unknown>;
+        if (
+          Object.keys(record).some(
+            (key) => key !== "requestId" && key !== "dataIdentity" && key !== "payload",
+          ) ||
+          typeof record.requestId !== "string" ||
+          typeof record.dataIdentity !== "string" ||
+          !("payload" in record)
+        ) {
+          return problem(400, "invalid-start", "the Start request has invalid fields");
+        }
+        const payload = decodeJsonValue(record.payload);
+        if (!payload.ok) return problem(400, "invalid-payload", "the payload is not JSON");
+        return noStoreJson(
+          await Effect.runPromise(
+            runApi.start({
+              projectId,
+              workflowName,
+              requestId: record.requestId,
+              dataIdentity: record.dataIdentity,
+              payload: payload.value,
+            }),
+          ),
+          202,
+        );
+      } catch (cause) {
+        return problem(
+          409,
+          "start-refused",
+          cause instanceof Error ? cause.message : "the Run was not admitted",
+        );
+      }
+    };
     let refreshCoordinatorStopped = false;
     const refreshFingerprints = new Map<string, string>();
     const projectRefreshes = new Map<string, Promise<void>>();
@@ -353,6 +411,7 @@ export const startDaemon = (
               "browser-session",
               "project-catalogue",
               "workflow-revisions",
+              "no-trigger-runs",
               "client-request-journal",
             ],
             packageVersion: release.packageVersion,
@@ -453,6 +512,30 @@ export const startDaemon = (
           if (request.method === "GET" && url.pathname === "/api/v1/workflows") {
             return Effect.runPromise(projectApi.workflowSnapshot());
           }
+          if (request.method === "GET" && url.pathname === "/api/v1/runs") {
+            return noStoreJson(await Effect.runPromise(runApi.snapshot()));
+          }
+          const oneRun = url.pathname.match(/^\/api\/v1\/runs\/([A-Za-z0-9_-]+)$/);
+          if (request.method === "GET" && oneRun !== null) {
+            const run = await Effect.runPromise(runApi.run(oneRun[1] ?? "invalid"));
+            return run === undefined
+              ? problem(404, "run-not-found", "the selected Run was not found")
+              : noStoreJson(run);
+          }
+          const projectRuns = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/runs$/);
+          if (request.method === "GET" && projectRuns !== null) {
+            return noStoreJson(await Effect.runPromise(runApi.snapshot(projectRuns[1])));
+          }
+          const workflowStart = url.pathname.match(
+            /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/workflows\/([^/]+)\/actions\/start$/,
+          );
+          if (request.method === "POST" && workflowStart !== null) {
+            return startRun(
+              request,
+              workflowStart[1] ?? "invalid",
+              decodeURIComponent(workflowStart[2] ?? "invalid"),
+            );
+          }
           const projectWorkflows = url.pathname.match(
             /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/workflows$/,
           );
@@ -515,6 +598,31 @@ export const startDaemon = (
         }
         if (request.method === "GET" && url.pathname === "/api/v1/workflows") {
           return Effect.runPromise(projectApi.workflowSnapshot());
+        }
+        if (request.method === "GET" && url.pathname === "/api/v1/runs") {
+          return noStoreJson(await Effect.runPromise(runApi.snapshot()));
+        }
+        const oneRun = url.pathname.match(/^\/api\/v1\/runs\/([A-Za-z0-9_-]+)$/);
+        if (request.method === "GET" && oneRun !== null) {
+          const run = await Effect.runPromise(runApi.run(oneRun[1] ?? "invalid"));
+          return run === undefined
+            ? problem(404, "run-not-found", "the selected Run was not found")
+            : noStoreJson(run);
+        }
+        const projectRuns = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/runs$/);
+        if (request.method === "GET" && projectRuns !== null) {
+          return noStoreJson(await Effect.runPromise(runApi.snapshot(projectRuns[1])));
+        }
+        const workflowStart = url.pathname.match(
+          /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/workflows\/([^/]+)\/actions\/start$/,
+        );
+        if (request.method === "POST" && workflowStart !== null) {
+          if (!isJson(request)) return problem(415, "json-required", "Start requires JSON");
+          return startRun(
+            request,
+            workflowStart[1] ?? "invalid",
+            decodeURIComponent(workflowStart[2] ?? "invalid"),
+          );
         }
         const projectWorkflows = url.pathname.match(
           /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/workflows$/,
