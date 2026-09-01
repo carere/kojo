@@ -1,4 +1,12 @@
-import { chmodSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -26,7 +34,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) removeTree(root);
 });
 
-describe("the managed macOS installation", () => {
+describe("the managed Daemon installation", () => {
   it("retains Kojo, Bun, Console, a stable CLI, and a stable launcher without reinstall side effects", async () => {
     const root = mkdtempSync(join(tmpdir(), "kojo-managed-install-"));
     roots.push(root);
@@ -34,8 +42,10 @@ describe("the managed macOS installation", () => {
     const paths: DaemonPaths = {
       installationRoot,
       dataRoot: join(root, "data"),
+      configurationRoot: join(root, "config"),
+      cacheRoot: join(root, "cache"),
       runtimeRoot: join(root, "runtime"),
-      launchAgent: join(root, "LaunchAgents", "dev.kojo.test.plist"),
+      serviceDefinition: join(root, "LaunchAgents", "dev.kojo.test.plist"),
       managedCli: join(installationRoot, "bin", "kojo"),
       managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
     };
@@ -44,21 +54,24 @@ describe("the managed macOS installation", () => {
       automaticStart: "enabled",
       manager: "loaded",
       process: "running",
+      loginLifetime: "test login lifetime",
+      logoutPersistence: "disabled",
     };
     const native: NativeService = {
+      serviceDocument: () => "test service definition\n",
+      assertSupported: () => {},
       inspect: () => observation,
       installAndStart: () => calls.push("install-and-start"),
       start: () => calls.push("start"),
       stop: () => calls.push("stop"),
       enable: () => calls.push("enable"),
       disable: () => calls.push("disable"),
+      keepRunningAfterLogout: () => calls.push("linger"),
     };
     const sourceRoot = new URL("../../../../", import.meta.url).pathname;
     const lifecycle = manageDaemon(paths, native, {
       sourceRoot,
       bunExecutable: process.execPath,
-      label: "dev.kojo.test",
-      home: root,
     });
 
     const first = await lifecycle.install();
@@ -66,6 +79,8 @@ describe("the managed macOS installation", () => {
       automaticStart: "disabled",
       manager: "unloaded",
       process: "stopped",
+      loginLifetime: "test login lifetime",
+      logoutPersistence: "disabled",
     };
     const second = await lifecycle.install();
 
@@ -84,6 +99,16 @@ describe("the managed macOS installation", () => {
     expect(lstatSync(release).mode & 0o222).toBe(0);
     expect(lstatSync(join(release, "runtime", "bun")).mode & 0o222).toBe(0);
     expect(readFileSync(join(release, "console", "index.html"), "utf8")).toContain("<html");
+    for (const privateDirectory of [
+      paths.installationRoot,
+      paths.dataRoot,
+      paths.configurationRoot,
+      paths.cacheRoot,
+      paths.runtimeRoot,
+    ]) {
+      expect(lstatSync(privateDirectory).mode & 0o077).toBe(0);
+    }
+    expect(lstatSync(paths.serviceDefinition).mode & 0o077).toBe(0);
 
     const command = Bun.spawnSync([paths.managedCli, "--version"], {
       env: { ...process.env, HOME: root },
@@ -91,4 +116,42 @@ describe("the managed macOS installation", () => {
     expect(command.exitCode).toBe(0);
     expect(command.stdout.toString().trim()).not.toBe("");
   }, 60_000);
+
+  it("refuses an unsupported Host before it writes managed content", async () => {
+    const root = mkdtempSync(join(tmpdir(), "kojo-unsupported-install-"));
+    roots.push(root);
+    const installationRoot = join(root, "installation");
+    const paths: DaemonPaths = {
+      installationRoot,
+      dataRoot: join(root, "data"),
+      configurationRoot: join(root, "config"),
+      cacheRoot: join(root, "cache"),
+      runtimeRoot: join(root, "runtime"),
+      serviceDefinition: join(root, "service", "kojo.service"),
+      managedCli: join(installationRoot, "bin", "kojo"),
+      managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
+    };
+    const native: NativeService = {
+      serviceDocument: () => "must not be written",
+      assertSupported: () => {
+        throw new Error("unsupported Host");
+      },
+      inspect: () => ({
+        automaticStart: "unknown",
+        manager: "unavailable",
+        process: "unknown",
+        loginLifetime: "unsupported",
+        logoutPersistence: "unknown",
+      }),
+      installAndStart: () => {},
+      start: () => {},
+      stop: () => {},
+      enable: () => {},
+      disable: () => {},
+      keepRunningAfterLogout: () => {},
+    };
+
+    await expect(manageDaemon(paths, native).install()).rejects.toThrow("unsupported Host");
+    expect(existsSync(installationRoot)).toBe(false);
+  });
 });

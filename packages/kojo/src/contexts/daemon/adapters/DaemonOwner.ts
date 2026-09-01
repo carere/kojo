@@ -39,7 +39,17 @@ const acquireLock = (path: string): LockHandle => {
     throw new LifecycleError("UNSAFE_SINGLETON", "the singleton lock has unsafe ownership");
   }
 
-  const library = dlopen("/usr/lib/libSystem.B.dylib", {
+  const lockLibrary =
+    process.platform === "darwin"
+      ? "/usr/lib/libSystem.B.dylib"
+      : process.platform === "linux"
+        ? "libc.so.6"
+        : undefined;
+  if (lockLibrary === undefined) {
+    closeSync(descriptor);
+    throw new LifecycleError("UNSUPPORTED_HOST", "the Host has no supported advisory file lock");
+  }
+  const library = dlopen(lockLibrary, {
     flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
   });
   const locked = library.symbols.flock(descriptor, 2 | 4);

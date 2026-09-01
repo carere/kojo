@@ -17,6 +17,8 @@ describe("the macOS LaunchAgent adapter", () => {
       automaticStart: "disabled",
       manager: "loaded",
       process: "running",
+      loginLifetime: "macOS GUI login session",
+      logoutPersistence: "unsupported",
     });
   });
 

@@ -12,6 +12,7 @@ describe("daemon status text", () => {
       responsiveness: "unresponsive",
       ready: false,
       loginLifetime: "macOS GUI login session",
+      logoutPersistence: "unsupported",
     });
 
     expect(lines).toEqual([
@@ -23,6 +24,7 @@ describe("daemon status text", () => {
       "Responsive: unresponsive.",
       "Ready: no.",
       "Supported lifetime: macOS GUI login session.",
+      "Keep running after logout: unsupported.",
     ]);
   });
 });

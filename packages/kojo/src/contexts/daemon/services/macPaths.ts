@@ -35,9 +35,11 @@ export const macPaths = (overrides: Partial<DaemonPaths> = {}): DaemonPaths => {
   return {
     installationRoot,
     dataRoot: overrides.dataRoot ?? join(installationRoot, "data"),
+    configurationRoot: overrides.configurationRoot ?? join(installationRoot, "config"),
+    cacheRoot: overrides.cacheRoot ?? join(home, "Library", "Caches", "Kojo"),
     runtimeRoot: overrides.runtimeRoot ?? join(darwinTemporaryDirectory(), "Kojo"),
-    launchAgent:
-      overrides.launchAgent ?? join(home, "Library", "LaunchAgents", "dev.kojo.daemon.plist"),
+    serviceDefinition:
+      overrides.serviceDefinition ?? join(home, "Library", "LaunchAgents", "dev.kojo.daemon.plist"),
     managedCli: overrides.managedCli ?? join(installationRoot, "bin", "kojo"),
     managedLauncher: overrides.managedLauncher ?? join(installationRoot, "bin", "kojo-launcher"),
   };

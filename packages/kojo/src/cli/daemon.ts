@@ -1,15 +1,27 @@
 import { Console, Effect } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { macLaunchAgent } from "../contexts/daemon/adapters/MacLaunchAgent.ts";
+import { systemdUserService } from "../contexts/daemon/adapters/SystemdUserService.ts";
 import type { DaemonStatus } from "../contexts/daemon/models/DaemonStatus.ts";
 import { LifecycleError } from "../contexts/daemon/models/LifecycleError.ts";
+import { linuxPaths } from "../contexts/daemon/services/linuxPaths.ts";
 import { macPaths } from "../contexts/daemon/services/macPaths.ts";
 import { type DaemonLifecycle, manageDaemon } from "../contexts/daemon/services/manageDaemon.ts";
 import { commandFailed } from "./CommandFailed.ts";
 
 const productionLifecycle = (): DaemonLifecycle => {
-  const paths = macPaths();
-  return manageDaemon(paths, macLaunchAgent());
+  if (process.platform === "darwin") {
+    const paths = macPaths();
+    return manageDaemon(paths, macLaunchAgent());
+  }
+  if (process.platform === "linux") {
+    const paths = linuxPaths();
+    return manageDaemon(paths, systemdUserService());
+  }
+  throw new LifecycleError(
+    "UNSUPPORTED_HOST",
+    "Kojo supports macOS or Linux with a functioning systemd user manager",
+  );
 };
 
 const line = (name: string, value: string): string => `${name}: ${value}.`;
@@ -23,6 +35,7 @@ export const daemonStatusLines = (status: DaemonStatus): ReadonlyArray<string> =
   line("Responsive", status.responsiveness),
   line("Ready", status.ready ? "yes" : "no"),
   line("Supported lifetime", status.loginLifetime),
+  line("Keep running after logout", status.logoutPersistence),
   ...(status.detail === undefined ? [] : [line("Manager detail", status.detail)]),
 ];
 
@@ -51,14 +64,14 @@ const install = Command.make(
     const result = yield* useLifecycle((lifecycle) => lifecycle.install());
     yield* Console.log(
       result.changed
-        ? "Installed, enabled, and started one managed macOS Daemon."
+        ? "Installed, enabled, and started one managed Daemon for this OS user."
         : "Kept the existing managed installation. Its service state did not change.",
     );
     yield* printStatus(result.status);
   }),
 ).pipe(
   Command.withDescription(
-    "Install immutable managed Kojo and Bun content, then enable and start the LaunchAgent",
+    "Install immutable managed Kojo and Bun content, then enable and start its native user service",
   ),
 );
 
@@ -106,7 +119,24 @@ const disable = Command.make(
   }),
 ).pipe(Command.withDescription("Disable automatic start and leave the current Daemon running"));
 
+const keepRunningAfterLogout = Command.make(
+  "keep-running-after-logout",
+  {},
+  Effect.fn(function* () {
+    if (process.platform === "linux") {
+      yield* Console.log(
+        "This changes linger for the complete OS user. All user services can then run after logout.",
+      );
+    }
+    yield* printStatus(yield* useLifecycle((lifecycle) => lifecycle.keepRunningAfterLogout()));
+  }),
+).pipe(
+  Command.withDescription(
+    "Explicitly request systemd linger for the complete OS user; Kojo never disables it",
+  ),
+);
+
 export const daemon = Command.make("daemon").pipe(
   Command.withDescription("Install and inspect the one managed Daemon for this OS user"),
-  Command.withSubcommands([install, status, start, stop, enable, disable]),
+  Command.withSubcommands([install, status, start, stop, enable, disable, keepRunningAfterLogout]),
 );

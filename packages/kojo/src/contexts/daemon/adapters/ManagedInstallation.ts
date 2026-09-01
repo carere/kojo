@@ -14,15 +14,17 @@ import { basename, dirname, join } from "node:path";
 import type { DaemonPaths } from "../models/DaemonPaths.ts";
 import { LifecycleError } from "../models/LifecycleError.ts";
 import type { ManagedReleaseManifest } from "../models/ManagedRelease.ts";
-import { launchAgentDocument } from "../services/launchAgentDocument.ts";
-import { atomicPrivateFile, ensurePrivateDirectory } from "../services/secureHostPath.ts";
+import {
+  atomicPrivateFile,
+  atomicPrivateFileInOwnedDirectory,
+  ensurePrivateDirectory,
+} from "../services/secureHostPath.ts";
 
 export interface ManagedInstallationOptions {
   readonly paths: DaemonPaths;
   readonly sourceRoot?: string;
   readonly bunExecutable?: string;
-  readonly label?: string;
-  readonly home?: string;
+  readonly serviceDocument: (paths: DaemonPaths) => string;
 }
 
 export interface InstallationResult {
@@ -143,6 +145,10 @@ export const installManagedRelease = async (
   const bunExecutable = options.bunExecutable ?? process.execPath;
 
   ensurePrivateDirectory(paths.installationRoot);
+  ensurePrivateDirectory(paths.dataRoot);
+  ensurePrivateDirectory(paths.configurationRoot);
+  ensurePrivateDirectory(paths.cacheRoot);
+  ensurePrivateDirectory(paths.runtimeRoot);
   ensurePrivateDirectory(releases);
   ensurePrivateDirectory(stagingRoot);
   ensurePrivateDirectory(staging);
@@ -189,13 +195,7 @@ export const installManagedRelease = async (
       0o700,
     );
     atomicPrivateFile(join(paths.installationRoot, "active-release"), `${releaseId}\n`);
-    atomicPrivateFile(
-      paths.launchAgent,
-      launchAgentDocument(paths, {
-        ...(options.label === undefined ? {} : { label: options.label }),
-        ...(options.home === undefined ? {} : { home: options.home }),
-      }),
-    );
+    atomicPrivateFileInOwnedDirectory(paths.serviceDefinition, options.serviceDocument(paths));
   } catch (cause) {
     if (existsSync(staging)) {
       discardTree(staging);

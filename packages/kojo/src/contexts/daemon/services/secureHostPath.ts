@@ -39,8 +39,49 @@ export const ensurePrivateDirectory = (path: string): void => {
   chmodSync(path, 0o700);
 };
 
+export const ensureOwnedDirectory = (path: string): void => {
+  if (!existsSync(path)) mkdirSync(path, { mode: 0o700, recursive: true });
+  const stat = lstatSync(path);
+  if (
+    stat.isSymbolicLink() ||
+    !stat.isDirectory() ||
+    stat.uid !== uid() ||
+    (stat.mode & 0o022) !== 0
+  ) {
+    throw new LifecycleError(
+      "UNSAFE_HOST_PATH",
+      `${path} must be a current-user directory that another OS user cannot write`,
+    );
+  }
+};
+
 export const atomicPrivateFile = (path: string, content: string, mode = 0o600): void => {
   ensurePrivateDirectory(dirname(path));
+  const temporary = join(dirname(path), `.${crypto.randomUUID()}.tmp`);
+  const descriptor = openSync(
+    temporary,
+    constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+    mode,
+  );
+  try {
+    fchmodSync(descriptor, mode);
+    writeFileSync(descriptor, content, "utf8");
+    const stat = fstatSync(descriptor);
+    if (stat.uid !== uid() || !stat.isFile()) {
+      throw new LifecycleError("UNSAFE_HOST_PATH", `${temporary} has unsafe ownership`);
+    }
+  } finally {
+    closeSync(descriptor);
+  }
+  renameSync(temporary, path);
+};
+
+export const atomicPrivateFileInOwnedDirectory = (
+  path: string,
+  content: string,
+  mode = 0o600,
+): void => {
+  ensureOwnedDirectory(dirname(path));
   const temporary = join(dirname(path), `.${crypto.randomUUID()}.tmp`);
   const descriptor = openSync(
     temporary,
