@@ -132,11 +132,16 @@ describe("the systemd user service adapter", () => {
     writeFileSync(definition, "service\n", { mode: 0o600 });
     const calls: Array<ReadonlyArray<string>> = [];
     const loginCalls: Array<ReadonlyArray<string>> = [];
+    let enabled = true;
     const service = systemdUserService({
       unit: "kojo-test.service",
       uid: 1200,
       systemctl: (arguments_) => {
         calls.push(arguments_);
+        if (arguments_.includes("is-enabled")) {
+          return result(enabled ? "enabled\n" : "disabled\n", enabled ? 0 : 1);
+        }
+        if (arguments_.includes("disable")) enabled = false;
         return result();
       },
       loginctl: (arguments_) => {
@@ -146,10 +151,14 @@ describe("the systemd user service adapter", () => {
     });
     try {
       service.removeRegistration?.(definition);
+      service.removeRegistration?.(definition);
 
       expect(existsSync(definition)).toBe(false);
       expect(calls.filter((call) => !call.includes("show-environment"))).toEqual([
+        ["--user", "is-enabled", "kojo-test.service"],
         ["--user", "disable", "kojo-test.service"],
+        ["--user", "daemon-reload"],
+        ["--user", "is-enabled", "kojo-test.service"],
         ["--user", "daemon-reload"],
       ]);
       expect(loginCalls).toEqual([]);

@@ -44,6 +44,7 @@ import type { DaemonEndpoint } from "../models/Endpoint.ts";
 import { LifecycleError } from "../models/LifecycleError.ts";
 import type { DaemonLifecycleControl } from "../ports/DaemonLifecycleControl.ts";
 import type { DaemonUpgradeControl } from "../ports/DaemonUpgradeControl.ts";
+import type { NativeService } from "../ports/NativeService.ts";
 import { activeConsoleRelease } from "../services/activeConsoleRelease.ts";
 import { browserAuthority } from "../services/browserAuthority.ts";
 import { ConfigurationApi } from "../services/ConfigurationApi.ts";
@@ -67,6 +68,7 @@ import {
 } from "./LifecycleControlTransport.ts";
 import { readCheckedManagedRelease } from "./ManagedInstallation.ts";
 import { ensurePurgeRecoveryCapsule, readPurgeRecoveryCapsule } from "./PurgeRecoveryCapsule.ts";
+import { consumePurgeSafetyRecoveryAuthorization } from "./PurgeSafetyRecovery.ts";
 import { SqliteConfigurationRepository } from "./SqliteConfigurationRepository.ts";
 import { SqliteDaemonLifecycleReceiptRepository } from "./SqliteDaemonLifecycleReceiptRepository.ts";
 import { SqlitePurgeSafetyRepository } from "./SqlitePurgeSafetyRepository.ts";
@@ -160,6 +162,9 @@ export interface StartDaemonOptions {
 export const recoverPurgeSafety = async (
   paths: DaemonPaths,
   operationId: string,
+  planToken: string,
+  capability: string,
+  nativeService: NativeService,
   now: () => number = Date.now,
 ): Promise<void> => {
   if (!/^[A-Za-z0-9_-]+$/.test(operationId)) {
@@ -168,11 +173,29 @@ export const recoverPurgeSafety = async (
       "the restricted purge recovery operation identity is invalid",
     );
   }
+  const assertStoppedDisabled = (): void => {
+    const observed = nativeService.inspect();
+    if (observed.process !== "stopped" || observed.automaticStart !== "disabled") {
+      throw new LifecycleError(
+        "PURGE_RECOVERY_SERVICE_UNSAFE",
+        "restricted purge recovery requires stopped ownership and disabled automatic start",
+      );
+    }
+  };
+  assertStoppedDisabled();
+  const plan = consumePurgeSafetyRecoveryAuthorization(
+    paths,
+    planToken,
+    operationId,
+    capability,
+    now(),
+  );
   assertPrivateNode(paths.dataRoot, "directory");
   const gate = acquireDaemonStartGate(paths);
   let lock: LockHandle | undefined;
   let database: Database | undefined;
   try {
+    assertStoppedDisabled();
     lock = acquireLock(join(paths.dataRoot, "daemon.lock"));
     const databasePath = join(paths.dataRoot, "kojo.db");
     assertPrivateNode(databasePath, "file");
@@ -190,16 +213,30 @@ export const recoverPurgeSafety = async (
         "the retained database has no Daemon data identity",
       );
     }
-    try {
-      const source = activeConsoleRelease(paths);
-      readCheckedManagedRelease(paths, source.releaseId);
-      ensurePurgeRecoveryCapsule(paths, dataIdentity, source.releaseId);
-    } catch (cause) {
-      try {
-        readPurgeRecoveryCapsule(paths, dataIdentity);
-      } catch {
-        throw cause;
-      }
+    const capsule = readPurgeRecoveryCapsule(paths, dataIdentity);
+    if (capsule.sourceReleaseId !== plan.sourceReleaseId) {
+      throw new LifecycleError(
+        "PURGE_RECOVERY_PLAN_STALE",
+        "the restricted recovery capsule changed after the exact check",
+      );
+    }
+    const journal = new FileLifecycleJournalRepository(join(paths.dataRoot, "lifecycle"));
+    const operation = journal.read(operationId);
+    if (
+      operation === undefined ||
+      journal.current()?.operationId !== operationId ||
+      operation.outcome !== undefined ||
+      operation.dataIdentity !== dataIdentity ||
+      operation.sourceReleaseId !== plan.sourceReleaseId ||
+      !(
+        (operation.kind === "remove" && operation.stage === "prepared") ||
+        (operation.kind === "purge-recovery" && operation.stage === "prepared")
+      )
+    ) {
+      throw new LifecycleError(
+        "PURGE_RECOVERY_PLAN_STALE",
+        "the exact lifecycle operation changed before restricted recovery",
+      );
     }
     const identityPath = join(paths.dataRoot, "lifecycle", "data-identity");
     assertPrivateNode(identityPath, "file");
@@ -409,6 +446,12 @@ export const startDaemon = (
       }
     } else {
       atomicPrivateFile(lifecycleIdentityPath, `${dataIdentity}\n`);
+    }
+    try {
+      ensurePurgeRecoveryCapsule(paths, dataIdentity, release.releaseId);
+    } catch {
+      // A minimal or damaged active release can still start for inspection. Removal will refuse
+      // before managed content is deleted unless the sole owner can build and seal this capsule.
     }
 
     ensurePrivateDirectory(paths.runtimeRoot);

@@ -55,6 +55,177 @@ const canonical = (value: unknown): string =>
 
 const hash = (value: string): string => new Bun.CryptoHasher("sha256").update(value).digest("hex");
 
+const record = (value: unknown): Record<string, unknown> | undefined =>
+  value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+
+const exactKeys = (value: Record<string, unknown>, keys: ReadonlyArray<string>): boolean => {
+  const expected = new Set(keys);
+  return (
+    Object.keys(value).length === expected.size &&
+    Object.keys(value).every((key) => expected.has(key))
+  );
+};
+
+const safeCount = (value: unknown): value is number =>
+  Number.isSafeInteger(value) && Number(value) >= 0;
+
+const correctnessOf = (value: unknown): PurgeSafetyEvidence["correctness"] => {
+  const correctness = record(value);
+  const recordsByTable = record(correctness?.recordsByTable);
+  if (
+    correctness === undefined ||
+    !exactKeys(correctness, [
+      "projects",
+      "runs",
+      "clientRequests",
+      "askings",
+      "artifacts",
+      "recordsByTable",
+    ]) ||
+    !safeCount(correctness.projects) ||
+    !safeCount(correctness.runs) ||
+    !safeCount(correctness.clientRequests) ||
+    !safeCount(correctness.askings) ||
+    !safeCount(correctness.artifacts) ||
+    recordsByTable === undefined ||
+    Object.entries(recordsByTable).some(
+      ([name, count]) => !/^[A-Za-z0-9_]+$/.test(name) || !safeCount(count),
+    )
+  ) {
+    throw new LifecycleError("PURGE_EVIDENCE_DAMAGED", "the purge correctness summary is invalid");
+  }
+  return correctness as unknown as PurgeSafetyEvidence["correctness"];
+};
+
+const resourceRisksOf = (value: unknown): PurgeSafetyEvidence["resourceRisks"] => {
+  if (!Array.isArray(value)) {
+    throw new LifecycleError("PURGE_EVIDENCE_DAMAGED", "the purge Resource risks are invalid");
+  }
+  for (const selected of value) {
+    const risk = record(selected);
+    const keys = [
+      "leaseId",
+      "projectId",
+      "runId",
+      "kind",
+      "state",
+      ...(risk?.reason === undefined ? [] : ["reason"]),
+    ] as const;
+    if (
+      risk === undefined ||
+      !exactKeys(risk, keys) ||
+      [risk.leaseId, risk.projectId, risk.runId, risk.kind, risk.state].some(
+        (field) => typeof field !== "string" || field.length === 0,
+      ) ||
+      (risk.reason !== undefined && typeof risk.reason !== "string")
+    ) {
+      throw new LifecycleError("PURGE_EVIDENCE_DAMAGED", "a purge Resource risk is invalid");
+    }
+  }
+  return value as PurgeSafetyEvidence["resourceRisks"];
+};
+
+const ownedScopeOf = (value: unknown): PurgeSafetyEvidence["ownedScope"] => {
+  if (!Array.isArray(value)) {
+    throw new LifecycleError("PURGE_EVIDENCE_DAMAGED", "the purge owned scope is invalid");
+  }
+  const names = new Set<string>();
+  for (const selected of value) {
+    const entry = record(selected);
+    const isFile = entry?.kind === "file";
+    if (
+      entry === undefined ||
+      !exactKeys(entry, [
+        "relativePath",
+        "kind",
+        "device",
+        "inode",
+        ...(isFile ? ["sha256"] : []),
+      ]) ||
+      typeof entry.relativePath !== "string" ||
+      entry.relativePath.length === 0 ||
+      entry.relativePath.startsWith("/") ||
+      entry.relativePath
+        .split("/")
+        .some((part) => part.length === 0 || part === "." || part === "..") ||
+      names.has(entry.relativePath) ||
+      (entry.kind !== "directory" && entry.kind !== "file") ||
+      !safeCount(entry.device) ||
+      !safeCount(entry.inode) ||
+      (isFile && (typeof entry.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(entry.sha256)))
+    ) {
+      throw new LifecycleError("PURGE_EVIDENCE_DAMAGED", "a purge owned-scope entry is invalid");
+    }
+    names.add(entry.relativePath);
+  }
+  return value as PurgeSafetyEvidence["ownedScope"];
+};
+
+export const decodePurgeSafetyEvidence = (value: unknown): PurgeSafetyEvidence => {
+  const evidence = record(value);
+  const owner = record(evidence?.owner);
+  const ownerState = record(evidence?.ownerProcessState);
+  if (
+    evidence === undefined ||
+    !exactKeys(evidence, [
+      "formatVersion",
+      "evidenceId",
+      "operationId",
+      "dataIdentity",
+      "stateVersion",
+      "correctnessFingerprint",
+      "correctness",
+      "resourceRisks",
+      "ownedScope",
+      "owner",
+      "ownerProcessState",
+      "issuedAt",
+      "expiresAt",
+      "seal",
+    ]) ||
+    evidence.formatVersion !== 1 ||
+    typeof evidence.evidenceId !== "string" ||
+    !/^[A-Za-z0-9_-]+$/.test(evidence.evidenceId) ||
+    typeof evidence.operationId !== "string" ||
+    !/^[A-Za-z0-9_-]+$/.test(evidence.operationId) ||
+    typeof evidence.dataIdentity !== "string" ||
+    evidence.dataIdentity.length === 0 ||
+    evidence.dataIdentity.length > 1_024 ||
+    typeof evidence.stateVersion !== "string" ||
+    !/^[a-f0-9]{64}$/.test(evidence.stateVersion) ||
+    typeof evidence.correctnessFingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/.test(evidence.correctnessFingerprint) ||
+    owner === undefined ||
+    !exactKeys(owner, ["daemonInstanceId", "runnerInstanceIds", "recordedAt"]) ||
+    typeof owner.daemonInstanceId !== "string" ||
+    !/^[A-Za-z0-9_-]+$/.test(owner.daemonInstanceId) ||
+    !Array.isArray(owner.runnerInstanceIds) ||
+    !owner.runnerInstanceIds.every((id) => typeof id === "string" && /^[A-Za-z0-9_-]+$/.test(id)) ||
+    typeof owner.recordedAt !== "string" ||
+    !Number.isFinite(Date.parse(owner.recordedAt)) ||
+    ownerState === undefined ||
+    !exactKeys(ownerState, ["daemon", "runners"]) ||
+    ownerState.daemon !== "sole-owner-finalizing" ||
+    ownerState.runners !== "stopped" ||
+    typeof evidence.issuedAt !== "string" ||
+    typeof evidence.expiresAt !== "string" ||
+    !Number.isFinite(Date.parse(evidence.issuedAt)) ||
+    !Number.isFinite(Date.parse(evidence.expiresAt)) ||
+    Date.parse(evidence.expiresAt) <= Date.parse(evidence.issuedAt) ||
+    typeof evidence.seal !== "string" ||
+    !/^[A-Za-z0-9_-]+$/.test(evidence.seal) ||
+    Buffer.from(evidence.seal, "base64url").byteLength !== 64
+  ) {
+    throw new LifecycleError("PURGE_EVIDENCE_DAMAGED", "sealed Daemon safety evidence is invalid");
+  }
+  correctnessOf(evidence.correctness);
+  resourceRisksOf(evidence.resourceRisks);
+  ownedScopeOf(evidence.ownedScope);
+  return evidence as unknown as PurgeSafetyEvidence;
+};
+
 const gatePath = (paths: DaemonPaths): string =>
   join(paths.configurationRoot, "lifecycle-gate.lock");
 const receiptDirectory = (paths: DaemonPaths): string =>
@@ -68,20 +239,70 @@ const quarantinePath = (paths: DaemonPaths, dataIdentity: string): string =>
     `.${basename(resolve(paths.dataRoot))}.purge-${hash(dataIdentity).slice(0, 24)}`,
   );
 
-const validPlan = (plan: PurgePlan): boolean =>
-  plan.formatVersion === 1 &&
-  plan.kind === "purge" &&
-  /^[a-f0-9]{64}$/.test(plan.planId) &&
-  /^[a-f0-9]{64}$/.test(plan.requestHash) &&
-  plan.dataIdentity.length > 0 &&
-  plan.evidenceId.length > 0 &&
-  Array.isArray(plan.affectedScope) &&
-  Array.isArray(plan.resourceRisks) &&
-  Number.isFinite(Date.parse(plan.issuedAt)) &&
-  Number.isFinite(Date.parse(plan.expiresAt)) &&
-  plan.planId === hash(canonical({ ...plan, planId: undefined }));
+const planOf = (value: unknown): PurgePlan => {
+  const plan = record(value);
+  const observed = record(plan?.observed);
+  if (
+    plan === undefined ||
+    !exactKeys(plan, [
+      "formatVersion",
+      "planId",
+      "kind",
+      "dataIdentity",
+      "requestHash",
+      "affectedScope",
+      "expectedStateVersion",
+      "expectedCorrectnessFingerprint",
+      "evidenceId",
+      "issuedAt",
+      "expiresAt",
+      "correctness",
+      "resourceRisks",
+      "observed",
+    ]) ||
+    plan.formatVersion !== 1 ||
+    plan.kind !== "purge" ||
+    typeof plan.planId !== "string" ||
+    !/^[a-f0-9]{64}$/.test(plan.planId) ||
+    typeof plan.requestHash !== "string" ||
+    !/^[a-f0-9]{64}$/.test(plan.requestHash) ||
+    typeof plan.dataIdentity !== "string" ||
+    plan.dataIdentity.length === 0 ||
+    plan.dataIdentity.length > 1_024 ||
+    typeof plan.evidenceId !== "string" ||
+    !/^[A-Za-z0-9_-]+$/.test(plan.evidenceId) ||
+    !Array.isArray(plan.affectedScope) ||
+    !plan.affectedScope.every(
+      (path) => typeof path === "string" && path.length > 0 && !path.includes("/"),
+    ) ||
+    new Set(plan.affectedScope).size !== plan.affectedScope.length ||
+    typeof plan.expectedStateVersion !== "string" ||
+    !/^[a-f0-9]{64}$/.test(plan.expectedStateVersion) ||
+    typeof plan.expectedCorrectnessFingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/.test(plan.expectedCorrectnessFingerprint) ||
+    typeof plan.issuedAt !== "string" ||
+    typeof plan.expiresAt !== "string" ||
+    !Number.isFinite(Date.parse(plan.issuedAt)) ||
+    !Number.isFinite(Date.parse(plan.expiresAt)) ||
+    Date.parse(plan.expiresAt) <= Date.parse(plan.issuedAt) ||
+    observed === undefined ||
+    !exactKeys(observed, ["automaticStart", "process"]) ||
+    !["enabled", "disabled", "unknown"].includes(String(observed.automaticStart)) ||
+    !["running", "stopped", "unknown"].includes(String(observed.process))
+  ) {
+    throw new LifecycleError("PURGE_PLAN_INVALID", "the purge plan is invalid");
+  }
+  correctnessOf(plan.correctness);
+  resourceRisksOf(plan.resourceRisks);
+  const decoded = plan as unknown as PurgePlan;
+  if (decoded.planId !== hash(canonical({ ...decoded, planId: undefined }))) {
+    throw new LifecycleError("PURGE_PLAN_INVALID", "the purge plan identity is invalid");
+  }
+  return decoded;
+};
 
-const verifyEvidence = (paths: DaemonPaths, evidence: PurgeSafetyEvidence): void => {
+const verifyEvidence = (paths: DaemonPaths, value: unknown): PurgeSafetyEvidence => {
+  const evidence = decodePurgeSafetyEvidence(value);
   const keyId = hash(evidence.dataIdentity).slice(0, 32);
   const publicKeyPath = join(
     paths.configurationRoot,
@@ -112,36 +333,42 @@ const verifyEvidence = (paths: DaemonPaths, evidence: PurgeSafetyEvidence): void
   } catch {
     accepted = false;
   }
-  if (
-    evidence.formatVersion !== 1 ||
-    !accepted ||
-    evidence.dataIdentity.length === 0 ||
-    evidence.evidenceId.length === 0 ||
-    !Array.isArray(evidence.ownedScope) ||
-    !Array.isArray(evidence.resourceRisks) ||
-    evidence.owner.runnerInstanceIds.length !== 0 ||
-    evidence.ownerProcessState.daemon !== "sole-owner-finalizing" ||
-    evidence.ownerProcessState.runners !== "stopped" ||
-    !Number.isFinite(Date.parse(evidence.issuedAt)) ||
-    !Number.isFinite(Date.parse(evidence.expiresAt))
-  ) {
+  if (!accepted || evidence.owner.runnerInstanceIds.length !== 0) {
     throw new LifecycleError(
       "PURGE_EVIDENCE_DAMAGED",
       "sealed Daemon safety evidence is invalid or not authored by the sole Daemon owner",
     );
   }
+  return evidence;
 };
 
 const readReceiptAt = (paths: DaemonPaths, path: string): PurgeReceipt => {
   assertPrivateNode(path, "file");
-  const value = JSON.parse(readFileSync(path, "utf8")) as PurgeReceipt;
+  const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+  const selected = record(parsed);
+  if (
+    selected === undefined ||
+    !exactKeys(selected, [
+      "formatVersion",
+      "operationId",
+      "dataIdentity",
+      "plan",
+      "evidence",
+      "stage",
+      "updatedAt",
+    ])
+  ) {
+    throw new LifecycleError("PURGE_RECEIPT_DAMAGED", "the stable purge receipt is invalid");
+  }
+  const plan = planOf(selected.plan);
+  const evidence = verifyEvidence(paths, selected.evidence);
+  const value = { ...selected, plan, evidence } as unknown as PurgeReceipt;
   if (
     value.formatVersion !== 1 ||
     !/^[A-Za-z0-9_-]+$/.test(value.operationId) ||
     value.dataIdentity.length === 0 ||
     path !== receiptPath(paths, value.dataIdentity) ||
     !["prepared", "quarantined", "completed"].includes(value.stage) ||
-    !validPlan(value.plan) ||
     value.plan.dataIdentity !== value.dataIdentity ||
     value.evidence.dataIdentity !== value.dataIdentity ||
     value.plan.evidenceId !== value.evidence.evidenceId ||
@@ -150,7 +377,6 @@ const readReceiptAt = (paths: DaemonPaths, path: string): PurgeReceipt => {
   ) {
     throw new LifecycleError("PURGE_RECEIPT_DAMAGED", "the stable purge receipt is invalid");
   }
-  verifyEvidence(paths, value.evidence);
   return value;
 };
 
@@ -244,9 +470,7 @@ export const readVerifiedPurgeSafetyEvidence = (paths: DaemonPaths): PurgeSafety
     );
   }
   assertPrivateNode(path, "file");
-  const evidence = JSON.parse(readFileSync(path, "utf8")) as PurgeSafetyEvidence;
-  verifyEvidence(paths, evidence);
-  return evidence;
+  return verifyEvidence(paths, JSON.parse(readFileSync(path, "utf8")));
 };
 
 const decodePlan = (token: string, evidence: PurgeSafetyEvidence): PurgePlan => {
@@ -256,13 +480,11 @@ const decodePlan = (token: string, evidence: PurgeSafetyEvidence): PurgePlan => 
   }
   let plan: PurgePlan;
   try {
-    plan = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as PurgePlan;
+    plan = planOf(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")));
   } catch (cause) {
     throw new LifecycleError("PURGE_PLAN_INVALID", "the purge plan token is invalid", cause);
   }
   if (
-    plan.formatVersion !== 1 ||
-    plan.kind !== "purge" ||
     suppliedSeal !== hash(`${canonical(plan)}\0${evidence.seal}`) ||
     plan.planId !== hash(canonical({ ...plan, planId: undefined }))
   ) {
@@ -315,20 +537,87 @@ const secureTree = (root: string): ReadonlyMap<string, Stats> => {
   return selected;
 };
 
+interface ScopeValidationOptions {
+  readonly mutableOperationIds?: ReadonlyArray<string>;
+  readonly allowMissing?: boolean;
+}
+
+const validMutableLifecycleEntry = (
+  root: string,
+  relativePath: string,
+  evidence: PurgeSafetyEvidence,
+  operationIds: ReadonlySet<string>,
+): boolean => {
+  if (relativePath === "lifecycle/purge-safety.json") {
+    try {
+      const selected = decodePurgeSafetyEvidence(
+        JSON.parse(readFileSync(join(root, relativePath), "utf8")),
+      );
+      return canonical(selected) === canonical(evidence);
+    } catch {
+      return false;
+    }
+  }
+  if (relativePath === "lifecycle/current-operation") {
+    return operationIds.has(readFileSync(join(root, relativePath), "utf8").trim());
+  }
+  const operation = /^lifecycle\/operations\/([A-Za-z0-9_-]+)(?:\/(\d+)\.json)?$/.exec(
+    relativePath,
+  );
+  if (operation?.[1] !== undefined && operationIds.has(operation[1])) {
+    if (operation[2] === undefined) return lstatSync(join(root, relativePath)).isDirectory();
+    try {
+      const selected = record(JSON.parse(readFileSync(join(root, relativePath), "utf8")));
+      return (
+        selected !== undefined &&
+        selected.formatVersion === 1 &&
+        selected.operationId === operation[1] &&
+        selected.dataIdentity === evidence.dataIdentity &&
+        Number(selected.stageRevision) === Number(operation[2]) &&
+        (selected.kind === "remove" ||
+          selected.kind === "purge" ||
+          selected.kind === "purge-recovery") &&
+        (selected.purgeSafetyEvidenceId === undefined ||
+          selected.purgeSafetyEvidenceId === evidence.evidenceId)
+      );
+    } catch {
+      return false;
+    }
+  }
+  const secret = /^lifecycle\/control-secrets\/([A-Za-z0-9_-]+)$/.exec(relativePath)?.[1];
+  return (
+    secret !== undefined &&
+    operationIds.has(secret) &&
+    /^[a-f0-9]{64}$/.test(readFileSync(join(root, relativePath), "utf8").trim())
+  );
+};
+
 const validateScopeAt = (
   rootPath: string,
   evidence: PurgeSafetyEvidence,
+  options: ScopeValidationOptions = {},
 ): ReadonlyArray<string> => {
   const root = resolve(rootPath);
   const actual = secureTree(root);
   const planned = new Map(evidence.ownedScope.map((entry) => [entry.relativePath, entry]));
+  const mutableOperationIds = new Set([
+    evidence.operationId,
+    ...(options.mutableOperationIds ?? []),
+  ]);
   const topLevel = new Set<string>();
   for (const [relativePath, stat] of actual) {
     const first = relativePath.split("/", 1)[0];
     if (first === undefined) throw new LifecycleError("PURGE_SCOPE_UNSAFE", "purge scope is empty");
     topLevel.add(first);
     const expected = planned.get(relativePath);
-    if (relativePath === "lifecycle" || relativePath.startsWith("lifecycle/")) continue;
+    if (
+      validMutableLifecycleEntry(root, relativePath, evidence, mutableOperationIds) &&
+      (expected === undefined ||
+        relativePath === "lifecycle/current-operation" ||
+        relativePath === "lifecycle/purge-safety.json")
+    ) {
+      continue;
+    }
     if (
       expected === undefined ||
       expected.device !== stat.dev ||
@@ -346,11 +635,15 @@ const validateScopeAt = (
       );
     }
   }
-  const plannedTopLevel = new Set(
-    evidence.ownedScope.map((entry) => entry.relativePath.split("/", 1)[0]),
-  );
-  if ([...topLevel].some((entry) => !plannedTopLevel.has(entry))) {
-    throw new LifecycleError("PURGE_PLAN_STALE", "Daemon data has an unplanned owned root");
+  if (!options.allowMissing) {
+    for (const relativePath of planned.keys()) {
+      if (!actual.has(relativePath)) {
+        throw new LifecycleError(
+          "PURGE_PLAN_STALE",
+          `Daemon data path ${relativePath} is missing since the sole owner sealed the plan`,
+        );
+      }
+    }
   }
   return [...topLevel].toSorted();
 };
@@ -364,7 +657,7 @@ const syncDirectory = (path: string): void => {
   }
 };
 
-const deleteTree = (path: string): void => {
+const deleteTree = (path: string, afterDelete: () => void = () => undefined): void => {
   const stat = lstatSync(path);
   if (
     stat.isSymbolicLink() ||
@@ -378,11 +671,12 @@ const deleteTree = (path: string): void => {
     );
   }
   if (stat.isDirectory()) {
-    for (const child of readdirSync(path)) deleteTree(join(path, child));
+    for (const child of readdirSync(path)) deleteTree(join(path, child), afterDelete);
     rmdirSync(path);
   } else {
     unlinkSync(path);
   }
+  afterDelete();
 };
 
 export class DaemonDataPurger {
@@ -418,11 +712,10 @@ export class DaemonDataPurger {
         "sealed safety evidence is stale; use restricted recovery before purge",
       );
     }
+    validateScopeAt(this.#paths.dataRoot, evidence);
     const native = this.#nativeService.inspect();
-    const issuedAt = this.#time();
-    const expiresAt = new Date(
-      Math.min(this.#now() + 10 * 60_000, Date.parse(evidence.expiresAt)),
-    ).toISOString();
+    const issuedAt = evidence.issuedAt;
+    const expiresAt = evidence.expiresAt;
     const requestHash = hash(
       canonical({
         operation: "purge",
@@ -509,11 +802,32 @@ export class DaemonDataPurger {
         }
         throw new LifecycleError("PURGE_RECEIPT_DAMAGED", "a completed purge became pending");
       }
+      const expectedAffectedScope = [
+        ...new Set(
+          evidence.ownedScope.map((entry) => entry.relativePath.split("/", 1)[0] as string),
+        ),
+      ].toSorted();
+      const expectedRequestHash = hash(
+        canonical({
+          operation: "purge",
+          dataIdentity: evidence.dataIdentity,
+          evidenceId: evidence.evidenceId,
+        }),
+      );
+      const native = this.#nativeService.inspect();
       if (
         plan.dataIdentity !== evidence.dataIdentity ||
         plan.evidenceId !== evidence.evidenceId ||
+        plan.requestHash !== expectedRequestHash ||
+        canonical(plan.affectedScope) !== canonical(expectedAffectedScope) ||
         plan.expectedStateVersion !== evidence.stateVersion ||
         plan.expectedCorrectnessFingerprint !== evidence.correctnessFingerprint ||
+        canonical(plan.correctness) !== canonical(evidence.correctness) ||
+        canonical(plan.resourceRisks) !== canonical(evidence.resourceRisks) ||
+        plan.issuedAt !== evidence.issuedAt ||
+        plan.expiresAt !== evidence.expiresAt ||
+        canonical(plan.observed) !==
+          canonical({ automaticStart: native.automaticStart, process: native.process }) ||
         Date.parse(plan.expiresAt) <= this.#now() ||
         Date.parse(evidence.expiresAt) <= this.#now()
       ) {
@@ -525,7 +839,6 @@ export class DaemonDataPurger {
           `${evidence.resourceRisks.length} Resource lease(s) are not confirmed released`,
         );
       }
-      const native = this.#nativeService.inspect();
       if (native.process !== "stopped" || native.automaticStart !== "disabled") {
         throw new LifecycleError(
           "PURGE_SERVICE_UNSAFE",
@@ -595,7 +908,9 @@ export class DaemonDataPurger {
           "the original lifecycle journal is missing before quarantine",
         );
       }
-      validateScopeAt(this.#paths.dataRoot, receipt.evidence);
+      validateScopeAt(this.#paths.dataRoot, receipt.evidence, {
+        mutableOperationIds: [receipt.operationId],
+      });
       const operation = this.#journal.read(receipt.operationId);
       if (operation !== undefined && operation.stage === "purge-authorized") {
         this.#journal.advance({
@@ -621,8 +936,11 @@ export class DaemonDataPurger {
     }
     const quarantine = quarantinePath(this.#paths, receipt.dataIdentity);
     if (existsSync(quarantine)) {
-      validateScopeAt(quarantine, receipt.evidence);
-      deleteTree(quarantine);
+      validateScopeAt(quarantine, receipt.evidence, {
+        mutableOperationIds: [receipt.operationId],
+        allowMissing: true,
+      });
+      deleteTree(quarantine, () => this.#boundary("delete-node"));
       syncDirectory(dirname(quarantine));
     }
     const completedAt = this.#time();

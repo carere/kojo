@@ -2,7 +2,10 @@
 import { join } from "node:path";
 import { Effect } from "effect";
 import { recoverPurgeSafety, startDaemon } from "../contexts/daemon/adapters/DaemonOwner.ts";
+import { macLaunchAgent } from "../contexts/daemon/adapters/MacLaunchAgent.ts";
 import { ManagedDaemonSupervision } from "../contexts/daemon/adapters/ManagedDaemonSupervision.ts";
+import { systemdUserService } from "../contexts/daemon/adapters/SystemdUserService.ts";
+import { LifecycleError } from "../contexts/daemon/models/LifecycleError.ts";
 import { hostPaths } from "../contexts/daemon/services/hostPaths.ts";
 
 export const runDaemon = async (): Promise<void> => {
@@ -27,7 +30,24 @@ export const runDaemon = async (): Promise<void> => {
   const managedAttemptId = process.env.KOJO_DAEMON_ATTEMPT_ID;
   const purgeRecoveryOperation = process.env.KOJO_PURGE_SAFETY_RECOVERY_OPERATION;
   if (purgeRecoveryOperation !== undefined) {
-    await recoverPurgeSafety(paths, purgeRecoveryOperation);
+    const planToken = process.env.KOJO_PURGE_SAFETY_RECOVERY_PLAN;
+    const capability = process.env.KOJO_PURGE_SAFETY_RECOVERY_CAPABILITY;
+    if (planToken === undefined || capability === undefined) {
+      throw new LifecycleError(
+        "PURGE_RECOVERY_AUTHORIZATION_INVALID",
+        "the restricted recovery child has no exact one-use authorization",
+      );
+    }
+    const service =
+      process.platform === "darwin"
+        ? macLaunchAgent()
+        : process.platform === "linux"
+          ? systemdUserService()
+          : undefined;
+    if (service === undefined) {
+      throw new LifecycleError("UNSUPPORTED_HOST", "restricted recovery requires macOS or Linux");
+    }
+    await recoverPurgeSafety(paths, purgeRecoveryOperation, planToken, capability, service);
     return;
   }
   const supervision =

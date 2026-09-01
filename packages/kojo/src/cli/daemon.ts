@@ -806,9 +806,9 @@ const purge = Command.make(
     );
     const lifecycleRoot = join(paths.dataRoot, "lifecycle");
     const journal = existsSync(lifecycleRoot)
-      ? yield* lifecycleTry(() => new FileLifecycleJournalRepository(lifecycleRoot)).pipe(
-          Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
-        )
+      ? yield* lifecycleTry(
+          () => new FileLifecycleJournalRepository(lifecycleRoot, { readOnly: check }),
+        ).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)))
       : undefined;
     const purger = new DaemonDataPurger({
       paths,
@@ -876,7 +876,9 @@ const repair = Command.make(
     );
     if (purgeSafety) {
       const service = nativeService();
-      const journal = new FileLifecycleJournalRepository(join(paths.dataRoot, "lifecycle"));
+      const journal = new FileLifecycleJournalRepository(join(paths.dataRoot, "lifecycle"), {
+        readOnly: check,
+      });
       const recovery = new PurgeSafetyRecovery({ paths, journal, nativeService: service });
       if (Option.isSome(apply)) {
         const result = yield* lifecycleTryPromise(() => recovery.apply(apply.value)).pipe(

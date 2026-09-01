@@ -144,7 +144,12 @@ export const systemdUserService = (
     disable: (stopNow) =>
       run("disable automatic start", ["disable", ...(stopNow ? ["--now"] : []), unit]),
     removeRegistration: (serviceDefinition) => {
-      run("disable automatic start", ["disable", unit]);
+      const current = systemctl(["--user", "is-enabled", unit]);
+      if (current.stdout.trim() === "enabled") {
+        run("disable automatic start", ["disable", unit]);
+      } else {
+        assertManager();
+      }
       if (existsSync(serviceDefinition)) {
         assertPrivateNode(serviceDefinition, "file");
         unlinkSync(serviceDefinition);

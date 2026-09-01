@@ -118,7 +118,9 @@ export const macLaunchAgent = (
     removeRegistration: (launchAgent) => {
       const current = inspect();
       if (current.manager === "loaded") run("stop the LaunchAgent", ["bootout", target]);
-      run("disable automatic start", ["disable", target]);
+      if (current.automaticStart !== "disabled") {
+        run("disable automatic start", ["disable", target]);
+      }
       if (existsSync(launchAgent)) {
         assertPrivateNode(launchAgent, "file");
         unlinkSync(launchAgent);

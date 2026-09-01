@@ -18,6 +18,7 @@ import type { DaemonLifecycleControl, LifecycleHandoff } from "../ports/DaemonLi
 import type { DaemonUpgradeControl } from "../ports/DaemonUpgradeControl.ts";
 import type { LifecycleJournalRepository } from "../ports/LifecycleJournalRepository.ts";
 import { removeOwnedSocket } from "../services/secureHostPath.ts";
+import { decodePurgeSafetyEvidence } from "./DaemonDataPurger.ts";
 
 type ControlAction =
   | "inspect-preflight"
@@ -144,29 +145,14 @@ const drainOf = (value: unknown): LifecycleDrainProgress => {
 };
 
 const purgeEvidenceOf = (value: unknown): PurgeSafetyEvidence => {
-  const evidence = record(value);
-  if (
-    evidence === undefined ||
-    evidence.formatVersion !== 1 ||
-    typeof evidence.evidenceId !== "string" ||
-    !/^[A-Za-z0-9_-]+$/.test(evidence.evidenceId) ||
-    typeof evidence.operationId !== "string" ||
-    typeof evidence.dataIdentity !== "string" ||
-    typeof evidence.stateVersion !== "string" ||
-    typeof evidence.correctnessFingerprint !== "string" ||
-    !Array.isArray(evidence.resourceRisks) ||
-    !Array.isArray(evidence.ownedScope) ||
-    typeof evidence.issuedAt !== "string" ||
-    typeof evidence.expiresAt !== "string" ||
-    typeof evidence.seal !== "string" ||
-    !/^[a-f0-9]{64}$/.test(evidence.seal)
-  ) {
+  try {
+    return decodePurgeSafetyEvidence(value);
+  } catch {
     throw new LifecycleError(
       "LIFECYCLE_CONTROL_UNAVAILABLE",
       "the lifecycle purge-safety response is invalid",
     );
   }
-  return value as PurgeSafetyEvidence;
 };
 
 const backupOf = (value: unknown): UpgradeBackupEvidence => {

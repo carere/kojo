@@ -1,6 +1,7 @@
 import {
   closeSync,
   constants,
+  existsSync,
   fchmodSync,
   fstatSync,
   fsyncSync,
@@ -142,6 +143,18 @@ export const ensurePurgeRecoveryCapsule = (
   dataIdentity: string,
   sourceReleaseId: string,
 ): PurgeRecoveryCapsule => {
+  const planKeyPath = join(paths.configurationRoot, "purge-control", "recovery-plan.key");
+  if (existsSync(planKeyPath)) {
+    assertPrivateNode(planKeyPath, "file");
+    if (!/^[a-f0-9]{64}$/.test(readFileSync(planKeyPath, "utf8").trim())) {
+      throw new LifecycleError(
+        "PURGE_RECOVERY_PLAN_KEY_DAMAGED",
+        "the restricted recovery plan key is damaged",
+      );
+    }
+  } else {
+    atomicPrivateFile(planKeyPath, `${crypto.getRandomValues(new Uint8Array(32)).toHex()}\n`);
+  }
   const release = join(paths.installationRoot, "releases", sourceReleaseId);
   const sourceBun = join(release, "runtime", "bun");
   const sourceLauncher = join(release, "launcher.js");

@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { createHmac } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -18,8 +19,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   acquireDaemonStartGate,
   DaemonDataPurger,
+  decodePurgeSafetyEvidence,
 } from "../../../../src/contexts/daemon/adapters/DaemonDataPurger.ts";
-import { startDaemon } from "../../../../src/contexts/daemon/adapters/DaemonOwner.ts";
+import {
+  recoverPurgeSafety,
+  startDaemon,
+} from "../../../../src/contexts/daemon/adapters/DaemonOwner.ts";
 import { FileLifecycleJournalRepository } from "../../../../src/contexts/daemon/adapters/FileLifecycleJournalRepository.ts";
 import {
   installManagedRelease,
@@ -29,7 +34,10 @@ import {
   ensurePurgeRecoveryCapsule,
   readPurgeRecoveryCapsule,
 } from "../../../../src/contexts/daemon/adapters/PurgeRecoveryCapsule.ts";
-import { PurgeSafetyRecovery } from "../../../../src/contexts/daemon/adapters/PurgeSafetyRecovery.ts";
+import {
+  decodePurgeSafetyRecoveryPlan,
+  PurgeSafetyRecovery,
+} from "../../../../src/contexts/daemon/adapters/PurgeSafetyRecovery.ts";
 import { SqlitePurgeSafetyRepository } from "../../../../src/contexts/daemon/adapters/SqlitePurgeSafetyRepository.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
 import type {
@@ -38,6 +46,21 @@ import type {
 } from "../../../../src/contexts/daemon/ports/NativeService.ts";
 
 const roots: string[] = [];
+
+const canonical = (value: unknown): string =>
+  JSON.stringify(value, (_key, selected) => {
+    if (selected === null || typeof selected !== "object" || Array.isArray(selected)) {
+      return selected;
+    }
+    return Object.fromEntries(
+      Object.entries(selected as Record<string, unknown>).toSorted(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+    );
+  });
+
+const digest = (value: string): string =>
+  new Bun.CryptoHasher("sha256").update(value).digest("hex");
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { force: true, recursive: true });
@@ -92,8 +115,25 @@ const fixture = (
     keepRunningAfterLogout: () => undefined,
   };
   const journal = new FileLifecycleJournalRepository(join(paths.dataRoot, "lifecycle"));
+  journal.current();
   return { root, paths, database, native, journal, dataIdentity };
 };
+
+const recoveryFor = (test: ReturnType<typeof fixture>): PurgeSafetyRecovery =>
+  new PurgeSafetyRecovery({
+    paths: test.paths,
+    journal: test.journal,
+    nativeService: test.native,
+    launchRestrictedRecovery: async ({ env }) => {
+      await recoverPurgeSafety(
+        test.paths,
+        env.KOJO_PURGE_SAFETY_RECOVERY_OPERATION ?? "",
+        env.KOJO_PURGE_SAFETY_RECOVERY_PLAN ?? "",
+        env.KOJO_PURGE_SAFETY_RECOVERY_CAPABILITY ?? "",
+        test.native,
+      );
+    },
+  });
 
 const seal = async (
   test: ReturnType<typeof fixture>,
@@ -121,6 +161,37 @@ const seal = async (
 };
 
 describe("remove safety and exact offline purge", () => {
+  it("refuses direct retained-launcher recovery without an exact one-use authorization", async () => {
+    const test = fixture();
+    mkdirSync(join(test.root, "service"), { mode: 0o700 });
+    writeFileSync(
+      join(test.paths.dataRoot, "lifecycle", "data-identity"),
+      `${test.dataIdentity}\n`,
+      { mode: 0o600 },
+    );
+    const installed = await Effect.runPromise(
+      installManagedRelease({ paths: test.paths, serviceDocument: () => "test service\n" }),
+    );
+    const capsule = ensurePurgeRecoveryCapsule(test.paths, test.dataIdentity, installed.releaseId);
+    const child = Bun.spawn([capsule.bun, capsule.launcher], {
+      env: {
+        ...process.env,
+        KOJO_DAEMON_CHILD: "1",
+        KOJO_PURGE_SAFETY_RECOVERY_OPERATION: "arbitrary",
+        KOJO_MANAGED_INSTALLATION: test.paths.installationRoot,
+        KOJO_DAEMON_DATA: test.paths.dataRoot,
+        KOJO_DAEMON_RUNTIME: test.paths.runtimeRoot,
+        KOJO_DAEMON_CONFIG: test.paths.configurationRoot,
+        KOJO_DAEMON_CACHE: test.paths.cacheRoot,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(await child.exited).toBe(1);
+    expect(await new Response(child.stderr).text()).toContain("no exact one-use authorization");
+    removeManagedInstallation(test.paths);
+  }, 30_000);
+
   it("recovers stale safety from the identity-bound capsule after managed removal", async () => {
     const test = fixture();
     mkdirSync(join(test.root, "service"), { mode: 0o700 });
@@ -170,11 +241,7 @@ describe("remove safety and exact offline purge", () => {
     });
     expect(purger.check).toThrow("stale");
 
-    const recovery = new PurgeSafetyRecovery({
-      paths: test.paths,
-      journal: test.journal,
-      nativeService: test.native,
-    });
+    const recovery = recoveryFor(test);
     const manifestPath = join(
       test.paths.dataRoot,
       "lifecycle",
@@ -194,14 +261,35 @@ describe("remove safety and exact offline purge", () => {
     expect(recovery.check).toThrow("signed identity authorization");
     writeFileSync(capsule.launcher, exactLauncher, { mode: 0o600 });
     writeFileSync(manifestPath, exactManifest, { mode: 0o600 });
+    const recoveryPlanPath = join(
+      test.paths.configurationRoot,
+      "purge-control",
+      "recovery-plan.json",
+    );
+    expect(existsSync(recoveryPlanPath)).toBe(false);
     const checked = recovery.check();
+    expect(existsSync(recoveryPlanPath)).toBe(false);
+    const malformedEncoded = Buffer.from(
+      JSON.stringify({ ...checked.plan, sourceReleaseId: 42 }),
+      "utf8",
+    ).toString("base64url");
+    const recoveryKey = readFileSync(
+      join(test.paths.configurationRoot, "purge-control", "recovery-plan.key"),
+      "utf8",
+    ).trim();
+    const malformedSeal = createHmac("sha256", Buffer.from(recoveryKey, "hex"))
+      .update(malformedEncoded)
+      .digest("hex");
+    expect(() =>
+      decodePurgeSafetyRecoveryPlan(test.paths, `${malformedEncoded}.${malformedSeal}`),
+    ).toThrow("recovery plan is invalid");
     const forged = {
       ...checked.plan,
       expected: { ...checked.plan.expected, unknown: "unsafe" },
     };
     await expect(
       recovery.apply(Buffer.from(JSON.stringify(forged), "utf8").toString("base64url")),
-    ).rejects.toThrow("plan is invalid");
+    ).rejects.toThrow("plan token is invalid");
     const recovered = await recovery.apply(checked.planToken);
 
     expect(recovered).toMatchObject({ outcome: "recovered", dataIdentity: test.dataIdentity });
@@ -236,11 +324,7 @@ describe("remove safety and exact offline purge", () => {
     const oldDataIdentity = oldDaemon.endpoint.dataIdentity;
     await Effect.runPromise(oldDaemon.stop);
 
-    const recovery = new PurgeSafetyRecovery({
-      paths: test.paths,
-      journal: test.journal,
-      nativeService: test.native,
-    });
+    const recovery = recoveryFor(test);
     await recovery.apply(recovery.check().planToken);
     const purger = new DaemonDataPurger({
       paths: test.paths,
@@ -334,6 +418,109 @@ describe("remove safety and exact offline purge", () => {
     expect(existsSync(join(test.paths.configurationRoot, "purge-control", "receipts"))).toBe(false);
   });
 
+  it("refuses missing signed correctness bytes and unplanned lifecycle content", async () => {
+    const missing = fixture();
+    await seal(missing);
+    missing.database.close(false);
+    unlinkSync(join(missing.paths.dataRoot, "kojo.db"));
+    const missingPurger = new DaemonDataPurger({
+      paths: missing.paths,
+      journal: missing.journal,
+      nativeService: missing.native,
+      now: () => Date.parse("2026-09-01T10:01:00.000Z"),
+    });
+    expect(missingPurger.check).toThrow("kojo.db is missing");
+
+    const added = fixture();
+    await seal(added);
+    added.database.close(false);
+    const unplanned = join(added.paths.dataRoot, "lifecycle", "unplanned-private-file");
+    writeFileSync(unplanned, "must not be deleted\n", { mode: 0o600 });
+    const addedPurger = new DaemonDataPurger({
+      paths: added.paths,
+      journal: added.journal,
+      nativeService: added.native,
+      now: () => Date.parse("2026-09-01T10:01:00.000Z"),
+    });
+    expect(addedPurger.check).toThrow("unplanned-private-file is new or changed");
+    expect(readFileSync(unplanned, "utf8")).toContain("must not be deleted");
+  });
+
+  it("checkpoints real WAL bytes before it seals the final purge scope", async () => {
+    const test = fixture();
+    expect(
+      test.database.query<{ journal_mode: string }, []>("PRAGMA journal_mode = WAL").get()
+        ?.journal_mode,
+    ).toBe("wal");
+    test.database.run("INSERT INTO correctness_history VALUES ('history-wal', 'accepted')");
+    expect(existsSync(join(test.paths.dataRoot, "kojo.db-wal"))).toBe(true);
+    await seal(test);
+    expect(
+      test.database.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get()?.journal_mode,
+    ).toBe("delete");
+    expect(existsSync(join(test.paths.dataRoot, "kojo.db-wal"))).toBe(false);
+    expect(existsSync(join(test.paths.dataRoot, "kojo.db-shm"))).toBe(false);
+    test.database.close(false);
+    expect(existsSync(join(test.paths.dataRoot, "kojo.db-shm"))).toBe(false);
+    const purger = new DaemonDataPurger({
+      paths: test.paths,
+      journal: test.journal,
+      nativeService: test.native,
+      now: () => Date.parse("2026-09-01T10:01:00.000Z"),
+    });
+    expect(purger.check().plan.correctness.recordsByTable.correctness_history).toBe(2);
+  });
+
+  it("rejects unknown nested plan and evidence fields", async () => {
+    const test = fixture();
+    await seal(test);
+    test.database.close(false);
+    const purger = new DaemonDataPurger({
+      paths: test.paths,
+      journal: test.journal,
+      nativeService: test.native,
+      now: () => Date.parse("2026-09-01T10:01:00.000Z"),
+    });
+    const checked = purger.check();
+    const evidence = JSON.parse(
+      readFileSync(join(test.paths.dataRoot, "lifecycle", "purge-safety.json"), "utf8"),
+    ) as Record<string, unknown>;
+    expect(() =>
+      decodePurgeSafetyEvidence({
+        ...evidence,
+        ownerProcessState: {
+          ...(evidence.ownerProcessState as Record<string, unknown>),
+          unknown: true,
+        },
+      }),
+    ).toThrow("safety evidence is invalid");
+
+    const withoutId = {
+      ...checked.plan,
+      observed: { ...checked.plan.observed, unknown: "unsafe" },
+      planId: undefined,
+    };
+    const forged = { ...withoutId, planId: digest(canonical(withoutId)) };
+    const encoded = Buffer.from(JSON.stringify(forged), "utf8").toString("base64url");
+    const token = `${encoded}.${digest(`${canonical(forged)}\0${String(evidence.seal)}`)}`;
+    expect(() => purger.confirm(token)).toThrow("purge plan token is invalid");
+
+    const changedWithoutId = {
+      ...checked.plan,
+      correctness: { ...checked.plan.correctness, runs: checked.plan.correctness.runs + 1 },
+      planId: undefined,
+    };
+    const changed = {
+      ...changedWithoutId,
+      planId: digest(canonical(changedWithoutId)),
+    };
+    const changedEncoded = Buffer.from(JSON.stringify(changed), "utf8").toString("base64url");
+    const changedToken = `${changedEncoded}.${digest(
+      `${canonical(changed)}\0${String(evidence.seal)}`,
+    )}`;
+    expect(() => purger.confirm(changedToken)).toThrow("plan or safety evidence is stale");
+  });
+
   it("refuses evidence that was changed and rehashed without the Daemon private key", async () => {
     const test = fixture();
     await seal(test);
@@ -354,7 +541,7 @@ describe("remove safety and exact offline purge", () => {
       now: () => Date.parse("2026-09-01T10:01:00.000Z"),
     });
 
-    expect(purger.check).toThrow("not authored by the sole Daemon owner");
+    expect(purger.check).toThrow("safety evidence is invalid");
   });
 
   it("refuses stale plans and unresolved Resource leases", async () => {
@@ -471,6 +658,45 @@ describe("remove safety and exact offline purge", () => {
     expect(readFileSync(join(project, ".kojo", "credential"), "utf8")).toContain("secret");
   });
 
+  it("resumes safe deletion after a crash part-way through the quarantine tree", async () => {
+    const test = fixture();
+    mkdirSync(join(test.paths.dataRoot, "artifacts", "nested"), { mode: 0o700, recursive: true });
+    writeFileSync(join(test.paths.dataRoot, "artifacts", "nested", "one"), "one", {
+      mode: 0o600,
+    });
+    writeFileSync(join(test.paths.dataRoot, "artifacts", "two"), "two", { mode: 0o600 });
+    await seal(test);
+    test.database.close(false);
+    const now = () => Date.parse("2026-09-01T10:01:00.000Z");
+    const plan = new DaemonDataPurger({
+      paths: test.paths,
+      journal: test.journal,
+      nativeService: test.native,
+      now,
+    }).check();
+    let deleted = 0;
+    expect(() =>
+      new DaemonDataPurger({
+        paths: test.paths,
+        journal: test.journal,
+        nativeService: test.native,
+        now,
+        boundary: (stage) => {
+          if (stage === "delete-node" && ++deleted === 2) throw new Error("delete crash");
+        },
+      }).confirm(plan.planToken),
+    ).toThrow("delete crash");
+    expect(existsSync(test.paths.dataRoot)).toBe(false);
+    expect(
+      new DaemonDataPurger({
+        paths: test.paths,
+        journal: test.journal,
+        nativeService: test.native,
+        now,
+      }).confirm(plan.planToken),
+    ).toMatchObject({ outcome: "purged" });
+  });
+
   it("publishes a new identity-specific verifier after purge and refuses the old plan", async () => {
     const test = fixture();
     await seal(test);
@@ -498,6 +724,8 @@ describe("remove safety and exact offline purge", () => {
     writeFileSync(join(test.paths.dataRoot, "lifecycle", "data-identity"), "data-new\n", {
       mode: 0o600,
     });
+    const nextJournal = new FileLifecycleJournalRepository(join(test.paths.dataRoot, "lifecycle"));
+    nextJournal.current();
     const nextRepository = new SqlitePurgeSafetyRepository(
       nextDatabase,
       "data-new",
@@ -517,7 +745,6 @@ describe("remove safety and exact offline purge", () => {
       ),
     );
     nextDatabase.close(false);
-    const nextJournal = new FileLifecycleJournalRepository(join(test.paths.dataRoot, "lifecycle"));
     const nextPurger = new DaemonDataPurger({
       paths: test.paths,
       journal: nextJournal,

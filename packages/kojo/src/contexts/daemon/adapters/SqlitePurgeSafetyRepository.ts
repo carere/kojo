@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from "node:crypto";
-import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { Effect } from "effect";
 import { LifecycleError } from "../models/LifecycleError.ts";
@@ -95,6 +95,7 @@ export class SqlitePurgeSafetyRepository implements PurgeSafetyRepository {
     } else {
       atomicPrivateFile(publicKeyPath, publicKey.toString("base64"));
     }
+    this.#authorizeRecoveryCapsule();
   }
 
   #table(name: string): boolean {
@@ -190,6 +191,34 @@ export class SqlitePurgeSafetyRepository implements PurgeSafetyRepository {
       }));
   }
 
+  #finalizeDatabaseBytes(): void {
+    const checkpoint = this.#database
+      .query<{ readonly busy: number }, []>("PRAGMA wal_checkpoint(TRUNCATE)")
+      .get();
+    if (checkpoint !== null && checkpoint.busy !== 0) {
+      throw new LifecycleError(
+        "PURGE_SAFETY_BUSY",
+        "the sole Daemon owner could not checkpoint all accepted SQLite state",
+      );
+    }
+    const journal = this.#database
+      .query<{ readonly journal_mode: string }, []>("PRAGMA journal_mode = DELETE")
+      .get();
+    if (journal?.journal_mode.toLowerCase() !== "delete") {
+      throw new LifecycleError(
+        "PURGE_SAFETY_BUSY",
+        "the sole Daemon owner could not seal stable final SQLite bytes",
+      );
+    }
+    this.#database.run("PRAGMA synchronous = FULL");
+    for (const sidecar of ["kojo.db-wal", "kojo.db-shm"]) {
+      const path = join(this.#dataRoot, sidecar);
+      if (!existsSync(path)) continue;
+      assertPrivateNode(path, "file");
+      unlinkSync(path);
+    }
+  }
+
   #scope(): ReadonlyArray<PurgeOwnedScope> {
     assertPrivateNode(this.#dataRoot, "directory");
     const owner = process.getuid?.() ?? -1;
@@ -234,7 +263,10 @@ export class SqlitePurgeSafetyRepository implements PurgeSafetyRepository {
         sha256: new Bun.CryptoHasher("sha256").update(readFileSync(path)).digest("hex"),
       });
     };
-    for (const child of readdirSync(this.#dataRoot).toSorted()) visit(join(this.#dataRoot, child));
+    for (const child of readdirSync(this.#dataRoot).toSorted()) {
+      if (child === "kojo.db-wal" || child === "kojo.db-shm") continue;
+      visit(join(this.#dataRoot, child));
+    }
     return selected;
   }
 
@@ -279,6 +311,7 @@ export class SqlitePurgeSafetyRepository implements PurgeSafetyRepository {
         ensurePrivateDirectory(join(this.#dataRoot, "lifecycle"));
         this.#prepareScope();
         this.#authorizeRecoveryCapsule();
+        this.#finalizeDatabaseBytes();
         const correctnessFingerprint = this.#fingerprint();
         if (existsSync(this.#evidencePath)) {
           assertPrivateNode(this.#evidencePath, "file");
