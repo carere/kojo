@@ -13,6 +13,7 @@ import { Route as IndexRouteImport } from './routes/index.tsx'
 import { Route as DaemonRouteImport } from './routes/daemon.tsx'
 import { Route as GatesRouteImport } from './routes/gates.tsx'
 import { Route as RunsRouteImport } from './routes/runs.tsx'
+import { Route as ProjectsProjectIdRouteImport } from './routes/projects.$projectId.tsx'
 import { Route as RunsRunIdRouteImport } from './routes/runs.$runId.tsx'
 import { Route as RunsRunIdGatesGateAskingRouteImport } from './routes/runs.$runId.gates.$gate.$asking.tsx'
 import { Route as RunsRunIdPhasesNameAttemptRouteImport } from './routes/runs.$runId.phases.$name.$attempt.tsx'
@@ -36,6 +37,11 @@ const GatesRoute = GatesRouteImport.update({
 const RunsRoute = RunsRouteImport.update({
   id: '/runs',
   path: '/runs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProjectsProjectIdRoute = ProjectsProjectIdRouteImport.update({
+  id: '/projects/$projectId',
+  path: '/projects/$projectId',
   getParentRoute: () => rootRouteImport,
 } as any)
 const RunsRunIdRoute = RunsRunIdRouteImport.update({
@@ -67,6 +73,7 @@ export interface FileRoutesByFullPath {
   '/daemon': typeof DaemonRoute
   '/gates': typeof GatesRoute
   '/runs': typeof RunsRouteWithChildren
+  '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/runs/$runId': typeof RunsRunIdRouteWithChildren
   '/runs/$runId/gates/$gate/$asking': typeof RunsRunIdGatesGateAskingRoute
   '/runs/$runId/phases/$name/$attempt': typeof RunsRunIdPhasesNameAttemptRoute
@@ -77,6 +84,7 @@ export interface FileRoutesByTo {
   '/daemon': typeof DaemonRoute
   '/gates': typeof GatesRoute
   '/runs': typeof RunsRouteWithChildren
+  '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/runs/$runId': typeof RunsRunIdRouteWithChildren
   '/runs/$runId/gates/$gate/$asking': typeof RunsRunIdGatesGateAskingRoute
   '/runs/$runId/phases/$name/$attempt': typeof RunsRunIdPhasesNameAttemptRoute
@@ -88,6 +96,7 @@ export interface FileRoutesById {
   '/daemon': typeof DaemonRoute
   '/gates': typeof GatesRoute
   '/runs': typeof RunsRouteWithChildren
+  '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/runs/$runId': typeof RunsRunIdRouteWithChildren
   '/runs/$runId/gates/$gate/$asking': typeof RunsRunIdGatesGateAskingRoute
   '/runs/$runId/phases/$name/$attempt': typeof RunsRunIdPhasesNameAttemptRoute
@@ -100,6 +109,7 @@ export interface FileRouteTypes {
     | '/daemon'
     | '/gates'
     | '/runs'
+    | '/projects/$projectId'
     | '/runs/$runId'
     | '/runs/$runId/gates/$gate/$asking'
     | '/runs/$runId/phases/$name/$attempt'
@@ -110,6 +120,7 @@ export interface FileRouteTypes {
     | '/daemon'
     | '/gates'
     | '/runs'
+    | '/projects/$projectId'
     | '/runs/$runId'
     | '/runs/$runId/gates/$gate/$asking'
     | '/runs/$runId/phases/$name/$attempt'
@@ -120,6 +131,7 @@ export interface FileRouteTypes {
     | '/daemon'
     | '/gates'
     | '/runs'
+    | '/projects/$projectId'
     | '/runs/$runId'
     | '/runs/$runId/gates/$gate/$asking'
     | '/runs/$runId/phases/$name/$attempt'
@@ -131,6 +143,7 @@ export interface RootRouteChildren {
   DaemonRoute: typeof DaemonRoute
   GatesRoute: typeof GatesRoute
   RunsRoute: typeof RunsRouteWithChildren
+  ProjectsProjectIdRoute: typeof ProjectsProjectIdRoute
 }
 
 declare module '@tanstack/solid-router' {
@@ -161,6 +174,13 @@ declare module '@tanstack/solid-router' {
       path: '/runs'
       fullPath: '/runs'
       preLoaderRoute: typeof RunsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/projects/$projectId': {
+      id: '/projects/$projectId'
+      path: '/projects/$projectId'
+      fullPath: '/projects/$projectId'
+      preLoaderRoute: typeof ProjectsProjectIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/runs/$runId': {
@@ -226,6 +246,7 @@ const rootRouteChildren: RootRouteChildren = {
   DaemonRoute: DaemonRoute,
   GatesRoute: GatesRoute,
   RunsRoute: RunsRouteWithChildren,
+  ProjectsProjectIdRoute: ProjectsProjectIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -43,6 +43,7 @@ export const inMemoryProjectRepository = Layer.sync(ProjectRepository, () => {
               location: request.location,
               projectState: "available",
               factoryState: request.factory.state,
+              refreshState: request.factory.refreshState ?? "current",
               registeredAt: request.observedAt,
               refreshedAt: request.observedAt,
               ...(request.factory.fault === undefined ? {} : { fault: request.factory.fault }),

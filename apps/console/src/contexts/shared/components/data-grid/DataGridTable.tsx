@@ -36,7 +36,7 @@ export const DataGridTable = <TFeatures extends TableFeatures, T extends RowData
       >
         <For each={props.table.getRowModel().rows}>
           {(row) => (
-            <TableRow data-project-id={row.id}>
+            <TableRow data-project-id={row.id} data-workflow-id={row.id}>
               <For each={row.getAllCells()}>
                 {(cell) => (
                   <TableCell>

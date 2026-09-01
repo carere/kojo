@@ -1,10 +1,14 @@
 import type {
+  FactoryRefreshState,
   FactoryState,
   ProjectDocument,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
+import type { WorkflowRefreshObservation } from "../../workflow/models/FactoryRefresh.ts";
 
 export interface FactoryObservation {
   readonly state: FactoryState;
+  readonly refreshState?: FactoryRefreshState;
+  readonly workflows?: ReadonlyArray<WorkflowRefreshObservation>;
   readonly fault?: string;
   readonly remedy?: string;
 }

@@ -1,4 +1,5 @@
 import type { ProjectDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
+import { Link } from "@tanstack/solid-router";
 import {
   createColumnHelper,
   createTable,
@@ -81,7 +82,17 @@ const projectColumns = (
       header: "Project",
       cell: (info) => (
         <span>
-          <strong class="block">{info.row.original.label}</strong>
+          <Link
+            class="block font-semibold underline"
+            onClick={(event) => {
+              event.preventDefault();
+              window.location.assign(event.currentTarget.href);
+            }}
+            params={{ projectId: info.row.original.projectId }}
+            to="/projects/$projectId"
+          >
+            {info.row.original.label}
+          </Link>
           <span class="font-mono text-muted-foreground text-xs">{info.row.original.projectId}</span>
         </span>
       ),
