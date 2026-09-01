@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
+import { existsSync, unlinkSync } from "node:fs";
 import { LifecycleError } from "../models/LifecycleError.ts";
 import type { NativeService, NativeServiceObservation } from "../ports/NativeService.ts";
+import { assertPrivateNode } from "../services/secureHostPath.ts";
 import { systemdUnitDocument } from "../services/systemdUnitDocument.ts";
 
 export interface SystemdCommandResult {
@@ -141,6 +143,19 @@ export const systemdUserService = (
     enable: () => run("enable automatic start", ["enable", unit]),
     disable: (stopNow) =>
       run("disable automatic start", ["disable", ...(stopNow ? ["--now"] : []), unit]),
+    removeRegistration: (serviceDefinition) => {
+      const current = systemctl(["--user", "is-enabled", unit]);
+      if (current.stdout.trim() === "enabled") {
+        run("disable automatic start", ["disable", unit]);
+      } else {
+        assertManager();
+      }
+      if (existsSync(serviceDefinition)) {
+        assertPrivateNode(serviceDefinition, "file");
+        unlinkSync(serviceDefinition);
+      }
+      run("reload the systemd user manager", ["daemon-reload"]);
+    },
     keepRunningAfterLogout: () => {
       const result = loginctl(["enable-linger", String(userId)]);
       if (result.exitCode === 0) return;

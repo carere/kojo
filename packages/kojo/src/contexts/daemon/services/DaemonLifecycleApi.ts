@@ -2,8 +2,10 @@ import { Effect } from "effect";
 import type { RunApi } from "../../workflow/services/RunApi.ts";
 import { LifecycleError } from "../models/LifecycleError.ts";
 import type { LifecycleRecordedOwner } from "../models/LifecycleOperation.ts";
+import type { PurgeSafetyEvidence } from "../models/Purge.ts";
 import type { DaemonLifecycleControl, LifecycleHandoff } from "../ports/DaemonLifecycleControl.ts";
 import type { DaemonLifecycleReceiptRepository } from "../ports/DaemonLifecycleReceiptRepository.ts";
+import type { PurgeSafetyRepository } from "../ports/PurgeSafetyRepository.ts";
 
 const asLifecycleError = (cause: unknown): LifecycleError =>
   cause instanceof LifecycleError
@@ -25,6 +27,8 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
   readonly #activatePendingConfiguration: Effect.Effect<void, LifecycleError>;
   readonly #recordPlannedStop: Effect.Effect<void, LifecycleError>;
   readonly #cleanupMillis: () => number;
+  readonly #purgeSafety: PurgeSafetyRepository | undefined;
+  readonly #now: () => number;
 
   constructor(options: {
     readonly dataIdentity: string;
@@ -34,6 +38,8 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
     readonly activatePendingConfiguration?: Effect.Effect<void, LifecycleError>;
     readonly recordPlannedStop?: Effect.Effect<void, LifecycleError>;
     readonly cleanupMillis?: () => number;
+    readonly purgeSafety?: PurgeSafetyRepository;
+    readonly now?: () => number;
   }) {
     this.#dataIdentity = options.dataIdentity;
     this.#runs = options.runs;
@@ -42,6 +48,8 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
     this.#activatePendingConfiguration = options.activatePendingConfiguration ?? Effect.void;
     this.#recordPlannedStop = options.recordPlannedStop ?? Effect.void;
     this.#cleanupMillis = options.cleanupMillis ?? (() => 30_000);
+    this.#purgeSafety = options.purgeSafety;
+    this.#now = options.now ?? Date.now;
   }
 
   #owner(): LifecycleRecordedOwner {
@@ -121,6 +129,23 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
             : this.#runs.daemonDrainProgress().pipe(Effect.mapError(asLifecycleError)),
         ),
       );
+
+  readonly sealPurgeSafety = (
+    operationId: string,
+  ): Effect.Effect<PurgeSafetyEvidence, LifecycleError> => {
+    if (this.#purgeSafety === undefined) {
+      return Effect.fail(
+        new LifecycleError("PURGE_SAFETY_UNAVAILABLE", "the Daemon has no purge safety owner"),
+      );
+    }
+    const issuedAt = new Date(this.#now()).toISOString();
+    return this.#purgeSafety.seal(
+      operationId,
+      this.#owner(),
+      issuedAt,
+      new Date(this.#now() + 10 * 60_000).toISOString(),
+    );
+  };
 
   readonly prepareHandoff = (
     operationId: string,

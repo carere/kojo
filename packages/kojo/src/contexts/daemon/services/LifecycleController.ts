@@ -44,7 +44,18 @@ const nextAction = (operation: LifecycleOperation): LifecycleNextAction => {
     case "owned-processes-stopped":
       return "stop-native-service";
     case "process-stopped":
-      return operation.kind === "restart" ? "start-replacement" : "inspect-result";
+      return operation.kind === "restart"
+        ? "start-replacement"
+        : operation.kind === "remove"
+          ? "remove-service-registration"
+          : "inspect-result";
+    case "service-unregistered":
+      return "remove-managed-installation";
+    case "installation-removed":
+      return "inspect-result";
+    case "purge-authorized":
+    case "data-deletion-started":
+      return "delete-daemon-data";
     case "replacement-started":
       return "inspect-result";
     case "mutations-held":
@@ -75,6 +86,9 @@ export class LifecycleController {
   readonly #pollIntervalMillis: number;
   readonly #serviceDefinition: string;
   readonly #observedDaemonInstanceId: () => string | undefined;
+  readonly #removeManagedInstallation: () => void;
+  readonly #acquireRemovalGate: () => { readonly release: () => void };
+  readonly #assertRemovalSafetyEvidence: () => string;
 
   constructor(options: {
     readonly journal: LifecycleJournalRepository;
@@ -84,6 +98,9 @@ export class LifecycleController {
     readonly pollIntervalMillis?: number;
     readonly serviceDefinition: string;
     readonly observedDaemonInstanceId?: () => string | undefined;
+    readonly removeManagedInstallation?: () => void;
+    readonly acquireRemovalGate?: () => { readonly release: () => void };
+    readonly assertRemovalSafetyEvidence?: () => string;
   }) {
     this.#journal = options.journal;
     this.#control = options.control;
@@ -92,6 +109,9 @@ export class LifecycleController {
     this.#pollIntervalMillis = options.pollIntervalMillis ?? 100;
     this.#serviceDefinition = options.serviceDefinition;
     this.#observedDaemonInstanceId = options.observedDaemonInstanceId ?? (() => undefined);
+    this.#removeManagedInstallation = options.removeManagedInstallation ?? (() => undefined);
+    this.#acquireRemovalGate = options.acquireRemovalGate ?? (() => ({ release: () => undefined }));
+    this.#assertRemovalSafetyEvidence = options.assertRemovalSafetyEvidence ?? (() => "presealed");
   }
 
   #time(): string {
@@ -180,6 +200,17 @@ export class LifecycleController {
           detail: "the native manager already confirmed that the Daemon was stopped",
         });
         return yield* controller.status(operation.operationId);
+      }
+      if (
+        operation.stage === "prepared" &&
+        operation.kind === "remove" &&
+        (yield* controller.#sync(controller.#nativeService.inspect)).process === "stopped"
+      ) {
+        const evidenceId = yield* controller.#sync(controller.#assertRemovalSafetyEvidence);
+        operation = yield* controller.#advance(operation, "process-stopped", {
+          purgeSafetyEvidenceId: evidenceId,
+          detail: "the native manager confirmed stopped ownership and current purge safety",
+        });
       }
 
       if (operation.stage === "prepared") {
@@ -272,6 +303,20 @@ export class LifecycleController {
         );
       }
       if (operation.stage === "owned-processes-stopped") {
+        if (operation.kind === "remove" && operation.purgeSafetyEvidenceId === undefined) {
+          if (controller.#control.sealPurgeSafety === undefined) {
+            return yield* Effect.fail(
+              new LifecycleError(
+                "PURGE_SAFETY_UNAVAILABLE",
+                "the sole Daemon owner cannot seal final removal safety evidence",
+              ),
+            );
+          }
+          const evidence = yield* controller.#control.sealPurgeSafety(operation.operationId);
+          operation = yield* controller.#advance(operation, operation.stage, {
+            purgeSafetyEvidenceId: evidence.evidenceId,
+          });
+        }
         const ownedProcessesStopped = operation;
         operation = yield* Effect.gen(function* () {
           yield* controller.#sync(controller.#nativeService.stop);
@@ -301,6 +346,71 @@ export class LifecycleController {
           controller.#nativeService.start(controller.#serviceDefinition),
         );
         operation = yield* controller.#advance(operation, "replacement-started");
+      }
+      if (operation.stage === "process-stopped" && operation.kind === "remove") {
+        const processStopped = operation;
+        operation = yield* Effect.acquireUseRelease(
+          Effect.retry(controller.#sync(controller.#acquireRemovalGate), {
+            schedule: Schedule.spaced(Duration.millis(controller.#pollIntervalMillis)),
+            times: Math.max(1, Math.ceil(DAEMON_CLEANUP_MILLIS / controller.#pollIntervalMillis)),
+          }),
+          () =>
+            Effect.gen(function* () {
+              const observation = yield* controller.#sync(controller.#nativeService.inspect);
+              if (observation.process !== "stopped") {
+                return yield* Effect.fail(
+                  new LifecycleError(
+                    "LIFECYCLE_OWNER_RESTARTED",
+                    "a Daemon start won the stop-to-remove race; managed content was preserved",
+                  ),
+                );
+              }
+              if (controller.#nativeService.removeRegistration === undefined) {
+                return yield* Effect.fail(
+                  new LifecycleError(
+                    "NATIVE_REMOVE_UNAVAILABLE",
+                    "the native service adapter cannot remove its registration",
+                  ),
+                );
+              }
+              yield* controller.#sync(() =>
+                controller.#nativeService.removeRegistration?.(controller.#serviceDefinition),
+              );
+              let removing = yield* controller.#advance(processStopped, "service-unregistered");
+              yield* controller.#sync(controller.#removeManagedInstallation);
+              removing = yield* controller.#advance(removing, "installation-removed");
+              return yield* controller.#advance(removing, "completed", {
+                outcome: "succeeded",
+              });
+            }),
+          (gate) => Effect.sync(gate.release),
+        );
+      } else if (
+        operation.stage === "service-unregistered" ||
+        operation.stage === "installation-removed"
+      ) {
+        const removal = operation;
+        operation = yield* Effect.acquireUseRelease(
+          Effect.retry(controller.#sync(controller.#acquireRemovalGate), {
+            schedule: Schedule.spaced(Duration.millis(controller.#pollIntervalMillis)),
+            times: Math.max(1, Math.ceil(DAEMON_CLEANUP_MILLIS / controller.#pollIntervalMillis)),
+          }),
+          () =>
+            Effect.gen(function* () {
+              const removed =
+                removal.stage === "service-unregistered"
+                  ? yield* controller
+                      .#sync(controller.#removeManagedInstallation)
+                      .pipe(
+                        Effect.flatMap(() => controller.#advance(removal, "installation-removed")),
+                      )
+                  : removal;
+              return yield* controller.#advance(removed, "completed", {
+                outcome: "succeeded",
+              });
+            }),
+          (gate) => Effect.sync(gate.release),
+        );
       }
       if (operation.stage === "replacement-started") {
         const priorDaemonInstanceId = operation.recordedOwner?.daemonInstanceId;

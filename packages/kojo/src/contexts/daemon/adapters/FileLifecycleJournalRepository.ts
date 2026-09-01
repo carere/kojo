@@ -149,6 +149,9 @@ const operationOf = (value: unknown): LifecycleOperation => {
     (candidate.forceAuthorizationId !== undefined &&
       (typeof candidate.forceAuthorizationId !== "string" ||
         !validId.test(candidate.forceAuthorizationId))) ||
+    (candidate.purgeSafetyEvidenceId !== undefined &&
+      (typeof candidate.purgeSafetyEvidenceId !== "string" ||
+        !validId.test(candidate.purgeSafetyEvidenceId))) ||
     !validBackup(candidate.backup) ||
     (candidate.migrationCheckpoint !== undefined &&
       (typeof candidate.migrationCheckpoint !== "string" ||

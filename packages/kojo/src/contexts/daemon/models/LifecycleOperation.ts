@@ -6,6 +6,9 @@ export type LifecycleOperationKind =
   | "enable"
   | "disable"
   | "disable-now"
+  | "remove"
+  | "purge"
+  | "purge-recovery"
   | "upgrade";
 
 export type LifecycleStage =
@@ -18,6 +21,10 @@ export type LifecycleStage =
   | "cleanup-started"
   | "owned-processes-stopped"
   | "process-stopped"
+  | "service-unregistered"
+  | "installation-removed"
+  | "purge-authorized"
+  | "data-deletion-started"
   | "replacement-started"
   | "mutations-held"
   | "final-preflight-accepted"
@@ -109,6 +116,7 @@ export interface LifecycleOperation {
   readonly handoffDigest?: string;
   readonly controllerAcceptedAt?: string;
   readonly forceAuthorizationId?: string;
+  readonly purgeSafetyEvidenceId?: string;
   readonly backup?: UpgradeBackupEvidence;
   readonly migrationCheckpoint?: string;
   readonly readiness?: UpgradeReadinessEvidence;
@@ -122,6 +130,9 @@ export type LifecycleNextAction =
   | "complete-handoff"
   | "stop-native-service"
   | "start-replacement"
+  | "remove-service-registration"
+  | "remove-managed-installation"
+  | "delete-daemon-data"
   | "inspect-result"
   | "repair"
   | "none";
@@ -148,6 +159,10 @@ export const lifecycleStageOrder: Readonly<Record<LifecycleStage, number>> = {
   "cleanup-started": 9,
   "owned-processes-stopped": 10,
   "process-stopped": 11,
+  "service-unregistered": 12,
+  "installation-removed": 13,
+  "purge-authorized": 1,
+  "data-deletion-started": 2,
   "replacement-started": 12,
   "candidate-selected": 12,
   "candidate-ready": 13,
@@ -167,6 +182,9 @@ export const lifecycleOperationKinds: ReadonlyArray<LifecycleOperationKind> = [
   "enable",
   "disable",
   "disable-now",
+  "remove",
+  "purge",
+  "purge-recovery",
   "upgrade",
 ];
 
@@ -180,6 +198,10 @@ export const lifecycleStages: ReadonlyArray<LifecycleStage> = [
   "cleanup-started",
   "owned-processes-stopped",
   "process-stopped",
+  "service-unregistered",
+  "installation-removed",
+  "purge-authorized",
+  "data-deletion-started",
   "replacement-started",
   "mutations-held",
   "final-preflight-accepted",

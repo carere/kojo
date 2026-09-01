@@ -29,6 +29,7 @@ export interface AdvanceLifecycleOperation {
       | "handoffDigest"
       | "controllerAcceptedAt"
       | "forceAuthorizationId"
+      | "purgeSafetyEvidenceId"
       | "compatibility"
       | "rollbackAttempted"
       | "backup"

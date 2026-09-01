@@ -2,6 +2,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Console, Duration, Effect, Option } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
+import {
+  acquireDaemonStartGate,
+  DaemonDataPurger,
+} from "../contexts/daemon/adapters/DaemonDataPurger.ts";
 import { FileLifecycleJournalRepository } from "../contexts/daemon/adapters/FileLifecycleJournalRepository.ts";
 import {
   SocketDaemonLifecycleControl,
@@ -15,8 +19,10 @@ import {
 import {
   managedReleaseSelection,
   readCheckedManagedRelease,
+  removeManagedInstallation,
   stageManagedRelease,
 } from "../contexts/daemon/adapters/ManagedInstallation.ts";
+import { PurgeSafetyRecovery } from "../contexts/daemon/adapters/PurgeSafetyRecovery.ts";
 import { systemdUserService } from "../contexts/daemon/adapters/SystemdUserService.ts";
 import type {
   ConfigurationApplyResult,
@@ -76,15 +82,20 @@ const productionController = (readOnly = false): ProductionController => {
   const journal = new FileLifecycleJournalRepository(join(paths.dataRoot, "lifecycle"), {
     readOnly,
   });
+  const service = nativeService();
   return {
     paths,
     journal,
     controller: new LifecycleController({
       journal,
       control: new SocketDaemonLifecycleControl(paths.runtimeRoot, journal),
-      nativeService: nativeService(),
+      nativeService: service,
       serviceDefinition: paths.serviceDefinition,
       observedDaemonInstanceId: () => readDaemonEndpoint(paths)?.instanceId,
+      removeManagedInstallation: () => removeManagedInstallation(paths),
+      acquireRemovalGate: () => acquireDaemonStartGate(paths),
+      assertRemovalSafetyEvidence: () =>
+        new DaemonDataPurger({ paths, journal, nativeService: service }).check().plan.evidenceId,
     }),
   };
 };
@@ -348,6 +359,19 @@ const parsedTimeout = (text: string) =>
 
 const lifecycleTry = <A>(body: () => A): Effect.Effect<A, LifecycleError> =>
   Effect.try({
+    try: body,
+    catch: (cause) =>
+      cause instanceof LifecycleError
+        ? cause
+        : new LifecycleError(
+            "LIFECYCLE_FAILED",
+            cause instanceof Error ? cause.message : String(cause),
+            cause,
+          ),
+  });
+
+const lifecycleTryPromise = <A>(body: () => Promise<A>): Effect.Effect<A, LifecycleError> =>
+  Effect.tryPromise({
     try: body,
     catch: (cause) =>
       cause instanceof LifecycleError
@@ -749,20 +773,133 @@ const restart = Command.make(
   ),
 );
 
+const remove = Command.make(
+  "remove",
+  {
+    force: Flag.boolean("force"),
+    pending: Flag.string("pending").pipe(Flag.optional),
+    timeout: Flag.string("timeout").pipe(Flag.withDefault("60s")),
+  },
+  Effect.fn(function* ({ force, pending, timeout }) {
+    const milliseconds = yield* parsedTimeout(timeout);
+    yield* beginLifecycle("remove", milliseconds, pending, force);
+  }),
+).pipe(
+  Command.withDescription(
+    "Drain and stop ownership, then remove native registration and managed content without Daemon data",
+  ),
+);
+
+const purge = Command.make(
+  "purge",
+  {
+    check: Flag.boolean("check"),
+    confirm: Flag.string("confirm").pipe(Flag.optional),
+    json: Flag.boolean("json"),
+  },
+  Effect.fn(function* ({ check, confirm, json }) {
+    if (check === Option.isSome(confirm)) {
+      return yield* clientExit(2, "purge requires exactly one of --check or --confirm PLAN_TOKEN");
+    }
+    const paths = yield* lifecycleTry(hostPaths).pipe(
+      Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+    );
+    const lifecycleRoot = join(paths.dataRoot, "lifecycle");
+    const journal = existsSync(lifecycleRoot)
+      ? yield* lifecycleTry(
+          () => new FileLifecycleJournalRepository(lifecycleRoot, { readOnly: check }),
+        ).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)))
+      : undefined;
+    const purger = new DaemonDataPurger({
+      paths,
+      ...(journal === undefined ? {} : { journal }),
+      nativeService: nativeService(),
+    });
+    if (Option.isSome(confirm)) {
+      const result = yield* lifecycleTry(() => purger.confirm(confirm.value)).pipe(
+        Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+      );
+      if (json) yield* Console.log(JSON.stringify({ formatVersion: 1, ...result }));
+      else {
+        yield* Console.log(`Purged Daemon data identity: ${result.dataIdentity}.`);
+        yield* Console.log(`Purge operation: ${result.operationId}.`);
+      }
+      return;
+    }
+    const result = yield* lifecycleTry(purger.check).pipe(
+      Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+    );
+    const ready =
+      result.plan.resourceRisks.length === 0 &&
+      result.plan.observed.process === "stopped" &&
+      result.plan.observed.automaticStart === "disabled";
+    if (json) {
+      yield* Console.log(
+        JSON.stringify({ formatVersion: 1, outcome: ready ? "ready" : "refused", ...result }),
+      );
+    } else {
+      yield* Console.log(`Purge outcome: ${ready ? "ready" : "refused"}.`);
+      yield* Console.log(`Daemon data identity: ${result.plan.dataIdentity}.`);
+      yield* Console.log(
+        `Correctness records: ${JSON.stringify(result.plan.correctness.recordsByTable)}.`,
+      );
+      yield* Console.log(`Resource risks: ${result.plan.resourceRisks.length}.`);
+      yield* Console.log(`Automatic start: ${result.plan.observed.automaticStart}.`);
+      yield* Console.log(`Process: ${result.plan.observed.process}.`);
+      yield* Console.log(`Plan expires at: ${result.plan.expiresAt}.`);
+      yield* Console.log(`Plan token: ${result.planToken}.`);
+    }
+    if (!ready) return yield* clientExit(1, "purge prerequisites are not satisfied");
+  }),
+).pipe(
+  Command.withDescription(
+    "Inspect purge consequences or delete one exact stopped data identity with its exact plan",
+  ),
+);
+
 const repair = Command.make(
   "repair",
   {
     check: Flag.boolean("check"),
     apply: Flag.string("apply").pipe(Flag.optional),
+    purgeSafety: Flag.boolean("purge-safety").pipe(
+      Flag.withDescription("Recover sealed purge safety with the retained restricted Daemon"),
+    ),
     json: Flag.boolean("json"),
   },
-  Effect.fn(function* ({ check, apply, json }) {
+  Effect.fn(function* ({ check, apply, purgeSafety, json }) {
     if (check === Option.isSome(apply)) {
       return yield* clientExit(2, "repair requires exactly one of --check or --apply PLAN_TOKEN");
     }
     const paths = yield* lifecycleTry(hostPaths).pipe(
       Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
     );
+    if (purgeSafety) {
+      const service = nativeService();
+      const journal = new FileLifecycleJournalRepository(join(paths.dataRoot, "lifecycle"), {
+        readOnly: check,
+      });
+      const recovery = new PurgeSafetyRecovery({ paths, journal, nativeService: service });
+      if (Option.isSome(apply)) {
+        const result = yield* lifecycleTryPromise(() => recovery.apply(apply.value)).pipe(
+          Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+        );
+        if (json) yield* Console.log(JSON.stringify({ formatVersion: 1, purgeSafety: result }));
+        else yield* Console.log(`Recovered purge safety evidence: ${result.evidenceId}.`);
+      } else {
+        const result = yield* lifecycleTry(recovery.check).pipe(
+          Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+        );
+        if (json) yield* Console.log(JSON.stringify({ formatVersion: 1, purgeSafety: result }));
+        else {
+          yield* Console.log(`Purge safety recovery data identity: ${result.plan.dataIdentity}.`);
+          yield* Console.log(`Purge safety recovery release: ${result.plan.sourceReleaseId}.`);
+          yield* Console.log(`Purge safety recovery plan expires at: ${result.plan.expiresAt}.`);
+          yield* Console.log(`Purge safety recovery plan token: ${result.planToken}.`);
+        }
+      }
+      return;
+    }
     const supervision = new ManagedDaemonSupervision(paths.dataRoot);
     const result = yield* lifecycleTry(() =>
       Option.isSome(apply) ? supervision.applyRepair(apply.value) : supervision.checkRepair(),
@@ -787,7 +924,7 @@ const repair = Command.make(
   }),
 ).pipe(
   Command.withDescription(
-    "Check exhausted Daemon supervision or apply one exact plan for another bounded cycle",
+    "Check or apply one exact Daemon supervision or purge safety repair plan",
   ),
 );
 
@@ -1058,6 +1195,8 @@ export const daemon = Command.make("daemon").pipe(
     start,
     stop,
     restart,
+    remove,
+    purge,
     repair,
     enable,
     disable,

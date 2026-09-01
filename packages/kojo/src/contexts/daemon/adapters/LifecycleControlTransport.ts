@@ -8,6 +8,7 @@ import type {
   UpgradeBackupEvidence,
   UpgradeReadinessEvidence,
 } from "../models/LifecycleOperation.ts";
+import type { PurgeSafetyEvidence } from "../models/Purge.ts";
 import type {
   UpgradeFinalPreflight,
   UpgradeHandoff,
@@ -17,11 +18,13 @@ import type { DaemonLifecycleControl, LifecycleHandoff } from "../ports/DaemonLi
 import type { DaemonUpgradeControl } from "../ports/DaemonUpgradeControl.ts";
 import type { LifecycleJournalRepository } from "../ports/LifecycleJournalRepository.ts";
 import { removeOwnedSocket } from "../services/secureHostPath.ts";
+import { decodePurgeSafetyEvidence } from "./DaemonDataPurger.ts";
 
 type ControlAction =
   | "inspect-preflight"
   | "begin-drain"
   | "read-drain"
+  | "seal-purge-safety"
   | "prepare-handoff"
   | "confirm-controller-ready"
   | "stop-owned-processes"
@@ -139,6 +142,17 @@ const drainOf = (value: unknown): LifecycleDrainProgress => {
     );
   }
   return drain as unknown as LifecycleDrainProgress;
+};
+
+const purgeEvidenceOf = (value: unknown): PurgeSafetyEvidence => {
+  try {
+    return decodePurgeSafetyEvidence(value);
+  } catch {
+    throw new LifecycleError(
+      "LIFECYCLE_CONTROL_UNAVAILABLE",
+      "the lifecycle purge-safety response is invalid",
+    );
+  }
 };
 
 const backupOf = (value: unknown): UpgradeBackupEvidence => {
@@ -286,6 +300,8 @@ const controlResponseValue = (value: unknown, action: ControlAction): unknown =>
     case "begin-drain":
     case "read-drain":
       return drainOf(response.value);
+    case "seal-purge-safety":
+      return purgeEvidenceOf(response.value);
     case "prepare-handoff": {
       const handoff = record(response.value);
       if (
@@ -395,6 +411,7 @@ const requestOf = (value: unknown): ControlRequest => {
     "inspect-preflight",
     "begin-drain",
     "read-drain",
+    "seal-purge-safety",
     "prepare-handoff",
     "confirm-controller-ready",
     "stop-owned-processes",
@@ -420,6 +437,7 @@ const requestOf = (value: unknown): ControlRequest => {
     "inspect-preflight": ["dataIdentity", "requestHash"],
     "begin-drain": ["dataIdentity", "requestHash"],
     "read-drain": [],
+    "seal-purge-safety": [],
     "prepare-handoff": [],
     "confirm-controller-ready": ["handoffDigest"],
     "stop-owned-processes": ["cleanupMillis", "replacementExpected", "forceAuthorizationId"],
@@ -846,6 +864,15 @@ export const startLifecycleControlServer = (options: {
           case "read-drain":
             value = await Effect.runPromise(options.control.readDrain(message.operationId));
             break;
+          case "seal-purge-safety":
+            if (options.control.sealPurgeSafety === undefined) {
+              throw new LifecycleError(
+                "PURGE_SAFETY_UNAVAILABLE",
+                "the Daemon has no purge safety owner",
+              );
+            }
+            value = await Effect.runPromise(options.control.sealPurgeSafety(message.operationId));
+            break;
           case "prepare-handoff":
             value = await Effect.runPromise(options.control.prepareHandoff(message.operationId));
             break;
@@ -981,6 +1008,9 @@ export class SocketDaemonLifecycleControl implements DaemonLifecycleControl {
 
   readonly readDrain = (operationId: string) =>
     this.#call<LifecycleDrainProgress>(operationId, "read-drain");
+
+  readonly sealPurgeSafety = (operationId: string) =>
+    this.#call<PurgeSafetyEvidence>(operationId, "seal-purge-safety");
 
   readonly prepareHandoff = (operationId: string) =>
     this.#call<LifecycleHandoff>(operationId, "prepare-handoff");

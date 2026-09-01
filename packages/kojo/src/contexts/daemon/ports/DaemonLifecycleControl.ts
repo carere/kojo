@@ -4,6 +4,7 @@ import type {
   LifecycleDrainProgress,
   LifecycleRecordedOwner,
 } from "../models/LifecycleOperation.ts";
+import type { PurgeSafetyEvidence } from "../models/Purge.ts";
 
 export interface LifecycleHandoff {
   readonly digest: string;
@@ -25,6 +26,9 @@ export interface DaemonLifecycleControl {
   readonly readDrain: (
     operationId: string,
   ) => Effect.Effect<LifecycleDrainProgress, LifecycleError>;
+  readonly sealPurgeSafety?: (
+    operationId: string,
+  ) => Effect.Effect<PurgeSafetyEvidence, LifecycleError>;
   readonly prepareHandoff: (operationId: string) => Effect.Effect<LifecycleHandoff, LifecycleError>;
   readonly confirmControllerReady: (
     operationId: string,

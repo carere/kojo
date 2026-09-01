@@ -24,5 +24,6 @@ export interface NativeService {
   readonly stop: () => void;
   readonly enable: () => void;
   readonly disable: (stopNow: boolean) => void;
+  readonly removeRegistration?: (serviceDefinition: string) => void;
   readonly keepRunningAfterLogout: () => void;
 }

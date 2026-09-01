@@ -7,7 +7,9 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   rmSync,
+  unlinkSync,
 } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { Effect } from "effect";
@@ -570,6 +572,47 @@ export const managedInstallationIsPresent = (paths: DaemonPaths): boolean => {
   }
 };
 
+const deleteOwnedManagedTree = (path: string): void => {
+  if (!existsSync(path)) return;
+  const stat = lstatSync(path);
+  if (
+    stat.isSymbolicLink() ||
+    stat.uid !== (process.getuid?.() ?? -1) ||
+    (stat.mode & 0o077) !== 0
+  ) {
+    throw new LifecycleError("UNSAFE_MANAGED_INSTALLATION", `${path} is not private owned content`);
+  }
+  if (stat.isDirectory()) {
+    chmodSync(path, 0o700);
+    for (const child of readdirSync(path)) deleteOwnedManagedTree(join(path, child));
+    rmdirSync(path);
+    return;
+  }
+  if (!stat.isFile() || stat.nlink !== 1) {
+    throw new LifecycleError(
+      "UNSAFE_MANAGED_INSTALLATION",
+      `${path} is not a private regular managed file`,
+    );
+  }
+  chmodSync(path, 0o600);
+  unlinkSync(path);
+};
+
+/** Remove only managed executable content. Daemon data, configuration, cache, and Projects remain. */
+export const removeManagedInstallation = (paths: DaemonPaths): void => {
+  for (const path of [
+    join(paths.installationRoot, "active-release"),
+    join(paths.installationRoot, "releases"),
+    join(paths.installationRoot, "staging"),
+    paths.managedCli,
+    paths.managedLauncher,
+  ]) {
+    deleteOwnedManagedTree(path);
+  }
+  const bin = dirname(paths.managedCli);
+  if (existsSync(bin) && readdirSync(bin).length === 0) deleteOwnedManagedTree(bin);
+};
+
 export const managedReleaseSelection = (paths: DaemonPaths): ManagedReleaseSelection => {
   const activePath = join(paths.installationRoot, "active-release");
   const read = (): string => {
@@ -613,7 +656,6 @@ export const installManagedRelease = (
       }
 
       ensurePrivateDirectory(paths.installationRoot);
-      ensurePrivateDirectory(paths.dataRoot);
       ensurePrivateDirectory(paths.configurationRoot);
       ensurePrivateDirectory(paths.cacheRoot);
       ensurePrivateDirectory(paths.runtimeRoot);
