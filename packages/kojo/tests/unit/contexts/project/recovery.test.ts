@@ -28,6 +28,7 @@ describe("Project Runner recovery", () => {
           safety: "pending",
           nextAttemptAt: "2026-09-01T00:00:00.001Z",
         });
+        yield* repository.confirmTermination("project-a", "runner-1", "2026-09-01T00:00:00.001Z");
         yield* repository.confirmSafety("project-a", "runner-1", "2026-09-01T00:00:00.001Z");
         yield* repository.recordFailure({
           projectId: "project-a",
@@ -44,6 +45,7 @@ describe("Project Runner recovery", () => {
           operationFailed: true,
         });
         expect(exhausted).toMatchObject({ attempts: 2, state: "held", safety: "pending" });
+        yield* repository.confirmTermination("project-a", "runner-3", "2026-09-01T00:00:02.001Z");
         yield* repository.confirmSafety("project-a", "runner-3", "2026-09-01T00:00:02.001Z");
 
         const repaired = yield* repository.repair("project-a", "2026-09-01T00:01:00.000Z");
@@ -63,6 +65,7 @@ describe("Project Runner recovery", () => {
         fault: "operation lost its reply",
         operationFailed: true,
       });
+      yield* repository.confirmTermination("project-b", "runner-1", "2026-09-01T00:00:00.001Z");
       yield* repository.confirmSafety("project-b", "runner-1", "2026-09-01T00:00:00.001Z");
       yield* repository.observeHealthy("project-b", "2026-09-01T00:00:00.002Z", false);
       const heartbeatOnly = yield* repository.observeHealthy(

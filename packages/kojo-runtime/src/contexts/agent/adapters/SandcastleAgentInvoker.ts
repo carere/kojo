@@ -1,14 +1,19 @@
 import type { AgentProvider } from "@ai-hero/sandcastle";
 import { claudeCode } from "@ai-hero/sandcastle";
 import { Effect, Layer, Option } from "effect";
+import {
+  inspectProviderState,
+  providerResourceEnvironment,
+  recordProviderState,
+  resourceLeaseId,
+} from "../../project/adapters/ProviderResourceRegistry.ts";
+import { ResourceLeaseClient } from "../../project/ports/ResourceLeaseClient.ts";
 import { Sandbox } from "../../sandbox/ports/Sandbox.ts";
-import { maySpawn } from "../guards/maySpawn.ts";
+import { ArtifactPublisher } from "../../trace/ports/ArtifactPublisher.ts";
 import { AgentAnswer } from "../models/AgentAnswer.ts";
 import type { AgentDefinition } from "../models/AgentDefinition.ts";
 import { AgentInvocationError } from "../models/AgentInvocationError.ts";
 import type { AgentSessionId } from "../models/AgentSessionId.ts";
-import type { AgentSpend } from "../models/AgentSpend.ts";
-import { spendFrom, spendVariable } from "../models/AgentSpend.ts";
 import type { RosterError } from "../models/RosterError.ts";
 import type { AgentCall, AgentCapabilities } from "../ports/AgentInvoker.ts";
 import { AgentInvoker } from "../ports/AgentInvoker.ts";
@@ -51,12 +56,9 @@ import * as YamlRoster from "./YamlRoster.ts";
  * this wrong does not fail — it silently sends a correction as a cold call carrying none of the
  * context that earned it.
  *
- * **5. It asks the spend switch before it asks the sandbox, and an unattended process is refused by
- * default.** This is the one adapter in Kojo that can cost somebody money, so it is the one that
- * has to hold the guard: a check anywhere above it protects whatever called it, and a check in a
- * test protects the test tier. `maySpawn` decides, `AgentSpend` reads the switch, and the refusal
- * is a `refused-to-spend` raised **before `sandbox.agent` is reached**, so no process exists to
- * have spent anything. See ticket 49 and `build-record.md` §9 for the two calls this cost.
+ * **5. Agent selection, credentials, account and spending are authored concerns.** Kojo does not
+ * add a grant, environment switch, wait state or consent fault. A Resource lease records that the
+ * authored provider process can exist before the process is started.
  */
 
 /** Which Sandcastle agent provider a roster entry becomes. */
@@ -81,41 +83,7 @@ export interface SandcastleAgentOptions {
    * spending anything.
    */
   readonly provider?: ProviderFor | undefined;
-  /**
-   * What this invoker may spawn. Defaults to whatever {@link spendVariable} says.
-   *
-   * A seam for the same reason as `provider`, and it must never become the way a *run* turns the
-   * guard off: `cli/` passes none of this, so every real invocation reads the environment. A test
-   * that needs a specific mode states it here and is graded on the refusal it gets.
-   */
-  readonly spend?: AgentSpend | undefined;
-  /**
-   * What a binary name opens on this machine. Defaults to `Bun.which`.
-   *
-   * The one impure thing the guard needs, taken as an argument so the decision stays a table.
-   */
-  readonly resolve?: ((binary: string) => string | undefined) | undefined;
 }
-
-/** Where a binary name resolves for this process — the same lookup the spawned shell will do. */
-const whichever = (binary: string): string | undefined => Bun.which(binary) ?? undefined;
-
-/**
- * What the switch says, read fresh on every call.
- *
- * Per call rather than once at layer build, because the layer of a stamped workflow is built by a
- * long-lived process — `kojo watch` — and a guard that was read at start-up would keep answering
- * for a variable somebody changed hours ago. It is two environment reads; the call it guards is
- * seconds of a model's time.
- */
-const declaredSpend = (): AgentSpend =>
-  spendFrom({
-    declared: process.env[spendVariable],
-    // The whole default rule, in one expression. A Vitest worker, a Playwright fixture, a CI step
-    // and an agent-driven shell all have no terminal here, which is what makes the guard on by
-    // default in exactly the places both unauthorised calls were spent.
-    attended: process.stdin.isTTY === true,
-  });
 
 /**
  * The binary a provider's command names, without running anything.
@@ -125,11 +93,6 @@ const declaredSpend = (): AgentSpend =>
  * its name. The prompt is empty because nothing here is sent anywhere; only the shape of the
  * command line is read.
  */
-const binaryOf = (provider: AgentProvider): string => {
-  const built = provider.buildPrintCommand({ prompt: "", dangerouslySkipPermissions: true });
-  return (built.command.trim().split(/\s+/)[0] ?? provider.name).replace(/^["']|["']$/g, "");
-};
-
 /**
  * Whether this provider can carry a conversation across turns at all.
  *
@@ -140,11 +103,31 @@ const binaryOf = (provider: AgentProvider): string => {
  */
 const carriesSessions = (provider: AgentProvider): boolean => provider.sessionStorage !== undefined;
 
+const shellValue = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
+
+/** Sandcastle's pre-created Sandbox ignores AgentProvider.env, so bind it to the real command. */
+const withProcessEnvironment = (
+  provider: AgentProvider,
+  environment: Record<string, string>,
+): AgentProvider => ({
+  ...provider,
+  buildPrintCommand: (options) => {
+    const command = provider.buildPrintCommand(options);
+    const assignments = Object.entries(environment)
+      .map(([name, value]) => `${name}=${shellValue(value)}`)
+      .join(" ");
+    return { ...command, command: `env ${assignments} ${command.command}` };
+  },
+});
+
 const make = (options: SandcastleAgentOptions) =>
   Effect.gen(function* () {
     const sandbox = yield* Sandbox;
     const roster = yield* Roster;
+    const resources = yield* ResourceLeaseClient;
+    const artifacts = yield* ArtifactPublisher;
     const providerFor = options.provider ?? claude;
+    let invocationSequence = 0;
 
     // Built from the first roster entry rather than per call, because capabilities are a claim
     // about *this invoker* and the port serves them as a value. Every agent in one roster runs
@@ -198,44 +181,79 @@ const make = (options: SandcastleAgentOptions) =>
         const definition = yield* define(call.agent);
         const resumed = Option.isSome(call.session);
         const provider = providerFor(definition);
+        invocationSequence += 1;
 
-        /**
-         * **The last thing asked before a process could exist.**
-         *
-         * After the roster, because a refusal that could not name the model would be worth less to
-         * whoever reads it; before `sandbox.agent`, because that call is where the money goes. The
-         * run is named from the correlation the acquisition stamped on the container, which is the
-         * same string the trace row carries — so a person reading this sentence can find the run.
-         */
-        const verdict = maySpawn({
-          spend: options.spend ?? declaredSpend(),
-          agent: call.agent,
-          provider: provider.name,
-          model: definition.model,
-          run: sandbox.environment.KOJO_RUN_ID ?? sandbox.id,
-          binary: binaryOf(provider),
-          resolve: options.resolve ?? whichever,
-          sandbox: sandbox.capabilities.kind,
-        });
-
-        if (verdict._tag === "Refused") {
-          return yield* new AgentInvocationError({
+        const acquisitionKey = `${sandbox.id}/agent/${call.agent}/${invocationSequence}`;
+        const leaseId = resourceLeaseId(acquisitionKey);
+        const resource = yield* resources.beginAcquisition({
+          leaseId,
+          kind: "agent",
+          acquisitionKey,
+          detail: {
             agent: call.agent,
-            fault: "refused-to-spend",
-            reason: verdict.reason,
-            cause: undefined,
-          });
-        }
+            model: definition.model,
+            provider: provider.name,
+            sandbox: sandbox.id,
+          },
+        });
+        const controlledProvider = withProcessEnvironment(
+          provider,
+          providerResourceEnvironment(resource),
+        );
+        yield* recordProviderState(resource, "agent", "creating").pipe(Effect.orDie);
 
         const run = yield* sandbox
           .agent({
-            provider,
+            provider: controlledProvider,
             // A cold turn carries the identity, the task template and the contract the phase
             // appended. A correction carries only itself — see `renderPrompt`.
             prompt: resumed ? call.prompt : renderPrompt({ agent: definition, task: call.prompt }),
             ...(Option.isSome(call.session) ? { resumeSession: call.session.value } : {}),
           })
           .pipe(
+            Effect.tap((answer) =>
+              Effect.gen(function* () {
+                const locator = answer.session ?? `${sandbox.id}/${call.agent}`;
+                const providerEvidence = yield* inspectProviderState(resource, "agent").pipe(
+                  Effect.orDie,
+                );
+                if (providerEvidence?.state !== "released") {
+                  yield* recordProviderState(resource, "agent", "acquired", locator).pipe(
+                    Effect.orDie,
+                  );
+                }
+                yield* resources.confirmAcquired(leaseId, {
+                  providerIdentity: resource.providerIdentity,
+                  locator,
+                });
+                yield* resources.beginRelease(leaseId);
+                if (providerEvidence?.state === "released") {
+                  yield* resources.confirmReleased(
+                    leaseId,
+                    "the provider registry confirms exact-key release",
+                  );
+                } else {
+                  yield* recordProviderState(resource, "agent", "release-intent", locator).pipe(
+                    Effect.orDie,
+                  );
+                  yield* resources.preserve(
+                    leaseId,
+                    "the agent process returned without exact provider release evidence",
+                  );
+                }
+                yield* artifacts.publishText({
+                  name: `agent-${leaseId}.txt`,
+                  mediaType: "text/plain; charset=utf-8",
+                  content: answer.output,
+                });
+              }),
+            ),
+            Effect.tapError(() =>
+              resources.unresolved(
+                leaseId,
+                "the agent provider did not return a result, so process release is not confirmed",
+              ),
+            ),
             Effect.mapError(
               (cause) =>
                 new AgentInvocationError({
@@ -291,7 +309,7 @@ const make = (options: SandcastleAgentOptions) =>
  */
 export const layer = (
   options?: SandcastleAgentOptions,
-): Layer.Layer<AgentInvoker, never, Sandbox | Roster> =>
+): Layer.Layer<AgentInvoker, never, Sandbox | Roster | ResourceLeaseClient | ArtifactPublisher> =>
   Layer.effect(AgentInvoker, make(options ?? {}));
 
 /**
@@ -316,7 +334,7 @@ export const layer = (
 export const fromConfig = (options: {
   readonly config: string;
   readonly provider?: ProviderFor | undefined;
-}): Layer.Layer<AgentInvoker, RosterError, Sandbox> =>
+}): Layer.Layer<AgentInvoker, RosterError, Sandbox | ResourceLeaseClient | ArtifactPublisher> =>
   layer({ provider: options.provider }).pipe(
     Layer.provide(YamlRoster.layer({ config: options.config })),
   );

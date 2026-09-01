@@ -18,6 +18,7 @@ interface RecoveryRow {
   readonly healthy_since: string | null;
   readonly next_attempt_at: string | null;
   readonly prior_runner_instance_id: string | null;
+  readonly termination_confirmed_at: string | null;
   readonly last_fault: string | null;
 }
 
@@ -33,6 +34,9 @@ const recoveryOf = (row: RecoveryRow): ProjectRecovery => ({
   ...(row.prior_runner_instance_id === null
     ? {}
     : { priorRunnerInstanceId: row.prior_runner_instance_id }),
+  ...(row.termination_confirmed_at === null
+    ? {}
+    : { terminationConfirmedAt: row.termination_confirmed_at }),
   ...(row.last_fault === null ? {} : { lastFault: row.last_fault }),
 });
 
@@ -71,10 +75,17 @@ export class SqliteProjectRecoveryRepository {
         healthy_since TEXT,
         next_attempt_at TEXT,
         prior_runner_instance_id TEXT,
+        termination_confirmed_at TEXT,
         last_fault TEXT,
         FOREIGN KEY (project_id) REFERENCES projects(project_id)
       ) STRICT
     `);
+    try {
+      database.run("ALTER TABLE project_runner_recovery ADD COLUMN termination_confirmed_at TEXT");
+    } catch (cause) {
+      if (!(cause instanceof Error) || !cause.message.includes("duplicate column name"))
+        throw cause;
+    }
   }
 
   readonly read = (
@@ -94,7 +105,8 @@ export class SqliteProjectRecoveryRepository {
         this.#database
           .query<RecoveryRow, []>(
             `SELECT project_id, cycle, attempts, state, safety, failed_operation_pending,
-                  healthy_since, next_attempt_at, prior_runner_instance_id, last_fault
+                  healthy_since, next_attempt_at, prior_runner_instance_id,
+                  termination_confirmed_at, last_fault
              FROM project_runner_recovery ORDER BY project_id`,
           )
           .all()
@@ -117,8 +129,9 @@ export class SqliteProjectRecoveryRepository {
             this.#database.run(
               `INSERT INTO project_runner_recovery (
                  project_id, cycle, attempts, state, safety, failed_operation_pending,
-                 healthy_since, next_attempt_at, prior_runner_instance_id, last_fault
-               ) VALUES (?, ?, ?, ?, 'pending', ?, NULL, ?, ?, ?)
+                 healthy_since, next_attempt_at, prior_runner_instance_id,
+                 termination_confirmed_at, last_fault
+               ) VALUES (?, ?, ?, ?, 'pending', ?, NULL, ?, ?, NULL, ?)
                ON CONFLICT(project_id) DO UPDATE SET
                  attempts = excluded.attempts,
                  state = excluded.state,
@@ -127,6 +140,7 @@ export class SqliteProjectRecoveryRepository {
                  healthy_since = NULL,
                  next_attempt_at = excluded.next_attempt_at,
                  prior_runner_instance_id = excluded.prior_runner_instance_id,
+                 termination_confirmed_at = NULL,
                  last_fault = excluded.last_fault`,
               [
                 failure.projectId,
@@ -148,13 +162,39 @@ export class SqliteProjectRecoveryRepository {
   readonly confirmSafety = (
     projectId: string,
     runnerInstanceId: string,
-    _confirmedAt: string,
+    confirmedAt: string,
   ): Effect.Effect<ProjectRecovery, ProjectRecoveryStoreError> =>
     this.#change(projectId, (prior) => {
       this.#assertPriorRunner(prior, runnerInstanceId);
+      if (prior.termination_confirmed_at !== confirmedAt) {
+        throw new ProjectRecoveryStoreError({
+          message: "Project safety needs the exact durable process-group termination proof",
+        });
+      }
       this.#database.run(
         "UPDATE project_runner_recovery SET safety = 'safe' WHERE project_id = ?",
         [projectId],
+      );
+    });
+
+  readonly confirmTermination = (
+    projectId: string,
+    runnerInstanceId: string,
+    confirmedAt: string,
+  ): Effect.Effect<ProjectRecovery, ProjectRecoveryStoreError> =>
+    this.#change(projectId, (prior) => {
+      this.#assertPriorRunner(prior, runnerInstanceId);
+      if (
+        prior.termination_confirmed_at !== null &&
+        prior.termination_confirmed_at !== confirmedAt
+      ) {
+        throw new ProjectRecoveryStoreError({
+          message: "termination evidence conflicts with the durable process-group proof",
+        });
+      }
+      this.#database.run(
+        "UPDATE project_runner_recovery SET termination_confirmed_at = ? WHERE project_id = ?",
+        [confirmedAt, projectId],
       );
     });
 
@@ -190,7 +230,8 @@ export class SqliteProjectRecoveryRepository {
           `UPDATE project_runner_recovery
               SET attempts = 0, state = 'healthy', failed_operation_pending = 0,
                   healthy_since = ?, next_attempt_at = NULL,
-                  prior_runner_instance_id = NULL, last_fault = NULL
+                  prior_runner_instance_id = NULL, termination_confirmed_at = NULL,
+                  last_fault = NULL
             WHERE project_id = ?`,
           [observedAt, projectId],
         );
@@ -274,7 +315,8 @@ export class SqliteProjectRecoveryRepository {
     return this.#database
       .query<RecoveryRow, [string]>(
         `SELECT project_id, cycle, attempts, state, safety, failed_operation_pending,
-                healthy_since, next_attempt_at, prior_runner_instance_id, last_fault
+                healthy_since, next_attempt_at, prior_runner_instance_id,
+                termination_confirmed_at, last_fault
            FROM project_runner_recovery WHERE project_id = ?`,
       )
       .get(projectId);

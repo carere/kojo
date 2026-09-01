@@ -24,8 +24,9 @@ interface ExecutionState {
 }
 
 /** Durable encoded engine for one exact Workflow Revision in one Project Runner process. */
-export const layer = (
+export const layer = <RExecution>(
   revisionId: string,
+  executionServices?: Layer.Layer<RExecution, never, never>,
 ): Layer.Layer<WorkflowEngine.WorkflowEngine, never, DaemonExecutionRepository> =>
   Layer.effect(
     WorkflowEngine.WorkflowEngine,
@@ -40,14 +41,18 @@ export const layer = (
         if (state === undefined) return;
         const current = state.fiber?.pollUnsafe();
         if (state.fiber !== undefined && current === undefined) return;
-        state.fiber = yield* state.registration
+        const execution = state.registration
           .execute(state.payload, executionId)
           .pipe(
             Workflow.intoResult,
             Effect.provideService(WorkflowEngine.WorkflowInstance, state.instance),
             Effect.provideService(WorkflowEngine.WorkflowEngine, engine),
-            Effect.forkIn(state.registration.scope),
           );
+        state.fiber = yield* (
+          executionServices === undefined
+            ? execution
+            : execution.pipe(Effect.provide(executionServices))
+        ).pipe(Effect.forkIn(state.registration.scope));
       });
 
       const engine = WorkflowEngine.makeUnsafe({

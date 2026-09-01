@@ -11,6 +11,7 @@ export default defineConfig({
     "runConsole.spec.ts",
     "workflowCatalogue.spec.ts",
     "gateVerdict.spec.ts",
+    "artifact.spec.ts",
   ],
   fullyParallel: true,
   reporter: [["list"]],

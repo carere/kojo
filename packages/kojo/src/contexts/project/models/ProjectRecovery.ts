@@ -17,6 +17,7 @@ export interface ProjectRecovery {
   readonly healthySince?: string;
   readonly nextAttemptAt?: string;
   readonly priorRunnerInstanceId?: string;
+  readonly terminationConfirmedAt?: string;
   readonly lastFault?: string;
 }
 

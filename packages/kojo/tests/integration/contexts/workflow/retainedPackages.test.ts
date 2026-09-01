@@ -33,11 +33,13 @@ const fixture = (): {
   const factory = join(root, ".kojo");
   const workflows = join(factory, "workflows");
   const localPackage = join(parent, "local-package");
+  const legacyWrapper = join(root, "node_modules", "legacy-wrapper");
   const linkedSource = join(parent, "linked-source.txt");
   const marker = join(parent, "workflow-executed");
   mkdirSync(workflows, { recursive: true });
   mkdirSync(join(root, "node_modules", "@carere"), { recursive: true });
   mkdirSync(localPackage, { recursive: true });
+  mkdirSync(legacyWrapper, { recursive: true });
   mkdirSync(join(dataRoot, "staging"), { recursive: true });
   mkdirSync(join(dataRoot, "revisions"), { recursive: true });
   mkdirSync(join(dataRoot, "objects"), { recursive: true });
@@ -56,6 +58,19 @@ const fixture = (): {
     `${JSON.stringify({ name: "fixture-local", version: "1.0.0", exports: "./index.ts" })}\n`,
   );
   writeFileSync(join(localPackage, "index.ts"), 'export const retained = "retained";\n');
+  writeFileSync(
+    join(legacyWrapper, "package.json"),
+    `${JSON.stringify({
+      name: "legacy-wrapper",
+      version: "1.0.0",
+      exports: "./index.ts",
+      dependencies: { "@carere/kojo": "0.0.0" },
+    })}\n`,
+  );
+  writeFileSync(
+    join(legacyWrapper, "index.ts"),
+    'export { sandboxed } from "@carere/kojo/contexts/workflow/services/sandboxed";\n',
+  );
   writeFileSync(join(localPackage, "fixture-tool"), "#!/bin/sh\nexit 0\n");
   chmodSync(join(localPackage, "fixture-tool"), 0o755);
   writeFileSync(linkedSource, "individual linked file bytes\n");
@@ -147,6 +162,35 @@ const fixture = (): {
       "",
     ].join("\n"),
   );
+  writeFileSync(
+    join(workflows, "legacy-bypass.ts"),
+    [
+      'import { Effect, Schema } from "effect";',
+      'import * as SandcastleAgentInvoker from "@carere/kojo/contexts/agent/adapters/SandcastleAgentInvoker";',
+      'import { sandboxed } from "@carere/kojo/contexts/workflow/services/sandboxed";',
+      'import { workflow } from "@carere/kojo-runtime/contexts/workflow/services/workflow";',
+      "void SandcastleAgentInvoker; void sandboxed;",
+      "export const legacyBypass = workflow(",
+      '  { name: "legacy-bypass", payload: Schema.Unknown, success: Schema.String, error: Schema.Unknown, idempotencyKey: () => "legacy-bypass" },',
+      '  () => Effect.succeed("not executed"),',
+      ");",
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(
+    join(workflows, "wrapped-bypass.ts"),
+    [
+      'import { Effect, Schema } from "effect";',
+      'import { sandboxed } from "legacy-wrapper";',
+      'import { workflow } from "@carere/kojo-runtime/contexts/workflow/services/workflow";',
+      "void sandboxed;",
+      "export const wrappedBypass = workflow(",
+      '  { name: "wrapped-bypass", payload: Schema.Unknown, success: Schema.String, error: Schema.Unknown, idempotencyKey: () => "wrapped-bypass" },',
+      '  () => Effect.succeed("not executed"),',
+      ");",
+      "",
+    ].join("\n"),
+  );
   return { root, dataRoot, marker, linkedBytes: readFileSync(linkedSource, "utf8") };
 };
 
@@ -162,12 +206,28 @@ describe("real Workflow Revision capture", () => {
     );
     const safe = refreshed.workflows.find((workflow) => workflow.workflowName === "safe");
     const computed = refreshed.workflows.find((workflow) => workflow.workflowName === "computed");
+    const legacyBypass = refreshed.workflows.find(
+      (workflow) => workflow.workflowName === "legacy-bypass",
+    );
+    const wrappedBypass = refreshed.workflows.find(
+      (workflow) => workflow.workflowName === "wrapped-bypass",
+    );
 
     expect(refreshed.factoryState).toBe("available");
     expect(computed).toMatchObject({
       availability: "invalid",
       sourceFault: expect.stringContaining("computed"),
     });
+    expect(legacyBypass).toMatchObject({
+      availability: "invalid",
+      sourceFault: expect.stringContaining("legacy @carere/kojo execution package"),
+    });
+    expect(legacyBypass?.revision).toBeUndefined();
+    expect(wrappedBypass).toMatchObject({
+      availability: "invalid",
+      sourceFault: expect.stringContaining("legacy @carere/kojo execution package"),
+    });
+    expect(wrappedBypass?.revision).toBeUndefined();
     expect(safe?.availability).toBe("available");
     expect(safe?.revision?.revisionId).toMatch(/^[a-f0-9]{64}$/);
     expect(safe?.revision?.manifest.sources.map((file) => file.path)).toEqual([

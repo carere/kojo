@@ -19,6 +19,7 @@ import type { RunViewMode } from "../models/view.ts";
 import { type PhaseSpan, spansOf } from "../models/waterfall.ts";
 import { waterfallStore } from "../services/waterfallStore.ts";
 import { PhaseTable } from "./PhaseTable.tsx";
+import { PublishedArtifacts } from "./PublishedArtifacts.tsx";
 import { RunOutcome } from "./RunOutcome.tsx";
 import { Waterfall } from "./Waterfall.tsx";
 
@@ -470,6 +471,8 @@ export const RunView = (props: {
                     </Show>
                   </Show>
                 </div>
+
+                <PublishedArtifacts runId={props.runId} artifacts={document().artifacts ?? []} />
 
                 {/*
                  * The dock. It renders nothing at all when no detail route is matched, which is what

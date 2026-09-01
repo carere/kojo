@@ -162,6 +162,57 @@ const phaseOf = (row: PhaseRow): PhaseResult => ({
   encodedResult: JSON.parse(row.encoded_result) as JsonValue,
 });
 
+const integrityIsOk = (database: Database): boolean => {
+  const integrity = database
+    .query<{ readonly integrity_check: string }, []>("PRAGMA integrity_check")
+    .all();
+  return integrity.length === 1 && integrity[0]?.integrity_check === "ok";
+};
+
+const rebuildTableCheck = (
+  database: Database,
+  options: {
+    readonly table: string;
+    readonly temporary: string;
+    readonly required: string;
+    readonly create: string;
+    readonly columns: string;
+  },
+): void => {
+  const row = database
+    .query<{ readonly sql: string }, [string]>(
+      "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+    )
+    .get(options.table);
+  if (row === null || row.sql.includes(options.required)) return;
+  const foreignKeys =
+    database.query<{ readonly foreign_keys: number }, []>("PRAGMA foreign_keys").get()
+      ?.foreign_keys ?? 0;
+  database.run("PRAGMA foreign_keys = OFF");
+  try {
+    database.transaction(() => {
+      database.run(`DROP TABLE IF EXISTS ${options.temporary}`);
+      database.run(options.create);
+      database.run(
+        `INSERT INTO ${options.temporary} (${options.columns}) SELECT ${options.columns} FROM ${options.table}`,
+      );
+      database.run(`DROP TABLE ${options.table}`);
+      database.run(`ALTER TABLE ${options.temporary} RENAME TO ${options.table}`);
+      if (!integrityIsOk(database))
+        throw new Error(`Kojo cannot verify the ${options.table} CHECK constraint migration`);
+    })();
+  } finally {
+    if (foreignKeys === 1) database.run("PRAGMA foreign_keys = ON");
+  }
+  if (!integrityIsOk(database))
+    throw new Error(`Kojo cannot verify the ${options.table} CHECK constraint migration`);
+  const foreignKeyFaults = database
+    .query<Record<string, unknown>, []>("PRAGMA foreign_key_check")
+    .all();
+  if (foreignKeyFaults.length > 0)
+    throw new Error(`Kojo cannot verify the ${options.table} foreign keys after migration`);
+};
+
 /** The sole-owner SQLite adapter for Run admission, Claims, slots, and replayed results. */
 export class SqliteRunRepository {
   readonly #database: Database;
@@ -178,7 +229,7 @@ export class SqliteRunRepository {
         payload_json TEXT NOT NULL,
         revision_id TEXT NOT NULL,
         package_graph_id TEXT NOT NULL,
-        state TEXT NOT NULL CHECK(state IN ('queued', 'executing', 'suspended', 'succeeded', 'failed', 'cancelled')),
+        state TEXT NOT NULL CHECK(state IN ('queued', 'executing', 'suspended', 'succeeded', 'failed', 'cancelled', 'held')),
         admission_sequence INTEGER NOT NULL UNIQUE,
         admitted_at TEXT NOT NULL,
         started_at TEXT,
@@ -188,6 +239,30 @@ export class SqliteRunRepository {
         FOREIGN KEY (revision_id) REFERENCES workflow_revisions(revision_id)
       ) STRICT
     `);
+    rebuildTableCheck(database, {
+      table: "workflow_runs",
+      temporary: "workflow_runs_kojo_check",
+      required: "'held'",
+      create: `CREATE TABLE workflow_runs_kojo_check (
+        run_id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL,
+        workflow_name TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        revision_id TEXT NOT NULL,
+        package_graph_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('queued', 'executing', 'suspended', 'succeeded', 'failed', 'cancelled', 'held')),
+        admission_sequence INTEGER NOT NULL UNIQUE,
+        admitted_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        UNIQUE(project_id, workflow_name, idempotency_key),
+        FOREIGN KEY (project_id, workflow_name) REFERENCES project_workflows(project_id, workflow_name),
+        FOREIGN KEY (revision_id) REFERENCES workflow_revisions(revision_id)
+      ) STRICT`,
+      columns:
+        "run_id, project_id, workflow_name, idempotency_key, payload_json, revision_id, package_graph_id, state, admission_sequence, admitted_at, started_at, finished_at",
+    });
     database.run(`
       CREATE TABLE IF NOT EXISTS workflow_queue (
         run_id TEXT PRIMARY KEY NOT NULL,
@@ -277,7 +352,8 @@ export class SqliteRunRepository {
           'RETAINED_HOST_INCOMPATIBLE',
           'RETAINED_BUN_INCOMPATIBLE',
           'RETAINED_EFFECT_INCOMPATIBLE',
-          'RETAINED_PROTOCOL_INCOMPATIBLE'
+          'RETAINED_PROTOCOL_INCOMPATIBLE',
+          'PROJECT_RECOVERY_REQUIRED'
         )),
         detail TEXT NOT NULL,
         remedy TEXT NOT NULL,
@@ -286,6 +362,29 @@ export class SqliteRunRepository {
         FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
       ) STRICT
     `);
+    rebuildTableCheck(database, {
+      table: "workflow_run_holds",
+      temporary: "workflow_run_holds_kojo_check",
+      required: "'PROJECT_RECOVERY_REQUIRED'",
+      create: `CREATE TABLE workflow_run_holds_kojo_check (
+        run_id TEXT PRIMARY KEY NOT NULL,
+        code TEXT NOT NULL CHECK(code IN (
+          'RETAINED_CONTENT_MISSING',
+          'RETAINED_CONTENT_CORRUPT',
+          'RETAINED_HOST_INCOMPATIBLE',
+          'RETAINED_BUN_INCOMPATIBLE',
+          'RETAINED_EFFECT_INCOMPATIBLE',
+          'RETAINED_PROTOCOL_INCOMPATIBLE',
+          'PROJECT_RECOVERY_REQUIRED'
+        )),
+        detail TEXT NOT NULL,
+        remedy TEXT NOT NULL,
+        fault_json TEXT NOT NULL,
+        held_at TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
+      ) STRICT`,
+      columns: "run_id, code, detail, remedy, fault_json, held_at",
+    });
     database.run(`
       CREATE TABLE IF NOT EXISTS workflow_cancellations (
         run_id TEXT PRIMARY KEY NOT NULL,

@@ -7,16 +7,27 @@ import {
   decodeJsonValue,
   type JsonValue,
 } from "@carere/kojo-runner-contracts/contexts/shared/codecs/json";
+import * as BunServices from "@effect/platform-bun/BunServices";
 import { Data, Effect, Layer, Option, Schema, Stream } from "effect";
 import { WorkflowEngine } from "effect/unstable/workflow";
 import type { GateRequest } from "../contexts/gate/models/GateRequest.ts";
 import { Gate } from "../contexts/gate/ports/Gate.ts";
 import { GateRepository } from "../contexts/gate/ports/GateRepository.ts";
 import {
+  layer as daemonResources,
+  type SendResourceMutation,
+} from "../contexts/project/adapters/DaemonResourceLeaseClient.ts";
+import {
   makeRunnerFrameReader,
   writeCriticalRunnerFrame,
   writeRunnerFrame,
 } from "../contexts/project/services/runnerChannel.ts";
+import * as BindMountWorkspace from "../contexts/sandbox/adapters/BindMountWorkspace.ts";
+import * as SandcastleSandboxSource from "../contexts/sandbox/adapters/SandcastleSandboxSource.ts";
+import {
+  layer as daemonArtifacts,
+  type SendArtifactMutation,
+} from "../contexts/trace/adapters/DaemonArtifactPublisher.ts";
 import { Tracer } from "../contexts/trace/ports/Tracer.ts";
 import { Trigger } from "../contexts/trigger/ports/Trigger.ts";
 import { layer as daemonEngine } from "../contexts/workflow/adapters/DaemonWorkflowEngine.ts";
@@ -181,7 +192,9 @@ export const inspectRegisteredRevision = async (
 /** Execute under the Daemon-assigned Run identity and return committed encoded Phase results. */
 export const executeRegisteredRevision = async (
   request: ExecuteRegisteredRequest,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  sendResourceMutation: SendResourceMutation,
+  sendArtifactMutation: SendArtifactMutation,
 ): Promise<ExecuteRegisteredResult> => {
   const { bundle, payload } = await loadRegisteredRevision(request);
   const results = new Map(Object.entries(request.recordedResults));
@@ -260,16 +273,33 @@ export const executeRegisteredRevision = async (
     sandbox: () => Effect.void,
     occurrence: () => Effect.void,
   });
-  const engineLayer = daemonEngine(request.revisionId).pipe(Layer.provide(repository));
+  const sandboxSource = SandcastleSandboxSource.layer.pipe(Layer.provide(BunServices.layer));
+  const hostWorkspace = BindMountWorkspace.layer({ root: process.cwd() }).pipe(
+    Layer.provide(BunServices.layer),
+  );
+  const executionServices = Layer.mergeAll(
+    daemonResources(sendResourceMutation),
+    daemonArtifacts(request.runId, sendArtifactMutation),
+    sandboxSource,
+    hostWorkspace,
+  );
+  const engineLayer = daemonEngine(request.revisionId, executionServices).pipe(
+    Layer.provide(repository),
+  );
   // Dynamic authored layers have a service type known only in their own Project process.
   const authoredLayer = bundle.layer as unknown as Layer.Layer<
     never,
     never,
     Tracer | WorkflowEngine.WorkflowEngine
   >;
-  const registration = authoredLayer.pipe(
-    Layer.provideMerge(Layer.mergeAll(engineLayer, tracerLayer, gateLayer, gateRepositoryLayer)),
+  const runnerServices = Layer.mergeAll(
+    engineLayer,
+    tracerLayer,
+    gateLayer,
+    gateRepositoryLayer,
+    executionServices,
   );
+  const registration = authoredLayer.pipe(Layer.provideMerge(runnerServices));
   const execution = Effect.gen(function* () {
     const engine = yield* WorkflowEngine.WorkflowEngine;
     yield* engine.execute(bundle.definition as never, {
@@ -609,6 +639,44 @@ const runPrivateProtocol = async (): Promise<void> => {
       });
       return committed;
     };
+    const sendExecutionMutation = async (
+      kind:
+        | "BeginResourceAcquisition"
+        | "ConfirmResourceAcquired"
+        | "BeginResourceRelease"
+        | "ConfirmResourceReleased"
+        | "PreserveResource"
+        | "ReportRecovery"
+        | "BeginArtifact"
+        | "WriteArtifactChunk"
+        | "FinishArtifact",
+      address: {
+        readonly runId: string;
+        readonly revisionId: string;
+        readonly claimGeneration: number;
+      },
+      body: JsonValue,
+    ): Promise<Record<string, JsonValue>> => {
+      const requestId = crypto.randomUUID();
+      const committed = new Promise<Record<string, JsonValue>>((resolve, reject) => {
+        mutationReplies.set(requestId, { resolve, reject });
+      });
+      await Effect.runPromise(
+        writeRunnerFrame(socket, {
+          version: 1,
+          kind,
+          requestId,
+          daemonInstanceId: binding.daemonInstanceId,
+          runnerInstanceId: binding.runnerInstanceId,
+          ...address,
+          body,
+        }),
+      ).catch((cause) => {
+        mutationReplies.delete(requestId);
+        throw cause;
+      });
+      return committed;
+    };
 
     let shutdown = false;
     try {
@@ -703,7 +771,7 @@ const runPrivateProtocol = async (): Promise<void> => {
             throw new Error("the Run already has an executing fiber in this Project Runner");
           }
           const controller = new AbortController();
-          const running = withRetainedFactoryRoot(registration.executionRoot, () =>
+          const running = withRetainedFactoryRoot(join(registration.executionRoot, ".kojo"), () =>
             executeRegisteredRevision(
               {
                 ...registration,
@@ -714,6 +782,26 @@ const runPrivateProtocol = async (): Promise<void> => {
                 scheduledWakeups: execute.scheduledWakeups,
               },
               controller.signal,
+              (kind, body) =>
+                sendExecutionMutation(
+                  kind,
+                  {
+                    runId: operation.runId,
+                    revisionId: operation.revisionId,
+                    claimGeneration: operation.claimGeneration,
+                  },
+                  body,
+                ),
+              (kind, body) =>
+                sendExecutionMutation(
+                  kind,
+                  {
+                    runId: operation.runId,
+                    revisionId: operation.revisionId,
+                    claimGeneration: operation.claimGeneration,
+                  },
+                  body,
+                ),
             ),
           )
             .then((result) => reply(operation.requestId, result as unknown as JsonValue))
@@ -783,7 +871,7 @@ const runPrivateProtocol = async (): Promise<void> => {
           await reply(operation.requestId, { polling: true });
           const running = Promise.resolve()
             .then(() =>
-              withRetainedFactoryRoot(registration.executionRoot, () =>
+              withRetainedFactoryRoot(join(registration.executionRoot, ".kojo"), () =>
                 runRegisteredTrigger({
                   registration,
                   pollerId: start.pollerId as string,

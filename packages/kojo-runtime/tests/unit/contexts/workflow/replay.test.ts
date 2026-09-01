@@ -1,11 +1,78 @@
 import type { JsonValue } from "@carere/kojo-runner-contracts/contexts/shared/codecs/json";
-import { Effect, Layer, Schema } from "effect";
+import { Context, Effect, Layer, Schema } from "effect";
 import { Activity, Workflow, WorkflowEngine } from "effect/unstable/workflow";
 import { describe, expect, it } from "vitest";
+import { ResourceLeaseClient } from "../../../../src/contexts/project/ports/ResourceLeaseClient.ts";
 import { layer as daemonEngine } from "../../../../src/contexts/workflow/adapters/DaemonWorkflowEngine.ts";
 import { DaemonExecutionRepository } from "../../../../src/contexts/workflow/ports/DaemonExecutionRepository.ts";
 
 describe("Daemon Workflow engine replay", () => {
+  it("provides Daemon execution services inside the registered Workflow fiber", async () => {
+    let acquisitionCount = 0;
+    const resources = Layer.succeedContext(
+      Context.make(ResourceLeaseClient, {
+        beginAcquisition: (resource) =>
+          Effect.sync(() => {
+            acquisitionCount += 1;
+            return {
+              acquisitionKey: resource.acquisitionKey,
+              providerIdentity: `kojo-resource:${resource.leaseId}`,
+              inspectionLocator: `/fixture/${resource.leaseId}.json`,
+            };
+          }),
+        confirmAcquired: () => Effect.void,
+        beginRelease: () => Effect.void,
+        confirmReleased: () => Effect.void,
+        preserve: () => Effect.void,
+        unresolved: () => Effect.void,
+      }),
+    );
+    const repository = Layer.succeed(DaemonExecutionRepository, {
+      readResult: () => Effect.as(Effect.void, undefined as JsonValue | undefined),
+      commitResult: () => Effect.void,
+      readDeferred: () => Effect.as(Effect.void, undefined as JsonValue | undefined),
+      commitDeferred: () => Effect.void,
+      scheduleWakeup: () => Effect.void,
+    });
+    const definition = Workflow.make("leased", {
+      payload: {},
+      success: Schema.Void,
+      error: Schema.Never,
+      idempotencyKey: () => "leased",
+    });
+    const registration = definition.toLayer(() =>
+      Effect.gen(function* () {
+        const leases = yield* ResourceLeaseClient;
+        yield* leases.beginAcquisition({
+          leaseId: "lease-runner",
+          kind: "sandbox",
+          acquisitionKey: "run/sandbox",
+          detail: {},
+        });
+      }),
+    );
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* WorkflowEngine.WorkflowEngine;
+        yield* engine.execute(definition, {
+          executionId: "run-leased",
+          payload: {},
+          discard: true,
+        });
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provide(resources),
+            Layer.provideMerge(
+              daemonEngine("a".repeat(64), resources).pipe(Layer.provide(repository)),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(acquisitionCount).toBe(1);
+  });
+
   it("uses a completed code Phase result in a fresh engine without repeating its body", async () =>
     Effect.runPromise(
       Effect.gen(function* () {

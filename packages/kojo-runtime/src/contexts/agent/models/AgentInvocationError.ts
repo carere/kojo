@@ -11,14 +11,6 @@ export const AgentInvocationFault = Schema.Literals([
   "resume-unsupported",
   /** The agent ran and the call failed anyway — spawn refused, the binary died, the API said no. */
   "provider-failed",
-  /**
-   * The spend switch refused before a process existed. Nothing ran, and nothing was spent.
-   *
-   * A separate fault from `provider-failed` because the two send a reader to opposite places: a
-   * provider that failed is something to fix, and this is something that was **not allowed** — and
-   * the remedy is one environment variable rather than an investigation. See `AgentSpend`.
-   */
-  "refused-to-spend",
 ]);
 export type AgentInvocationFault = typeof AgentInvocationFault.Type;
 

@@ -6,7 +6,7 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { enginePackage } from "@carere/kojo/contexts/shared/models/FactoryLayout";
+import { enginePackage, runtimePackage } from "@carere/kojo/contexts/shared/models/FactoryLayout";
 
 /**
  * The one server in this suite that is **not** a fixture: a factory stamped here, a run started by
@@ -40,6 +40,7 @@ const packageRoot = new URL("../../../../packages/kojo", import.meta.url).pathna
   /\/$/,
   "",
 );
+const runtimeRoot = join(dirname(packageRoot), "kojo-runtime");
 const cli = join(packageRoot, "src", "main.ts");
 
 /**
@@ -75,17 +76,17 @@ const git = (root: string, args: ReadonlyArray<string>): string =>
  */
 const workflowSource = [
   'import { Duration, Effect, Schema } from "effect";',
-  'import { GateRejected } from "@carere/kojo/contexts/gate/models/GateRejected";',
-  'import * as OnExpiry from "@carere/kojo/contexts/gate/models/OnExpiry";',
-  'import { noSandbox } from "@carere/kojo/contexts/sandbox/adapters/providers";',
-  'import { SandboxError } from "@carere/kojo/contexts/sandbox/models/SandboxError";',
-  'import { WorkspaceError } from "@carere/kojo/contexts/sandbox/models/WorkspaceError";',
-  'import { WorkspaceUnreachable } from "@carere/kojo/contexts/sandbox/models/WorkspaceUnreachable";',
-  'import { WorktreeUnusable } from "@carere/kojo/contexts/sandbox/models/WorktreeUnusable";',
-  'import { code } from "@carere/kojo/contexts/workflow/services/phase/code";',
-  'import { gate } from "@carere/kojo/contexts/workflow/services/phase/gate";',
-  'import { sandboxed } from "@carere/kojo/contexts/workflow/services/sandboxed";',
-  'import { workflow } from "@carere/kojo/contexts/workflow/services/workflow";',
+  'import { GateRejected } from "@carere/kojo-runtime/contexts/gate/models/GateRejected";',
+  'import * as OnExpiry from "@carere/kojo-runtime/contexts/gate/models/OnExpiry";',
+  'import { noSandbox } from "@carere/kojo-runtime/contexts/sandbox/adapters/providers";',
+  'import { SandboxError } from "@carere/kojo-runtime/contexts/sandbox/models/SandboxError";',
+  'import { WorkspaceError } from "@carere/kojo-runtime/contexts/sandbox/models/WorkspaceError";',
+  'import { WorkspaceUnreachable } from "@carere/kojo-runtime/contexts/sandbox/models/WorkspaceUnreachable";',
+  'import { WorktreeUnusable } from "@carere/kojo-runtime/contexts/sandbox/models/WorktreeUnusable";',
+  'import { code } from "@carere/kojo-runtime/contexts/workflow/services/phase/code";',
+  'import { gate } from "@carere/kojo-runtime/contexts/workflow/services/phase/gate";',
+  'import { sandboxed } from "@carere/kojo-runtime/contexts/workflow/services/sandboxed";',
+  'import { workflow } from "@carere/kojo-runtime/contexts/workflow/services/workflow";',
   "",
   "export const paperwork = workflow(",
   "  {",
@@ -210,6 +211,7 @@ const stamp = (): string => {
   // repository that has it, and the run then fails for a reason that reads like a Kojo bug.
   mkdirSync(join(root, "node_modules", dirname(enginePackage)), { recursive: true });
   symlinkSync(packageRoot, join(root, "node_modules", enginePackage));
+  symlinkSync(runtimeRoot, join(root, "node_modules", runtimePackage));
   for (const dependency of ["effect", "@ai-hero", "@effect", "@types"]) {
     symlinkSync(
       join(packageRoot, "node_modules", dependency),

@@ -7,7 +7,11 @@ import {
   decodeSuccess,
 } from "../../shared/codecs/json.ts";
 import { decodeRunnerIdentity, decodeSha256 } from "../../shared/models/identity.ts";
-import { decodeArtifactChunkBody } from "../contracts/artifact.ts";
+import {
+  decodeArtifactChunkBody,
+  decodeBeginArtifactBody,
+  decodeFinishArtifactBody,
+} from "../contracts/artifact.ts";
 import {
   decodeCancelRunBody,
   decodeCommitActionResultBody,
@@ -19,6 +23,14 @@ import {
 import type { RunnerFrame } from "../contracts/frame.ts";
 import { decodeHelloBody, decodeWelcomeBody } from "../contracts/handshake.ts";
 import { isExecutionMutationKind, isRunnerOperationKind } from "../contracts/operations.ts";
+import {
+  decodeBeginResourceAcquisitionBody,
+  decodeBeginResourceReleaseBody,
+  decodeConfirmResourceAcquiredBody,
+  decodeConfirmResourceReleasedBody,
+  decodePreserveResourceBody,
+  decodeReportRecoveryBody,
+} from "../contracts/resource.ts";
 
 const prefixIssues = <A>(
   result: DecodeResult<A>,
@@ -71,6 +83,10 @@ export const decodeRunnerFrame = (input: unknown): DecodeResult<RunnerFrame> => 
     body = prefixIssues(decodeWelcomeBody(base.value.body), ["body"]);
   } else if (base.value.kind === "WriteArtifactChunk") {
     body = prefixIssues(decodeArtifactChunkBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "BeginArtifact") {
+    body = prefixIssues(decodeBeginArtifactBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "FinishArtifact") {
+    body = prefixIssues(decodeFinishArtifactBody(base.value.body), ["body"]);
   } else if (base.value.kind === "RegisterRevision") {
     body = prefixIssues(decodeRegisterRevisionBody(base.value.body), ["body"]);
   } else if (base.value.kind === "ExecuteRun") {
@@ -83,6 +99,18 @@ export const decodeRunnerFrame = (input: unknown): DecodeResult<RunnerFrame> => 
     body = prefixIssues(decodeCommitActionResultBody(base.value.body), ["body"]);
   } else if (base.value.kind === "Ready") {
     body = prefixIssues(decodeOperationReplyBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "BeginResourceAcquisition") {
+    body = prefixIssues(decodeBeginResourceAcquisitionBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "ConfirmResourceAcquired") {
+    body = prefixIssues(decodeConfirmResourceAcquiredBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "BeginResourceRelease") {
+    body = prefixIssues(decodeBeginResourceReleaseBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "ConfirmResourceReleased") {
+    body = prefixIssues(decodeConfirmResourceReleasedBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "PreserveResource") {
+    body = prefixIssues(decodePreserveResourceBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "ReportRecovery") {
+    body = prefixIssues(decodeReportRecoveryBody(base.value.body), ["body"]);
   } else {
     body = prefixIssues(decodeJsonValue(base.value.body), ["body"]);
   }
