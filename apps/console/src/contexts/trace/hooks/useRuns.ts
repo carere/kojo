@@ -29,6 +29,8 @@ export const useRuns = (): UseQueryResult<ReadonlyArray<RunLine>, Error> =>
               workflow: run.workflowName,
               startedAt: Date.parse(run.startedAt ?? run.admittedAt),
             },
+            executionState: run.state,
+            ...(run.queueReason === undefined ? {} : { queueReason: run.queueReason }),
             ...(run.state === "succeeded" || run.state === "failed" ? { outcome: run.state } : {}),
           }),
         );

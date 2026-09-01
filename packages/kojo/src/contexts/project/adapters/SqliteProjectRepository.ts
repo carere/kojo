@@ -5,6 +5,10 @@ import type { ProjectDocument } from "@carere/kojo-client-contracts/contexts/cli
 import type { WorkflowDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import { Effect, Layer } from "effect";
 import type { FactoryRefreshObservation } from "../../workflow/models/FactoryRefresh.ts";
+import type {
+  TriggerPoller,
+  WorkflowActivityReceipt,
+} from "../../workflow/models/WorkflowActivity.ts";
 import type { RegisteredProject, RegisterProjectRequest } from "../models/Project.ts";
 import { ProjectStoreError } from "../models/ProjectStoreError.ts";
 import { ProjectRepository } from "../ports/ProjectRepository.ts";
@@ -44,6 +48,17 @@ interface WorkflowRow {
 interface ReceiptRow {
   readonly request_body: string;
   readonly receipt_json: string;
+}
+
+interface CurrentRunRow {
+  readonly run_id: string;
+  readonly state: "queued" | "executing" | "suspended";
+  readonly queue_reason:
+    | "execution-capacity"
+    | "project-capacity"
+    | "runner-starting"
+    | "package-switch"
+    | null;
 }
 
 export interface ExecutionRevision {
@@ -88,6 +103,7 @@ const workflowDocumentOf = (row: WorkflowRow): WorkflowDocument => ({
     ...(row.trigger_observed_at === null ? {} : { observedAt: row.trigger_observed_at }),
     ...(row.trigger_detail === null ? {} : { detail: row.trigger_detail }),
   },
+  currentRuns: [],
   refreshedAt: row.refreshed_at,
 });
 
@@ -167,6 +183,26 @@ export class SqliteProjectRepository {
         PRIMARY KEY (data_identity, request_id)
       ) STRICT
     `);
+    database.run(`
+      CREATE TABLE IF NOT EXISTS workflow_activity_receipts (
+        data_identity TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        receipt_json TEXT NOT NULL,
+        committed_at TEXT NOT NULL,
+        PRIMARY KEY (data_identity, request_id)
+      ) STRICT
+    `);
+    database.run(`
+      CREATE TABLE IF NOT EXISTS trigger_pollers (
+        project_id TEXT NOT NULL,
+        workflow_name TEXT NOT NULL,
+        poller_id TEXT NOT NULL UNIQUE,
+        started_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, workflow_name),
+        FOREIGN KEY (project_id, workflow_name) REFERENCES project_workflows(project_id, workflow_name)
+      ) STRICT
+    `);
     database.run(
       "INSERT OR IGNORE INTO daemon_metadata (name, value) VALUES ('project_snapshot_version', '0')",
     );
@@ -229,7 +265,7 @@ export class SqliteProjectRepository {
         `INSERT INTO project_workflows (
            project_id, workflow_name, activity, availability, source, source_fault, remedy,
            current_revision_id, candidate_revision_id, trigger_state, refreshed_at
-         ) VALUES (?, ?, 'inactive', ?, ?, ?, ?, ?, NULL, 'not-declared', ?)
+         ) VALUES (?, ?, 'inactive', ?, ?, ?, ?, ?, NULL, ?, ?)
          ON CONFLICT(project_id, workflow_name) DO UPDATE SET
            availability = excluded.availability,
            source = excluded.source,
@@ -249,6 +285,7 @@ export class SqliteProjectRepository {
           workflow.sourceFault ?? null,
           workflow.remedy ?? null,
           revision?.revisionId ?? null,
+          workflow.triggerDeclared === true ? "not-observed" : "not-declared",
           observedAt,
         ],
       );
@@ -468,14 +505,258 @@ export class SqliteProjectRepository {
           const label = basename(row.label);
           labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
         }
-        return rows.map((row) =>
-          workflowDocumentOf({
+        const runTableExists =
+          this.#database
+            .query<{ readonly count: number }, []>(
+              "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'workflow_runs'",
+            )
+            .get()?.count === 1;
+        return rows.map((row) => {
+          const document = workflowDocumentOf({
             ...row,
             label:
               (labelCounts.get(basename(row.label)) ?? 0) > 1
                 ? `${basename(row.label)} · ${row.project_id.slice(0, 8)}`
                 : basename(row.label),
-          }),
+          });
+          if (!runTableExists) return document;
+          const currentRuns = this.#database
+            .query<CurrentRunRow, [string, string]>(
+              `SELECT r.run_id, r.state, q.queue_reason
+                 FROM workflow_runs r
+                 LEFT JOIN workflow_queue q ON q.run_id = r.run_id
+                WHERE r.project_id = ? AND r.workflow_name = ?
+                  AND r.state IN ('queued', 'executing', 'suspended')
+                ORDER BY r.admission_sequence`,
+            )
+            .all(row.project_id, row.workflow_name)
+            .map((run) => ({
+              runId: run.run_id,
+              state: run.state,
+              ...(run.queue_reason === null ? {} : { queueReason: run.queue_reason }),
+            }));
+          return { ...document, currentRuns };
+        });
+      },
+      catch: failed,
+    });
+
+  readonly workflow = (
+    projectId: string,
+    workflowName: string,
+  ): Effect.Effect<WorkflowDocument | undefined, ProjectStoreError> =>
+    Effect.map(this.workflows, (workflows) =>
+      workflows.find(
+        (workflow) => workflow.projectId === projectId && workflow.workflowName === workflowName,
+      ),
+    );
+
+  readonly startActivity = (request: {
+    readonly dataIdentity: string;
+    readonly requestId: string;
+    readonly projectId: string;
+    readonly workflowName: string;
+    readonly changedAt: string;
+  }): Effect.Effect<WorkflowActivityReceipt, ProjectStoreError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            const requestJson = JSON.stringify([request.projectId, request.workflowName, "start"]);
+            const prior = this.#database
+              .query<
+                { readonly request_json: string; readonly receipt_json: string },
+                [string, string]
+              >(
+                "SELECT request_json, receipt_json FROM workflow_activity_receipts WHERE data_identity = ? AND request_id = ?",
+              )
+              .get(request.dataIdentity, request.requestId);
+            if (prior !== null) {
+              if (prior.request_json !== requestJson) {
+                throw new ProjectStoreError({
+                  code: "REQUEST_ID_CONFLICT",
+                  message: "This request ID already names different request content.",
+                  status: 409,
+                  retry: "lookupOriginal",
+                  remedy: "Look up the original request.",
+                });
+              }
+              return JSON.parse(prior.receipt_json) as WorkflowActivityReceipt;
+            }
+            const workflow = this.#workflowRow(request.projectId, request.workflowName);
+            if (workflow.availability !== "available" || workflow.current_revision_id === null) {
+              throw new ProjectStoreError({
+                code: "WORKFLOW_UNAVAILABLE",
+                message: "The selected Project Workflow is not available.",
+                status: 409,
+                retry: "never",
+                remedy: "Repair the Workflow fault shown in its snapshot.",
+              });
+            }
+            const trigger = workflow.trigger_state !== "not-declared";
+            let pollerStarted = false;
+            let pollerId: string | undefined;
+            if (trigger) {
+              const priorPoller = this.#database
+                .query<{ readonly poller_id: string }, [string, string]>(
+                  "SELECT poller_id FROM trigger_pollers WHERE project_id = ? AND workflow_name = ?",
+                )
+                .get(request.projectId, request.workflowName);
+              pollerId = priorPoller?.poller_id ?? crypto.randomUUID();
+              if (priorPoller === null) {
+                this.#database.run(
+                  "INSERT INTO trigger_pollers (project_id, workflow_name, poller_id, started_at) VALUES (?, ?, ?, ?)",
+                  [request.projectId, request.workflowName, pollerId, request.changedAt],
+                );
+                pollerStarted = true;
+              }
+              this.#database.run(
+                `UPDATE project_workflows
+                    SET activity = 'active', trigger_state = 'polling',
+                        trigger_observed_at = ?, trigger_detail = 'listening'
+                  WHERE project_id = ? AND workflow_name = ?`,
+                [request.changedAt, request.projectId, request.workflowName],
+              );
+            } else {
+              this.#database.run(
+                "UPDATE project_workflows SET activity = 'active' WHERE project_id = ? AND workflow_name = ?",
+                [request.projectId, request.workflowName],
+              );
+            }
+            const receipt: WorkflowActivityReceipt = {
+              projectId: request.projectId,
+              workflowName: request.workflowName,
+              activity: "active",
+              trigger,
+              pollerStarted,
+              ...(pollerId === undefined ? {} : { pollerId }),
+              changedAt: request.changedAt,
+            };
+            this.#database.run(
+              "INSERT INTO workflow_activity_receipts (data_identity, request_id, request_json, receipt_json, committed_at) VALUES (?, ?, ?, ?, ?)",
+              [
+                request.dataIdentity,
+                request.requestId,
+                requestJson,
+                JSON.stringify(receipt),
+                request.changedAt,
+              ],
+            );
+            return receipt;
+          })
+          .immediate(),
+      catch: failed,
+    });
+
+  readonly stopActivity = (request: {
+    readonly dataIdentity: string;
+    readonly requestId: string;
+    readonly projectId: string;
+    readonly workflowName: string;
+    readonly changedAt: string;
+  }): Effect.Effect<WorkflowActivityReceipt, ProjectStoreError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            const requestJson = JSON.stringify([request.projectId, request.workflowName, "stop"]);
+            const prior = this.#database
+              .query<
+                { readonly request_json: string; readonly receipt_json: string },
+                [string, string]
+              >(
+                "SELECT request_json, receipt_json FROM workflow_activity_receipts WHERE data_identity = ? AND request_id = ?",
+              )
+              .get(request.dataIdentity, request.requestId);
+            if (prior !== null) {
+              if (prior.request_json !== requestJson) {
+                throw new ProjectStoreError({
+                  code: "REQUEST_ID_CONFLICT",
+                  message: "This request ID already names different request content.",
+                  status: 409,
+                  retry: "lookupOriginal",
+                  remedy: "Look up the original request.",
+                });
+              }
+              return JSON.parse(prior.receipt_json) as WorkflowActivityReceipt;
+            }
+            const workflow = this.#workflowRow(request.projectId, request.workflowName);
+            const trigger = workflow.trigger_state !== "not-declared";
+            this.#database.run(
+              "DELETE FROM trigger_pollers WHERE project_id = ? AND workflow_name = ?",
+              [request.projectId, request.workflowName],
+            );
+            this.#database.run(
+              `UPDATE project_workflows SET activity = 'inactive',
+                 trigger_state = CASE WHEN trigger_state = 'not-declared' THEN 'not-declared' ELSE 'not-observed' END,
+                 trigger_observed_at = ?, trigger_detail = CASE WHEN trigger_state = 'not-declared' THEN NULL ELSE 'stopped' END
+               WHERE project_id = ? AND workflow_name = ?`,
+              [request.changedAt, request.projectId, request.workflowName],
+            );
+            const receipt: WorkflowActivityReceipt = {
+              projectId: request.projectId,
+              workflowName: request.workflowName,
+              activity: "inactive",
+              trigger,
+              pollerStarted: false,
+              changedAt: request.changedAt,
+            };
+            this.#database.run(
+              "INSERT INTO workflow_activity_receipts (data_identity, request_id, request_json, receipt_json, committed_at) VALUES (?, ?, ?, ?, ?)",
+              [
+                request.dataIdentity,
+                request.requestId,
+                requestJson,
+                JSON.stringify(receipt),
+                request.changedAt,
+              ],
+            );
+            return receipt;
+          })
+          .immediate(),
+      catch: failed,
+    });
+
+  readonly triggerPollers: Effect.Effect<ReadonlyArray<TriggerPoller>, ProjectStoreError> =
+    Effect.try({
+      try: () =>
+        this.#database
+          .query<
+            {
+              readonly projectId: string;
+              readonly workflowName: string;
+              readonly pollerId: string;
+              readonly startedAt: string;
+            },
+            []
+          >(
+            "SELECT project_id AS projectId, workflow_name AS workflowName, poller_id AS pollerId, started_at AS startedAt FROM trigger_pollers ORDER BY started_at",
+          )
+          .all(),
+      catch: failed,
+    });
+
+  readonly observeTrigger = (request: {
+    readonly projectId: string;
+    readonly workflowName: string;
+    readonly state: "polling" | "delayed" | "failed";
+    readonly detail: string;
+    readonly observedAt: string;
+  }): Effect.Effect<void, ProjectStoreError> =>
+    Effect.try({
+      try: () => {
+        this.#workflowRow(request.projectId, request.workflowName);
+        this.#database.run(
+          `UPDATE project_workflows
+              SET trigger_state = ?, trigger_detail = ?, trigger_observed_at = ?
+            WHERE project_id = ? AND workflow_name = ?`,
+          [
+            request.state,
+            request.detail,
+            request.observedAt,
+            request.projectId,
+            request.workflowName,
+          ],
         );
       },
       catch: failed,
@@ -595,6 +876,74 @@ export class SqliteProjectRepository {
       ),
     );
 
+  readonly retainedExecutionRevision = (
+    projectId: string,
+    workflowName: string,
+    revisionId: string,
+  ): Effect.Effect<ExecutionRevision, ProjectStoreError> =>
+    Effect.try({
+      try: () => {
+        const row = this.#database
+          .query<
+            {
+              readonly location: string;
+              readonly package_graph_id: string;
+              readonly published_path: string;
+              readonly manifest_json: string;
+            },
+            [string, string, string]
+          >(
+            `SELECT p.location, r.package_graph_id, r.published_path, r.manifest_json
+               FROM projects p
+               JOIN project_workflows w ON w.project_id = p.project_id
+               JOIN workflow_revisions r ON r.revision_id = ?
+              WHERE p.project_id = ? AND w.workflow_name = ?`,
+          )
+          .get(revisionId, projectId, workflowName);
+        if (row === null) throw new Error("the pinned Workflow Revision is missing");
+        const manifest = JSON.parse(row.manifest_json) as { readonly entrySource?: unknown };
+        if (typeof manifest.entrySource !== "string") {
+          throw new Error("the pinned Workflow Revision manifest has no entry source");
+        }
+        return {
+          projectId,
+          location: row.location,
+          workflowName,
+          revisionId,
+          packageGraphId: row.package_graph_id,
+          publishedPath: row.published_path,
+          entrySource: manifest.entrySource,
+        };
+      },
+      catch: failed,
+    });
+
+  readonly settleManualActivity = (
+    projectId: string,
+    workflowName: string,
+  ): Effect.Effect<void, ProjectStoreError> =>
+    Effect.try({
+      try: () => {
+        const workflow = this.#workflowRow(projectId, workflowName);
+        if (workflow.trigger_state !== "not-declared") return;
+        const current =
+          this.#database
+            .query<{ readonly count: number }, [string, string]>(
+              `SELECT COUNT(*) AS count FROM workflow_runs
+                WHERE project_id = ? AND workflow_name = ?
+                  AND state IN ('queued', 'executing', 'suspended')`,
+            )
+            .get(projectId, workflowName)?.count ?? 0;
+        if (current === 0) {
+          this.#database.run(
+            "UPDATE project_workflows SET activity = 'inactive' WHERE project_id = ? AND workflow_name = ?",
+            [projectId, workflowName],
+          );
+        }
+      },
+      catch: failed,
+    });
+
   readonly receipt = (
     dataIdentity: string,
     requestId: string,
@@ -629,4 +978,28 @@ export class SqliteProjectRepository {
     receipt: this.receipt,
     snapshotVersion: this.snapshotVersion,
   });
+
+  #workflowRow(
+    projectId: string,
+    workflowName: string,
+  ): Pick<WorkflowRow, "availability" | "current_revision_id" | "trigger_state"> {
+    const row = this.#database
+      .query<
+        Pick<WorkflowRow, "availability" | "current_revision_id" | "trigger_state">,
+        [string, string]
+      >(
+        "SELECT availability, current_revision_id, trigger_state FROM project_workflows WHERE project_id = ? AND workflow_name = ?",
+      )
+      .get(projectId, workflowName);
+    if (row === null) {
+      throw new ProjectStoreError({
+        code: "WORKFLOW_NOT_FOUND",
+        message: "The selected Project Workflow does not exist.",
+        status: 404,
+        retry: "never",
+        remedy: "Select a Workflow from the authoritative Workflow snapshot.",
+      });
+    }
+    return row;
+  }
 }

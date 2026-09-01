@@ -6,6 +6,10 @@ import type {
   RunSnapshot,
   StartRunResult,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
+import type {
+  StartTriggerWorkflowResult,
+  StopWorkflowResult,
+} from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import type { OperationReplyBody } from "@carere/kojo-runner-contracts/contexts/project/contracts/execution";
 import { Data, Effect } from "effect";
@@ -13,7 +17,7 @@ import type { SqliteProjectRepository } from "../../project/adapters/SqliteProje
 import { materializeRevision } from "../../project/services/materializeRevision.ts";
 import { makeRunnerFrameReader, writeRunnerFrame } from "../../project/services/runnerChannel.ts";
 import type { SqliteRunRepository } from "../adapters/SqliteRunRepository.ts";
-import type { DaemonRun, PhaseResult, RunAuthority } from "../models/DaemonRun.ts";
+import type { ClaimedRun, DaemonRun, PhaseResult, RunAuthority } from "../models/DaemonRun.ts";
 import { canonicalJson } from "./canonicalJson.ts";
 
 interface RunnerRegistration {
@@ -67,7 +71,9 @@ const documentOf = (run: DaemonRun, phases: ReadonlyArray<PhaseResult>): RunDocu
   revisionId: run.revisionId,
   packageGraphId: run.packageGraphId,
   state: run.state,
-  ...(!terminal(run) && run.state === "queued" ? { queueReason: "runner-starting" as const } : {}),
+  ...(!terminal(run) && run.state === "queued"
+    ? { queueReason: run.queueReason ?? ("runner-starting" as const) }
+    : {}),
   admittedAt: run.admittedAt,
   ...(run.startedAt === undefined ? {} : { startedAt: run.startedAt }),
   ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
@@ -109,6 +115,7 @@ export class RunApi {
   readonly #now: () => number;
   readonly #projects: SqliteProjectRepository;
   readonly #runs: SqliteRunRepository;
+  #pumping = false;
 
   constructor(options: {
     readonly dataIdentity: string;
@@ -134,6 +141,77 @@ export class RunApi {
     readonly payload: JsonValue;
   }): Effect.Effect<StartRunResult, RunApiFault> =>
     Effect.tryPromise({ try: () => this.#start(options), catch: runApiFault });
+
+  readonly startWorkflow = (options: {
+    readonly projectId: string;
+    readonly workflowName: string;
+    readonly requestId: string;
+    readonly dataIdentity: string;
+    readonly payload?: JsonValue;
+  }): Effect.Effect<StartRunResult | StartTriggerWorkflowResult, RunApiFault> =>
+    Effect.tryPromise({
+      try: async () => {
+        if (options.dataIdentity !== this.#dataIdentity)
+          throw new Error("the Daemon data identity changed");
+        const workflow = await Effect.runPromise(
+          this.#projects.workflow(options.projectId, options.workflowName),
+        );
+        if (workflow === undefined) throw new Error("the selected Project Workflow was not found");
+        const trigger = workflow.trigger.state !== "not-declared";
+        if (trigger) {
+          if (options.payload !== undefined)
+            throw new Error("a Trigger Workflow Start does not accept payload flags");
+          const receipt = await Effect.runPromise(
+            this.#projects.startActivity({
+              dataIdentity: options.dataIdentity,
+              requestId: options.requestId,
+              projectId: options.projectId,
+              workflowName: options.workflowName,
+              changedAt: new Date(this.#now()).toISOString(),
+            }),
+          );
+          return {
+            kind: "trigger",
+            projectId: receipt.projectId,
+            workflowName: receipt.workflowName,
+            activity: "active",
+            triggerState: "polling",
+            pollerStarted: receipt.pollerStarted,
+          };
+        }
+        if (options.payload === undefined)
+          throw new Error("a no-Trigger Workflow Start requires one JSON payload");
+        return this.#start({ ...options, payload: options.payload });
+      },
+      catch: runApiFault,
+    });
+
+  readonly stopWorkflow = (options: {
+    readonly projectId: string;
+    readonly workflowName: string;
+    readonly requestId: string;
+    readonly dataIdentity: string;
+  }): Effect.Effect<StopWorkflowResult, RunApiFault> =>
+    Effect.tryPromise({
+      try: async () => {
+        if (options.dataIdentity !== this.#dataIdentity)
+          throw new Error("the Daemon data identity changed");
+        const receipt = await Effect.runPromise(
+          this.#projects.stopActivity({
+            ...options,
+            changedAt: new Date(this.#now()).toISOString(),
+          }),
+        );
+        return {
+          kind: "stop",
+          projectId: receipt.projectId,
+          workflowName: receipt.workflowName,
+          activity: "inactive",
+          admittedRunsContinue: true,
+        };
+      },
+      catch: runApiFault,
+    });
 
   async #start(options: {
     readonly projectId: string;
@@ -199,17 +277,19 @@ export class RunApi {
           admittedAt,
         }),
       );
-      if (!admission.duplicate) {
-        const authority = await Effect.runPromise(
-          this.#runs.claim(admission.run.runId, runnerInstanceId, admittedAt),
-        );
-        void this.#execute(revision.location, materialized.runner, registration, authority).finally(
-          materialized.dispose,
-        );
-      } else {
-        materialized.dispose();
-      }
+      await Effect.runPromise(
+        this.#projects.startActivity({
+          dataIdentity: options.dataIdentity,
+          requestId: `${options.requestId}:activity`,
+          projectId: options.projectId,
+          workflowName: options.workflowName,
+          changedAt: admittedAt,
+        }),
+      );
+      void this.#pump();
+      materialized.dispose();
       return {
+        kind: "run",
         runId: admission.run.runId,
         duplicate: admission.duplicate,
         revisionId: admission.run.revisionId,
@@ -218,6 +298,67 @@ export class RunApi {
     } catch (cause) {
       materialized.dispose();
       throw cause;
+    }
+  }
+
+  async #pump(): Promise<void> {
+    if (this.#pumping) return;
+    this.#pumping = true;
+    try {
+      while (true) {
+        const runnerInstanceId = crypto.randomUUID();
+        const claimed = await Effect.runPromise(
+          this.#runs.claimNext(runnerInstanceId, new Date(this.#now()).toISOString()),
+        );
+        if (claimed === undefined) break;
+        void this.#dispatch(claimed).finally(() => this.#pump());
+      }
+    } finally {
+      this.#pumping = false;
+    }
+  }
+
+  async #dispatch(claimed: ClaimedRun): Promise<void> {
+    const { run, authority } = claimed;
+    try {
+      const revision = await Effect.runPromise(
+        this.#projects.retainedExecutionRevision(run.projectId, run.workflowName, run.revisionId),
+      );
+      const executionRoot = join(this.#dataRoot, "runner-materialized");
+      mkdirSync(executionRoot, { recursive: true, mode: 0o700 });
+      const materialized = materializeRevision({
+        retainedRoot: revision.publishedPath,
+        executionRoot,
+        revisionId: revision.revisionId,
+        packageGraphId: revision.packageGraphId,
+      });
+      const registration: RunnerRegistration = {
+        registrationVersion: 1,
+        selectedProtocol: 1,
+        daemonInstanceId: this.#instanceId,
+        runnerInstanceId: authority.runnerInstanceId,
+        projectId: run.projectId,
+        boundProjectId: run.projectId,
+        revisionId: run.revisionId,
+        packageGraphId: run.packageGraphId,
+        boundPackageGraphId: run.packageGraphId,
+        executionRoot: materialized.root,
+        workflowName: run.workflowName,
+        entrySource: revision.entrySource,
+        payload: run.payload,
+        connectionSecret: crypto.getRandomValues(new Uint8Array(32)).toHex(),
+      };
+      await this.#execute(revision.location, materialized.runner, registration, authority).finally(
+        materialized.dispose,
+      );
+    } catch {
+      await Effect.runPromise(
+        this.#runs.completeRun(authority, "failed", new Date(this.#now()).toISOString()),
+      ).catch(() => undefined);
+    } finally {
+      await Effect.runPromise(
+        this.#projects.settleManualActivity(run.projectId, run.workflowName),
+      ).catch(() => undefined);
     }
   }
 

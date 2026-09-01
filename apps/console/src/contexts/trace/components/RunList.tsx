@@ -28,6 +28,7 @@ const helper = createColumnHelper<typeof features, RunRow>();
 
 /** What each status looks like. A colour per meaning, decided once. */
 const statusTones: Record<RunStatus, BadgeTone> = {
+  queued: "waiting",
   executing: "running",
   suspended: "waiting",
   succeeded: "good",
@@ -59,6 +60,10 @@ const columns = helper.columns([
     cell: (info) => (
       <Badge tone={statusTones[info.row.original.status]}>{info.row.original.status}</Badge>
     ),
+  }),
+  helper.accessor("queueReason", {
+    header: "Queue reason",
+    cell: (info) => <span>{info.getValue()}</span>,
   }),
   helper.accessor("gate", {
     header: "Open gate",

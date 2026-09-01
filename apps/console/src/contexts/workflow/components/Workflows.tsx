@@ -1,7 +1,13 @@
 import type { WorkflowDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
+import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { createColumnHelper, createTable, tableFeatures } from "@tanstack/solid-table";
 import { createEffect, createMemo, createSignal, type JSX, Match, Switch } from "solid-js";
-import { ConsoleAccessError } from "../../daemon/services/browserAccess.ts";
+import {
+  ConsoleAccessError,
+  startManualWorkflow,
+  startTriggerWorkflow,
+  stopWorkflow,
+} from "../../daemon/services/browserAccess.ts";
 import { Badge, type BadgeTone } from "../../shared/components/Badge.tsx";
 import { ConsoleNavigation } from "../../shared/components/ConsoleNavigation.tsx";
 import { DataGrid } from "../../shared/components/data-grid/DataGrid.tsx";
@@ -30,6 +36,84 @@ const tone = (state: string): BadgeTone => {
   if (state === "invalid" || state === "failed") return "danger";
   if (state === "pending" || state === "refreshing") return "waiting";
   return "neutral";
+};
+
+const WorkflowActions = (props: { readonly workflow: WorkflowDocument }): JSX.Element => {
+  const [payload, setPayload] = createSignal("{}");
+  const [pending, setPending] = createSignal(false);
+  const [notice, setNotice] = createSignal<string>();
+  const trigger = () => props.workflow.trigger.state !== "not-declared";
+  const start = async (): Promise<void> => {
+    setPending(true);
+    setNotice(undefined);
+    try {
+      if (trigger()) {
+        await startTriggerWorkflow(props.workflow.projectId, props.workflow.workflowName);
+        setNotice("Trigger listening. No immediate Run was created.");
+      } else {
+        const parsed = JSON.parse(payload()) as JsonValue;
+        const result = await startManualWorkflow(
+          props.workflow.projectId,
+          props.workflow.workflowName,
+          parsed,
+        );
+        setNotice(`Run ${result.runId} admitted.`);
+      }
+    } catch (cause) {
+      setNotice(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPending(false);
+    }
+  };
+  const stop = async (): Promise<void> => {
+    setPending(true);
+    setNotice(undefined);
+    try {
+      await stopWorkflow(props.workflow.projectId, props.workflow.workflowName);
+      setNotice("Inactive. Admitted Runs remain eligible.");
+    } catch (cause) {
+      setNotice(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPending(false);
+    }
+  };
+  return (
+    <div class="flex min-w-64 flex-col gap-2">
+      {trigger() ? null : (
+        <textarea
+          aria-label={`JSON payload for ${props.workflow.workflowName}`}
+          class="min-h-16 rounded border bg-background p-2 font-mono text-xs"
+          value={payload()}
+          onInput={(event) => setPayload(event.currentTarget.value)}
+        />
+      )}
+      <div class="flex gap-2">
+        <button
+          type="button"
+          disabled={pending() || props.workflow.availability !== "available"}
+          class="rounded border px-2 py-1 text-xs"
+          onClick={() => void start()}
+        >
+          {trigger() ? "Start Trigger" : "Start Run"}
+        </button>
+        <button
+          type="button"
+          disabled={pending() || props.workflow.activity === "inactive"}
+          class="rounded border px-2 py-1 text-xs"
+          onClick={() => void stop()}
+        >
+          Stop
+        </button>
+        <a
+          class="px-2 py-1 text-xs underline"
+          href={`/runs?project=${encodeURIComponent(props.workflow.projectId)}&workflow=${encodeURIComponent(props.workflow.workflowName)}`}
+        >
+          Current Runs ({props.workflow.currentRuns.length})
+        </a>
+      </div>
+      {notice() === undefined ? null : <p role="status">{notice()}</p>}
+    </div>
+  );
 };
 
 const columns = helper.columns([
@@ -85,6 +169,11 @@ const columns = helper.columns([
     id: "trigger",
     header: "Trigger observation",
     cell: (info) => <span>{info.row.original.trigger.state}</span>,
+  }),
+  helper.display({
+    id: "actions",
+    header: "Actions and current Runs",
+    cell: (info) => <WorkflowActions workflow={info.row.original} />,
   }),
 ]);
 

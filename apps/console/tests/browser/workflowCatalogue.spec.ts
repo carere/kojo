@@ -18,7 +18,7 @@ test("shows separate Workflow state in a Project-scoped Zaidan grid", async ({ p
   await page.goto("http://127.0.0.1:47243/");
   await page.getByRole("link", { name: "project-missing" }).click();
   await expect(page.getByRole("heading", { name: "Workflows" })).toBeVisible();
-  await expect(page.locator("[data-workflow-id]")).toHaveCount(3);
+  await expect(page.locator("[data-workflow-id]")).toHaveCount(4);
   for (const heading of [
     "Project",
     "Factory",
@@ -33,6 +33,18 @@ test("shows separate Workflow state in a Project-scoped Zaidan grid", async ({ p
   }
   await expect(page.getByText("declares another name", { exact: true })).toBeVisible();
   await expect(page.getByText("polling", { exact: true })).toBeVisible();
+  await expect(page.getByText("failed", { exact: true })).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "Actions and current Runs" })).toBeVisible();
+  await page.getByRole("button", { name: "Stop" }).first().click();
+  await expect(page.getByRole("status")).toContainText("Admitted Runs remain eligible");
+  await page.getByRole("button", { name: "Start Trigger" }).first().click();
+  await expect(page.getByRole("status")).toContainText(
+    "Trigger listening. No immediate Run was created.",
+  );
+  await expect(page.getByRole("link", { name: "Current Runs (1)" }).first()).toHaveAttribute(
+    "href",
+    /\/runs\?project=.*workflow=available/,
+  );
 
   await page.getByLabel("Workflow availability").selectOption("invalid");
   await expect(page.locator("[data-workflow-id]")).toHaveCount(1);
@@ -42,4 +54,9 @@ test("shows separate Workflow state in a Project-scoped Zaidan grid", async ({ p
 
   const navigation = page.getByRole("navigation", { name: "Console" });
   await expect(navigation.getByRole("link")).toHaveCount(4);
+
+  await page.getByLabel("Workflow availability").selectOption("all");
+  await page.getByRole("link", { name: "Current Runs (1)" }).click();
+  await expect(page.getByRole("columnheader", { name: "Queue reason" })).toBeVisible();
+  await expect(page.getByText("runner-starting", { exact: true })).toBeVisible();
 });

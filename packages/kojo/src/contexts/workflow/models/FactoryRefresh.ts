@@ -8,6 +8,7 @@ export interface WorkflowRefreshObservation {
   readonly source: string;
   readonly sourceFault?: string;
   readonly remedy?: string;
+  readonly triggerDeclared?: boolean;
   readonly revision?: CapturedWorkflowRevision;
 }
 

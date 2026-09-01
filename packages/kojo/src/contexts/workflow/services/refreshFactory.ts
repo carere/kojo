@@ -10,6 +10,7 @@ interface Diagnostic {
   readonly standing: "ok" | "failed" | "skipped";
   readonly detail: string;
   readonly remedy?: string;
+  readonly triggerDeclared?: boolean;
 }
 
 interface Validation {
@@ -162,6 +163,9 @@ const refreshFactoryPromise = async (options: {
       continue;
     }
     try {
+      const localDiagnostic = validation.diagnostics.find(
+        (diagnostic) => diagnostic.subject === `workflow:${workflowName}`,
+      );
       const revision = captureWorkflowRevision({
         project: options.project,
         dataRoot: options.dataRoot,
@@ -172,6 +176,7 @@ const refreshFactoryPromise = async (options: {
         availability: "available" as const,
         source: join(factory, "workflows", `${workflowName}.ts`),
         revision,
+        triggerDeclared: localDiagnostic?.triggerDeclared === true,
       });
     } catch (cause) {
       if (cause instanceof RevisionCaptureError && cause.code === "WORKFLOW_INVALID") {

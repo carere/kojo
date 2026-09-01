@@ -1,6 +1,12 @@
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 
-export type DaemonRunState = "queued" | "executing" | "succeeded" | "failed";
+export type DaemonRunState = "queued" | "executing" | "suspended" | "succeeded" | "failed";
+export type RunQueueKind = "new" | "continuation";
+export type RunQueueReason =
+  | "execution-capacity"
+  | "project-capacity"
+  | "runner-starting"
+  | "package-switch";
 
 export interface DaemonRun {
   readonly runId: string;
@@ -11,10 +17,17 @@ export interface DaemonRun {
   readonly revisionId: string;
   readonly packageGraphId: string;
   readonly state: DaemonRunState;
+  readonly queueKind?: RunQueueKind;
+  readonly queueReason?: RunQueueReason;
   readonly admissionSequence: number;
   readonly admittedAt: string;
   readonly startedAt?: string;
   readonly finishedAt?: string;
+}
+
+export interface ClaimedRun {
+  readonly run: DaemonRun;
+  readonly authority: RunAuthority;
 }
 
 export interface RunAuthority {

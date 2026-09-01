@@ -1,4 +1,5 @@
 import type { FactoryRefreshState, FactoryState, ProjectState } from "./project.ts";
+import type { RunExecutionState } from "./run.ts";
 
 export type WorkflowActivity = "active" | "inactive";
 export type WorkflowAvailability = "available" | "invalid" | "removed";
@@ -7,6 +8,16 @@ export interface TriggerObservation {
   readonly state: "not-declared" | "not-observed" | "polling" | "delayed" | "failed";
   readonly observedAt?: string;
   readonly detail?: string;
+}
+
+export interface CurrentWorkflowRun {
+  readonly runId: string;
+  readonly state: RunExecutionState;
+  readonly queueReason?:
+    | "execution-capacity"
+    | "project-capacity"
+    | "runner-starting"
+    | "package-switch";
 }
 
 /** One Project Workflow observation. Availability and activity are separate on purpose. */
@@ -25,6 +36,7 @@ export interface WorkflowDocument {
   readonly currentRevisionId?: string;
   readonly candidateRevisionId?: string;
   readonly trigger: TriggerObservation;
+  readonly currentRuns: ReadonlyArray<CurrentWorkflowRun>;
   readonly refreshedAt: string;
 }
 
@@ -46,4 +58,21 @@ export interface WorkflowSnapshot {
   readonly refreshAfterMillis: number;
   readonly counts: WorkflowCounts;
   readonly workflows: ReadonlyArray<WorkflowDocument>;
+}
+
+export interface StartTriggerWorkflowResult {
+  readonly kind: "trigger";
+  readonly projectId: string;
+  readonly workflowName: string;
+  readonly activity: "active";
+  readonly triggerState: "polling";
+  readonly pollerStarted: boolean;
+}
+
+export interface StopWorkflowResult {
+  readonly kind: "stop";
+  readonly projectId: string;
+  readonly workflowName: string;
+  readonly activity: "inactive";
+  readonly admittedRunsContinue: true;
 }

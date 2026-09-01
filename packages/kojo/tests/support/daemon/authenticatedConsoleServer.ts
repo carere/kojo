@@ -115,6 +115,13 @@ if (fixture === "workflows") {
       fault: "declares another name",
     },
     {
+      name: "faulted",
+      availability: "available",
+      activity: "active",
+      revision: available,
+      fault: null,
+    },
+    {
       name: "removed",
       availability: "removed",
       activity: "inactive",
@@ -136,12 +143,33 @@ if (fixture === "workflows") {
         workflow.fault,
         workflow.fault === null ? null : "Make the declared name match the file name.",
         workflow.revision,
-        workflow.name === "available" ? "polling" : "not-declared",
-        workflow.name === "available" ? "Trigger position 42" : null,
+        workflow.name === "available"
+          ? "polling"
+          : workflow.name === "faulted"
+            ? "failed"
+            : "not-declared",
+        workflow.name === "available"
+          ? "Trigger position 42"
+          : workflow.name === "faulted"
+            ? "five transient acknowledgement retries were exhausted"
+            : null,
         now,
       ],
     );
   }
+  database.run(
+    `INSERT INTO workflow_runs (
+       run_id, project_id, workflow_name, idempotency_key, payload_json, revision_id,
+       package_graph_id, state, admission_sequence, admitted_at
+     ) VALUES ('run-queued', ?, 'available', 'fixture', 'null', ?, ?, 'queued', 1, ?)`,
+    [project.project_id, available, available, now],
+  );
+  database.run(
+    `INSERT INTO workflow_queue (
+       run_id, project_id, admission_sequence, queued_at, queue_kind, queue_reason
+     ) VALUES ('run-queued', ?, 1, ?, 'new', 'runner-starting')`,
+    [project.project_id, now],
+  );
   database.close(false);
 }
 

@@ -1,10 +1,11 @@
-import { Cause, Clock, Effect, Schema } from "effect";
+import { Cause, Clock, Effect, type Layer, Schema } from "effect";
 import { Activity, Workflow } from "effect/unstable/workflow";
 import { present } from "../../shared/lib/present.ts";
 import { BuildInfo } from "../../shared/models/BuildInfo.ts";
 import type { RunId } from "../../shared/models/RunId.ts";
 import { RunRecord } from "../../trace/models/RunRecord.ts";
 import { Tracer } from "../../trace/ports/Tracer.ts";
+import type { Trigger } from "../../trigger/ports/Trigger.ts";
 import { CurrentRun } from "./CurrentRun.ts";
 import { type Compensating, compensating } from "./compensation.ts";
 
@@ -41,6 +42,8 @@ export const workflow = <
     readonly idempotencyKey: (
       payload: Payload extends Schema.Struct.Fields ? Schema.Struct.Type<Payload> : Payload["Type"],
     ) => string;
+    /** One logical Trigger source. Start controls it; it is not a second user setting. */
+    readonly trigger?: Layer.Layer<Trigger, never, unknown>;
   },
   body: (
     payload: Payload extends Schema.Struct.Fields ? Schema.Struct.Type<Payload> : Payload["Type"],
@@ -126,5 +129,6 @@ export const workflow = <
     authoredIdempotencyKey: options.idempotencyKey as (payload: unknown) => string,
     encodeEnginePayload: (payload: unknown): Record<string, unknown> =>
       scalar ? { value: payload } : (payload as Record<string, unknown>),
+    ...(options.trigger === undefined ? {} : { trigger: options.trigger }),
   } as const;
 };

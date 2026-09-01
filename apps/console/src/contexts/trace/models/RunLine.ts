@@ -12,6 +12,8 @@ export interface RunLine {
   };
   /** How the run last stopped. Absent while it has never stopped, which is *executing*. */
   readonly outcome?: "succeeded" | "failed" | "suspended";
+  readonly executionState?: "queued" | "executing" | "suspended" | "succeeded" | "failed";
+  readonly queueReason?: string;
 }
 
 /**
@@ -20,9 +22,10 @@ export interface RunLine {
  * Four states from the wire's three, because an absent outcome is not a missing value — it is the
  * run still going. Naming it keeps every consumer from re-deciding what `undefined` meant.
  */
-export type RunStatus = "executing" | "suspended" | "succeeded" | "failed";
+export type RunStatus = "queued" | "executing" | "suspended" | "succeeded" | "failed";
 
-export const statusOf = (line: RunLine): RunStatus => line.outcome ?? "executing";
+export const statusOf = (line: RunLine): RunStatus =>
+  line.executionState ?? line.outcome ?? "executing";
 
 /**
  * Has this run stopped for good?
