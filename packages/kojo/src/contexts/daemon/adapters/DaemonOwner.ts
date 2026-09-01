@@ -19,10 +19,14 @@ import type {
   BrowserSessionResponse,
   DaemonDocument,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/browser";
-import { decodeJsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
+import {
+  decodeJsonValue,
+  type JsonValue,
+} from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Effect } from "effect";
 import { SqliteProjectRepository } from "../../project/adapters/SqliteProjectRepository.ts";
 import { ProjectApi } from "../../project/services/ProjectApi.ts";
+import { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRepository.ts";
 import { SqliteRunRepository } from "../../workflow/adapters/SqliteRunRepository.ts";
 import { RevisionCaptureError } from "../../workflow/models/RevisionCaptureError.ts";
 import { RunApi } from "../../workflow/services/RunApi.ts";
@@ -230,6 +234,7 @@ export const startDaemon = (
     const authority = browserAuthority({ now });
     const projectRepository = new SqliteProjectRepository(database);
     const runRepository = new SqliteRunRepository(database);
+    new SqliteTriggerRepository(database);
     const projectApi = new ProjectApi({
       dataIdentity,
       instanceId,
@@ -262,21 +267,24 @@ export const startDaemon = (
             (key) => key !== "requestId" && key !== "dataIdentity" && key !== "payload",
           ) ||
           typeof record.requestId !== "string" ||
-          typeof record.dataIdentity !== "string" ||
-          !("payload" in record)
+          typeof record.dataIdentity !== "string"
         ) {
           return problem(400, "invalid-start", "the Start request has invalid fields");
         }
-        const payload = decodeJsonValue(record.payload);
-        if (!payload.ok) return problem(400, "invalid-payload", "the payload is not JSON");
+        let payloadValue: JsonValue | undefined;
+        if ("payload" in record) {
+          const payload = decodeJsonValue(record.payload);
+          if (!payload.ok) return problem(400, "invalid-payload", "the payload is not JSON");
+          payloadValue = payload.value;
+        }
         return noStoreJson(
           await Effect.runPromise(
-            runApi.start({
+            runApi.startWorkflow({
               projectId,
               workflowName,
               requestId: record.requestId,
               dataIdentity: record.dataIdentity,
-              payload: payload.value,
+              ...(payloadValue === undefined ? {} : { payload: payloadValue }),
             }),
           ),
           202,
@@ -286,6 +294,43 @@ export const startDaemon = (
           409,
           "start-refused",
           cause instanceof Error ? cause.message : "the Run was not admitted",
+        );
+      }
+    };
+    const stopWorkflow = async (
+      request: Request,
+      projectId: string,
+      workflowName: string,
+    ): Promise<Response> => {
+      try {
+        const input = await requestJson(request);
+        if (input === null || typeof input !== "object" || Array.isArray(input)) {
+          return problem(400, "invalid-stop", "the Stop request must be a JSON object");
+        }
+        const record = input as Record<string, unknown>;
+        if (
+          Object.keys(record).some((key) => key !== "requestId" && key !== "dataIdentity") ||
+          typeof record.requestId !== "string" ||
+          typeof record.dataIdentity !== "string"
+        ) {
+          return problem(400, "invalid-stop", "the Stop request has invalid fields");
+        }
+        return noStoreJson(
+          await Effect.runPromise(
+            runApi.stopWorkflow({
+              projectId,
+              workflowName,
+              requestId: record.requestId,
+              dataIdentity: record.dataIdentity,
+            }),
+          ),
+          202,
+        );
+      } catch (cause) {
+        return problem(
+          409,
+          "stop-refused",
+          cause instanceof Error ? cause.message : "the Workflow was not stopped",
         );
       }
     };
@@ -412,6 +457,7 @@ export const startDaemon = (
               "project-catalogue",
               "workflow-revisions",
               "no-trigger-runs",
+              "trigger-scheduling",
               "client-request-journal",
             ],
             packageVersion: release.packageVersion,
@@ -536,6 +582,16 @@ export const startDaemon = (
               decodeURIComponent(workflowStart[2] ?? "invalid"),
             );
           }
+          const workflowStop = url.pathname.match(
+            /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/workflows\/([^/]+)\/actions\/stop$/,
+          );
+          if (request.method === "POST" && workflowStop !== null) {
+            return stopWorkflow(
+              request,
+              workflowStop[1] ?? "invalid",
+              decodeURIComponent(workflowStop[2] ?? "invalid"),
+            );
+          }
           const projectWorkflows = url.pathname.match(
             /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/workflows$/,
           );
@@ -622,6 +678,17 @@ export const startDaemon = (
             request,
             workflowStart[1] ?? "invalid",
             decodeURIComponent(workflowStart[2] ?? "invalid"),
+          );
+        }
+        const workflowStop = url.pathname.match(
+          /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/workflows\/([^/]+)\/actions\/stop$/,
+        );
+        if (request.method === "POST" && workflowStop !== null) {
+          if (!isJson(request)) return problem(415, "json-required", "Stop requires JSON");
+          return stopWorkflow(
+            request,
+            workflowStop[1] ?? "invalid",
+            decodeURIComponent(workflowStop[2] ?? "invalid"),
           );
         }
         const projectWorkflows = url.pathname.match(

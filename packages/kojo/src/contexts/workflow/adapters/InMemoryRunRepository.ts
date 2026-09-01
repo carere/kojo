@@ -1,6 +1,7 @@
 import { Effect, Layer } from "effect";
 import type { DaemonRun, PhaseResult, RunAuthority } from "../models/DaemonRun.ts";
 import { RunStoreError } from "../models/RunStoreError.ts";
+import { CONTINUATION_BURST, DEFAULT_DAEMON_EXECUTING_RUNS } from "../models/SchedulingDefaults.ts";
 import { type Admission, type AdmitRunRequest, RunRepository } from "../ports/RunRepository.ts";
 import { runIdOf } from "../services/runIdentity.ts";
 
@@ -13,6 +14,8 @@ interface MemoryState {
   readonly slots: Map<string, RunAuthority>;
   readonly results: Map<string, PhaseResult>;
   sequence: number;
+  lastProjectId?: string;
+  readonly continuationStreaks: Map<string, number>;
 }
 
 const tupleOf = (request: AdmitRunRequest): string =>
@@ -65,6 +68,7 @@ export const layer: Layer.Layer<RunRepository> = Layer.effect(
       generations: new Map(),
       slots: new Map(),
       results: new Map(),
+      continuationStreaks: new Map(),
       sequence: 0,
     };
     return {
@@ -103,6 +107,8 @@ export const layer: Layer.Layer<RunRepository> = Layer.effect(
               revisionId: request.revisionId,
               packageGraphId: request.packageGraphId,
               state: "queued",
+              queueKind: "new",
+              queueReason: "runner-starting",
               admissionSequence: state.sequence,
               admittedAt: request.admittedAt,
             } satisfies DaemonRun);
@@ -121,7 +127,7 @@ export const layer: Layer.Layer<RunRepository> = Layer.effect(
               message: `Run ${runId} was not found`,
             });
           }
-          if (run.state !== "queued" || state.slots.size >= 4) {
+          if (run.state !== "queued" || state.slots.size >= DEFAULT_DAEMON_EXECUTING_RUNS) {
             throw new RunStoreError({
               code: "RUN_NOT_ELIGIBLE",
               message: "the Run has no execution slot",
@@ -142,12 +148,96 @@ export const layer: Layer.Layer<RunRepository> = Layer.effect(
           const authority = { runId, runnerInstanceId, generation, revisionId: run.revisionId };
           state.claims.set(runId, authority);
           state.slots.set(runId, authority);
+          const { queueReason: _queueReason, ...runWithoutQueueReason } = run;
           state.runs.set(runId, {
-            ...run,
+            ...runWithoutQueueReason,
             state: "executing",
             startedAt: run.startedAt ?? claimedAt,
           });
           return authority;
+        }),
+      claimNext: (runnerInstanceId, claimedAt) =>
+        attempt(() => {
+          if (state.slots.size >= DEFAULT_DAEMON_EXECUTING_RUNS) return undefined;
+          const occupied = new Set(
+            [...state.slots.values()].flatMap((slot) => {
+              const projectId = state.runs.get(slot.runId)?.projectId;
+              return projectId === undefined ? [] : [projectId];
+            }),
+          );
+          const eligible = [...state.runs.values()].filter(
+            (run) => run.state === "queued" && !occupied.has(run.projectId),
+          );
+          const projects = [...new Set(eligible.map((run) => run.projectId))].sort();
+          if (projects.length === 0) return undefined;
+          const following = projects.find((projectId) => projectId > (state.lastProjectId ?? ""));
+          const projectId = following ?? projects[0];
+          if (projectId === undefined) return undefined;
+          const projectRuns = eligible
+            .filter((run) => run.projectId === projectId)
+            .sort((left, right) => left.admissionSequence - right.admissionSequence);
+          const continuations = projectRuns.filter((run) => run.queueKind === "continuation");
+          const newRuns = projectRuns.filter((run) => run.queueKind !== "continuation");
+          const streak = state.continuationStreaks.get(projectId) ?? 0;
+          const selected =
+            streak >= CONTINUATION_BURST && newRuns.length > 0
+              ? newRuns[0]
+              : (continuations[0] ?? newRuns[0]);
+          if (selected === undefined) return undefined;
+          const generation = (state.generations.get(selected.runId) ?? 0) + 1;
+          state.generations.set(selected.runId, generation);
+          const claimed = {
+            runId: selected.runId,
+            runnerInstanceId,
+            generation,
+            revisionId: selected.revisionId,
+          };
+          state.claims.set(selected.runId, claimed);
+          state.slots.set(selected.runId, claimed);
+          const { queueReason: _queueReason, ...runWithoutQueueReason } = selected;
+          const run = {
+            ...runWithoutQueueReason,
+            state: "executing" as const,
+            startedAt: selected.startedAt ?? claimedAt,
+          };
+          state.runs.set(selected.runId, run);
+          state.lastProjectId = projectId;
+          state.continuationStreaks.set(
+            projectId,
+            selected.queueKind === "continuation" ? streak + 1 : 0,
+          );
+          return { run, authority: claimed };
+        }),
+      suspend: (authority) =>
+        attempt(() => {
+          assertAuthority(state, authority);
+          const run = state.runs.get(authority.runId);
+          if (run === undefined) throw stale();
+          state.runs.set(authority.runId, { ...run, state: "suspended" });
+          state.claims.delete(authority.runId);
+          state.slots.delete(authority.runId);
+        }),
+      continueRun: (runId) =>
+        attempt(() => {
+          const run = state.runs.get(runId);
+          if (run === undefined) {
+            throw new RunStoreError({
+              code: "RUN_NOT_FOUND",
+              message: `Run ${runId} was not found`,
+            });
+          }
+          if (run.state !== "suspended") {
+            throw new RunStoreError({
+              code: "RUN_NOT_ELIGIBLE",
+              message: "only a suspended Run can continue",
+            });
+          }
+          state.runs.set(runId, {
+            ...run,
+            state: "queued",
+            queueKind: "continuation",
+            queueReason: "runner-starting",
+          });
         }),
       read: (runId) => Effect.sync(() => state.runs.get(runId)),
       list: Effect.sync(() =>

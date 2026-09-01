@@ -42,6 +42,7 @@ describe("Workflow CLI view", () => {
           sourceFault: "the declaration name does not match",
           currentRevisionId: "a".repeat(64),
           trigger: { state: "delayed", detail: "historical package switch" },
+          currentRuns: [{ runId: "run-one", state: "queued", queueReason: "package-switch" }],
           refreshedAt: "2026-09-01T00:00:00.000Z",
         },
       ],
@@ -58,7 +59,8 @@ describe("Workflow CLI view", () => {
         "Workflow=invalid",
         "Source=the declaration name does not match",
         `Revision=${"a".repeat(64)}`,
-        "Trigger=delayed",
+        "Trigger=delayed:historical package switch",
+        "CurrentRuns=1",
       ].join("\t"),
     ]);
   });

@@ -1,6 +1,6 @@
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Context, type Effect } from "effect";
-import type { DaemonRun, PhaseResult, RunAuthority } from "../models/DaemonRun.ts";
+import type { ClaimedRun, DaemonRun, PhaseResult, RunAuthority } from "../models/DaemonRun.ts";
 import type { RunStoreError } from "../models/RunStoreError.ts";
 
 export interface AdmitRunRequest {
@@ -30,6 +30,15 @@ export class RunRepository extends Context.Service<
       runnerInstanceId: string,
       claimedAt: string,
     ) => Effect.Effect<RunAuthority, RunStoreError>;
+    readonly claimNext: (
+      runnerInstanceId: string,
+      claimedAt: string,
+    ) => Effect.Effect<ClaimedRun | undefined, RunStoreError>;
+    readonly suspend: (
+      authority: RunAuthority,
+      suspendedAt: string,
+    ) => Effect.Effect<void, RunStoreError>;
+    readonly continueRun: (runId: string, queuedAt: string) => Effect.Effect<void, RunStoreError>;
     readonly read: (runId: string) => Effect.Effect<DaemonRun | undefined, RunStoreError>;
     readonly list: Effect.Effect<ReadonlyArray<DaemonRun>, RunStoreError>;
     readonly readResult: (

@@ -3,7 +3,11 @@ import type {
   RunDocument,
   StartRunResult,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
-import type { WorkflowSnapshot } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
+import type {
+  StartTriggerWorkflowResult,
+  StopWorkflowResult,
+  WorkflowSnapshot,
+} from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import { Console, Data, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import type { DaemonPaths } from "../contexts/daemon/models/DaemonPaths.ts";
@@ -61,7 +65,8 @@ export const workflowLines = (snapshot: WorkflowSnapshot): ReadonlyArray<string>
       `Workflow=${workflow.availability}`,
       `Source=${workflow.sourceFault ?? workflow.source}`,
       `Revision=${workflow.candidateRevisionId ?? workflow.currentRevisionId ?? "none"}`,
-      `Trigger=${workflow.trigger.state}`,
+      `Trigger=${workflow.trigger.state}${workflow.trigger.detail === undefined ? "" : `:${workflow.trigger.detail}`}`,
+      `CurrentRuns=${workflow.currentRuns.length}`,
     ].join("\t"),
   );
 
@@ -99,14 +104,15 @@ const startRun = Command.make(
   Effect.fn(function* ({ projectId, workflowName, payload, payloadFile, wait, timeout, json }) {
     const inline = Option.getOrUndefined(payload);
     const file = Option.getOrUndefined(payloadFile);
-    if ((inline === undefined) === (file === undefined)) {
-      return yield* clientExit(2, "Start requires exactly one --payload or --payload-file");
+    if (inline !== undefined && file !== undefined) {
+      return yield* clientExit(2, "Start accepts at most one --payload or --payload-file");
     }
     if (!wait && Option.isSome(timeout)) {
       return yield* clientExit(2, "--timeout is valid only with --wait");
     }
     const parsed = yield* Effect.tryPromise({
       try: async () => {
+        if (inline === undefined && file === undefined) return undefined;
         const text =
           inline ??
           (file === "-"
@@ -140,14 +146,17 @@ const startRun = Command.make(
           body: JSON.stringify({
             requestId: crypto.randomUUID(),
             dataIdentity: endpoint.dataIdentity,
-            payload: parsed,
+            ...(parsed === undefined ? {} : { payload: parsed }),
           }),
         } as RequestInit & { readonly unix: string });
         if (!response.ok) {
           const body = (await response.json().catch(() => ({}))) as { readonly message?: string };
           throw new Error(body.message ?? `the Daemon refused Start (${response.status})`);
         }
-        return { endpoint, result: (await response.json()) as StartRunResult };
+        return {
+          endpoint,
+          result: (await response.json()) as StartRunResult | StartTriggerWorkflowResult,
+        };
       },
       catch: (cause) =>
         new WorkflowClientError({
@@ -156,6 +165,14 @@ const startRun = Command.make(
         }),
     }).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
     if (!wait) {
+      if (result.result.kind === "trigger") {
+        yield* Console.log(
+          json
+            ? JSON.stringify({ formatVersion: 1, ...result.result })
+            : `Workflow ${workflowName} is active and its Trigger is listening.`,
+        );
+        return;
+      }
       yield* Console.log(
         json
           ? JSON.stringify({ formatVersion: 1, ...result.result })
@@ -163,10 +180,19 @@ const startRun = Command.make(
       );
       return;
     }
+    if (result.result.kind === "trigger") {
+      yield* Console.log(
+        json
+          ? JSON.stringify({ formatVersion: 1, ...result.result })
+          : `Workflow ${workflowName} is active and its Trigger is listening.`,
+      );
+      return;
+    }
+    const runResult = result.result;
     let run: RunDocument | undefined;
     while (deadline === undefined || Date.now() < deadline) {
       const response = yield* Effect.promise(() =>
-        fetch(`http://localhost/api/v1/runs/${encodeURIComponent(result.result.runId)}`, {
+        fetch(`http://localhost/api/v1/runs/${encodeURIComponent(runResult.runId)}`, {
           unix: result.endpoint.socketPath,
           headers: { accept: "application/json" },
         } as RequestInit & { readonly unix: string }),
@@ -178,7 +204,7 @@ const startRun = Command.make(
       yield* Effect.sleep("50 millis");
     }
     if (run?.state !== "succeeded" && run?.state !== "failed") {
-      return yield* clientExit(3, `Run ${result.result.runId} continues after the client timeout`);
+      return yield* clientExit(3, `Run ${runResult.runId} continues after the client timeout`);
     }
     yield* Console.log(
       json ? JSON.stringify({ formatVersion: 1, run }) : `Run ${run.runId} ${run.state}.`,
@@ -186,6 +212,50 @@ const startRun = Command.make(
     if (run.state === "failed") return yield* clientExit(1, `Run ${run.runId} failed`);
   }),
 ).pipe(Command.withDescription("Admit one no-Trigger JSON Run through the Daemon"));
+
+const stopWorkflow = Command.make(
+  "stop",
+  {
+    projectId: Argument.string("project-id"),
+    workflowName: Argument.string("workflow-name"),
+    wait: Flag.boolean("wait"),
+    json: Flag.boolean("json"),
+  },
+  Effect.fn(function* ({ projectId, workflowName, json }) {
+    const receipt = yield* Effect.tryPromise({
+      try: async () => {
+        const endpoint = readDaemonEndpoint(productionPaths());
+        if (endpoint === undefined)
+          throw new Error("the Daemon is not ready; run `kojo daemon start`");
+        const path = `/api/v1/projects/${encodeURIComponent(projectId)}/workflows/${encodeURIComponent(workflowName)}/actions/stop`;
+        const response = await fetch(`http://localhost${path}`, {
+          unix: endpoint.socketPath,
+          method: "POST",
+          headers: { accept: "application/json", "content-type": "application/json" },
+          body: JSON.stringify({
+            requestId: crypto.randomUUID(),
+            dataIdentity: endpoint.dataIdentity,
+          }),
+        } as RequestInit & { readonly unix: string });
+        if (!response.ok) {
+          const body = (await response.json().catch(() => ({}))) as { readonly message?: string };
+          throw new Error(body.message ?? `the Daemon refused Stop (${response.status})`);
+        }
+        return (await response.json()) as StopWorkflowResult;
+      },
+      catch: (cause) =>
+        new WorkflowClientError({
+          reason: cause instanceof Error ? cause.message : String(cause),
+          cause,
+        }),
+    }).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
+    yield* Console.log(
+      json
+        ? JSON.stringify({ formatVersion: 1, ...receipt })
+        : `Workflow ${workflowName} is inactive. Its admitted Runs remain eligible.`,
+    );
+  }),
+).pipe(Command.withDescription("Stop future Trigger admission without cancelling admitted Runs"));
 
 const list = Command.make(
   "list",
@@ -230,5 +300,5 @@ const status = Command.make(
 
 export const workflow = Command.make("workflow").pipe(
   Command.withDescription("Start and inspect Daemon-owned Project Workflows"),
-  Command.withSubcommands([list, status, startRun]),
+  Command.withSubcommands([list, status, startRun, stopWorkflow]),
 );

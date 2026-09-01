@@ -1,6 +1,6 @@
 import type { JsonValue } from "../../shared/codecs/json.ts";
 
-export type RunExecutionState = "queued" | "executing" | "succeeded" | "failed";
+export type RunExecutionState = "queued" | "executing" | "suspended" | "succeeded" | "failed";
 
 export interface RunPhaseDocument {
   readonly phasePath: string;
@@ -21,7 +21,11 @@ export interface RunDocument {
   readonly revisionId: string;
   readonly packageGraphId: string;
   readonly state: RunExecutionState;
-  readonly queueReason?: "execution-capacity" | "project-capacity" | "runner-starting";
+  readonly queueReason?:
+    | "execution-capacity"
+    | "project-capacity"
+    | "runner-starting"
+    | "package-switch";
   readonly admittedAt: string;
   readonly startedAt?: string;
   readonly finishedAt?: string;
@@ -39,6 +43,7 @@ export interface RunSnapshot {
 }
 
 export interface StartRunResult {
+  readonly kind: "run";
   readonly runId: string;
   readonly duplicate: boolean;
   readonly revisionId: string;

@@ -16,6 +16,7 @@ export interface ProjectDiagnostic {
   readonly standing: "ok" | "failed" | "skipped";
   readonly detail: string;
   readonly remedy?: string;
+  readonly triggerDeclared?: boolean;
 }
 
 /** The standalone result. It contains no Effect value or application service. */
@@ -61,7 +62,12 @@ const isBundle = (
 ): value is {
   readonly definition: Record<string, unknown>;
   readonly layer: Layer.Layer<unknown>;
-} => hasProperties(value) && isDefinition(value.definition) && Layer.isLayer(value.layer);
+  readonly trigger?: Layer.Layer<unknown>;
+} =>
+  hasProperties(value) &&
+  isDefinition(value.definition) &&
+  Layer.isLayer(value.layer) &&
+  (value.trigger === undefined || Layer.isLayer(value.trigger));
 
 const safeAsset = (asset: string): boolean => {
   if (asset === "" || isAbsolute(asset)) return false;
@@ -253,7 +259,11 @@ const workflowDiagnostic = async (factory: string): Promise<ReadonlyArray<Projec
   }
 
   const diagnostics: ProjectDiagnostic[] = [];
-  const loaded: Array<{ readonly name: string; readonly definition: Record<string, unknown> }> = [];
+  const loaded: Array<{
+    readonly name: string;
+    readonly definition: Record<string, unknown>;
+    readonly triggerDeclared: boolean;
+  }> = [];
   for (const name of names) {
     const source = join(directory, `${name}.ts`);
     try {
@@ -280,7 +290,11 @@ const workflowDiagnostic = async (factory: string): Promise<ReadonlyArray<Projec
         );
         continue;
       }
-      loaded.push({ name, definition: bundles[0]?.definition ?? {} });
+      loaded.push({
+        name,
+        definition: bundles[0]?.definition ?? {},
+        triggerDeclared: bundles[0]?.trigger !== undefined,
+      });
     } catch (cause) {
       diagnostics.push(
         failed(
@@ -292,7 +306,7 @@ const workflowDiagnostic = async (factory: string): Promise<ReadonlyArray<Projec
     }
   }
 
-  for (const { name, definition } of loaded) {
+  for (const { name, definition, triggerDeclared } of loaded) {
     const schema = definition.payloadSchema;
     if (!hasProperties(schema) || !hasProperties(schema.fields)) continue;
     const fields = Object.keys(schema.fields);
@@ -306,7 +320,10 @@ const workflowDiagnostic = async (factory: string): Promise<ReadonlyArray<Projec
       );
       const key = (definition.idempotencyKey as (value: unknown) => unknown)(decoded);
       if (typeof key !== "string") throw new Error("the idempotency key is not a string");
-      diagnostics.push(ok(`workflow:${name}`, "declaration, Layer, payload, and key are valid"));
+      diagnostics.push({
+        ...ok(`workflow:${name}`, "declaration, Layer, payload, and key are valid"),
+        triggerDeclared,
+      });
     } catch (cause) {
       diagnostics.push(
         failed(

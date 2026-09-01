@@ -9,7 +9,12 @@ import type {
   RunDocument,
   RunSnapshot,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
-import type { WorkflowSnapshot } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
+import type {
+  StartTriggerWorkflowResult,
+  StopWorkflowResult,
+  WorkflowSnapshot,
+} from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
+import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 
 interface StoredSession {
   readonly credential: string;
@@ -139,6 +144,33 @@ const authorizedRead = async <A>(path: string): Promise<A> => {
   return (await response.json()) as A;
 };
 
+const authorizedMutation = async <A>(path: string, body: unknown): Promise<A> => {
+  const session = await currentAccess();
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      authorization: `Bearer ${session.credential}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (response.status === 401 || response.status === 403) {
+    window.sessionStorage.removeItem(storageKey);
+    access = undefined;
+    throw new ConsoleAccessError("access-required", "Run `kojo ui` again to open this Console.");
+  }
+  if (!response.ok) {
+    const problem = (await response.json().catch(() => ({}))) as { readonly message?: string };
+    throw new ConsoleAccessError(
+      "api-refused",
+      problem.message ?? "The Daemon refused the mutation.",
+    );
+  }
+  return (await response.json()) as A;
+};
+
 export const readDaemon = (): Promise<DaemonDocument> =>
   authorizedRead<DaemonDocument>("/api/v1/daemon");
 
@@ -156,3 +188,37 @@ export const readRuns = (): Promise<RunSnapshot> => authorizedRead<RunSnapshot>(
 
 export const readRun = (runId: string): Promise<RunDocument> =>
   authorizedRead<RunDocument>(`/api/v1/runs/${encodeURIComponent(runId)}`);
+
+const workflowMutation = async <A>(
+  projectId: string,
+  workflowName: string,
+  action: "start" | "stop",
+  payload?: JsonValue,
+): Promise<A> => {
+  const bootstrap = await compatibility();
+  return authorizedMutation<A>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/workflows/${encodeURIComponent(workflowName)}/actions/${action}`,
+    {
+      requestId: crypto.randomUUID(),
+      dataIdentity: bootstrap.dataIdentity,
+      ...(payload === undefined ? {} : { payload }),
+    },
+  );
+};
+
+export const startTriggerWorkflow = (
+  projectId: string,
+  workflowName: string,
+): Promise<StartTriggerWorkflowResult> => workflowMutation(projectId, workflowName, "start");
+
+export const startManualWorkflow = (
+  projectId: string,
+  workflowName: string,
+  payload: JsonValue,
+): Promise<{ readonly runId: string }> =>
+  workflowMutation(projectId, workflowName, "start", payload);
+
+export const stopWorkflow = (
+  projectId: string,
+  workflowName: string,
+): Promise<StopWorkflowResult> => workflowMutation(projectId, workflowName, "stop");
