@@ -9,7 +9,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main, codex/issue-68-linux-native-evidence]
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}
