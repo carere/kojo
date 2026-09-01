@@ -93,6 +93,17 @@ const performControlledEffect = async (counter: string): Promise<number> => {
   return (JSON.parse(output) as { readonly count: number }).count;
 };
 
+const phaseResult = (count: number) => ({
+  phasePath: "publish",
+  attempt: 1,
+  kind: "code" as const,
+  outcome: "succeeded" as const,
+  description: "Publish the controlled effect",
+  startedAt: new Date(2).toISOString(),
+  endedAt: new Date(6).toISOString(),
+  encodedResult: { count },
+});
+
 describe("uncertain external actions", () => {
   it.effect(
     "holds an arbitrary action after its effect result is lost and consumes one exact retry authorization",
@@ -116,6 +127,7 @@ describe("uncertain external actions", () => {
           expect(held[0]).toMatchObject({ state: "unresolved", uncertaintyRevision: 1 });
           expect(yield* runs.read(first.run.runId)).toMatchObject({ state: "held" });
           expect(readFileSync(counter, "utf8")).toBe("1");
+          yield* actions.settleAfterRunnerTermination(first.authority, new Date(4).toISOString());
 
           const wrongAction = yield* Effect.result(
             actions.authorizeRetry({
@@ -163,6 +175,18 @@ describe("uncertain external actions", () => {
           expect(
             Result.isFailure(
               yield* Effect.result(
+                actions.recordEvidence(
+                  request.actionId,
+                  1,
+                  { kind: "not-performed", detail: "a stale recovery check completed late" },
+                  new Date(8).toISOString(),
+                ),
+              ),
+            ),
+          ).toBe(true);
+          expect(
+            Result.isFailure(
+              yield* Effect.result(
                 actions.authorizeRetry({
                   dataIdentity: "data",
                   requestId: "retry-exact",
@@ -198,8 +222,13 @@ describe("uncertain external actions", () => {
           yield* actions.begin(originalIntent);
           expect(yield* Effect.promise(() => performControlledEffect(counter))).toBe(1);
           yield* actions.holdOpen(original.run.runId, "lost result", new Date(3).toISOString());
+          yield* actions.settleAfterRunnerTermination(
+            original.authority,
+            new Date(4).toISOString(),
+          );
           yield* actions.recordEvidence(
             originalIntent.actionId,
+            1,
             {
               kind: "original-result",
               detail: "the provider query returned the original-contract result",
@@ -228,8 +257,10 @@ describe("uncertain external actions", () => {
             "lost before launch",
             new Date(8).toISOString(),
           );
+          yield* actions.settleAfterRunnerTermination(absent.authority, new Date(9).toISOString());
           yield* actions.recordEvidence(
             absentIntent.actionId,
+            1,
             { kind: "not-performed", detail: "the provider proved the idempotency key is absent" },
             new Date(9).toISOString(),
           );
@@ -267,6 +298,15 @@ describe("uncertain external actions", () => {
           new Date(3).toISOString(),
         );
         expect(recovery[0]).toMatchObject({ state: "repetition-safe" });
+        expect(yield* runs.read(first.run.runId)).toMatchObject({ state: "held" });
+        expect(
+          Result.isFailure(
+            yield* Effect.result(
+              runs.claim(first.run.runId, "runner-too-early", new Date(4).toISOString()),
+            ),
+          ),
+        ).toBe(true);
+        yield* actions.settleAfterRunnerTermination(first.authority, new Date(4).toISOString());
         expect(yield* runs.read(first.run.runId)).toMatchObject({ state: "queued" });
         const replacement = yield* runs.claim(
           first.run.runId,
@@ -281,7 +321,7 @@ describe("uncertain external actions", () => {
               actions.confirmResult(
                 first.authority,
                 request.actionId,
-                { count: 1 },
+                phaseResult(1),
                 "stale output",
                 new Date(5).toISOString(),
               ),
@@ -291,11 +331,42 @@ describe("uncertain external actions", () => {
         yield* actions.confirmResult(
           replacement,
           request.actionId,
-          { count: 2 },
+          phaseResult(2),
           "replacement result",
           new Date(6).toISOString(),
         );
+        expect(yield* runs.phases(first.run.runId)).toEqual([phaseResult(2)]);
         expect(readFileSync(counter, "utf8")).toBe("2");
+      } finally {
+        database.close(false);
+        rmSync(root, { recursive: true, force: true });
+      }
+    }),
+  );
+
+  it.effect("does not infer process safety from a replacement Claim", () =>
+    Effect.gen(function* () {
+      const root = mkdtempSync(join(tmpdir(), "kojo-replacement-"));
+      const counter = join(root, "count");
+      writeFileSync(counter, "0");
+      const { database, runs, actions } = fixture();
+      try {
+        const first = yield* admitAndClaim(runs, "replacement", "runner-old", 0);
+        const request = intent(first.run.runId, first.authority, "safe-repetition");
+        yield* actions.begin(request);
+        expect(yield* Effect.promise(() => performControlledEffect(counter))).toBe(1);
+
+        yield* runs.recoverInterruptedExecutions(new Date(3).toISOString());
+        const replacement = yield* runs.claim(
+          first.run.runId,
+          "runner-new",
+          new Date(4).toISOString(),
+        );
+        expect(yield* actions.begin({ ...request, authority: replacement })).toMatchObject({
+          kind: "hold",
+          action: { state: "unresolved", uncertaintyRevision: 1 },
+        });
+        expect(readFileSync(counter, "utf8")).toBe("1");
       } finally {
         database.close(false);
         rmSync(root, { recursive: true, force: true });
@@ -315,6 +386,7 @@ describe("uncertain external actions", () => {
           "the external result is not known",
           new Date(3).toISOString(),
         );
+        yield* actions.settleAfterRunnerTermination(first.authority, new Date(4).toISOString());
 
         yield* runs.requestCancellation(
           first.run.runId,

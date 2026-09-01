@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Effect } from "effect";
-import type { RunAuthority } from "../models/DaemonRun.ts";
+import type { PhaseResult, RunAuthority } from "../models/DaemonRun.ts";
 import type {
   AuthorizeUncertainRetryRequest,
   ExternalActionDecision,
@@ -247,11 +247,10 @@ export class SqliteExternalActionRepository {
                 result: JSON.parse(prior.evidence_result_json) as JsonValue,
               };
             }
-            const declaredSafe = prior.recovery_policy === "safe-repetition";
             const evidencePermits =
               prior.state === "not-performed" || prior.state === "repetition-safe";
             const authorized = prior.state === "retry-authorized";
-            if (declaredSafe || evidencePermits || authorized) {
+            if (evidencePermits || authorized) {
               this.#database.run(
                 `UPDATE workflow_external_actions SET state = 'intended', updated_at = ?,
                    retry_consumed_at = CASE WHEN state = 'retry-authorized' THEN ? ELSE retry_consumed_at END
@@ -292,7 +291,7 @@ export class SqliteExternalActionRepository {
   readonly confirmResult = (
     authority: RunAuthority,
     actionId: string,
-    result: JsonValue,
+    phase: PhaseResult,
     detail: string,
     confirmedAt: string,
   ): Effect.Effect<ExternalActionIntent, RunStoreError> =>
@@ -307,17 +306,76 @@ export class SqliteExternalActionRepository {
                 code: "STALE_AUTHORITY",
                 message: "the result does not match the action authority",
               });
-            if (row.state === "result-confirmed") return actionOf(row);
+            const encodedResult = JSON.stringify(phase.encodedResult);
+            if (row.state === "result-confirmed") {
+              if (row.evidence_result_json !== encodedResult)
+                throw new RunStoreError({
+                  code: "REQUEST_CONFLICT",
+                  message: "the action already has a different confirmed result",
+                });
+              return actionOf(row);
+            }
             if (row.state !== "intended")
               throw new RunStoreError({
                 code: "RUN_NOT_ELIGIBLE",
                 message: `Action ${actionId} is ${row.state}; it cannot accept a result`,
               });
             this.#database.run(
+              `INSERT INTO workflow_results (
+                 run_id, revision_id, phase_path, attempt, kind, outcome, description,
+                 started_at, ended_at, encoded_result
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(run_id, phase_path, attempt) DO NOTHING`,
+              [
+                authority.runId,
+                authority.revisionId,
+                phase.phasePath,
+                phase.attempt,
+                phase.kind,
+                phase.outcome,
+                phase.description,
+                phase.startedAt,
+                phase.endedAt,
+                encodedResult,
+              ],
+            );
+            const stored = this.#database
+              .query<
+                {
+                  readonly revision_id: string;
+                  readonly kind: string;
+                  readonly outcome: string;
+                  readonly description: string;
+                  readonly started_at: string;
+                  readonly ended_at: string;
+                  readonly encoded_result: string;
+                },
+                [string, string, number]
+              >(
+                `SELECT revision_id, kind, outcome, description, started_at, ended_at, encoded_result
+                 FROM workflow_results WHERE run_id = ? AND phase_path = ? AND attempt = ?`,
+              )
+              .get(authority.runId, phase.phasePath, phase.attempt);
+            if (
+              stored === null ||
+              stored.revision_id !== authority.revisionId ||
+              stored.kind !== phase.kind ||
+              stored.outcome !== phase.outcome ||
+              stored.description !== phase.description ||
+              stored.started_at !== phase.startedAt ||
+              stored.ended_at !== phase.endedAt ||
+              stored.encoded_result !== encodedResult
+            ) {
+              throw new RunStoreError({
+                code: "REQUEST_CONFLICT",
+                message: "the Phase already has a different committed result",
+              });
+            }
+            this.#database.run(
               `UPDATE workflow_external_actions SET state = 'result-confirmed', updated_at = ?,
                  evidence_kind = 'original-result', evidence_detail = ?, evidence_observed_at = ?,
                  evidence_result_json = ? WHERE action_id = ?`,
-              [confirmedAt, detail, confirmedAt, JSON.stringify(result), actionId],
+              [confirmedAt, detail, confirmedAt, encodedResult, actionId],
             );
             return actionOf(this.#row(actionId));
           })
@@ -327,6 +385,7 @@ export class SqliteExternalActionRepository {
 
   readonly recordEvidence = (
     actionId: string,
+    uncertaintyRevision: number,
     evidence: ExternalActionEvidence,
     observedAt: string,
   ): Effect.Effect<ExternalActionIntent, RunStoreError> =>
@@ -335,6 +394,11 @@ export class SqliteExternalActionRepository {
         this.#database
           .transaction(() => {
             const prior = this.#row(actionId);
+            if (prior.state !== "unresolved" || prior.uncertainty_revision !== uncertaintyRevision)
+              throw new RunStoreError({
+                code: "RUN_NOT_ELIGIBLE",
+                message: "the evidence does not match the current unresolved action revision",
+              });
             const state: ExternalActionState =
               evidence.kind === "original-result"
                 ? "result-confirmed"
@@ -405,36 +469,46 @@ export class SqliteExternalActionRepository {
             if (open.length > 0) {
               this.#database.run("DELETE FROM workflow_queue WHERE run_id = ?", [runId]);
               this.#database.run("DELETE FROM workflow_reservations WHERE run_id = ?", [runId]);
-              this.#database.run("DELETE FROM workflow_slots WHERE run_id = ?", [runId]);
-              this.#database.run("DELETE FROM workflow_claims WHERE run_id = ?", [runId]);
-              if (open.some((action) => action.recovery_policy !== "safe-repetition")) {
-                this.#database.run(
-                  `UPDATE workflow_runs SET state = 'held' WHERE run_id = ?
-                     AND state NOT IN ('succeeded', 'failed', 'cancelled')
-                     AND NOT EXISTS (SELECT 1 FROM workflow_cancellations WHERE run_id = ?)`,
-                  [runId, runId],
-                );
-              } else {
-                const run = this.#database
-                  .query<
-                    { readonly project_id: string; readonly admission_sequence: number },
-                    [string]
-                  >("SELECT project_id, admission_sequence FROM workflow_runs WHERE run_id = ?")
-                  .get(runId);
-                if (run !== null) {
-                  this.#database.run("UPDATE workflow_runs SET state = 'queued' WHERE run_id = ?", [
-                    runId,
-                  ]);
-                  this.#database.run(
-                    `INSERT INTO workflow_queue (
-                      run_id, project_id, admission_sequence, queued_at, queue_kind, queue_reason
-                    ) VALUES (?, ?, ?, ?, 'continuation', 'runner-starting')`,
-                    [runId, run.project_id, run.admission_sequence, observedAt],
-                  );
-                }
-              }
+              this.#database.run(
+                `UPDATE workflow_runs SET state = 'held' WHERE run_id = ?
+                   AND state NOT IN ('succeeded', 'failed', 'cancelled')
+                   AND NOT EXISTS (SELECT 1 FROM workflow_cancellations WHERE run_id = ?)`,
+                [runId, runId],
+              );
             }
             return open.map((action) => actionOf(this.#row(action.action_id)));
+          })
+          .immediate(),
+      catch: failure,
+    });
+
+  /** Release the old execution only after its process group and Project resources are safe. */
+  readonly settleAfterRunnerTermination = (
+    authority: RunAuthority,
+    queuedAt: string,
+  ): Effect.Effect<ReadonlyArray<ExternalActionIntent>, RunStoreError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            this.#assertAuthority(authority);
+            const actions = this.#database
+              .query<ActionRow, [string]>(
+                `SELECT * FROM workflow_external_actions WHERE run_id = ?
+                 AND state IN ('unresolved', 'repetition-safe') ORDER BY intended_at`,
+              )
+              .all(authority.runId);
+            if (actions.length === 0)
+              throw new RunStoreError({
+                code: "RUN_NOT_ELIGIBLE",
+                message: "the Run has no external action awaiting Runner termination",
+              });
+            this.#database.run("DELETE FROM workflow_slots WHERE run_id = ?", [authority.runId]);
+            this.#database.run("DELETE FROM workflow_claims WHERE run_id = ?", [authority.runId]);
+            if (actions.every((action) => action.state === "repetition-safe")) {
+              this.#queueHeldRun(authority.runId, queuedAt);
+            }
+            return actions.map(actionOf);
           })
           .immediate(),
       catch: failure,

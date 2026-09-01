@@ -1,6 +1,5 @@
-import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Context, type Effect } from "effect";
-import type { RunAuthority } from "../models/DaemonRun.ts";
+import type { PhaseResult, RunAuthority } from "../models/DaemonRun.ts";
 import type {
   AuthorizeUncertainRetryRequest,
   ExternalActionDecision,
@@ -29,12 +28,13 @@ export class ExternalActionRepository extends Context.Service<
     readonly confirmResult: (
       authority: RunAuthority,
       actionId: string,
-      result: JsonValue,
+      phase: PhaseResult,
       detail: string,
       confirmedAt: string,
     ) => Effect.Effect<ExternalActionIntent, RunStoreError>;
     readonly recordEvidence: (
       actionId: string,
+      uncertaintyRevision: number,
       evidence: ExternalActionEvidence,
       observedAt: string,
     ) => Effect.Effect<ExternalActionIntent, RunStoreError>;
@@ -42,6 +42,10 @@ export class ExternalActionRepository extends Context.Service<
       runId: string,
       detail: string,
       observedAt: string,
+    ) => Effect.Effect<ReadonlyArray<ExternalActionIntent>, RunStoreError>;
+    readonly settleAfterRunnerTermination: (
+      authority: RunAuthority,
+      queuedAt: string,
     ) => Effect.Effect<ReadonlyArray<ExternalActionIntent>, RunStoreError>;
     readonly authorizeRetry: (
       request: AuthorizeUncertainRetryRequest,

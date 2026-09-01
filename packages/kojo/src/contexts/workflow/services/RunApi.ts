@@ -959,6 +959,14 @@ export class RunApi {
               "The Project Runner connection was lost. The same Run will recover under a new fenced Claim.",
             ),
           );
+        } else {
+          if (!(await this.#waitForRecovery(recovery.nextAttemptAt))) return;
+          await Effect.runPromise(
+            this.#actions.settleAfterRunnerTermination(
+              authority,
+              new Date(this.#now()).toISOString(),
+            ),
+          );
         }
       } else if (authority !== undefined) {
         const current = await Effect.runPromise(this.#runs.read(authority.runId)).catch(
@@ -2297,22 +2305,19 @@ export class RunApi {
                 this.#actions.confirmResult(
                   authority,
                   String(action.actionId),
-                  action.encodedResult as JsonValue,
+                  {
+                    phasePath: String(action.phasePath),
+                    attempt: Number(action.attempt),
+                    kind: action.kind as "actor" | "code" | "agent",
+                    outcome: action.outcome as "succeeded" | "failed" | "interrupted",
+                    description: String(action.description),
+                    startedAt: String(action.startedAt),
+                    endedAt: String(action.endedAt),
+                    encodedResult: action.encodedResult as JsonValue,
+                  },
                   "The current fenced Project Runner returned the encoded original-contract result.",
                   String(action.endedAt),
                 ),
-              );
-              await Effect.runPromise(
-                this.#runs.completePhase(authority, {
-                  phasePath: String(action.phasePath),
-                  attempt: Number(action.attempt),
-                  kind: action.kind as "actor" | "code" | "agent",
-                  outcome: action.outcome as "succeeded" | "failed" | "interrupted",
-                  description: String(action.description),
-                  startedAt: String(action.startedAt),
-                  endedAt: String(action.endedAt),
-                  encodedResult: action.encodedResult as JsonValue,
-                }),
               );
               await replyMutation(frame, {
                 state: "result-confirmed",

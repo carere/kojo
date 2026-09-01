@@ -136,4 +136,57 @@ describe("Daemon Workflow engine replay", () => {
         expect(results.size).toBe(1);
       }),
     ));
+
+  it("keeps Action identity stable across fresh engines and hashes the Workflow input", async () => {
+    const observed: Array<{ readonly actionId: string; readonly inputHash: string }> = [];
+    const repository = Layer.succeed(DaemonExecutionRepository, {
+      beginAction: (actionId, _phasePath, _attempt, inputHash) =>
+        Effect.sync(() => {
+          observed.push({ actionId, inputHash });
+          return { kind: "perform" as const, actionId };
+        }),
+      readResult: () => Effect.as(Effect.void, undefined as JsonValue | undefined),
+      commitResult: () => Effect.void,
+      readDeferred: () => Effect.as(Effect.void, undefined as JsonValue | undefined),
+      commitDeferred: () => Effect.void,
+      scheduleWakeup: () => Effect.void,
+    });
+    const definition = Workflow.make("identity", {
+      payload: { value: Schema.String },
+      success: Schema.String,
+      error: Schema.Never,
+      idempotencyKey: ({ value }) => value,
+    });
+    const registration = definition.toLayer(({ value }) =>
+      Activity.make({
+        name: "publish",
+        success: Schema.String,
+        error: Schema.Never,
+        execute: Effect.succeed(value),
+      }),
+    );
+    const execute = (payload: string) =>
+      Effect.gen(function* () {
+        const engine = yield* WorkflowEngine.WorkflowEngine;
+        return yield* engine.execute(definition, {
+          executionId: "daemon-assigned-run",
+          payload: { value: payload },
+          discard: false,
+        });
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(daemonEngine("a".repeat(64)).pipe(Layer.provide(repository))),
+          ),
+        ),
+      );
+
+    await Effect.runPromise(execute("same"));
+    await Effect.runPromise(execute("same"));
+    await Effect.runPromise(execute("changed"));
+
+    expect(observed[0]).toEqual(observed[1]);
+    expect(observed[2]?.inputHash).not.toBe(observed[0]?.inputHash);
+    expect(observed[2]?.actionId).not.toBe(observed[0]?.actionId);
+  });
 });
