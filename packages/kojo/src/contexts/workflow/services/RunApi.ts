@@ -255,6 +255,7 @@ export class RunApi {
   readonly #triggerProcesses = new Map<string, { readonly stop: () => Promise<void> }>();
   readonly #triggerGroups = new Map<string, ProjectTriggerGroup>();
   readonly #activeExecutions = new Map<string, ActiveExecutionControl>();
+  readonly #projectDispatchHolds = new Set<string>();
   readonly #recoveryWaits = new Set<{
     readonly timer: ReturnType<typeof setTimeout>;
     readonly resolve: (continueRecovery: boolean) => void;
@@ -448,6 +449,41 @@ export class RunApi {
       },
       catch: runApiFault,
     });
+
+  /** Hold one Project before its active location changes, then confirm its Runner is stopped. */
+  readonly drainProject = (projectId: string): Effect.Effect<void, RunApiFault> =>
+    Effect.tryPromise({
+      try: async () => {
+        this.#projectDispatchHolds.add(projectId);
+        await this.#stopProjectTriggerPollers(projectId, "Project location change draining");
+        while (
+          [...this.#activeExecutions.values()].some((control) => control.projectId === projectId)
+        ) {
+          await Bun.sleep(10);
+        }
+        await Effect.runPromise(this.#runnerSupervisor.stop(projectId));
+        const recovery = await Effect.runPromise(this.#projectRecovery.read(projectId));
+        if (
+          recovery !== undefined &&
+          (recovery.state !== "healthy" || recovery.safety !== "safe")
+        ) {
+          throw new Error("Project recovery is not safe enough to release its location");
+        }
+        const leases = await Effect.runPromise(this.#resources.byProject(projectId));
+        const unresolved = leases.filter((lease) => lease.state !== "released");
+        if (unresolved.length > 0) {
+          throw new Error(
+            `Project location release waits for ${unresolved.length} Resource lease(s) to be confirmed released`,
+          );
+        }
+      },
+      catch: runApiFault,
+    });
+
+  readonly releaseProjectDispatch = (projectId: string): void => {
+    this.#projectDispatchHolds.delete(projectId);
+    void this.#pump();
+  };
 
   async #stopCancelledProject(
     projectId: string,
@@ -728,6 +764,17 @@ export class RunApi {
             )
             .map((recovery) => recovery.projectId),
         );
+        for (const projectId of this.#projectDispatchHolds) blockedProjectIds.add(projectId);
+        for (const project of await Effect.runPromise(this.#projects.projects)) {
+          if (
+            project.projectState !== "available" ||
+            !project.locationActive ||
+            !project.locationConfirmed ||
+            project.locationChange.state === "draining"
+          ) {
+            blockedProjectIds.add(project.projectId);
+          }
+        }
         const reserved = await Effect.runPromise(
           this.#runs.reserveNext(reservationId, new Date(now).toISOString(), blockedProjectIds),
         );
@@ -1354,6 +1401,18 @@ export class RunApi {
     workflowName: string,
     pollerId: string,
   ): Promise<void> {
+    const project = (await Effect.runPromise(this.#projects.projects)).find(
+      (candidate) => candidate.projectId === projectId,
+    );
+    if (
+      project === undefined ||
+      project.projectState !== "available" ||
+      !project.locationActive ||
+      !project.locationConfirmed ||
+      project.locationChange.state === "draining"
+    ) {
+      return;
+    }
     const key = this.#pollerKey(projectId, workflowName);
     if (this.#triggerProcesses.has(key)) return;
     const recovery = await Effect.runPromise(this.#projectRecovery.read(projectId));

@@ -11,6 +11,7 @@ import type {
 import type {
   ClientRequestDocument,
   ProjectCounts,
+  ProjectLocationAction,
   ProjectSnapshot,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
 import type {
@@ -21,6 +22,7 @@ import { Effect } from "effect";
 import type { HostClientRequestJournal } from "../../daemon/adapters/HostClientRequestJournal.ts";
 import type { FactoryRefreshObservation } from "../../workflow/models/FactoryRefresh.ts";
 import { RevisionCaptureError } from "../../workflow/models/RevisionCaptureError.ts";
+import type { RunApi } from "../../workflow/services/RunApi.ts";
 import { refreshFactory } from "../../workflow/services/refreshFactory.ts";
 import type { SqliteProjectRepository } from "../adapters/SqliteProjectRepository.ts";
 import { ProjectStoreError } from "../models/ProjectStoreError.ts";
@@ -95,6 +97,7 @@ export class ProjectApi {
   readonly #journal: HostClientRequestJournal;
   readonly #now: () => number;
   readonly #repository: SqliteProjectRepository;
+  readonly #runs: RunApi;
   readonly #worktrees: string;
 
   constructor(options: {
@@ -104,6 +107,7 @@ export class ProjectApi {
     readonly now: () => number;
     readonly repository: SqliteProjectRepository;
     readonly dataRoot: string;
+    readonly runs: RunApi;
   }) {
     this.#dataIdentity = options.dataIdentity;
     this.#dataRoot = options.dataRoot;
@@ -111,16 +115,29 @@ export class ProjectApi {
     this.#journal = options.journal;
     this.#now = options.now;
     this.#repository = options.repository;
+    this.#runs = options.runs;
     this.#worktrees = join(options.dataRoot, "worktrees");
   }
 
   snapshot(): Effect.Effect<Response> {
     return Effect.promise(async () => {
       try {
-        const [projects, snapshotVersion] = await Promise.all([
-          Effect.runPromise(this.#repository.projects),
-          Effect.runPromise(this.#repository.snapshotVersion),
-        ]);
+        let projects = await Effect.runPromise(this.#repository.projects);
+        const missing = projects
+          .filter(
+            (project) =>
+              project.locationActive &&
+              project.projectState === "available" &&
+              !existsSync(project.location),
+          )
+          .map((project) => project.location);
+        if (missing.length > 0) {
+          await Effect.runPromise(
+            this.#repository.markMissingLocations(missing, new Date(this.#now()).toISOString()),
+          );
+          projects = await Effect.runPromise(this.#repository.projects);
+        }
+        const snapshotVersion = await Effect.runPromise(this.#repository.snapshotVersion);
         const body: ProjectSnapshot = {
           observationVersion: 1,
           instanceId: this.#instanceId,
@@ -136,6 +153,120 @@ export class ProjectApi {
         return refusal(
           cause instanceof ProjectStoreError ? cause : invalid(String(cause)),
           "snapshot",
+          this.#dataIdentity,
+        );
+      }
+    });
+  }
+
+  locationChange(
+    projectId: string,
+    action: ProjectLocationAction,
+    input: unknown,
+  ): Effect.Effect<Response> {
+    return Effect.promise(async () => {
+      let requestId = "invalid";
+      try {
+        if (input === null || typeof input !== "object" || Array.isArray(input)) {
+          throw invalid("The Project location request must be one JSON object.");
+        }
+        const body = input as Record<string, unknown>;
+        requestId = typeof body.requestId === "string" ? body.requestId : "invalid";
+        if (
+          Object.keys(body).some(
+            (key) => !["requestId", "dataIdentity", "location", "confirm"].includes(key),
+          ) ||
+          typeof body.requestId !== "string" ||
+          body.dataIdentity !== this.#dataIdentity
+        ) {
+          throw invalid("The Project location request does not match this Daemon data lifetime.");
+        }
+        let requestedLocation: string | undefined;
+        if (action !== "archive") {
+          if (typeof body.location !== "string") {
+            throw invalid("Relocate and restore need one exact Git working-tree root.");
+          }
+          requestedLocation = exactGitWorkingTree(body.location, this.#worktrees);
+          if (requestedLocation !== body.location) {
+            throw invalid("The Daemon resolved a different Project location.");
+          }
+          if (body.confirm !== true) {
+            throw new ProjectStoreError({
+              code: "PROJECT_LOCATION_CONFIRMATION_REQUIRED",
+              message: "A Project location change needs explicit confirmation.",
+              status: 409,
+              retry: "never",
+              remedy:
+                "Confirm that Workflows become inactive while retained Runs keep their pinned revisions.",
+            });
+          }
+        } else if (body.location !== undefined || body.confirm !== true) {
+          throw new ProjectStoreError({
+            code: "PROJECT_ARCHIVE_CONFIRMATION_REQUIRED",
+            message: "Archiving needs explicit confirmation and does not accept a location.",
+            status: 409,
+            retry: "never",
+            remedy:
+              "Confirm that the Project becomes Archived and its active location is released.",
+          });
+        }
+        const changedAt = new Date(this.#now()).toISOString();
+        const retainedRequest: MutationEnvelope = {
+          mutationVersion: 1,
+          requestId,
+          dataIdentity: this.#dataIdentity,
+          operation: `${action}Project`,
+          target: { identityVersion: 1, kind: "project", parts: [projectId] },
+          arguments: {
+            confirm: true,
+            ...(requestedLocation === undefined ? {} : { location: requestedLocation }),
+          },
+          preconditions: {},
+        };
+        this.#journal.prepare(retainedRequest);
+        const requestBody = JSON.stringify(retainedRequest);
+        const accepted = await Effect.runPromise(
+          this.#repository.beginLocationChange({
+            requestId,
+            requestBody,
+            dataIdentity: this.#dataIdentity,
+            projectId,
+            action,
+            ...(requestedLocation === undefined ? {} : { requestedLocation }),
+            changedAt,
+          }),
+        );
+        if (accepted.status === "committed") return response(accepted);
+        await Effect.runPromise(this.#runs.drainProject(projectId));
+        await Effect.runPromise(
+          this.#repository.commitLocationChange({
+            requestId,
+            dataIdentity: this.#dataIdentity,
+            projectId,
+            action,
+            changedAt: new Date(this.#now()).toISOString(),
+          }),
+        );
+        if (action !== "archive") this.#runs.releaseProjectDispatch(projectId);
+        const receipt = await Effect.runPromise(
+          this.#repository.receipt(this.#dataIdentity, requestId),
+        );
+        if (receipt === undefined)
+          throw new Error("the committed Project receipt was not retained");
+        return response(receipt);
+      } catch (cause) {
+        return refusal(
+          cause instanceof ProjectStoreError
+            ? cause
+            : new ProjectStoreError({
+                code: "PROJECT_LOCATION_CHANGE_REFUSED",
+                message: cause instanceof Error ? cause.message : String(cause),
+                status: 409,
+                retry: "safe",
+                remedy:
+                  "Inspect the Project drain, Project recovery, and Resource leases before retrying this request.",
+              }),
+          requestId,
           this.#dataIdentity,
         );
       }
@@ -248,6 +379,29 @@ export class ProjectApi {
             }),
             requestId,
             this.#dataIdentity,
+          );
+        }
+        const locationOperation = retained.request.operation.match(
+          /^(relocate|archive|restore)Project$/,
+        );
+        if (
+          locationOperation !== null &&
+          retained.request.target.kind === "project" &&
+          typeof retained.request.target.parts[0] === "string"
+        ) {
+          return await Effect.runPromise(
+            this.locationChange(
+              retained.request.target.parts[0],
+              locationOperation[1] as ProjectLocationAction,
+              {
+                requestId,
+                dataIdentity: this.#dataIdentity,
+                confirm: true,
+                ...(typeof retained.request.arguments.location === "string"
+                  ? { location: retained.request.arguments.location }
+                  : {}),
+              },
+            ),
           );
         }
         const sentLocation = registrationLocation(retained.request, this.#dataIdentity);

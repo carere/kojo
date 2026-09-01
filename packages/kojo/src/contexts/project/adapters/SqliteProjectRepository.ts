@@ -1,7 +1,12 @@
 import type { Database } from "bun:sqlite";
 import { basename } from "node:path";
 import type { OperationReceipt } from "@carere/kojo-client-contracts/contexts/client/contracts/operation";
-import type { ProjectDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
+import type {
+  ProjectDocument,
+  ProjectLocationAction,
+  ProjectLocationRecord,
+  ProjectLocationResult,
+} from "@carere/kojo-client-contracts/contexts/client/contracts/project";
 import type { WorkflowDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import { Effect, Layer } from "effect";
 import type { FactoryRefreshObservation } from "../../workflow/models/FactoryRefresh.ts";
@@ -23,6 +28,19 @@ interface ProjectRow {
   readonly refreshed_at: string;
   readonly fault: string | null;
   readonly remedy: string | null;
+  readonly last_location: string | null;
+  readonly location_active: number;
+  readonly location_confirmed: number;
+  readonly location_action: ProjectLocationAction | null;
+  readonly requested_location: string | null;
+  readonly location_change_started_at: string | null;
+}
+
+interface LocationHistoryRow {
+  readonly location: string;
+  readonly active_from: string;
+  readonly released_at: string | null;
+  readonly release_reason: "relocated" | "archived" | null;
 }
 
 interface WorkflowRow {
@@ -62,6 +80,10 @@ interface CurrentRunRow {
     | null;
 }
 
+const projectColumns = `project_id, location, project_state, factory_state, refresh_state,
+  registered_at, refreshed_at, fault, remedy, last_location, location_active,
+  location_confirmed, location_action, requested_location, location_change_started_at`;
+
 export interface ExecutionRevision {
   readonly projectId: string;
   readonly location: string;
@@ -72,15 +94,32 @@ export interface ExecutionRevision {
   readonly entrySource: string;
 }
 
-const documentOf = (row: ProjectRow): ProjectDocument => ({
+const documentOf = (
+  row: ProjectRow,
+  locationHistory: ReadonlyArray<ProjectLocationRecord> = [],
+): ProjectDocument => ({
   projectId: row.project_id,
-  label: basename(row.location),
-  location: row.location,
+  label: basename(row.last_location ?? row.location),
+  location: row.last_location ?? row.location,
+  locationActive: row.location_active === 1,
+  locationConfirmed: row.location_confirmed === 1,
   projectState: row.project_state,
   factoryState: row.factory_state,
   refreshState: row.refresh_state,
   registeredAt: row.registered_at,
   refreshedAt: row.refreshed_at,
+  locationChange:
+    row.location_action === null
+      ? { state: "steady" }
+      : {
+          state: "draining",
+          action: row.location_action,
+          ...(row.requested_location === null ? {} : { requestedLocation: row.requested_location }),
+          ...(row.location_change_started_at === null
+            ? {}
+            : { startedAt: row.location_change_started_at }),
+        },
+  locationHistory,
   ...(row.fault === null ? {} : { fault: row.fault }),
   ...(row.remedy === null ? {} : { remedy: row.remedy }),
 });
@@ -141,12 +180,44 @@ export class SqliteProjectRepository {
         remedy TEXT
       ) STRICT
     `);
-    const projectColumns = database
+    const projectColumnInfo = database
       .query<{ readonly name: string }, []>("PRAGMA table_info(projects)")
       .all();
-    if (!projectColumns.some((column) => column.name === "refresh_state")) {
+    if (!projectColumnInfo.some((column) => column.name === "refresh_state")) {
       database.run("ALTER TABLE projects ADD COLUMN refresh_state TEXT NOT NULL DEFAULT 'current'");
     }
+    const additions = [
+      ["last_location", "TEXT"],
+      ["location_active", "INTEGER NOT NULL DEFAULT 1"],
+      ["location_confirmed", "INTEGER NOT NULL DEFAULT 1"],
+      ["location_action", "TEXT"],
+      ["requested_location", "TEXT"],
+      ["location_change_started_at", "TEXT"],
+    ] as const;
+    for (const [name, definition] of additions) {
+      if (!projectColumnInfo.some((column) => column.name === name)) {
+        database.run(`ALTER TABLE projects ADD COLUMN ${name} ${definition}`);
+      }
+    }
+    database.run("UPDATE projects SET last_location = location WHERE last_location IS NULL");
+    database.run(`
+      CREATE TABLE IF NOT EXISTS project_location_history (
+        history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id TEXT NOT NULL,
+        location TEXT NOT NULL,
+        active_from TEXT NOT NULL,
+        released_at TEXT,
+        release_reason TEXT CHECK(release_reason IN ('relocated', 'archived')),
+        FOREIGN KEY (project_id) REFERENCES projects(project_id)
+      ) STRICT
+    `);
+    database.run(`
+      INSERT INTO project_location_history (project_id, location, active_from)
+      SELECT p.project_id, p.last_location, p.registered_at FROM projects p
+       WHERE NOT EXISTS (
+         SELECT 1 FROM project_location_history h WHERE h.project_id = p.project_id
+       )
+    `);
     database.run(`
       CREATE TABLE IF NOT EXISTS workflow_revisions (
         revision_id TEXT PRIMARY KEY NOT NULL,
@@ -323,6 +394,27 @@ export class SqliteProjectRepository {
     }
   }
 
+  #history(projectId: string): ReadonlyArray<ProjectLocationRecord> {
+    return this.#database
+      .query<LocationHistoryRow, [string]>(
+        `SELECT location, active_from, released_at, release_reason
+           FROM project_location_history WHERE project_id = ? ORDER BY active_from, history_id`,
+      )
+      .all(projectId)
+      .map((row) => ({
+        location: row.location,
+        activeFrom: row.active_from,
+        ...(row.released_at === null ? {} : { releasedAt: row.released_at }),
+        ...(row.release_reason === null ? {} : { releaseReason: row.release_reason }),
+      }));
+  }
+
+  #project(projectId: string): ProjectRow | null {
+    return this.#database
+      .query<ProjectRow, [string]>(`SELECT ${projectColumns} FROM projects WHERE project_id = ?`)
+      .get(projectId);
+  }
+
   readonly register = (
     request: RegisterProjectRequest,
   ): Effect.Effect<RegisteredProject, ProjectStoreError> =>
@@ -354,8 +446,7 @@ export class SqliteProjectRepository {
 
           let row = this.#database
             .query<ProjectRow, [string]>(
-              `SELECT project_id, location, project_state, factory_state, refresh_state, registered_at,
-                      refreshed_at, fault, remedy
+              `SELECT ${projectColumns}
                  FROM projects WHERE location = ? AND project_state != 'archived'`,
             )
             .get(request.location);
@@ -365,8 +456,9 @@ export class SqliteProjectRepository {
             this.#database.run(
               `INSERT INTO projects (
                  project_id, location, project_state, factory_state, registered_at,
-                 refresh_state, refreshed_at, fault, remedy
-               ) VALUES (?, ?, 'available', ?, ?, ?, ?, ?, ?)`,
+                 refresh_state, refreshed_at, fault, remedy, last_location,
+                 location_active, location_confirmed
+               ) VALUES (?, ?, 'available', ?, ?, ?, ?, ?, ?, ?, 1, 1)`,
               [
                 projectId,
                 request.location,
@@ -376,15 +468,19 @@ export class SqliteProjectRepository {
                 request.observedAt,
                 request.factory.fault ?? null,
                 request.factory.remedy ?? null,
+                request.location,
               ],
+            );
+            this.#database.run(
+              "INSERT INTO project_location_history (project_id, location, active_from) VALUES (?, ?, ?)",
+              [projectId, request.location, request.observedAt],
             );
             this.#database.run(
               "UPDATE daemon_metadata SET value = CAST(value AS INTEGER) + 1 WHERE name = 'project_snapshot_version'",
             );
             row = this.#database
               .query<ProjectRow, [string]>(
-                `SELECT project_id, location, project_state, factory_state, refresh_state, registered_at,
-                        refreshed_at, fault, remedy FROM projects WHERE project_id = ?`,
+                `SELECT ${projectColumns} FROM projects WHERE project_id = ?`,
               )
               .get(projectId);
           }
@@ -393,13 +489,12 @@ export class SqliteProjectRepository {
             this.#applyFactory(row.project_id, request.factory, request.observedAt);
             row = this.#database
               .query<ProjectRow, [string]>(
-                `SELECT project_id, location, project_state, factory_state, refresh_state, registered_at,
-                        refreshed_at, fault, remedy FROM projects WHERE project_id = ?`,
+                `SELECT ${projectColumns} FROM projects WHERE project_id = ?`,
               )
               .get(row.project_id);
           }
           if (row === null) throw new Error("the refreshed Project could not be read");
-          const project = documentOf(row);
+          const project = documentOf(row, this.#history(row.project_id));
           const receipt: OperationReceipt = {
             receiptVersion: 1,
             requestId: request.requestId,
@@ -427,15 +522,318 @@ export class SqliteProjectRepository {
       catch: failed,
     });
 
+  readonly markMissingLocations = (
+    missingLocations: ReadonlyArray<string>,
+    observedAt: string,
+  ): Effect.Effect<number, ProjectStoreError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            let changed = 0;
+            for (const location of missingLocations) {
+              const result = this.#database.run(
+                `UPDATE projects
+                    SET project_state = 'unavailable', location_confirmed = 0,
+                        refreshed_at = ?, fault = 'The confirmed Project location is unavailable.',
+                        remedy = 'Restore the working tree, then explicitly relocate this Project to the same path.'
+                  WHERE location = ? AND project_state = 'available'`,
+                [observedAt, location],
+              );
+              if (result.changes === 0) continue;
+              changed += result.changes;
+              this.#database.run(
+                `UPDATE project_workflows SET activity = 'inactive',
+                   trigger_state = CASE WHEN trigger_state = 'not-declared' THEN 'not-declared' ELSE 'not-observed' END,
+                   trigger_detail = CASE WHEN trigger_state = 'not-declared' THEN NULL ELSE 'Project location unavailable' END
+                 WHERE project_id IN (SELECT project_id FROM projects WHERE location = ?)`,
+                [location],
+              );
+              this.#database.run(
+                "DELETE FROM trigger_pollers WHERE project_id IN (SELECT project_id FROM projects WHERE location = ?)",
+                [location],
+              );
+            }
+            if (changed > 0) {
+              this.#database.run(
+                "UPDATE daemon_metadata SET value = CAST(value AS INTEGER) + 1 WHERE name = 'project_snapshot_version'",
+              );
+            }
+            return changed;
+          })
+          .immediate(),
+      catch: failed,
+    });
+
+  readonly beginLocationChange = (request: {
+    readonly requestId: string;
+    readonly requestBody: string;
+    readonly dataIdentity: string;
+    readonly projectId: string;
+    readonly action: ProjectLocationAction;
+    readonly requestedLocation?: string;
+    readonly changedAt: string;
+  }): Effect.Effect<OperationReceipt, ProjectStoreError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            const priorReceipt = this.#database
+              .query<ReceiptRow, [string, string]>(
+                "SELECT request_body, receipt_json FROM client_receipts WHERE data_identity = ? AND request_id = ?",
+              )
+              .get(request.dataIdentity, request.requestId);
+            if (priorReceipt !== null) {
+              if (priorReceipt.request_body !== request.requestBody) {
+                throw new ProjectStoreError({
+                  code: "REQUEST_ID_CONFLICT",
+                  message: "This request ID already names different request content.",
+                  status: 409,
+                  retry: "lookupOriginal",
+                  remedy:
+                    "Look up the original request. Use a new request ID for different content.",
+                });
+              }
+              return JSON.parse(priorReceipt.receipt_json) as OperationReceipt;
+            }
+            const project = this.#project(request.projectId);
+            if (project === null) {
+              throw new ProjectStoreError({
+                code: "PROJECT_NOT_FOUND",
+                message: "The selected Project does not exist.",
+                status: 404,
+                retry: "never",
+                remedy: "Select a Project from the authoritative Project snapshot.",
+              });
+            }
+            if (project.location_action !== null) {
+              throw new ProjectStoreError({
+                code: "PROJECT_LOCATION_CHANGE_ACTIVE",
+                message: "A Project location change is already draining execution.",
+                status: 409,
+                retry: "safe",
+                remedy:
+                  "Inspect the Project and retry the original request after its drain finishes.",
+              });
+            }
+            if (request.action === "restore" && project.project_state !== "archived") {
+              throw new ProjectStoreError({
+                code: "PROJECT_NOT_ARCHIVED",
+                message: "Only an Archived Project can be restored.",
+                status: 409,
+                retry: "never",
+                remedy: "Select an Archived Project.",
+              });
+            }
+            if (request.action !== "restore" && project.project_state === "archived") {
+              throw new ProjectStoreError({
+                code: "PROJECT_ARCHIVED",
+                message: "The selected Project is Archived.",
+                status: 409,
+                retry: "never",
+                remedy: "Restore the Project before you relocate it.",
+              });
+            }
+            if (request.action !== "archive" && request.requestedLocation === undefined) {
+              throw new ProjectStoreError({
+                code: "PROJECT_LOCATION_REQUIRED",
+                message: "This location change needs one exact Project location.",
+                status: 422,
+                retry: "never",
+                remedy: "Supply one canonical Git working-tree root.",
+              });
+            }
+            if (request.requestedLocation !== undefined) {
+              const conflict = this.#database
+                .query<{ readonly project_id: string }, [string, string]>(
+                  `SELECT project_id FROM projects
+                    WHERE location = ? AND project_id != ? AND project_state != 'archived'`,
+                )
+                .get(request.requestedLocation, request.projectId);
+              if (conflict !== null) {
+                throw new ProjectStoreError({
+                  code: "PROJECT_LOCATION_CONFLICT",
+                  message: "The requested location belongs to another active Project.",
+                  status: 409,
+                  retry: "never",
+                  remedy: "Archive or relocate the other Project, or select another working tree.",
+                });
+              }
+            }
+            this.#database.run(
+              `UPDATE projects SET location_action = ?, requested_location = ?,
+                 location_change_started_at = ? WHERE project_id = ?`,
+              [
+                request.action,
+                request.requestedLocation ?? null,
+                request.changedAt,
+                request.projectId,
+              ],
+            );
+            this.#database.run(
+              `UPDATE project_workflows SET activity = 'inactive',
+                 trigger_state = CASE WHEN trigger_state = 'not-declared' THEN 'not-declared' ELSE 'not-observed' END,
+                 trigger_observed_at = ?,
+                 trigger_detail = CASE WHEN trigger_state = 'not-declared' THEN NULL ELSE 'Project location change draining' END
+               WHERE project_id = ?`,
+              [request.changedAt, request.projectId],
+            );
+            this.#database.run("DELETE FROM trigger_pollers WHERE project_id = ?", [
+              request.projectId,
+            ]);
+            this.#database.run(
+              "UPDATE daemon_metadata SET value = CAST(value AS INTEGER) + 1 WHERE name = 'project_snapshot_version'",
+            );
+            const receipt: OperationReceipt = {
+              receiptVersion: 1,
+              requestId: request.requestId,
+              dataIdentity: request.dataIdentity,
+              operation: `${request.action}Project`,
+              status: "accepted",
+              result: {
+                action: request.action,
+                projectId: request.projectId,
+                priorLocation: project.last_location ?? project.location,
+                ...(request.requestedLocation === undefined
+                  ? {}
+                  : { requestedLocation: request.requestedLocation }),
+                state: "draining",
+              },
+            };
+            this.#database.run(
+              `INSERT INTO client_receipts
+                 (data_identity, request_id, request_body, receipt_json, committed_at)
+               VALUES (?, ?, ?, ?, ?)`,
+              [
+                request.dataIdentity,
+                request.requestId,
+                request.requestBody,
+                JSON.stringify(receipt),
+                request.changedAt,
+              ],
+            );
+            return receipt;
+          })
+          .immediate(),
+      catch: failed,
+    });
+
+  readonly commitLocationChange = (request: {
+    readonly requestId: string;
+    readonly dataIdentity: string;
+    readonly projectId: string;
+    readonly action: ProjectLocationAction;
+    readonly changedAt: string;
+  }): Effect.Effect<ProjectLocationResult, ProjectStoreError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            const row = this.#project(request.projectId);
+            if (row === null || row.location_action !== request.action) {
+              throw new ProjectStoreError({
+                code: "PROJECT_LOCATION_CHANGE_LOST",
+                message: "The accepted Project location change is not active.",
+                status: 409,
+                retry: "lookupOriginal",
+                remedy: "Look up the original request before you send another location change.",
+              });
+            }
+            const priorLocation = row.last_location ?? row.location;
+            const requested = row.requested_location;
+            if (request.action === "archive") {
+              this.#database.run(
+                `UPDATE projects SET location = ?, project_state = 'archived', location_active = 0,
+                   location_confirmed = 0, location_action = NULL, requested_location = NULL,
+                   location_change_started_at = NULL, refreshed_at = ?, fault = NULL, remedy = NULL
+                 WHERE project_id = ?`,
+                [`/.kojo-archived/${request.projectId}`, request.changedAt, request.projectId],
+              );
+              this.#database.run(
+                `UPDATE project_location_history SET released_at = ?, release_reason = 'archived'
+                  WHERE project_id = ? AND released_at IS NULL`,
+                [request.changedAt, request.projectId],
+              );
+            } else {
+              if (requested === null) throw new Error("the accepted location was not retained");
+              if (requested !== priorLocation) {
+                this.#database.run(
+                  `UPDATE project_location_history SET released_at = ?, release_reason = 'relocated'
+                    WHERE project_id = ? AND released_at IS NULL`,
+                  [request.changedAt, request.projectId],
+                );
+                this.#database.run(
+                  `INSERT INTO project_location_history (project_id, location, active_from)
+                   VALUES (?, ?, ?)`,
+                  [request.projectId, requested, request.changedAt],
+                );
+              }
+              this.#database.run(
+                `UPDATE projects SET location = ?, last_location = ?, project_state = 'available',
+                   location_active = 1, location_confirmed = 1, refresh_state = 'pending',
+                   location_action = NULL, requested_location = NULL,
+                   location_change_started_at = NULL, refreshed_at = ?, fault = NULL, remedy = NULL
+                 WHERE project_id = ?`,
+                [requested, requested, request.changedAt, request.projectId],
+              );
+            }
+            this.#database.run(
+              "UPDATE daemon_metadata SET value = CAST(value AS INTEGER) + 1 WHERE name = 'project_snapshot_version'",
+            );
+            const committed = this.#project(request.projectId);
+            if (committed === null) throw new Error("the committed Project could not be read");
+            const consequences = [
+              "New Project dispatch stopped before the location changed.",
+              "All Project Workflows are inactive.",
+              "Existing Runs and pinned Workflow Revisions were retained.",
+              ...(request.action === "archive"
+                ? ["The prior location is released for ordinary registration."]
+                : ["A Factory Refresh is required before new Runs can start."]),
+            ];
+            const result: ProjectLocationResult = {
+              action: request.action,
+              project: documentOf(committed, this.#history(request.projectId)),
+              priorLocation,
+              consequences,
+            };
+            const receipt = this.#database
+              .query<ReceiptRow, [string, string]>(
+                "SELECT request_body, receipt_json FROM client_receipts WHERE data_identity = ? AND request_id = ?",
+              )
+              .get(request.dataIdentity, request.requestId);
+            if (receipt === null) throw new Error("the accepted client request was not retained");
+            const committedReceipt: OperationReceipt = {
+              receiptVersion: 1,
+              requestId: request.requestId,
+              dataIdentity: request.dataIdentity,
+              operation: `${request.action}Project`,
+              status: "committed",
+              result: JSON.parse(JSON.stringify(result)),
+            };
+            this.#database.run(
+              `UPDATE client_receipts SET receipt_json = ?, committed_at = ?
+                WHERE data_identity = ? AND request_id = ?`,
+              [
+                JSON.stringify(committedReceipt),
+                request.changedAt,
+                request.dataIdentity,
+                request.requestId,
+              ],
+            );
+            return result;
+          })
+          .immediate(),
+      catch: failed,
+    });
+
   readonly projects: Effect.Effect<ReadonlyArray<ProjectDocument>, ProjectStoreError> = Effect.try({
     try: () => {
       const rows = this.#database
         .query<ProjectRow, []>(
-          `SELECT project_id, location, project_state, factory_state, refresh_state, registered_at,
-                  refreshed_at, fault, remedy FROM projects ORDER BY registered_at, project_id`,
+          `SELECT ${projectColumns} FROM projects ORDER BY registered_at, project_id`,
         )
         .all();
-      const documents = rows.map(documentOf);
+      const documents = rows.map((row) => documentOf(row, this.#history(row.project_id)));
       const labelCounts = new Map<string, number>();
       for (const project of documents) {
         labelCounts.set(project.label, (labelCounts.get(project.label) ?? 0) + 1);
@@ -526,7 +924,8 @@ export class SqliteProjectRepository {
                   w.source_fault, w.remedy, w.current_revision_id, w.candidate_revision_id,
                   w.trigger_state, w.trigger_observed_at, w.trigger_detail, w.refreshed_at,
                   r.package_graph_id AS current_package_graph_id,
-                  p.location AS label, p.project_state, p.factory_state, p.refresh_state
+                  COALESCE(p.last_location, p.location) AS label,
+                  p.project_state, p.factory_state, p.refresh_state
              FROM project_workflows w
              JOIN projects p ON p.project_id = w.project_id
              LEFT JOIN workflow_revisions r ON r.revision_id = w.current_revision_id

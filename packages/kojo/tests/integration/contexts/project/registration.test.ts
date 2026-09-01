@@ -1,10 +1,22 @@
+import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import type { OperationReceipt } from "@carere/kojo-client-contracts/contexts/client/contracts/operation";
-import type { ProjectSnapshot } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
+import type {
+  ClientRequestDocument,
+  ProjectSnapshot,
+} from "@carere/kojo-client-contracts/contexts/client/contracts/project";
 import { Effect } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -12,6 +24,7 @@ import {
   startDaemon,
 } from "../../../../src/contexts/daemon/adapters/DaemonOwner.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
+import { SqliteResourceLeaseRepository } from "../../../../src/contexts/project/adapters/SqliteResourceLeaseRepository.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
 
 const roots: string[] = [];
@@ -182,5 +195,234 @@ describe("durable Project registration", () => {
       await call(replacement, "/api/v1/projects")
     ).json()) as ProjectSnapshot;
     expect(snapshot.counts.total).toBe(1);
+  });
+
+  it("requires explicit same-path confirmation and retains identity while locations change", async () => {
+    const hostPaths = paths();
+    const daemon = startDaemon(hostPaths);
+    daemons.push(daemon);
+    const parent = roots[0] ?? "";
+    const firstLocation = repository(parent, "relocating");
+    const alternateLocation = repository(parent, "restored");
+
+    const register = async (requestId: string, location: string) => {
+      const input = mutation(daemon, requestId, location);
+      expect((await prepare(daemon, input)).status).toBe(201);
+      const response = await retry(daemon, requestId);
+      expect(response.status, await response.clone().text()).toBe(200);
+      return (await response.json()) as OperationReceipt;
+    };
+    const original = await register("location-original", firstLocation);
+    const originalId = (
+      original.result as unknown as { readonly project: { readonly projectId: string } }
+    ).project.projectId;
+
+    const absent = `${firstLocation}-absent`;
+    renameSync(firstLocation, absent);
+    const unavailable = (await (await call(daemon, "/api/v1/projects")).json()) as ProjectSnapshot;
+    expect(unavailable.projects.find((project) => project.projectId === originalId)).toMatchObject({
+      projectState: "unavailable",
+      locationConfirmed: false,
+    });
+    renameSync(absent, firstLocation);
+    const stillUnavailable = (await (
+      await call(daemon, "/api/v1/projects")
+    ).json()) as ProjectSnapshot;
+    expect(
+      stillUnavailable.projects.find((project) => project.projectId === originalId),
+    ).toMatchObject({
+      projectState: "unavailable",
+      locationConfirmed: false,
+    });
+
+    const confirmResponse = await call(daemon, `/api/v1/projects/${originalId}/actions/relocate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        requestId: "confirm-same-location",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        location: firstLocation,
+        confirm: true,
+      }),
+    });
+    expect(confirmResponse.status, await confirmResponse.clone().text()).toBe(200);
+    expect((await confirmResponse.json()) as OperationReceipt).toMatchObject({
+      operation: "relocateProject",
+      status: "committed",
+      result: {
+        project: {
+          projectId: originalId,
+          projectState: "available",
+          locationConfirmed: true,
+          refreshState: "pending",
+        },
+      },
+    });
+
+    const archiveRequest = {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        requestId: "archive-original",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        confirm: true,
+      }),
+    } satisfies RequestInit;
+    const database = new Database(join(hostPaths.dataRoot, "kojo.db"), { strict: true });
+    const resources = new SqliteResourceLeaseRepository(database);
+    const resourceAuthority = {
+      projectId: originalId,
+      runId: "retained-run",
+      revisionId: "a".repeat(64),
+      runnerInstanceId: "runner-before-location-change",
+      claimGeneration: 1,
+    } as const;
+    await Effect.runPromise(
+      resources.beginAcquisition(
+        {
+          ...resourceAuthority,
+          leaseId: "lease-before-location-change",
+          kind: "worktree",
+          acquisitionKey: "retained-run/worktree",
+          requestedAt: "2026-09-01T10:00:00.000Z",
+          detail: { branch: "kojo/retained-run" },
+        },
+        {
+          providerIdentity: "kojo-resource:location-change",
+          inspectionLocator: join(
+            hostPaths.dataRoot,
+            "resource-inspections",
+            "location-change.json",
+          ),
+        },
+      ),
+    );
+    const heldByResource = await call(
+      daemon,
+      `/api/v1/projects/${originalId}/actions/archive`,
+      archiveRequest,
+    );
+    expect(heldByResource.status).toBe(409);
+    const draining = (await (await call(daemon, "/api/v1/projects")).json()) as ProjectSnapshot;
+    expect(draining.projects.find((project) => project.projectId === originalId)).toMatchObject({
+      projectState: "available",
+      locationChange: { state: "draining", action: "archive" },
+    });
+    const retainedArchive = (await (
+      await call(daemon, "/api/v1/client-requests/archive-original")
+    ).json()) as ClientRequestDocument;
+    expect(retainedArchive).toMatchObject({
+      request: { operation: "archiveProject", target: { kind: "project", parts: [originalId] } },
+      receipt: { status: "accepted" },
+    });
+    await Effect.runPromise(
+      resources.confirmAcquired(
+        resourceAuthority,
+        "lease-before-location-change",
+        "2026-09-01T10:00:00.500Z",
+        {
+          providerIdentity: "kojo-resource:location-change",
+          locator: firstLocation,
+        },
+      ),
+    );
+    await Effect.runPromise(
+      resources.beginRelease(
+        resourceAuthority,
+        "lease-before-location-change",
+        "2026-09-01T10:00:01.000Z",
+      ),
+    );
+    await Effect.runPromise(
+      resources.confirmReleased(
+        resourceAuthority,
+        "lease-before-location-change",
+        "2026-09-01T10:00:02.000Z",
+        "fixture confirmed release",
+      ),
+    );
+    database.run(
+      `INSERT INTO project_runner_recovery (
+         project_id, cycle, attempts, state, safety, failed_operation_pending, last_fault
+       ) VALUES (?, 1, 1, 'held', 'uncertain', 1, 'fixture recovery is uncertain')`,
+      [originalId],
+    );
+    const heldByRecovery = await call(
+      daemon,
+      `/api/v1/projects/${originalId}/actions/archive`,
+      archiveRequest,
+    );
+    expect(heldByRecovery.status).toBe(409);
+    database.run(
+      `UPDATE project_runner_recovery SET state = 'healthy', safety = 'safe',
+         failed_operation_pending = 0, last_fault = NULL WHERE project_id = ?`,
+      [originalId],
+    );
+    const archiveResponse = await call(daemon, "/api/v1/client-requests/archive-original/retry", {
+      method: "POST",
+    });
+    expect(archiveResponse.status, await archiveResponse.clone().text()).toBe(200);
+    expect((await archiveResponse.json()) as OperationReceipt).toMatchObject({
+      status: "committed",
+      result: {
+        project: {
+          projectId: originalId,
+          projectState: "archived",
+          locationActive: false,
+          location: firstLocation,
+        },
+      },
+    });
+    database.close();
+
+    const replacement = await register("new-project-at-released-location", firstLocation);
+    expect(replacement.result).toMatchObject({ created: true });
+    const conflict = await call(daemon, `/api/v1/projects/${originalId}/actions/restore`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        requestId: "restore-conflict",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        location: firstLocation,
+        confirm: true,
+      }),
+    });
+    expect(conflict.status).toBe(409);
+    const afterConflict = (await (
+      await call(daemon, "/api/v1/projects")
+    ).json()) as ProjectSnapshot;
+    expect(
+      afterConflict.projects.find((project) => project.projectId === originalId),
+    ).toMatchObject({
+      projectState: "archived",
+      location: firstLocation,
+      locationActive: false,
+    });
+
+    const restored = await call(daemon, `/api/v1/projects/${originalId}/actions/restore`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        requestId: "restore-alternate",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        location: alternateLocation,
+        confirm: true,
+      }),
+    });
+    expect(restored.status, await restored.clone().text()).toBe(200);
+    expect((await restored.json()) as OperationReceipt).toMatchObject({
+      status: "committed",
+      result: {
+        project: {
+          projectId: originalId,
+          projectState: "available",
+          location: alternateLocation,
+          locationHistory: [
+            { location: firstLocation, releaseReason: "archived" },
+            { location: alternateLocation },
+          ],
+        },
+      },
+    });
   });
 });
