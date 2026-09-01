@@ -90,6 +90,33 @@ const processExists = (processId: number): boolean => {
   }
 };
 
+const systemdFailure = (unit: string, observation: unknown, cause: unknown): Error => {
+  const output = (command: ReadonlyArray<string>): string => {
+    const result = Bun.spawnSync([...command]);
+    return [new TextDecoder().decode(result.stdout), new TextDecoder().decode(result.stderr)]
+      .filter((part) => part.trim().length > 0)
+      .join("\n");
+  };
+  return new Error(
+    [
+      cause instanceof Error ? cause.message : String(cause),
+      `Observation: ${JSON.stringify(observation)}`,
+      output([
+        "/usr/bin/systemctl",
+        "--user",
+        "show",
+        unit,
+        "--property=LoadState,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus",
+        "--no-pager",
+      ]),
+      output(["/usr/bin/systemctl", "--user", "status", unit, "--full", "--no-pager"]),
+      output(["/usr/bin/journalctl", "--user-unit", unit, "--no-pager", "--lines=100"]),
+    ]
+      .filter((part) => part.trim().length > 0)
+      .join("\n\n"),
+  );
+};
+
 const systemdUserManagerAvailable =
   process.platform === "linux" &&
   Bun.spawnSync(["/usr/bin/systemctl", "--user", "show-environment"]).exitCode === 0;
@@ -127,7 +154,11 @@ describe.skipIf(!systemdUserManagerAvailable)("the native systemd user Daemon li
 
     try {
       service.installAndStart(paths.serviceDefinition);
-      await waitFor(() => service.inspect().process === "running");
+      try {
+        await waitFor(() => service.inspect().process === "running");
+      } catch (cause) {
+        throw systemdFailure(unit, service.inspect(), cause);
+      }
       await waitFor(() => existsSync(join(paths.runtimeRoot, "endpoint.json")));
       await waitFor(() => existsSync(childProcessIdPath));
       const childProcessId = Number(readFileSync(childProcessIdPath, "utf8").trim());

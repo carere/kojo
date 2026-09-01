@@ -3,6 +3,7 @@ set -euo pipefail
 
 workspace=${1:?usage: systemd-native-evidence.sh WORKSPACE EVIDENCE_DIRECTORY}
 evidence_directory=${2:?usage: systemd-native-evidence.sh WORKSPACE EVIDENCE_DIRECTORY}
+workspace_owner=$(stat -c %u:%g "$workspace")
 evidence_user=kojo-native-evidence
 fixture=packages/kojo/tests/support/daemon/systemdLogoutFixture.ts
 unit=kojo-native-logout-evidence.service
@@ -19,6 +20,7 @@ cleanup() {
   loginctl terminate-user "$evidence_user" >/dev/null 2>&1 || true
   userdel --remove "$evidence_user" >/dev/null 2>&1 || true
   rm -f "$key" "$key.pub" "$policy"
+  chown -R "$workspace_owner" "$workspace" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
