@@ -5,6 +5,10 @@ import { Command, Flag } from "effect/unstable/cli";
 import { FileLifecycleJournalRepository } from "../contexts/daemon/adapters/FileLifecycleJournalRepository.ts";
 import { SocketDaemonLifecycleControl } from "../contexts/daemon/adapters/LifecycleControlTransport.ts";
 import { macLaunchAgent } from "../contexts/daemon/adapters/MacLaunchAgent.ts";
+import {
+  readCheckedManagedRelease,
+  stageManagedRelease,
+} from "../contexts/daemon/adapters/ManagedInstallation.ts";
 import { systemdUserService } from "../contexts/daemon/adapters/SystemdUserService.ts";
 import type {
   ConfigurationApplyResult,
@@ -18,6 +22,12 @@ import type {
   LifecycleOperationKind,
   LifecycleOperationStatus,
 } from "../contexts/daemon/models/LifecycleOperation.ts";
+import {
+  decodeUpgradeCheckReport,
+  decodeUpgradeCheckResult,
+  type UpgradeCheckReport,
+  type UpgradeCheckResult,
+} from "../contexts/daemon/models/ManagedUpgrade.ts";
 import type { LifecycleJournalRepository } from "../contexts/daemon/ports/LifecycleJournalRepository.ts";
 import type { NativeService } from "../contexts/daemon/ports/NativeService.ts";
 import { readDaemonEndpoint } from "../contexts/daemon/services/daemonStatus.ts";
@@ -157,6 +167,47 @@ export const lifecycleStatusLines = (status: LifecycleOperationStatus): Readonly
   line("Next permitted action", status.nextPermittedAction),
 ];
 
+export const upgradeStatusLines = (report: UpgradeCheckReport): ReadonlyArray<string> => [
+  line("Managed upgrade check", report.outcome),
+  line("Staged candidate", report.candidateReleaseId),
+  line("Active source release", report.sourceReleaseId),
+  line("Checked Daemon data", report.dataIdentity),
+  line("Checked retained set", report.retainedSetHash),
+  line("Checked at", report.checkedAt),
+  line("Checked current Workflows", String(report.checked.currentWorkflows)),
+  line("Checked retained Runs", String(report.checked.retainedRuns)),
+  line("Checked terminal Runs", String(report.checked.terminalRuns)),
+  line("Checked validation references", String(report.checked.validations)),
+  line("Checked readers", String(report.checked.readers)),
+  line("Checked Workflow Revisions", String(report.checked.revisions)),
+  line("Rollback-loss approval", report.rollbackApproval),
+  ...report.compatibilityFaults.map((fault) =>
+    line(
+      `Compatibility ${fault.code}${fault.revisionId === undefined ? "" : ` for ${fault.revisionId}`}`,
+      `${fault.detail} Scope: ${fault.affectedScope.join(", ") || "none"}. Remedy: ${fault.remedy}`,
+    ),
+  ),
+  ...report.existingFaults.map((fault) =>
+    line(
+      `Existing ${fault.code}${fault.revisionId === undefined ? "" : ` for ${fault.revisionId}`}`,
+      `${fault.detail} Scope: ${fault.affectedScope.join(", ") || "none"}. Remedy: ${fault.remedy}`,
+    ),
+  ),
+  ...(report.plan === undefined
+    ? []
+    : [
+        line("No-rollback plan", report.plan.planId),
+        line("Plan affected scope", report.plan.affectedScope.join(", ") || "none"),
+        line("Plan state version", report.plan.expectedStateVersion),
+        line(
+          "Migration consequence",
+          `${report.plan.migration.description}; rollback from data format ${report.plan.migration.toDataFormat} to ${report.plan.migration.fromDataFormat} is not available`,
+        ),
+        line("Plan expiry", report.plan.expiresAt),
+      ]),
+  line("Managed upgrade remedy", report.remedy),
+];
+
 const printStatus = (status: DaemonStatus): Effect.Effect<void> =>
   Effect.forEach(daemonStatusLines(status), (statusLine) => Console.log(statusLine), {
     discard: true,
@@ -207,6 +258,11 @@ const readConfigurationPatch = (file: string): Effect.Effect<unknown, string> =>
       `configuration file is not valid JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
   });
 
+const printUpgradeStatus = (report: UpgradeCheckReport): Effect.Effect<void> =>
+  Effect.forEach(upgradeStatusLines(report), (statusLine) => Console.log(statusLine), {
+    discard: true,
+  });
+
 const requestHash = (value: unknown): string =>
   new Bun.CryptoHasher("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -224,6 +280,78 @@ const lifecycleTry = <A>(body: () => A): Effect.Effect<A, LifecycleError> =>
         ? cause
         : new LifecycleError(
             "LIFECYCLE_FAILED",
+            cause instanceof Error ? cause.message : String(cause),
+            cause,
+          ),
+  });
+
+const upgradeRequest = (
+  paths: DaemonPaths,
+  candidateReleaseId: string,
+  approvalToken?: string,
+): Effect.Effect<UpgradeCheckResult, LifecycleError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const endpoint = readDaemonEndpoint(paths);
+      if (endpoint === undefined) {
+        throw new LifecycleError(
+          "DAEMON_NOT_READY",
+          "the Daemon is not ready; start it before managed upgrade preflight",
+        );
+      }
+      const response = await fetch("http://localhost/api/v1/daemon/upgrade-check", {
+        unix: endpoint.socketPath,
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          candidateReleaseId,
+          ...(approvalToken === undefined ? {} : { approvalToken }),
+        }),
+      } as RequestInit & { readonly unix: string });
+      const value = (await response.json()) as unknown;
+      if (!response.ok) {
+        const fault = value as { readonly code?: unknown; readonly message?: unknown };
+        throw new LifecycleError(
+          typeof fault.code === "string" ? fault.code : "UPGRADE_PREFLIGHT_FAILED",
+          typeof fault.message === "string" ? fault.message : "managed upgrade preflight failed",
+        );
+      }
+      return decodeUpgradeCheckResult(value);
+    },
+    catch: (cause) =>
+      cause instanceof LifecycleError
+        ? cause
+        : new LifecycleError(
+            "UPGRADE_PREFLIGHT_FAILED",
+            cause instanceof Error ? cause.message : String(cause),
+            cause,
+          ),
+  });
+
+const latestUpgrade = (
+  paths: DaemonPaths,
+): Effect.Effect<UpgradeCheckReport | undefined, LifecycleError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const endpoint = readDaemonEndpoint(paths);
+      if (endpoint === undefined) return undefined;
+      const response = await fetch("http://localhost/api/v1/daemon/upgrade-check", {
+        unix: endpoint.socketPath,
+      } as RequestInit & { readonly unix: string });
+      if (response.status === 404) return undefined;
+      if (!response.ok) {
+        throw new LifecycleError(
+          "UPGRADE_STATUS_FAILED",
+          "the Daemon refused the managed upgrade status read",
+        );
+      }
+      return decodeUpgradeCheckReport(await response.json());
+    },
+    catch: (cause) =>
+      cause instanceof LifecycleError
+        ? cause
+        : new LifecycleError(
+            "UPGRADE_STATUS_FAILED",
             cause instanceof Error ? cause.message : String(cause),
             cause,
           ),
@@ -430,6 +558,9 @@ const status = Command.make(
         "/api/v1/daemon/configuration",
       ).pipe(Effect.catch((message) => commandFailed(message)));
     }
+    const upgrade = yield* latestUpgrade(paths).pipe(
+      Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+    );
     if (json) {
       yield* Console.log(
         JSON.stringify({
@@ -437,6 +568,7 @@ const status = Command.make(
           daemon,
           ...(lifecycle === undefined ? {} : { lifecycle }),
           ...(configuration === undefined ? {} : { configuration }),
+          ...(upgrade === undefined ? {} : { upgrade }),
         }),
       );
     } else {
@@ -447,6 +579,7 @@ const status = Command.make(
           yield* Console.log(statusLine);
         }
       }
+      if (upgrade !== undefined) yield* printUpgradeStatus(upgrade);
     }
   }),
 ).pipe(Command.withDescription("Inspect the installation and service without starting work"));
@@ -581,6 +714,85 @@ const keepRunningAfterLogout = Command.make(
   ),
 );
 
+const upgrade = Command.make(
+  "upgrade",
+  {
+    version: Flag.string("version"),
+    check: Flag.boolean("check"),
+    approveNoRollback: Flag.string("approve-no-rollback").pipe(Flag.optional),
+  },
+  Effect.fn(function* ({ version, check, approveNoRollback }) {
+    if (!check) {
+      return yield* clientExit(
+        2,
+        "managed release activation is separate; use --check before a later activation request",
+      );
+    }
+    const paths = yield* lifecycleTry(hostPaths).pipe(
+      Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+    );
+    let candidateReleaseId: string;
+    if (Option.isSome(approveNoRollback)) {
+      const recorded = yield* latestUpgrade(paths).pipe(
+        Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+      );
+      if (
+        recorded === undefined ||
+        recorded.plan === undefined ||
+        (recorded.outcome !== "approval-required" &&
+          !(recorded.outcome === "staged" && recorded.rollbackApproval === "approved"))
+      ) {
+        return yield* commandFailed(
+          "no recorded no-rollback plan is waiting; repeat --check for the exact candidate",
+        );
+      }
+      const retained = yield* lifecycleTry(() =>
+        readCheckedManagedRelease(paths, recorded.candidateReleaseId),
+      ).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)));
+      if (retained.kojoVersion !== version) {
+        return yield* commandFailed(
+          `the approval plan names Kojo ${retained.kojoVersion}, not requested ${version}`,
+        );
+      }
+      candidateReleaseId = retained.releaseId;
+    } else {
+      const activePath = join(paths.installationRoot, "active-release");
+      const sourceReleaseId = yield* lifecycleTry(() => {
+        assertPrivateNode(activePath, "file");
+        return readFileSync(activePath, "utf8").trim();
+      }).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)));
+      const candidate = yield* stageManagedRelease({ paths, expectedVersion: version }).pipe(
+        Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+      );
+      const activeAfterStage = yield* lifecycleTry(() => readFileSync(activePath, "utf8").trim());
+      if (activeAfterStage !== sourceReleaseId) {
+        return yield* commandFailed(
+          "the active release changed while staging; repeat the check against the new source release",
+        );
+      }
+      candidateReleaseId = candidate.releaseId;
+    }
+    const result = yield* upgradeRequest(
+      paths,
+      candidateReleaseId,
+      Option.isSome(approveNoRollback) ? approveNoRollback.value : undefined,
+    ).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)));
+    yield* printUpgradeStatus(result.report);
+    if (result.approvalToken !== undefined) {
+      yield* Console.log(
+        `Approval token: ${result.approvalToken}. Use --approve-no-rollback with this exact candidate only after review.`,
+      );
+    }
+    if (result.report.outcome !== "staged") {
+      return yield* clientExit(1, `managed upgrade check outcome: ${result.report.outcome}`);
+    }
+  }),
+).pipe(
+  Command.withDescription(
+    "Stage and check one exact managed release without drain, download, package change, or Workflow execution",
+  ),
+);
+
 export const daemon = Command.make("daemon").pipe(
   Command.withDescription("Install and inspect the one managed Daemon for this OS user"),
   Command.withSubcommands([
@@ -593,5 +805,6 @@ export const daemon = Command.make("daemon").pipe(
     disable,
     configure,
     keepRunningAfterLogout,
+    upgrade,
   ]),
 );

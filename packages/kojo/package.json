@@ -68,6 +68,7 @@
   },
   "files": [
     "console",
+    "managed-release.json",
     "src"
   ],
   "dependencies": {

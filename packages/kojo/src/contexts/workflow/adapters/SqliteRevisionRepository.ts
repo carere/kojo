@@ -217,6 +217,32 @@ export class SqliteRevisionRepository {
   ): Effect.Effect<RevisionDetails, RevisionMaintenanceError> =>
     Effect.try({ try: () => this.#details(revisionId, observedAt), catch: failed });
 
+  /** Read-only exact-content inspection for the Daemon upgrade preflight. */
+  readonly inspectForPreflight = (
+    revisionId: string,
+  ): Effect.Effect<
+    {
+      readonly revisionId: string;
+      readonly packageGraphId: string;
+      readonly manifest: RevisionManifest;
+      readonly faults: ReadonlyArray<RevisionFault>;
+    },
+    RevisionMaintenanceError
+  > =>
+    Effect.try({
+      try: () => {
+        const row = this.#revision(revisionId);
+        const manifest = this.#manifest(row);
+        return {
+          revisionId,
+          packageGraphId: row.package_graph_id,
+          manifest,
+          faults: this.#faults(row, manifest),
+        };
+      },
+      catch: failed,
+    });
+
   readonly protectValidation = (
     revisionId: string,
     validationId: string,
