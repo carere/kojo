@@ -108,3 +108,69 @@ test("shows the exact pinned-content fault and repair remedy for a held Run", as
     page.getByText("Remedy: Restore the exact retained package bytes. Do not refresh this Run."),
   ).toBeVisible();
 });
+
+test("requires acknowledgement and separates durable cancellation intent from confirmation", async ({
+  page,
+}) => {
+  let cancelled = false;
+  await page.route("**/api/v1/runs/run-cancel-control/actions/cancel", async (route) => {
+    cancelled = true;
+    await route.fulfill({
+      contentType: "application/json",
+      status: 202,
+      body: JSON.stringify({
+        kind: "cancel",
+        runId: "run-cancel-control",
+        cancellation: "requested",
+        executionStopped: false,
+        state: "executing",
+      }),
+    });
+  });
+  await page.route("**/api/v1/runs/run-cancel-control", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        runId: "run-cancel-control",
+        projectId: "project-browser-fixture",
+        workflowName: "compile",
+        revisionId: "a".repeat(64),
+        packageGraphId: "b".repeat(64),
+        state: "executing",
+        admittedAt: "2026-09-01T00:00:00.000Z",
+        startedAt: "2026-09-01T00:00:01.000Z",
+        phases: [],
+        ...(cancelled
+          ? {
+              cancellation: {
+                state: "requested",
+                source: "run",
+                requestedAt: "2026-09-01T00:00:02.000Z",
+              },
+              cleanup: { state: "pending" },
+            }
+          : {}),
+      }),
+    });
+  });
+  await page.goto(launch());
+  await expect(page.getByText("Access active", { exact: true })).toBeVisible();
+  await page.goto(`${origin}/runs/run-cancel-control`);
+
+  const cancel = page.getByRole("button", { name: "Cancel Run" });
+  await expect(cancel).toBeDisabled();
+  await page
+    .getByText("I understand that cancellation does not undo completed effects", { exact: false })
+    .click();
+  await expect(cancel).toBeEnabled();
+  await cancel.click();
+  await expect(
+    page.getByText("Cancellation intent is durable. Execution stop is not confirmed.", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Cancellation requested — execution stop is not confirmed"),
+  ).toBeVisible();
+  await expect(page.getByText("Resource cleanup: pending")).toBeVisible();
+});

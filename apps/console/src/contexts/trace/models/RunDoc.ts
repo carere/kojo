@@ -172,6 +172,22 @@ export interface RunDoc {
       readonly detail: string;
       readonly remedy: string;
     };
+    readonly cancellation?: {
+      readonly state: "requested" | "confirmed";
+      readonly source: "run" | "forced-workflow-stop";
+      readonly requestedAt: string;
+      readonly confirmedAt?: string;
+      readonly targetSetId?: string;
+    };
+    readonly recovery?: {
+      readonly state: "interrupted-sibling";
+      readonly interruptedAt: string;
+      readonly detail: string;
+    };
+    readonly cleanup?: {
+      readonly state: "not-required" | "pending" | "confirmed" | "fault";
+      readonly detail?: string;
+    };
   };
   readonly run: {
     readonly run: {
@@ -193,7 +209,7 @@ export interface RunDoc {
       /** The image the containers were built from, when anything resolved one. */
       readonly imageDigest?: string;
     };
-    readonly outcome?: "succeeded" | "failed" | "suspended";
+    readonly outcome?: "succeeded" | "failed" | "suspended" | "cancelled";
     readonly finishedAt?: number;
     readonly inFlight?: InFlightLine;
   };

@@ -75,5 +75,8 @@ export interface StopWorkflowResult {
   readonly projectId: string;
   readonly workflowName: string;
   readonly activity: "inactive";
-  readonly admittedRunsContinue: true;
+  readonly admittedRunsContinue: boolean;
+  readonly forced?: boolean;
+  readonly targetSetId?: string;
+  readonly targetedRunIds?: ReadonlyArray<string>;
 }

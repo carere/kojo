@@ -9,6 +9,7 @@ import {
 import { decodeRunnerIdentity, decodeSha256 } from "../../shared/models/identity.ts";
 import { decodeArtifactChunkBody } from "../contracts/artifact.ts";
 import {
+  decodeCancelRunBody,
   decodeCommitActionResultBody,
   decodeExecuteRunBody,
   decodeOperationReplyBody,
@@ -74,6 +75,8 @@ export const decodeRunnerFrame = (input: unknown): DecodeResult<RunnerFrame> => 
     body = prefixIssues(decodeRegisterRevisionBody(base.value.body), ["body"]);
   } else if (base.value.kind === "ExecuteRun") {
     body = prefixIssues(decodeExecuteRunBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "CancelRun") {
+    body = prefixIssues(decodeCancelRunBody(base.value.body), ["body"]);
   } else if (base.value.kind === "ReadResult") {
     body = prefixIssues(decodeReadResultBody(base.value.body), ["body"]);
   } else if (base.value.kind === "CommitActionResult") {

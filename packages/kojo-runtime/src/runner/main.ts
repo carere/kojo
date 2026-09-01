@@ -180,6 +180,7 @@ export const inspectRegisteredRevision = async (
 /** Execute under the Daemon-assigned Run identity and return committed encoded Phase results. */
 export const executeRegisteredRevision = async (
   request: ExecuteRegisteredRequest,
+  signal?: AbortSignal,
 ): Promise<ExecuteRegisteredResult> => {
   const { bundle, payload } = await loadRegisteredRevision(request);
   const results = new Map(Object.entries(request.recordedResults));
@@ -282,7 +283,7 @@ export const executeRegisteredRevision = async (
     never,
     never
   >;
-  const outcome = await Effect.runPromise(execution);
+  const outcome = await Effect.runPromise(execution, signal === undefined ? undefined : { signal });
   const phases = Array.from(results.entries()).flatMap(([key, encodedResult]) => {
     if (initiallyRecorded.has(key)) return [];
     const tuple = JSON.parse(key) as [string, string, string, number];
@@ -534,6 +535,15 @@ const runPrivateProtocol = async (): Promise<void> => {
       string,
       { readonly controller: AbortController; readonly running: Promise<void> }
     >();
+    const executions = new Map<
+      string,
+      {
+        readonly revisionId: string;
+        readonly claimGeneration: number;
+        readonly controller: AbortController;
+        readonly running: Promise<void>;
+      }
+    >();
     const mutationReplies = new Map<
       string,
       {
@@ -679,17 +689,65 @@ const runPrivateProtocol = async (): Promise<void> => {
         if (registration === undefined || registration.purpose === "trigger") {
           throw new Error("the execution has no exact bound registration");
         }
-        const result = await withRetainedFactoryRoot(registration.executionRoot, () =>
-          executeRegisteredRevision({
-            ...registration,
-            runId: operation.runId,
-            payload: execute.payload,
-            recordedResults: execute.recordedResults,
-            deferredResults: execute.deferredResults,
-            scheduledWakeups: execute.scheduledWakeups,
-          }),
-        );
-        await reply(operation.requestId, result as unknown as JsonValue);
+        if (executions.has(operation.runId)) {
+          throw new Error("the Run already has an executing fiber in this Project Runner");
+        }
+        const controller = new AbortController();
+        const running = withRetainedFactoryRoot(registration.executionRoot, () =>
+          executeRegisteredRevision(
+            {
+              ...registration,
+              runId: operation.runId,
+              payload: execute.payload,
+              recordedResults: execute.recordedResults,
+              deferredResults: execute.deferredResults,
+              scheduledWakeups: execute.scheduledWakeups,
+            },
+            controller.signal,
+          ),
+        )
+          .then((result) => reply(operation.requestId, result as unknown as JsonValue))
+          .catch(async (cause) => {
+            await Effect.runPromise(
+              writeRunnerFrame(socket, {
+                version: 1,
+                kind: "Fault",
+                requestId: crypto.randomUUID(),
+                daemonInstanceId: binding.daemonInstanceId,
+                runnerInstanceId: binding.runnerInstanceId,
+                body: {
+                  operationRequestId: operation.requestId,
+                  runId: operation.runId,
+                  message: controller.signal.aborted
+                    ? "the Run execution was cancelled"
+                    : cause instanceof Error
+                      ? cause.message
+                      : String(cause),
+                },
+              }),
+            );
+          })
+          .finally(() => executions.delete(operation.runId));
+        executions.set(operation.runId, {
+          revisionId: operation.revisionId,
+          claimGeneration: operation.claimGeneration,
+          controller,
+          running,
+        });
+        continue;
+      }
+      if (operation.kind === "CancelRun") {
+        const active = executions.get(operation.runId);
+        if (
+          active === undefined ||
+          active.revisionId !== operation.revisionId ||
+          active.claimGeneration !== operation.claimGeneration
+        ) {
+          throw new Error("the cancellation does not match the executing Run authority");
+        }
+        active.controller.abort();
+        await active.running;
+        await reply(operation.requestId, { stopped: true });
         continue;
       }
       if (operation.kind === "StartTrigger") {
@@ -772,6 +830,8 @@ const runPrivateProtocol = async (): Promise<void> => {
         continue;
       }
       if (operation.kind === "Shutdown") {
+        for (const execution of executions.values()) execution.controller.abort();
+        await Promise.allSettled([...executions.values()].map((execution) => execution.running));
         await Promise.all([...triggers.keys()].map(stopTrigger));
         for (const pending of mutationReplies.values()) {
           pending.reject(new Error("the Project Runner stopped before the mutation reply"));

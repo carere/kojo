@@ -2,6 +2,7 @@ import { chmodSync, mkdirSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
 import type {
+  CancelRunResult,
   RunDocument,
   RunSnapshot,
   StartRunResult,
@@ -121,6 +122,9 @@ const documentOf = (run: DaemonRun, phases: ReadonlyArray<PhaseResult>): RunDocu
   ...(run.startedAt === undefined ? {} : { startedAt: run.startedAt }),
   ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
   ...(run.executionFault === undefined ? {} : { executionFault: run.executionFault }),
+  ...(run.cancellation === undefined ? {} : { cancellation: run.cancellation }),
+  ...(run.recovery === undefined ? {} : { recovery: run.recovery }),
+  ...(run.cleanup === undefined ? {} : { cleanup: run.cleanup }),
   phases: phases
     .filter((phase) => phase.description !== INTERNAL_PHASE_DESCRIPTION)
     .map((phase) => ({
@@ -164,6 +168,15 @@ interface ProjectTriggerGroup {
   readonly stop: () => Promise<void>;
 }
 
+interface ActiveExecutionControl {
+  readonly projectId: string;
+  readonly authority: RunAuthority;
+  /** Resolves only after the owned Project Runner process group has stopped. */
+  readonly cancelAndStop: (deadlineMillis: number) => Promise<void>;
+  /** Releases cancellation after returned Phase results reach durable storage. */
+  readonly settleCommit: () => void;
+}
+
 /** Daemon-owned no-Trigger admission, dispatch, and observation service. */
 export class RunApi {
   readonly #dataIdentity: string;
@@ -176,9 +189,11 @@ export class RunApi {
   readonly #triggers: SqliteTriggerRepository;
   readonly #gates: SqliteDaemonGateRepository;
   readonly #runnerIdleMillis: number;
+  readonly #runnerCleanupMillis: number;
   readonly #runnerSupervisor = new ProjectRunnerSupervisor();
   readonly #triggerProcesses = new Map<string, { readonly stop: () => Promise<void> }>();
   readonly #triggerGroups = new Map<string, ProjectTriggerGroup>();
+  readonly #activeExecutions = new Map<string, ActiveExecutionControl>();
   #pumping = false;
   #stopping = false;
 
@@ -193,6 +208,7 @@ export class RunApi {
     readonly triggers: SqliteTriggerRepository;
     readonly gates: SqliteDaemonGateRepository;
     readonly runnerIdleMillis?: number;
+    readonly runnerCleanupMillis?: number;
   }) {
     this.#dataIdentity = options.dataIdentity;
     this.#instanceId = options.instanceId;
@@ -204,6 +220,7 @@ export class RunApi {
     this.#triggers = options.triggers;
     this.#gates = options.gates;
     this.#runnerIdleMillis = options.runnerIdleMillis ?? DEFAULT_RUNNER_IDLE_MILLIS;
+    this.#runnerCleanupMillis = options.runnerCleanupMillis ?? 30_000;
   }
 
   readonly start = (options: {
@@ -271,16 +288,43 @@ export class RunApi {
     readonly workflowName: string;
     readonly requestId: string;
     readonly dataIdentity: string;
+    readonly force?: boolean;
   }): Effect.Effect<StopWorkflowResult, RunApiFault> =>
     Effect.tryPromise({
       try: async () => {
         if (options.dataIdentity !== this.#dataIdentity)
           throw new Error("the Daemon data identity changed");
+        const changedAt = new Date(this.#now()).toISOString();
+        if (options.force === true) {
+          const forced = await Effect.runPromise(
+            this.#runs.forceStopWorkflow({
+              dataIdentity: options.dataIdentity,
+              requestId: options.requestId,
+              canonicalRequest: canonicalJson({
+                operation: "forceStopWorkflow",
+                projectId: options.projectId,
+                workflowName: options.workflowName,
+              }),
+              projectId: options.projectId,
+              workflowName: options.workflowName,
+              acceptedAt: changedAt,
+            }),
+          );
+          await this.#stopTriggerPoller(options.projectId, options.workflowName);
+          await this.#stopCancelledProject(options.projectId, forced.targetRunIds, changedAt);
+          return {
+            kind: "stop",
+            projectId: options.projectId,
+            workflowName: options.workflowName,
+            activity: "inactive",
+            admittedRunsContinue: false,
+            forced: true,
+            targetSetId: forced.targetSetId,
+            targetedRunIds: forced.targetRunIds,
+          };
+        }
         const receipt = await Effect.runPromise(
-          this.#projects.stopActivity({
-            ...options,
-            changedAt: new Date(this.#now()).toISOString(),
-          }),
+          this.#projects.stopActivity({ ...options, changedAt }),
         );
         await this.#stopTriggerPoller(options.projectId, options.workflowName);
         return {
@@ -293,6 +337,83 @@ export class RunApi {
       },
       catch: runApiFault,
     });
+
+  readonly cancelRun = (options: {
+    readonly runId: string;
+    readonly requestId: string;
+    readonly dataIdentity: string;
+  }): Effect.Effect<CancelRunResult, RunApiFault> =>
+    Effect.tryPromise({
+      try: async () => {
+        if (options.dataIdentity !== this.#dataIdentity)
+          throw new Error("the Daemon data identity changed");
+        const requestedAt = new Date(this.#now()).toISOString();
+        const cancellation = await Effect.runPromise(
+          this.#runs.requestCancellation(options.runId, options.requestId, requestedAt),
+        );
+        if (cancellation.requiresExecutionStop) {
+          await this.#stopCancelledProject(
+            cancellation.run.projectId,
+            [cancellation.run.runId],
+            requestedAt,
+          );
+        }
+        await Effect.runPromise(this.#gates.reconcileTerminalInabilities()).catch(() => undefined);
+        const run = await Effect.runPromise(this.#runs.read(options.runId));
+        if (run === undefined) throw new Error("the selected Run was not found after cancellation");
+        return {
+          kind: "cancel",
+          runId: run.runId,
+          cancellation: run.cancellation?.state ?? "requested",
+          executionStopped: run.cancellation?.state === "confirmed",
+          state: run.state,
+        };
+      },
+      catch: runApiFault,
+    });
+
+  async #stopCancelledProject(
+    projectId: string,
+    targetRunIds: ReadonlyArray<string>,
+    requestedAt: string,
+  ): Promise<void> {
+    const deadline = Date.now() + this.#runnerCleanupMillis;
+    let controls: ReadonlyArray<ActiveExecutionControl> = [];
+    while (Date.now() <= deadline) {
+      controls = [
+        ...new Map(
+          targetRunIds.flatMap((runId) => {
+            const control = this.#activeExecutions.get(runId);
+            return control === undefined || control.projectId !== projectId
+              ? []
+              : [[control.authority.runnerInstanceId, control] as const];
+          }),
+        ).values(),
+      ];
+      if (controls.length > 0) break;
+      const targets = await Promise.all(
+        targetRunIds.map((runId) => Effect.runPromise(this.#runs.read(runId))),
+      );
+      if (targets.every((run) => run?.state !== "executing")) return;
+      await Bun.sleep(5);
+    }
+    if (controls.length === 0) return;
+    try {
+      const remainingMillis = Math.max(1, deadline - Date.now());
+      await Promise.all(controls.map((control) => control.cancelAndStop(remainingMillis)));
+    } catch (cause) {
+      const detail = `Project Runner termination is not confirmed: ${cause instanceof Error ? cause.message : String(cause)}`;
+      await Effect.runPromise(this.#runs.recordCleanupFault(targetRunIds, detail));
+      throw cause;
+    }
+    const stoppedAt = new Date(Math.max(this.#now(), Date.parse(requestedAt))).toISOString();
+    await Effect.runPromise(
+      this.#runs.confirmProjectRunnerStopped(projectId, targetRunIds, stoppedAt, {
+        state: "confirmed",
+      }),
+    );
+    void this.#pump();
+  }
 
   readonly restore = (): Effect.Effect<void, RunApiFault> =>
     Effect.tryPromise({
@@ -530,9 +651,14 @@ export class RunApi {
             : this.#runs.hold(authority, fault, heldAt),
         ).catch(() => undefined);
       } else if (authority !== undefined) {
-        await Effect.runPromise(
-          this.#runs.completeRun(authority, "failed", new Date(this.#now()).toISOString()),
-        ).catch(() => undefined);
+        const current = await Effect.runPromise(this.#runs.read(authority.runId)).catch(
+          () => undefined,
+        );
+        if (current?.cancellation === undefined) {
+          await Effect.runPromise(
+            this.#runs.completeRun(authority, "failed", new Date(this.#now()).toISOString()),
+          ).catch(() => undefined);
+        }
         await Effect.runPromise(this.#gates.reconcileTerminalInabilities()).catch(() => undefined);
       }
     } finally {
@@ -635,69 +761,73 @@ export class RunApi {
       },
       authority,
     );
-    const endedAt = new Date(this.#now()).toISOString();
-    const phaseByKey = new Map(
-      executed.phases.map((phase) => [
-        JSON.stringify([authority.runId, authority.revisionId, phase.phasePath, phase.attempt]),
-        phase,
-      ]),
-    );
-    for (const [key, result] of Object.entries(executed.recordedResults)) {
-      if (key in recordedResults) continue;
-      const tuple = JSON.parse(key) as [string, string, string, number];
-      if (tuple[0] !== authority.runId || tuple[1] !== authority.revisionId) {
-        throw new Error("the Runner returned a result outside its Run or revision");
-      }
-      const phase = phaseByKey.get(key);
-      if (phase === undefined) {
-        throw new Error("the Runner omitted timing for a committed Phase result");
-      }
-      await Effect.runPromise(
-        this.#runs.completePhase(authority, { ...phase, encodedResult: result }),
+    try {
+      const endedAt = new Date(this.#now()).toISOString();
+      const phaseByKey = new Map(
+        executed.phases.map((phase) => [
+          JSON.stringify([authority.runId, authority.revisionId, phase.phasePath, phase.attempt]),
+          phase,
+        ]),
       );
-    }
-    for (const application of applications) {
-      await Effect.runPromise(this.#gates.markApplied(authority, application.wakeupId, endedAt));
-    }
-    if (executed.outcome === "suspended") {
-      const asking = executed.askings[0];
-      if (asking === undefined) {
-        throw new Error("the Runner suspended without creating an Asking");
+      for (const [key, result] of Object.entries(executed.recordedResults)) {
+        if (key in recordedResults) continue;
+        const tuple = JSON.parse(key) as [string, string, string, number];
+        if (tuple[0] !== authority.runId || tuple[1] !== authority.revisionId) {
+          throw new Error("the Runner returned a result outside its Run or revision");
+        }
+        const phase = phaseByKey.get(key);
+        if (phase === undefined) {
+          throw new Error("the Runner omitted timing for a committed Phase result");
+        }
+        await Effect.runPromise(
+          this.#runs.completePhase(authority, { ...phase, encodedResult: result }),
+        );
       }
-      const parts = asking.internalDeferredName.split("/");
-      const escalated = parts.at(-1) === "escalated";
-      const numberAt = escalated ? parts.length - 2 : parts.length - 1;
-      const askingNumber = Number(parts[numberAt]);
-      if (parts[0] !== "gate" || !Number.isInteger(askingNumber) || askingNumber < 1) {
-        throw new Error("the Runner returned an invalid structured Asking identity");
+      for (const application of applications) {
+        await Effect.runPromise(this.#gates.markApplied(authority, application.wakeupId, endedAt));
       }
-      const gatePath = parts.slice(1, numberAt).join("/");
-      if (gatePath.length === 0) throw new Error("the Runner returned an empty Gate path");
-      const token = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
-      await Effect.runPromise(
-        this.#gates.createAskingAndSuspend(authority, {
-          identity: {
-            identityVersion: 1,
-            runId: authority.runId,
-            gatePath,
-            askingNumber,
-            escalationStage: escalated ? 1 : 0,
-          },
-          token,
-          projectId: registration.projectId,
-          workflowName: registration.workflowName,
-          description: asking.description,
-          actor: asking.actor,
-          choices: asking.choices,
-          deadline: new Date(asking.deadlineAt).toISOString(),
-          expiryBranch: asking.expiryBranch,
-          internalDeferredName: asking.internalDeferredName,
-          createdAt: new Date(asking.requestedAt).toISOString(),
-        }),
-      );
-      return;
+      if (executed.outcome === "suspended") {
+        const asking = executed.askings[0];
+        if (asking === undefined) {
+          throw new Error("the Runner suspended without creating an Asking");
+        }
+        const parts = asking.internalDeferredName.split("/");
+        const escalated = parts.at(-1) === "escalated";
+        const numberAt = escalated ? parts.length - 2 : parts.length - 1;
+        const askingNumber = Number(parts[numberAt]);
+        if (parts[0] !== "gate" || !Number.isInteger(askingNumber) || askingNumber < 1) {
+          throw new Error("the Runner returned an invalid structured Asking identity");
+        }
+        const gatePath = parts.slice(1, numberAt).join("/");
+        if (gatePath.length === 0) throw new Error("the Runner returned an empty Gate path");
+        const token = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
+        await Effect.runPromise(
+          this.#gates.createAskingAndSuspend(authority, {
+            identity: {
+              identityVersion: 1,
+              runId: authority.runId,
+              gatePath,
+              askingNumber,
+              escalationStage: escalated ? 1 : 0,
+            },
+            token,
+            projectId: registration.projectId,
+            workflowName: registration.workflowName,
+            description: asking.description,
+            actor: asking.actor,
+            choices: asking.choices,
+            deadline: new Date(asking.deadlineAt).toISOString(),
+            expiryBranch: asking.expiryBranch,
+            internalDeferredName: asking.internalDeferredName,
+            createdAt: new Date(asking.requestedAt).toISOString(),
+          }),
+        );
+        return;
+      }
+      await Effect.runPromise(this.#runs.completeRun(authority, executed.outcome, endedAt));
+    } finally {
+      this.#activeExecutions.get(authority.runId)?.settleCommit();
     }
-    await Effect.runPromise(this.#runs.completeRun(authority, executed.outcome, endedAt));
   }
 
   #pollerKey(projectId: string, workflowName: string): string {
@@ -1298,6 +1428,7 @@ export class RunApi {
         stdin: new Blob([request.connectionSecret]),
         stdout: "pipe",
         stderr: "pipe",
+        detached: true,
       });
       const output = new Response(child.stdout as ReadableStream<Uint8Array>).text();
       const error = new Response(child.stderr as ReadableStream<Uint8Array>).text();
@@ -1381,46 +1512,7 @@ export class RunApi {
       ) {
         throw new Error("the Project Runner did not commit exact revision registration");
       }
-      let result = registeredBody.result;
-      if (mode === "execute") {
-        if (authority === undefined || !("runId" in request))
-          throw new Error("Runner execution requires current authority");
-        const executeRequestId = crypto.randomUUID();
-        await Effect.runPromise(
-          writeRunnerFrame(socket, {
-            version: 1,
-            kind: "ExecuteRun",
-            requestId: executeRequestId,
-            daemonInstanceId: request.daemonInstanceId,
-            runnerInstanceId: request.runnerInstanceId,
-            runId: authority.runId,
-            revisionId: authority.revisionId,
-            claimGeneration: authority.generation,
-            body: {
-              executionVersion: 1,
-              workflowName: request.workflowName,
-              payload: request.payload,
-              recordedResults: request.recordedResults,
-              deferredResults: request.deferredResults,
-              scheduledWakeups: request.scheduledWakeups,
-            },
-          }),
-        );
-        const executed = await Effect.runPromise(reader.read);
-        const executedBody = executed.body as unknown as OperationReplyBody;
-        if (
-          executed.kind !== "Ready" ||
-          executed.daemonInstanceId !== request.daemonInstanceId ||
-          executed.runnerInstanceId !== request.runnerInstanceId ||
-          executedBody.operationRequestId !== executeRequestId ||
-          executedBody.state !== "committed" ||
-          executedBody.result === undefined
-        ) {
-          throw new Error("the Project Runner did not commit execution reply");
-        }
-        result = executedBody.result;
-      }
-      const shutdown = async (): Promise<void> => {
+      const inspectShutdown = async (): Promise<void> => {
         await Effect.runPromise(
           writeRunnerFrame(socket as Socket, {
             version: 1,
@@ -1448,77 +1540,273 @@ export class RunApi {
             `Project Runner exited ${exit}: ${standardError.trim()}${standardOutput.trim()}`,
           );
       };
-      if (mode === "execute") {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        let stopping: Promise<void> | undefined;
-        const idle = {
-          stop: (): Promise<void> => {
-            if (stopping !== undefined) return stopping;
-            if (timer !== undefined) clearTimeout(timer);
-            stopping = (async () => {
-              try {
-                await shutdown();
-              } catch (cause) {
-                if (!processExitConfirmed && child !== undefined) {
-                  if (child.exitCode === null) child.kill("SIGTERM");
-                  await child.exited;
-                  processExitConfirmed = true;
-                }
-                throw cause;
-              }
-            })().finally(async () => {
-              if (revisionReaderAcquired && processExitConfirmed) {
-                await Effect.runPromise(
-                  this.#revisions.confirmProcessExit(
-                    request.runnerInstanceId,
-                    new Date(this.#now()).toISOString(),
-                  ),
-                ).catch(() => undefined);
-                revisionReaderAcquired = false;
-              }
-              cleanup();
-              this.#runnerSupervisor.detach(request.projectId, request.runnerInstanceId);
-            });
-            return stopping;
-          },
-        };
+      if (mode === "inspect") {
+        await inspectShutdown();
+        return registeredBody.result as A;
+      }
+      if (authority === undefined || !("runId" in request))
+        throw new Error("Runner execution requires current authority");
+
+      const pending = new Map<
+        string,
+        { readonly resolve: (value: JsonValue) => void; readonly reject: (cause: unknown) => void }
+      >();
+      let stoppedRequestId: string | undefined;
+      const readerDone = (async () => {
+        while (true) {
+          const frame = await Effect.runPromise(reader.read);
+          if (
+            frame.daemonInstanceId !== request.daemonInstanceId ||
+            frame.runnerInstanceId !== request.runnerInstanceId
+          ) {
+            throw new Error("the Project Runner reply escaped its private binding");
+          }
+          const body = frame.body as unknown as {
+            readonly operationRequestId?: string;
+            readonly state?: string;
+            readonly result?: JsonValue;
+            readonly message?: string;
+          };
+          const selected =
+            typeof body.operationRequestId === "string"
+              ? pending.get(body.operationRequestId)
+              : undefined;
+          if (frame.kind === "Ready" && selected !== undefined && body.state === "committed") {
+            pending.delete(body.operationRequestId as string);
+            selected.resolve(body.result ?? null);
+            continue;
+          }
+          if (frame.kind === "Fault" && selected !== undefined) {
+            pending.delete(body.operationRequestId as string);
+            selected.reject(new Error(body.message ?? "the Project Runner reported a fault"));
+            continue;
+          }
+          if (frame.kind === "Stopped") {
+            stoppedRequestId = body.operationRequestId;
+            if (selected !== undefined) {
+              pending.delete(body.operationRequestId as string);
+              selected.resolve({ stopped: true });
+            }
+            return;
+          }
+          throw new Error(`the Project Runner sent unexpected ${frame.kind}`);
+        }
+      })().catch((cause) => {
+        for (const selected of pending.values()) selected.reject(cause);
+        pending.clear();
+      });
+      const command = async (
+        kind: "ExecuteRun" | "CancelRun" | "Shutdown",
+        body: JsonValue,
+      ): Promise<JsonValue> => {
+        const requestId = crypto.randomUUID();
+        const result = new Promise<JsonValue>((resolve, reject) => {
+          pending.set(requestId, { resolve, reject });
+        });
         await Effect.runPromise(
-          this.#runnerSupervisor.attach(request.projectId, {
-            instanceId: request.runnerInstanceId,
-            packageGraphId: request.packageGraphId,
-            purpose: "execution",
-            stop: Effect.tryPromise({ try: idle.stop, catch: runnerError }),
-          }),
-        );
-        timer = setTimeout(() => void idle.stop().catch(() => undefined), this.#runnerIdleMillis);
-        detached = true;
-      } else {
-        await shutdown();
+          writeRunnerFrame(
+            socket as Socket,
+            {
+              version: 1,
+              kind,
+              requestId,
+              daemonInstanceId: request.daemonInstanceId,
+              runnerInstanceId: request.runnerInstanceId,
+              ...(kind === "Shutdown"
+                ? {}
+                : {
+                    runId: authority.runId,
+                    revisionId: authority.revisionId,
+                    claimGeneration: authority.generation,
+                  }),
+              body,
+            } as RunnerFrame,
+          ),
+        ).catch((cause) => {
+          pending.delete(requestId);
+          throw cause;
+        });
+        return result;
+      };
+      const forceProcessGroup = async (): Promise<void> => {
+        if (child === undefined) return;
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          if (child.exitCode === null) child.kill("SIGKILL");
+        }
+        await child.exited;
+        for (let attempt = 0; attempt < 50; attempt += 1) {
+          try {
+            process.kill(-child.pid, 0);
+            await Bun.sleep(10);
+          } catch {
+            return;
+          }
+        }
+        throw new Error("the owned Project Runner process group did not terminate");
+      };
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let stopping: Promise<void> | undefined;
+      let executionState: "starting" | "running" | "finished" | "committed" = "starting";
+      let releaseCommit: (() => void) | undefined;
+      const commitSettled = new Promise<void>((resolve) => {
+        releaseCommit = resolve;
+      });
+      const processGroupExists = (): boolean => {
+        if (child === undefined) return false;
+        try {
+          process.kill(-child.pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const confirmRevisionReaderExit = async (): Promise<void> => {
+        if (!revisionReaderAcquired || !processExitConfirmed) return;
         await Effect.runPromise(
-          this.#revisions.releaseReader(revisionReaderId, {
-            kind: "process-exit",
-            runnerInstanceId: request.runnerInstanceId,
-            confirmedAt: new Date(this.#now()).toISOString(),
-          }),
+          this.#revisions.confirmProcessExit(
+            request.runnerInstanceId,
+            new Date(this.#now()).toISOString(),
+          ),
         );
         revisionReaderAcquired = false;
+      };
+      const stop = (): Promise<void> => {
+        stopping ??= (async () => {
+          if (timer !== undefined) clearTimeout(timer);
+          if (child !== undefined && child.exitCode === null) {
+            const graceful = await Promise.race([
+              command("Shutdown", null).then(() => true),
+              Bun.sleep(1_000).then(() => false),
+            ]).catch(() => false);
+            if (!graceful || stoppedRequestId === undefined) await forceProcessGroup();
+          }
+          await child?.exited;
+          if (processGroupExists()) await forceProcessGroup();
+          processExitConfirmed = true;
+          await readerDone.catch(() => undefined);
+          await Promise.all([output, error]);
+          await confirmRevisionReaderExit();
+        })().then(
+          () => {
+            cleanup();
+            this.#runnerSupervisor.detach(request.projectId, request.runnerInstanceId);
+            this.#activeExecutions.delete(authority.runId);
+          },
+          (cause) => {
+            stopping = undefined;
+            throw cause;
+          },
+        );
+        return stopping;
+      };
+      const control: ActiveExecutionControl = {
+        projectId: request.projectId,
+        authority,
+        cancelAndStop: async (deadlineMillis) => {
+          if (executionState === "finished") await commitSettled;
+          if (executionState !== "running") {
+            await stop();
+            return;
+          }
+          const cooperative = await Promise.race([
+            command("CancelRun", {
+              cancellationVersion: 1,
+              deadlineAt: new Date(this.#now() + deadlineMillis).toISOString(),
+            }).then(() => true),
+            Bun.sleep(deadlineMillis).then(() => false),
+          ]).catch(() => false);
+          if (!cooperative) {
+            if (timer !== undefined) clearTimeout(timer);
+            await forceProcessGroup();
+            processExitConfirmed = true;
+            await confirmRevisionReaderExit();
+            stopping ??= Promise.resolve().then(() => {
+              cleanup();
+              this.#runnerSupervisor.detach(request.projectId, request.runnerInstanceId);
+              this.#activeExecutions.delete(authority.runId);
+            });
+            await stopping;
+            return;
+          }
+          await stop();
+        },
+        settleCommit: () => {
+          releaseCommit?.();
+          releaseCommit = undefined;
+          if (executionState === "finished") {
+            executionState = "committed";
+            timer = setTimeout(() => void stop().catch(() => undefined), this.#runnerIdleMillis);
+          }
+        },
+      };
+      this.#activeExecutions.set(authority.runId, control);
+      await Effect.runPromise(
+        this.#runnerSupervisor.attach(request.projectId, {
+          instanceId: request.runnerInstanceId,
+          packageGraphId: request.packageGraphId,
+          purpose: "execution",
+          stop: Effect.tryPromise({ try: stop, catch: runnerError }),
+        }),
+      );
+      detached = true;
+      const beforeExecution = await Effect.runPromise(this.#runs.read(authority.runId));
+      if (beforeExecution?.cancellation?.state === "requested") {
+        await control.cancelAndStop(this.#runnerCleanupMillis);
+        await Effect.runPromise(
+          this.#runs.confirmProjectRunnerStopped(
+            request.projectId,
+            [authority.runId],
+            new Date(this.#now()).toISOString(),
+            { state: "confirmed" },
+          ),
+        );
+        throw new Error("the Run was cancelled before Workflow execution started");
       }
-      return result as A;
+      executionState = "running";
+      try {
+        const result = await command("ExecuteRun", {
+          executionVersion: 1,
+          workflowName: request.workflowName,
+          payload: request.payload,
+          recordedResults: request.recordedResults,
+          deferredResults: request.deferredResults,
+          scheduledWakeups: request.scheduledWakeups,
+        });
+        executionState = "finished";
+        return result as A;
+      } catch (cause) {
+        executionState = "finished";
+        releaseCommit?.();
+        releaseCommit = undefined;
+        await stop().catch(() => undefined);
+        throw cause;
+      }
     } finally {
       if (!detached) {
-        if (revisionReaderAcquired && child !== undefined) {
-          void child.exited
-            .then(() =>
-              Effect.runPromise(
-                this.#revisions.confirmProcessExit(
-                  request.runnerInstanceId,
-                  new Date(this.#now()).toISOString(),
-                ),
-              ),
-            )
-            .catch(() => undefined);
+        if (child !== undefined) {
+          if (child.exitCode === null) {
+            try {
+              process.kill(-child.pid, "SIGKILL");
+            } catch {
+              child.kill("SIGKILL");
+            }
+          }
+          await child.exited.catch(() => undefined);
+          processExitConfirmed = true;
+        }
+        if (revisionReaderAcquired && processExitConfirmed) {
+          await Effect.runPromise(
+            this.#revisions.confirmProcessExit(
+              request.runnerInstanceId,
+              new Date(this.#now()).toISOString(),
+            ),
+          ).catch(() => undefined);
+          revisionReaderAcquired = false;
         }
         cleanup();
+        if (authority !== undefined) this.#activeExecutions.delete(authority.runId);
       }
     }
   }

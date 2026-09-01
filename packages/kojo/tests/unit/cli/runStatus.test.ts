@@ -95,6 +95,31 @@ describe("Daemon Run status CLI contract", () => {
     expect(requestedRunExitCode(run("failed"), false)).toBe(0);
     expect(requestedRunExitCode(run("failed"), true)).toBe(1);
     expect(requestedRunExitCode(run("succeeded"), true)).toBe(0);
+    expect(requestedRunExitCode(run("cancelled"), true)).toBe(1);
+  });
+
+  it("shows cancellation intent, sibling recovery, and cleanup as separate facts", () => {
+    const subject: RunDocument = {
+      ...run("executing"),
+      cancellation: {
+        state: "requested",
+        source: "forced-workflow-stop",
+        requestedAt: "2026-09-01T00:00:01.000Z",
+        targetSetId: "target-one",
+      },
+      recovery: {
+        state: "interrupted-sibling",
+        interruptedAt: "2026-09-01T00:00:02.000Z",
+        detail: "same identity and pinned revision retained",
+      },
+      cleanup: { state: "pending" },
+    };
+    const line = runStatusLine(subject, false);
+    expect(line).toContain("Cancellation=requested:forced-workflow-stop");
+    expect(line).toContain(
+      "Recovery=interrupted-sibling:same identity and pinned revision retained",
+    );
+    expect(line).toContain("Cleanup=pending");
   });
 
   it("maps API faults to 1 and interruption to 130 without a server mutation", () => {

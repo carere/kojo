@@ -11,6 +11,7 @@ import type {
 } from "@carere/kojo-client-contracts/contexts/client/contracts/gate";
 import type { ProjectSnapshot } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
 import type {
+  CancelRunResult,
   RunDocument,
   RunSnapshot,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
@@ -199,6 +200,7 @@ const workflowMutation = async <A>(
   workflowName: string,
   action: "start" | "stop",
   payload?: JsonValue,
+  force = false,
 ): Promise<A> => {
   const bootstrap = await compatibility();
   return authorizedMutation<A>(
@@ -207,6 +209,7 @@ const workflowMutation = async <A>(
       requestId: crypto.randomUUID(),
       dataIdentity: bootstrap.dataIdentity,
       ...(payload === undefined ? {} : { payload }),
+      ...(force ? { force: true } : {}),
     },
   );
 };
@@ -227,6 +230,20 @@ export const stopWorkflow = (
   projectId: string,
   workflowName: string,
 ): Promise<StopWorkflowResult> => workflowMutation(projectId, workflowName, "stop");
+
+export const forceStopWorkflow = (
+  projectId: string,
+  workflowName: string,
+): Promise<StopWorkflowResult> =>
+  workflowMutation(projectId, workflowName, "stop", undefined, true);
+
+export const cancelRun = async (runId: string): Promise<CancelRunResult> => {
+  const bootstrap = await compatibility();
+  return authorizedMutation<CancelRunResult>(
+    `/api/v1/runs/${encodeURIComponent(runId)}/actions/cancel`,
+    { requestId: crypto.randomUUID(), dataIdentity: bootstrap.dataIdentity },
+  );
+};
 
 export const readAskings = (): Promise<AskingSnapshot> =>
   authorizedRead<AskingSnapshot>("/api/v1/askings");

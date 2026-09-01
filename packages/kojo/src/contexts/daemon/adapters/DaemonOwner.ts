@@ -105,6 +105,7 @@ export interface StartDaemonOptions {
   readonly now?: () => number;
   readonly automaticRefresh?: boolean;
   readonly runnerIdleMillis?: number;
+  readonly runnerCleanupMillis?: number;
 }
 
 const retainedDirectories = [
@@ -263,6 +264,9 @@ export const startDaemon = (
       ...(options.runnerIdleMillis === undefined
         ? {}
         : { runnerIdleMillis: options.runnerIdleMillis }),
+      ...(options.runnerCleanupMillis === undefined
+        ? {}
+        : { runnerCleanupMillis: options.runnerCleanupMillis }),
     });
     void Effect.runPromise(runApi.restore()).catch(() => undefined);
     const gateApi = new GateApi({
@@ -461,9 +465,12 @@ export const startDaemon = (
         }
         const record = input as Record<string, unknown>;
         if (
-          Object.keys(record).some((key) => key !== "requestId" && key !== "dataIdentity") ||
+          Object.keys(record).some(
+            (key) => key !== "requestId" && key !== "dataIdentity" && key !== "force",
+          ) ||
           typeof record.requestId !== "string" ||
-          typeof record.dataIdentity !== "string"
+          typeof record.dataIdentity !== "string" ||
+          ("force" in record && typeof record.force !== "boolean")
         ) {
           return problem(400, "invalid-stop", "the Stop request has invalid fields");
         }
@@ -474,6 +481,7 @@ export const startDaemon = (
               workflowName,
               requestId: record.requestId,
               dataIdentity: record.dataIdentity,
+              ...(record.force === true ? { force: true } : {}),
             }),
           ),
           202,
@@ -483,6 +491,38 @@ export const startDaemon = (
           409,
           "stop-refused",
           cause instanceof Error ? cause.message : "the Workflow was not stopped",
+        );
+      }
+    };
+    const cancelRun = async (request: Request, runId: string): Promise<Response> => {
+      try {
+        const input = await requestJson(request);
+        if (input === null || typeof input !== "object" || Array.isArray(input)) {
+          return problem(400, "invalid-cancel", "the cancellation request must be a JSON object");
+        }
+        const record = input as Record<string, unknown>;
+        if (
+          Object.keys(record).some((key) => key !== "requestId" && key !== "dataIdentity") ||
+          typeof record.requestId !== "string" ||
+          typeof record.dataIdentity !== "string"
+        ) {
+          return problem(400, "invalid-cancel", "the cancellation request has invalid fields");
+        }
+        return noStoreJson(
+          await Effect.runPromise(
+            runApi.cancelRun({
+              runId,
+              requestId: record.requestId,
+              dataIdentity: record.dataIdentity,
+            }),
+          ),
+          202,
+        );
+      } catch (cause) {
+        return problem(
+          409,
+          "cancel-refused",
+          cause instanceof Error ? cause.message : "the Run cancellation was refused",
         );
       }
     };
@@ -722,6 +762,12 @@ export const startDaemon = (
           if (request.method === "POST" && url.pathname === "/api/v1/gate-answers") {
             return answerGate(request, false);
           }
+          const cancelOneRun = url.pathname.match(
+            /^\/api\/v1\/runs\/([A-Za-z0-9_-]+)\/actions\/cancel$/,
+          );
+          if (request.method === "POST" && cancelOneRun !== null) {
+            return cancelRun(request, cancelOneRun[1] ?? "invalid");
+          }
           const projectAskings = url.pathname.match(
             /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/askings$/,
           );
@@ -833,6 +879,13 @@ export const startDaemon = (
         if (request.method === "POST" && url.pathname === "/api/v1/gate-answers") {
           if (!isJson(request)) return problem(415, "json-required", "Gate answer requires JSON");
           return answerGate(request, true);
+        }
+        const cancelOneRun = url.pathname.match(
+          /^\/api\/v1\/runs\/([A-Za-z0-9_-]+)\/actions\/cancel$/,
+        );
+        if (request.method === "POST" && cancelOneRun !== null) {
+          if (!isJson(request)) return problem(415, "json-required", "Cancel requires JSON");
+          return cancelRun(request, cancelOneRun[1] ?? "invalid");
         }
         const projectAskings = url.pathname.match(
           /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/askings$/,

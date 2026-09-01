@@ -218,10 +218,20 @@ const stopWorkflow = Command.make(
   {
     projectId: Argument.string("project-id"),
     workflowName: Argument.string("workflow-name"),
+    force: Flag.boolean("force"),
     wait: Flag.boolean("wait"),
+    timeout: Flag.string("timeout").pipe(Flag.optional),
     json: Flag.boolean("json"),
   },
-  Effect.fn(function* ({ projectId, workflowName, json }) {
+  Effect.fn(function* ({ projectId, workflowName, force, wait, timeout, json }) {
+    if (!wait && Option.isSome(timeout)) {
+      return yield* clientExit(2, "--timeout is valid only with --wait");
+    }
+    const duration = yield* Effect.try({
+      try: () => (wait ? timeoutMillis(Option.getOrUndefined(timeout) ?? "60s") : undefined),
+      catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
+    }).pipe(Effect.catch((message) => clientExit(2, message)));
+    const deadline = duration === undefined ? undefined : Date.now() + duration;
     const receipt = yield* Effect.tryPromise({
       try: async () => {
         const endpoint = readDaemonEndpoint(productionPaths());
@@ -235,6 +245,7 @@ const stopWorkflow = Command.make(
           body: JSON.stringify({
             requestId: crypto.randomUUID(),
             dataIdentity: endpoint.dataIdentity,
+            ...(force ? { force: true } : {}),
           }),
         } as RequestInit & { readonly unix: string });
         if (!response.ok) {
@@ -252,10 +263,46 @@ const stopWorkflow = Command.make(
     yield* Console.log(
       json
         ? JSON.stringify({ formatVersion: 1, ...receipt })
-        : `Workflow ${workflowName} is inactive. Its admitted Runs remain eligible.`,
+        : force
+          ? `Workflow ${workflowName} is inactive. Forced Stop targeted ${receipt.targetedRunIds?.length ?? 0} Runs.`
+          : `Workflow ${workflowName} is inactive. Its admitted Runs remain eligible.`,
     );
+    if (force && wait) {
+      const endpoint = readDaemonEndpoint(productionPaths());
+      if (endpoint === undefined) return yield* commandFailed("the Daemon endpoint disappeared");
+      for (const runId of receipt.targetedRunIds ?? []) {
+        let stopped = false;
+        while (deadline === undefined || Date.now() < deadline) {
+          const response = yield* Effect.promise(() =>
+            fetch(`http://localhost/api/v1/runs/${encodeURIComponent(runId)}`, {
+              unix: endpoint.socketPath,
+              headers: { accept: "application/json" },
+            } as RequestInit & { readonly unix: string }),
+          );
+          if (response.ok) {
+            const run = (yield* Effect.promise(() => response.json())) as RunDocument;
+            if (run.state === "cancelled") {
+              stopped = true;
+              break;
+            }
+            if (run.state === "succeeded" || run.state === "failed") {
+              return yield* clientExit(
+                1,
+                `Run ${runId} reached ${run.state}; forced cancellation did not take effect`,
+              );
+            }
+          }
+          yield* Effect.sleep("50 millis");
+        }
+        if (!stopped) {
+          return yield* clientExit(3, `Forced Stop target ${runId} still has executing work`);
+        }
+      }
+    }
   }),
-).pipe(Command.withDescription("Stop future Trigger admission without cancelling admitted Runs"));
+).pipe(
+  Command.withDescription("Stop future Trigger admission; --force cancels the accepted target set"),
+);
 
 const list = Command.make(
   "list",

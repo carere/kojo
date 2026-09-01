@@ -37,6 +37,9 @@ export const useRun = (runId: () => string): UseQueryResult<RunDoc, Error> =>
             state: run.state,
             ...(run.queueReason === undefined ? {} : { queueReason: run.queueReason }),
             ...(run.executionFault === undefined ? {} : { executionFault: run.executionFault }),
+            ...(run.cancellation === undefined ? {} : { cancellation: run.cancellation }),
+            ...(run.recovery === undefined ? {} : { recovery: run.recovery }),
+            ...(run.cleanup === undefined ? {} : { cleanup: run.cleanup }),
           },
           run: {
             run: {
@@ -49,7 +52,9 @@ export const useRun = (runId: () => string): UseQueryResult<RunDoc, Error> =>
               configDigest: run.packageGraphId.slice(0, 12),
               host: "local Host",
             },
-            ...(run.state === "succeeded" || run.state === "failed" ? { outcome: run.state } : {}),
+            ...(run.state === "succeeded" || run.state === "failed" || run.state === "cancelled"
+              ? { outcome: run.state }
+              : {}),
             ...(run.finishedAt === undefined ? {} : { finishedAt: Date.parse(run.finishedAt) }),
           },
           phases: run.phases.map((phase) => ({
@@ -77,6 +82,8 @@ export const useRun = (runId: () => string): UseQueryResult<RunDoc, Error> =>
     }) => {
       if (refused(query.state.error)) return false as const;
       const outcome = query.state.data?.run.outcome;
-      return outcome === "succeeded" || outcome === "failed" ? (false as const) : pollMillis;
+      return outcome === "succeeded" || outcome === "failed" || outcome === "cancelled"
+        ? (false as const)
+        : pollMillis;
     },
   }));
