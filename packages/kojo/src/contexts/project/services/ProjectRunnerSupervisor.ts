@@ -26,12 +26,12 @@ export class ProjectRunnerSupervisor {
     return this.#projects.get(projectId)?.handle?.packageGraphId;
   }
 
-  prepare<A>(options: {
+  prepare<A, StopError, LoadError>(options: {
     readonly projectId: string;
     readonly packageGraphId: string;
-    readonly stopCurrentPolling: Effect.Effect<void, ProjectRunnerError>;
-    readonly load: Effect.Effect<A, ProjectRunnerError>;
-  }): Effect.Effect<A, ProjectRunnerError> {
+    readonly stopCurrentPolling: Effect.Effect<void, StopError>;
+    readonly load: Effect.Effect<A, LoadError>;
+  }): Effect.Effect<A, ProjectRunnerError | StopError | LoadError> {
     const supervisor = this;
     return Effect.gen(function* () {
       const prior = supervisor.#projects.get(options.projectId);

@@ -476,7 +476,7 @@ export class RunApi {
                 }),
               };
             },
-            catch: runnerError,
+            catch: (cause) => (cause instanceof RetainedContentFault ? cause : runnerError(cause)),
           }),
         }),
       );
@@ -1139,6 +1139,20 @@ export class RunApi {
           }
           const key = registrationKey(revision.revisionId, revision.workflowName);
           if (registrations.has(key)) return;
+          await Effect.runPromise(
+            this.#revisions.acquireReader({
+              readerId: JSON.stringify([
+                "runner-registration",
+                runnerInstanceId,
+                revision.revisionId,
+                revision.workflowName,
+              ]),
+              revisionId: revision.revisionId,
+              kind: "loaded",
+              runnerInstanceId,
+              acquiredAt: new Date(this.#now()).toISOString(),
+            }),
+          );
           const registered = await command("RegisterRevision", {
             registrationVersion: 1,
             purpose: "trigger",
@@ -1161,20 +1175,6 @@ export class RunApi {
           ) {
             throw new Error("the Project Runner did not register one authored Trigger");
           }
-          await Effect.runPromise(
-            this.#revisions.acquireReader({
-              readerId: JSON.stringify([
-                "runner-registration",
-                runnerInstanceId,
-                revision.revisionId,
-                revision.workflowName,
-              ]),
-              revisionId: revision.revisionId,
-              kind: "loaded",
-              runnerInstanceId,
-              acquiredAt: new Date(this.#now()).toISOString(),
-            }),
-          );
           registrations.set(key, { revision, materialized, pollerId });
           const started = await command("StartTrigger", {
             pollerId,
@@ -1258,6 +1258,7 @@ export class RunApi {
     let socket: Socket | undefined;
     let child: ReturnType<typeof Bun.spawn> | undefined;
     let detached = false;
+    let processExitConfirmed = false;
     const revisionReaderId = JSON.stringify([
       "runner-registration",
       request.runnerInstanceId,
@@ -1338,6 +1339,16 @@ export class RunApi {
           },
         }),
       );
+      await Effect.runPromise(
+        this.#revisions.acquireReader({
+          readerId: revisionReaderId,
+          revisionId: request.revisionId,
+          kind: "loaded",
+          runnerInstanceId: request.runnerInstanceId,
+          acquiredAt: new Date(this.#now()).toISOString(),
+        }),
+      );
+      revisionReaderAcquired = true;
       const registerRequestId = crypto.randomUUID();
       await Effect.runPromise(
         writeRunnerFrame(socket, {
@@ -1370,16 +1381,6 @@ export class RunApi {
       ) {
         throw new Error("the Project Runner did not commit exact revision registration");
       }
-      await Effect.runPromise(
-        this.#revisions.acquireReader({
-          readerId: revisionReaderId,
-          revisionId: request.revisionId,
-          kind: "loaded",
-          runnerInstanceId: request.runnerInstanceId,
-          acquiredAt: new Date(this.#now()).toISOString(),
-        }),
-      );
-      revisionReaderAcquired = true;
       let result = registeredBody.result;
       if (mode === "execute") {
         if (authority === undefined || !("runId" in request))
@@ -1440,6 +1441,7 @@ export class RunApi {
         }
         socket?.end();
         const exit = await child?.exited;
+        processExitConfirmed = true;
         const [standardOutput, standardError] = await Promise.all([output, error]);
         if (exit !== 0)
           throw new Error(
@@ -1453,14 +1455,24 @@ export class RunApi {
           stop: (): Promise<void> => {
             if (stopping !== undefined) return stopping;
             if (timer !== undefined) clearTimeout(timer);
-            stopping = shutdown().finally(async () => {
-              if (revisionReaderAcquired) {
+            stopping = (async () => {
+              try {
+                await shutdown();
+              } catch (cause) {
+                if (!processExitConfirmed && child !== undefined) {
+                  if (child.exitCode === null) child.kill("SIGTERM");
+                  await child.exited;
+                  processExitConfirmed = true;
+                }
+                throw cause;
+              }
+            })().finally(async () => {
+              if (revisionReaderAcquired && processExitConfirmed) {
                 await Effect.runPromise(
-                  this.#revisions.releaseReader(revisionReaderId, {
-                    kind: "process-exit",
-                    runnerInstanceId: request.runnerInstanceId,
-                    confirmedAt: new Date(this.#now()).toISOString(),
-                  }),
+                  this.#revisions.confirmProcessExit(
+                    request.runnerInstanceId,
+                    new Date(this.#now()).toISOString(),
+                  ),
                 ).catch(() => undefined);
                 revisionReaderAcquired = false;
               }
@@ -1493,7 +1505,21 @@ export class RunApi {
       }
       return result as A;
     } finally {
-      if (!detached) cleanup();
+      if (!detached) {
+        if (revisionReaderAcquired && child !== undefined) {
+          void child.exited
+            .then(() =>
+              Effect.runPromise(
+                this.#revisions.confirmProcessExit(
+                  request.runnerInstanceId,
+                  new Date(this.#now()).toISOString(),
+                ),
+              ),
+            )
+            .catch(() => undefined);
+        }
+        cleanup();
+      }
     }
   }
 }

@@ -64,6 +64,22 @@ afterEach(() => {
 });
 
 describe("Project Runner package switching", () => {
+  it("keeps a retained-content load fault available to the Run recovery transition", async () => {
+    const supervisor = new ProjectRunnerSupervisor();
+    const retainedContentFault = new Error("exact retained content is missing");
+
+    await expect(
+      Effect.runPromise(
+        supervisor.prepare({
+          projectId: "project-fault",
+          packageGraphId: "graph-missing",
+          stopCurrentPolling: Effect.void,
+          load: Effect.fail(retainedContentFault),
+        }),
+      ),
+    ).rejects.toBe(retainedContentFault);
+  });
+
   it("stops polling and confirms the old process before it loads the selected graph", async () => {
     const root = mkdtempSync(join(tmpdir(), "kojo-package-switch-"));
     roots.push(root);
