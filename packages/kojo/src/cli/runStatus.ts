@@ -1,4 +1,7 @@
-import type { RunDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
+import type {
+  CancelRunResult,
+  RunDocument,
+} from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 import { Console, Data, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import type { DaemonPaths } from "../contexts/daemon/models/DaemonPaths.ts";
@@ -53,6 +56,20 @@ export const runStatusLine = (run: RunDocument, json: boolean, details = false):
               `Fault=${run.executionFault.code}:${run.executionFault.detail}`,
               `Remedy=${run.executionFault.remedy}`,
             ]),
+        ...(run.cancellation === undefined
+          ? []
+          : [
+              `Cancellation=${run.cancellation.state}:${run.cancellation.source}`,
+              `CancellationRequested=${run.cancellation.requestedAt}`,
+            ]),
+        ...(run.recovery === undefined
+          ? []
+          : [`Recovery=${run.recovery.state}:${run.recovery.detail}`]),
+        ...(run.cleanup === undefined
+          ? []
+          : [
+              `Cleanup=${run.cleanup.state}${run.cleanup.detail === undefined ? "" : `:${run.cleanup.detail}`}`,
+            ]),
         `Phases=${run.phases.length}`,
         ...(details
           ? [
@@ -68,9 +85,10 @@ export const runStatusLine = (run: RunDocument, json: boolean, details = false):
       ].join("\t");
 
 export const requestedRunExitCode = (run: RunDocument, observingCondition: boolean): 0 | 1 =>
-  observingCondition && run.state === "failed" ? 1 : 0;
+  observingCondition && (run.state === "failed" || run.state === "cancelled") ? 1 : 0;
 
-const terminal = (run: RunDocument): boolean => run.state === "succeeded" || run.state === "failed";
+const terminal = (run: RunDocument): boolean =>
+  run.state === "succeeded" || run.state === "failed" || run.state === "cancelled";
 
 export const runStatusRequest = (
   runId: string,
@@ -147,4 +165,79 @@ const status = Command.make(
   }),
 ).pipe(Command.withDescription("Inspect, wait for, or follow one Daemon Run"));
 
-export const runStatusCommands = [status] as const;
+const cancel = Command.make(
+  "cancel",
+  {
+    runId: Argument.string("run"),
+    wait: Flag.boolean("wait"),
+    timeout: Flag.string("timeout").pipe(Flag.optional),
+    json: Flag.boolean("json"),
+  },
+  Effect.fn(function* ({ runId, wait, timeout, json }) {
+    if (!wait && Option.isSome(timeout)) {
+      return yield* clientExit(2, "--timeout is valid only with --wait");
+    }
+    const within = yield* Effect.try({
+      try: () => timeoutMillis(Option.getOrUndefined(timeout) ?? "60s"),
+      catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
+    }).pipe(Effect.catch((message) => clientExit(2, message)));
+    const deadline = within === undefined ? undefined : Date.now() + within;
+    const accepted = yield* Effect.tryPromise({
+      try: async () => {
+        const endpoint = readDaemonEndpoint(productionPaths());
+        if (endpoint === undefined)
+          throw new Error("the Daemon is not ready; run `kojo daemon start`");
+        const response = await fetch(
+          `http://localhost/api/v1/runs/${encodeURIComponent(runId)}/actions/cancel`,
+          {
+            unix: endpoint.socketPath,
+            method: "POST",
+            headers: { accept: "application/json", "content-type": "application/json" },
+            body: JSON.stringify({
+              requestId: crypto.randomUUID(),
+              dataIdentity: endpoint.dataIdentity,
+            }),
+          } as RequestInit & { readonly unix: string },
+        );
+        if (!response.ok) {
+          const body = (await response.json().catch(() => ({}))) as { readonly message?: string };
+          throw new Error(body.message ?? `the Daemon refused cancellation (${response.status})`);
+        }
+        return (await response.json()) as CancelRunResult;
+      },
+      catch: (cause) =>
+        new RunStatusClientError({
+          reason: cause instanceof Error ? cause.message : String(cause),
+        }),
+    }).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
+    if (!wait) {
+      yield* Console.log(
+        json
+          ? JSON.stringify({ formatVersion: 1, ...accepted })
+          : accepted.cancellation === "confirmed"
+            ? `Run ${runId} is Cancelled. Execution stopped.`
+            : `Cancellation requested for Run ${runId}. Execution stop is not confirmed.`,
+      );
+      return;
+    }
+    let observed = yield* readRun(runId).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
+    while (observed.state !== "cancelled") {
+      if (terminal(observed)) {
+        return yield* clientExit(
+          1,
+          `Run ${runId} reached ${observed.state}; cancellation did not become Cancelled`,
+        );
+      }
+      if (deadline !== undefined && Date.now() >= deadline) {
+        return yield* clientExit(3, `Run ${runId} still has unconfirmed cancellation intent`);
+      }
+      yield* Effect.sleep("50 millis");
+      observed = yield* readRun(runId).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
+    }
+    yield* Console.log(
+      json ? JSON.stringify({ formatVersion: 1, run: observed }) : `Run ${runId} is Cancelled.`,
+    );
+  }),
+).pipe(Command.withDescription("Request Run cancellation without owning its execution"));
+
+export const runStatusCommands = [status, cancel] as const;

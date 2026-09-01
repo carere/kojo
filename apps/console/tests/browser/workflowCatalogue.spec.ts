@@ -14,7 +14,29 @@ const launch = (): string => {
 };
 
 test("shows separate Workflow state in a Project-scoped Zaidan grid", async ({ page }) => {
+  await page.route("**/actions/stop", async (route) => {
+    const body = route.request().postDataJSON() as { readonly force?: boolean };
+    if (body.force !== true) {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({
+        kind: "stop",
+        projectId: "project-missing",
+        workflowName: "available",
+        activity: "inactive",
+        admittedRunsContinue: false,
+        forced: true,
+        targetSetId: "target-browser",
+        targetedRunIds: ["run-current"],
+      }),
+    });
+  });
   await page.goto(launch());
+  await expect(page.getByText("Access active", { exact: true })).toBeVisible();
   await page.goto("http://127.0.0.1:47243/");
   await page.getByRole("link", { name: "project-missing" }).click();
   await expect(page.getByRole("heading", { name: "Workflows" })).toBeVisible();
@@ -37,6 +59,16 @@ test("shows separate Workflow state in a Project-scoped Zaidan grid", async ({ p
   await expect(page.getByRole("columnheader", { name: "Actions and current Runs" })).toBeVisible();
   await page.getByRole("button", { name: "Stop" }).first().click();
   await expect(page.getByRole("status")).toContainText("Admitted Runs remain eligible");
+  const forced = page.getByRole("button", { name: "Stop with force" }).first();
+  await expect(forced).toBeDisabled();
+  await page
+    .getByText("I understand that forced Stop records cancellation", { exact: false })
+    .first()
+    .click();
+  await forced.click();
+  await expect(page.getByRole("status")).toContainText(
+    "Cancellation intent is separate from confirmed stop",
+  );
   await page.getByRole("button", { name: "Start Trigger" }).first().click();
   await expect(page.getByRole("status")).toContainText(
     "Trigger listening. No immediate Run was created.",

@@ -30,6 +30,11 @@ export interface ExecuteRunBody {
   readonly scheduledWakeups: Readonly<Record<string, string>>;
 }
 
+export interface CancelRunBody {
+  readonly cancellationVersion: 1;
+  readonly deadlineAt: string;
+}
+
 export interface ReadResultBody {
   readonly resultVersion: 1;
   readonly phasePath: string;
@@ -170,6 +175,16 @@ export const decodeExecuteRunBody = (input: unknown): DecodeResult<ExecuteRunBod
     deferredResults: deferredResults.value as Readonly<Record<string, JsonValue>>,
     scheduledWakeups: scheduledWakeups.value as Readonly<Record<string, string>>,
   });
+};
+
+export const decodeCancelRunBody = (input: unknown): DecodeResult<CancelRunBody> => {
+  const record = decodeClosedRecord(input, ["cancellationVersion", "deadlineAt"]);
+  if (!record.ok) return record;
+  if (record.value.cancellationVersion !== 1)
+    return decodeFailure(["cancellationVersion"], "Expected cancellation version 1");
+  const deadlineAt = instant(record.value.deadlineAt, ["deadlineAt"]);
+  if (!deadlineAt.ok) return deadlineAt;
+  return decodeSuccess({ cancellationVersion: 1, deadlineAt: deadlineAt.value });
 };
 
 export const decodeReadResultBody = (input: unknown): DecodeResult<ReadResultBody> => {

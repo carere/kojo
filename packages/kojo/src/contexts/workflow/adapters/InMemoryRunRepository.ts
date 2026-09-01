@@ -14,6 +14,15 @@ interface MemoryState {
   readonly slots: Map<string, RunAuthority>;
   readonly results: Map<string, PhaseResult>;
   readonly reservations: Map<string, string>;
+  readonly cancellationRequests: Map<string, string>;
+  readonly forcedStops: Map<
+    string,
+    {
+      readonly canonical: string;
+      readonly targetSetId: string;
+      readonly targetRunIds: ReadonlyArray<string>;
+    }
+  >;
   sequence: number;
   lastProjectId?: string;
   readonly continuationStreaks: Map<string, number>;
@@ -86,6 +95,8 @@ export const layer: Layer.Layer<RunRepository> = Layer.effect(
       slots: new Map(),
       results: new Map(),
       reservations: new Map(),
+      cancellationRequests: new Map(),
+      forcedStops: new Map(),
       continuationStreaks: new Map(),
       sequence: 0,
     };
@@ -401,6 +412,140 @@ export const layer: Layer.Layer<RunRepository> = Layer.effect(
           state.runs.set(authority.runId, { ...run, state: runState, finishedAt });
           state.claims.delete(authority.runId);
           state.slots.delete(authority.runId);
+        }),
+      requestCancellation: (runId, requestId, requestedAt) =>
+        attempt(() => {
+          const run = state.runs.get(runId);
+          if (run === undefined) {
+            throw new RunStoreError({
+              code: "RUN_NOT_FOUND",
+              message: `Run ${runId} was not found`,
+            });
+          }
+          const priorRunId = state.cancellationRequests.get(requestId);
+          if (priorRunId !== undefined && priorRunId !== runId) {
+            throw new RunStoreError({
+              code: "REQUEST_CONFLICT",
+              message: "the cancellation request ID already names another Run",
+            });
+          }
+          state.cancellationRequests.set(requestId, runId);
+          const alreadyRequested = run.cancellation !== undefined;
+          if (run.state === "succeeded" || run.state === "failed") {
+            throw new RunStoreError({
+              code: "RUN_NOT_ELIGIBLE",
+              message: "a completed Run cannot be cancelled",
+            });
+          }
+          if (run.state === "cancelled") {
+            return { run, alreadyRequested: true, requiresExecutionStop: false };
+          }
+          const requiresExecutionStop = run.state === "executing";
+          const next: DaemonRun = {
+            ...run,
+            ...(!requiresExecutionStop
+              ? { state: "cancelled" as const, finishedAt: requestedAt }
+              : {}),
+            cancellation: {
+              state: requiresExecutionStop ? "requested" : "confirmed",
+              source: "run",
+              requestedAt: run.cancellation?.requestedAt ?? requestedAt,
+              ...(!requiresExecutionStop ? { confirmedAt: requestedAt } : {}),
+            },
+            cleanup: { state: requiresExecutionStop ? "pending" : "not-required" },
+          };
+          state.runs.set(runId, next);
+          if (!requiresExecutionStop) {
+            state.reservations.delete(runId);
+            state.claims.delete(runId);
+            state.slots.delete(runId);
+          }
+          return { run: next, alreadyRequested, requiresExecutionStop };
+        }),
+      forceStopWorkflow: (request) =>
+        attempt(() => {
+          const receiptKey = JSON.stringify([request.dataIdentity, request.requestId]);
+          const prior = state.forcedStops.get(receiptKey);
+          if (prior !== undefined) {
+            if (prior.canonical !== request.canonicalRequest) {
+              throw new RunStoreError({
+                code: "REQUEST_CONFLICT",
+                message: "the forced Stop request ID already names different content",
+              });
+            }
+            return { ...prior, alreadyAccepted: true };
+          }
+          const targetSetId = crypto.randomUUID();
+          const targets = [...state.runs.values()].filter(
+            (run) =>
+              run.projectId === request.projectId &&
+              run.workflowName === request.workflowName &&
+              run.state !== "succeeded" &&
+              run.state !== "failed" &&
+              run.state !== "cancelled",
+          );
+          const targetRunIds = targets.map((run) => run.runId);
+          for (const run of targets) {
+            const executing = run.state === "executing";
+            state.runs.set(run.runId, {
+              ...run,
+              ...(executing ? {} : { state: "cancelled" as const, finishedAt: request.acceptedAt }),
+              cancellation: {
+                state: executing ? "requested" : "confirmed",
+                source: "forced-workflow-stop",
+                requestedAt: request.acceptedAt,
+                targetSetId,
+                ...(executing ? {} : { confirmedAt: request.acceptedAt }),
+              },
+              cleanup: { state: executing ? "pending" : "not-required" },
+            });
+            if (!executing) {
+              state.reservations.delete(run.runId);
+              state.claims.delete(run.runId);
+              state.slots.delete(run.runId);
+            }
+          }
+          const receipt = { canonical: request.canonicalRequest, targetSetId, targetRunIds };
+          state.forcedStops.set(receiptKey, receipt);
+          return { ...receipt, alreadyAccepted: false };
+        }),
+      confirmProjectRunnerStopped: (projectId, targetRunIds, stoppedAt, cleanup) =>
+        attempt(() => {
+          const targets = new Set(targetRunIds);
+          for (const run of state.runs.values()) {
+            if (run.projectId !== projectId || run.state !== "executing") continue;
+            state.claims.delete(run.runId);
+            state.slots.delete(run.runId);
+            if (targets.has(run.runId)) {
+              state.runs.set(run.runId, {
+                ...run,
+                state: "cancelled",
+                finishedAt: stoppedAt,
+                cancellation: {
+                  ...(run.cancellation ?? {
+                    source: "run" as const,
+                    requestedAt: stoppedAt,
+                  }),
+                  state: "confirmed",
+                  confirmedAt: stoppedAt,
+                },
+                cleanup,
+              });
+              continue;
+            }
+            state.runs.set(run.runId, {
+              ...run,
+              state: "queued",
+              queueKind: "continuation",
+              queueReason: "runner-starting",
+              recovery: {
+                state: "interrupted-sibling",
+                interruptedAt: stoppedAt,
+                detail:
+                  "The Project Runner stopped for another Run. This Run keeps its identity and pinned revision.",
+              },
+            });
+          }
         }),
       phases: (runId) =>
         Effect.sync(() =>

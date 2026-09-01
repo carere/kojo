@@ -4,6 +4,7 @@ import { createColumnHelper, createTable, tableFeatures } from "@tanstack/solid-
 import { createEffect, createMemo, createSignal, type JSX, Match, Switch } from "solid-js";
 import {
   ConsoleAccessError,
+  forceStopWorkflow,
   startManualWorkflow,
   startTriggerWorkflow,
   stopWorkflow,
@@ -45,6 +46,7 @@ const WorkflowActions = (props: {
 }): JSX.Element => {
   const [payload, setPayload] = createSignal("{}");
   const [pending, setPending] = createSignal(false);
+  const [forceAcknowledged, setForceAcknowledged] = createSignal(false);
   const trigger = () => props.workflow.trigger.state !== "not-declared";
   const start = async (): Promise<void> => {
     setPending(true);
@@ -80,6 +82,22 @@ const WorkflowActions = (props: {
       setPending(false);
     }
   };
+  const stopWithForce = async (): Promise<void> => {
+    if (!forceAcknowledged()) return;
+    setPending(true);
+    props.onNotice(undefined);
+    try {
+      const result = await forceStopWorkflow(props.workflow.projectId, props.workflow.workflowName);
+      props.onNotice(
+        `Forced Stop accepted target set ${result.targetSetId ?? "unknown"}: ${result.targetedRunIds?.length ?? 0} Runs. Cancellation intent is separate from confirmed stop.`,
+      );
+      setForceAcknowledged(false);
+    } catch (cause) {
+      props.onNotice(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPending(false);
+    }
+  };
   return (
     <div class="flex min-w-64 flex-col gap-2">
       {trigger() ? null : (
@@ -107,6 +125,14 @@ const WorkflowActions = (props: {
         >
           Stop
         </button>
+        <button
+          type="button"
+          disabled={pending() || !forceAcknowledged() || props.workflow.activity === "inactive"}
+          class="rounded border border-red-700 px-2 py-1 text-xs text-red-700 dark:text-red-300"
+          onClick={() => void stopWithForce()}
+        >
+          Stop with force
+        </button>
         <a
           class="px-2 py-1 text-xs underline"
           href={`/runs?project=${encodeURIComponent(props.workflow.projectId)}&workflow=${encodeURIComponent(props.workflow.workflowName)}`}
@@ -114,6 +140,17 @@ const WorkflowActions = (props: {
           Current Runs ({props.workflow.currentRuns.length})
         </a>
       </div>
+      <label class="flex items-start gap-2 text-xs">
+        <input
+          type="checkbox"
+          checked={forceAcknowledged()}
+          onChange={(event) => setForceAcknowledged(event.currentTarget.checked)}
+        />
+        <span>
+          I understand that forced Stop records cancellation for the current nonterminal target set.
+          It does not undo effects or prove Resource cleanup.
+        </span>
+      </label>
       {props.notice() === undefined ? null : <p role="status">{props.notice()}</p>}
     </div>
   );

@@ -1,6 +1,7 @@
 import { SoluxProvider } from "@carere/solux";
 import { Link, Outlet, useNavigate } from "@tanstack/solid-router";
-import { type JSX, Show } from "solid-js";
+import { createSignal, type JSX, Show } from "solid-js";
+import { cancelRun } from "../../daemon/services/browserAccess.ts";
 import { GateCard } from "../../gate/components/GateCard.tsx";
 import { useAskings } from "../../gate/hooks/useAskings.ts";
 import { type Asking, latestAskingOf } from "../../gate/models/Asking.ts";
@@ -45,11 +46,15 @@ const statusTones: Record<string, BadgeTone> = {
   held: "danger",
   succeeded: "good",
   failed: "danger",
+  cancelled: "danger",
 };
 
 /** How long the run has been going, or how long it took. Both come from the injected clock. */
 const elapsedOf = (doc: RunDoc, now: number): string => {
-  const finished = doc.run.outcome === "succeeded" || doc.run.outcome === "failed";
+  const finished =
+    doc.run.outcome === "succeeded" ||
+    doc.run.outcome === "failed" ||
+    doc.run.outcome === "cancelled";
   const until = finished ? (doc.run.finishedAt ?? now) : now;
   return axisDuration(until - doc.run.run.startedAt);
 };
@@ -90,11 +95,32 @@ export const RunView = (props: {
   const run = useRun(() => props.runId);
   const store = waterfallStore();
   const navigate = useNavigate();
+  const [cancelAcknowledged, setCancelAcknowledged] = createSignal(false);
+  const [cancelNotice, setCancelNotice] = createSignal<string>();
+  const [cancelPending, setCancelPending] = createSignal(false);
 
   const doc = () => settled(run);
   const status = (): RunStatus => doc()?.daemon?.state ?? doc()?.run.outcome ?? "executing";
   /** The server answered, and what it answered was *there is no such run*. */
   const missing = () => refusal(run);
+  const requestCancellation = async (): Promise<void> => {
+    if (!cancelAcknowledged()) return;
+    setCancelPending(true);
+    try {
+      const result = await cancelRun(props.runId);
+      setCancelNotice(
+        result.cancellation === "confirmed"
+          ? "Run cancellation is confirmed. Execution stopped."
+          : "Cancellation intent is durable. Execution stop is not confirmed.",
+      );
+      setCancelAcknowledged(false);
+      await run.refetch();
+    } catch (cause) {
+      setCancelNotice(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setCancelPending(false);
+    }
+  };
 
   /**
    * The askings, polled while this run can still move.
@@ -281,6 +307,73 @@ export const RunView = (props: {
                   <p class="mt-1 font-mono text-xs">Remedy: {fault().remedy}</p>
                 </Notice>
               )}
+            </Show>
+
+            <Show when={document().daemon?.cancellation}>
+              {(cancellation) => (
+                <Notice
+                  tone={cancellation().state === "confirmed" ? "empty" : "retrying"}
+                  title={
+                    cancellation().state === "confirmed"
+                      ? "Run Cancelled — execution stopped"
+                      : "Cancellation requested — execution stop is not confirmed"
+                  }
+                >
+                  <p class="mt-1">
+                    Source: {cancellation().source}. Requested: {cancellation().requestedAt}.
+                  </p>
+                </Notice>
+              )}
+            </Show>
+
+            <Show when={document().daemon?.recovery}>
+              {(recovery) => (
+                <Notice tone="retrying" title="Interrupted sibling recovery">
+                  <p class="mt-1">{recovery().detail}</p>
+                </Notice>
+              )}
+            </Show>
+
+            <Show when={document().daemon?.cleanup}>
+              {(cleanup) => (
+                <Notice
+                  tone={cleanup().state === "fault" ? "empty" : "retrying"}
+                  title={`Resource cleanup: ${cleanup().state}`}
+                >
+                  <Show when={cleanup().detail}>{(detail) => <p class="mt-1">{detail()}</p>}</Show>
+                </Notice>
+              )}
+            </Show>
+
+            <Show when={!isTerminal(status())}>
+              <section class="rounded border p-3" aria-label="Cancel Run">
+                <label class="flex items-start gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={cancelAcknowledged()}
+                    onChange={(event) => setCancelAcknowledged(event.currentTarget.checked)}
+                  />
+                  <span>
+                    I understand that cancellation does not undo completed effects or prove Resource
+                    cleanup.
+                  </span>
+                </label>
+                <button
+                  type="button"
+                  class="mt-2 rounded border border-red-700 px-3 py-1 text-red-700 text-sm dark:text-red-300"
+                  disabled={cancelPending() || !cancelAcknowledged()}
+                  onClick={() => void requestCancellation()}
+                >
+                  Cancel Run
+                </button>
+                <Show when={cancelNotice()}>
+                  {(notice) => (
+                    <p role="status" class="mt-2 text-sm">
+                      {notice()}
+                    </p>
+                  )}
+                </Show>
+              </section>
             </Show>
 
             {/*

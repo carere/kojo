@@ -1,8 +1,10 @@
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Context, type Effect } from "effect";
 import type {
+  CancellationRequestResult,
   ClaimedRun,
   DaemonRun,
+  ForcedStopResult,
   PhaseResult,
   ReservedRun,
   RunAuthority,
@@ -80,6 +82,25 @@ export class RunRepository extends Context.Service<
       authority: RunAuthority,
       state: "succeeded" | "failed",
       finishedAt: string,
+    ) => Effect.Effect<void, RunStoreError>;
+    readonly requestCancellation: (
+      runId: string,
+      requestId: string,
+      requestedAt: string,
+    ) => Effect.Effect<CancellationRequestResult, RunStoreError>;
+    readonly forceStopWorkflow: (request: {
+      readonly dataIdentity: string;
+      readonly requestId: string;
+      readonly canonicalRequest: string;
+      readonly projectId: string;
+      readonly workflowName: string;
+      readonly acceptedAt: string;
+    }) => Effect.Effect<ForcedStopResult, RunStoreError>;
+    readonly confirmProjectRunnerStopped: (
+      projectId: string,
+      targetRunIds: ReadonlyArray<string>,
+      stoppedAt: string,
+      cleanup: { readonly state: "confirmed" | "fault"; readonly detail?: string },
     ) => Effect.Effect<void, RunStoreError>;
     readonly phases: (runId: string) => Effect.Effect<ReadonlyArray<PhaseResult>, RunStoreError>;
   }

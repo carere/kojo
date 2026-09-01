@@ -53,10 +53,34 @@ export interface RunDocument {
     };
     readonly diagnostic?: string;
   };
+  readonly cancellation?: {
+    readonly state: "requested" | "confirmed";
+    readonly source: "run" | "forced-workflow-stop";
+    readonly requestedAt: string;
+    readonly confirmedAt?: string;
+    readonly targetSetId?: string;
+  };
+  readonly recovery?: {
+    readonly state: "interrupted-sibling";
+    readonly interruptedAt: string;
+    readonly detail: string;
+  };
+  readonly cleanup?: {
+    readonly state: "not-required" | "pending" | "confirmed" | "fault";
+    readonly detail?: string;
+  };
   readonly admittedAt: string;
   readonly startedAt?: string;
   readonly finishedAt?: string;
   readonly phases: ReadonlyArray<RunPhaseDocument>;
+}
+
+export interface CancelRunResult {
+  readonly kind: "cancel";
+  readonly runId: string;
+  readonly cancellation: "requested" | "confirmed";
+  readonly executionStopped: boolean;
+  readonly state: RunExecutionState;
 }
 
 export interface RunSnapshot {

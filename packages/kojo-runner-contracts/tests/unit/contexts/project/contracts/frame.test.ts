@@ -77,6 +77,30 @@ describe("Runner contract golden fixtures", () => {
     expect(decodeRunnerFrame(withoutAuthority).ok).toBe(false);
   });
 
+  it("accepts only the closed versioned cancellation deadline", () => {
+    const cancellation = {
+      ...execution,
+      kind: "CancelRun",
+      body: {
+        cancellationVersion: 1,
+        deadlineAt: "2026-09-01T00:00:30.000Z",
+      },
+    } as const;
+    expect(decodeRunnerFrame(cancellation).ok).toBe(true);
+    expect(
+      decodeRunnerFrame({
+        ...cancellation,
+        body: { ...cancellation.body, deadlineAt: "later" },
+      }).ok,
+    ).toBe(false);
+    expect(
+      decodeRunnerFrame({
+        ...cancellation,
+        body: { ...cancellation.body, force: true },
+      }).ok,
+    ).toBe(false);
+  });
+
   it("accepts a bounded Artifact chunk and rejects a larger chunk", () => {
     const chunk = {
       ...execution,

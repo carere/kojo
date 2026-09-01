@@ -48,10 +48,38 @@ export interface DaemonRun {
   readonly queueKind?: RunQueueKind;
   readonly queueReason?: RunQueueReason;
   readonly executionFault?: RunExecutionFault;
+  readonly cancellation?: {
+    readonly state: "requested" | "confirmed";
+    readonly source: "run" | "forced-workflow-stop";
+    readonly requestedAt: string;
+    readonly confirmedAt?: string;
+    readonly targetSetId?: string;
+  };
+  readonly recovery?: {
+    readonly state: "interrupted-sibling";
+    readonly interruptedAt: string;
+    readonly detail: string;
+  };
+  readonly cleanup?: {
+    readonly state: "not-required" | "pending" | "confirmed" | "fault";
+    readonly detail?: string;
+  };
   readonly admissionSequence: number;
   readonly admittedAt: string;
   readonly startedAt?: string;
   readonly finishedAt?: string;
+}
+
+export interface CancellationRequestResult {
+  readonly run: DaemonRun;
+  readonly alreadyRequested: boolean;
+  readonly requiresExecutionStop: boolean;
+}
+
+export interface ForcedStopResult {
+  readonly targetSetId: string;
+  readonly targetRunIds: ReadonlyArray<string>;
+  readonly alreadyAccepted: boolean;
 }
 
 export interface ClaimedRun {
