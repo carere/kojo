@@ -42,8 +42,10 @@ import { refreshFactory } from "../../workflow/services/refreshFactory.ts";
 import type { DaemonPaths } from "../models/DaemonPaths.ts";
 import type { DaemonEndpoint } from "../models/Endpoint.ts";
 import { LifecycleError } from "../models/LifecycleError.ts";
+import type { DaemonLifecycleControl } from "../ports/DaemonLifecycleControl.ts";
 import { activeConsoleRelease } from "../services/activeConsoleRelease.ts";
 import { browserAuthority } from "../services/browserAuthority.ts";
+import { DaemonLifecycleApi } from "../services/DaemonLifecycleApi.ts";
 import {
   assertPrivateNode,
   atomicPrivateFile,
@@ -51,7 +53,13 @@ import {
   removeOwnedPlainFile,
   removeOwnedSocket,
 } from "../services/secureHostPath.ts";
+import { FileLifecycleJournalRepository } from "./FileLifecycleJournalRepository.ts";
 import { HostClientRequestJournal } from "./HostClientRequestJournal.ts";
+import {
+  type LifecycleControlServer,
+  startLifecycleControlServer,
+} from "./LifecycleControlTransport.ts";
+import { SqliteDaemonLifecycleReceiptRepository } from "./SqliteDaemonLifecycleReceiptRepository.ts";
 
 interface LockHandle {
   readonly unlock: () => void;
@@ -100,6 +108,7 @@ const acquireLock = (path: string): LockHandle => {
 
 export interface RunningDaemon {
   readonly endpoint: DaemonEndpoint;
+  readonly lifecycleControl: DaemonLifecycleControl;
   readonly stopped: Effect.Effect<void, LifecycleError>;
   readonly stop: Effect.Effect<void, LifecycleError>;
 }
@@ -214,9 +223,11 @@ export const startDaemon = (
   const databasePath = join(paths.dataRoot, "kojo.db");
   const runtimeEndpoint = join(paths.runtimeRoot, "endpoint.json");
   const socketPath = join(paths.runtimeRoot, "daemon.sock");
+  const lifecycleSocketPath = join(paths.runtimeRoot, "lifecycle-control.sock");
   let database: Database | undefined;
   let socketServer: Bun.Server<unknown> | undefined;
   let consoleServer: Bun.Server<unknown> | undefined;
+  let lifecycleServer: LifecycleControlServer | undefined;
 
   try {
     if (existsSync(databasePath)) assertPrivateNode(databasePath, "file");
@@ -239,10 +250,23 @@ export const startDaemon = (
         dataIdentity,
       ]);
     }
+    const lifecycleIdentityPath = join(paths.dataRoot, "lifecycle", "data-identity");
+    if (existsSync(lifecycleIdentityPath)) {
+      assertPrivateNode(lifecycleIdentityPath, "file");
+      if (readFileSync(lifecycleIdentityPath, "utf8").trim() !== dataIdentity) {
+        throw new LifecycleError(
+          "DAEMON_DATA_IDENTITY_CONFLICT",
+          "the offline lifecycle identity does not match the sole Daemon owner",
+        );
+      }
+    } else {
+      atomicPrivateFile(lifecycleIdentityPath, `${dataIdentity}\n`);
+    }
 
     ensurePrivateDirectory(paths.runtimeRoot);
     removeOwnedPlainFile(runtimeEndpoint);
     removeOwnedSocket(socketPath);
+    removeOwnedSocket(lifecycleSocketPath);
 
     const instanceId = crypto.randomUUID();
     const authority = browserAuthority({ now });
@@ -254,6 +278,7 @@ export const startDaemon = (
     const revisionRepository = new SqliteRevisionRepository(database, paths.dataRoot);
     const triggerRepository = new SqliteTriggerRepository(database);
     const gateRepository = new SqliteDaemonGateRepository(database);
+    const lifecycleReceipts = new SqliteDaemonLifecycleReceiptRepository(database);
     const artifactRepository = new AtomicArtifactRepository(database, paths.dataRoot);
     const runApi = new RunApi({
       dataIdentity,
@@ -281,6 +306,28 @@ export const startDaemon = (
       ...(options.resourceRecoveryBoundary === undefined
         ? {}
         : { resourceRecoveryBoundary: options.resourceRecoveryBoundary }),
+      daemonDispatchHeld: lifecycleReceipts.activeDrainHeld(),
+    });
+    let restoreFailure: unknown;
+    const restorePromise = Effect.runPromise(runApi.restore()).catch((cause: unknown) => {
+      restoreFailure = cause;
+    });
+    const lifecycleControl = new DaemonLifecycleApi({
+      dataIdentity,
+      runs: runApi,
+      receipts: lifecycleReceipts,
+      ready: Effect.tryPromise({
+        try: async () => {
+          await restorePromise;
+          if (restoreFailure !== undefined) throw restoreFailure;
+        },
+        catch: (cause) =>
+          new LifecycleError(
+            "DAEMON_RESTORE_FAILED",
+            cause instanceof Error ? cause.message : String(cause),
+            cause,
+          ),
+      }),
     });
     const projectApi = new ProjectApi({
       dataIdentity,
@@ -291,7 +338,6 @@ export const startDaemon = (
       dataRoot: paths.dataRoot,
       runs: runApi,
     });
-    void Effect.runPromise(runApi.restore()).catch(() => undefined);
     const gateApi = new GateApi({
       dataIdentity,
       instanceId,
@@ -1130,6 +1176,11 @@ export const startDaemon = (
     });
     chmodSync(socketPath, 0o600);
     atomicPrivateFile(runtimeEndpoint, `${JSON.stringify(endpoint)}\n`);
+    lifecycleServer = startLifecycleControlServer({
+      socketPath: lifecycleSocketPath,
+      control: lifecycleControl,
+      journal: new FileLifecycleJournalRepository(join(paths.dataRoot, "lifecycle")),
+    });
 
     let resolveStopped: (() => void) | undefined;
     const stopped = new Promise<void>((resolve) => {
@@ -1144,6 +1195,7 @@ export const startDaemon = (
         clearInterval(gateDeadlineTimer);
         socketServer?.stop(true);
         consoleServer?.stop(true);
+        lifecycleServer?.stop();
         await Promise.allSettled([...projectRefreshes.values()]);
         await Effect.runPromise(runApi.shutdown());
         database?.close(false);
@@ -1166,12 +1218,14 @@ export const startDaemon = (
           );
     return {
       endpoint,
+      lifecycleControl,
       stopped: Effect.tryPromise({ try: () => stopped, catch: surfaceFailure }),
       stop: Effect.tryPromise({ try: stopPromise, catch: surfaceFailure }),
     };
   } catch (cause) {
     socketServer?.stop(true);
     consoleServer?.stop(true);
+    lifecycleServer?.stop();
     database?.close(false);
     lock.unlock();
     if (cause instanceof LifecycleError) throw cause;

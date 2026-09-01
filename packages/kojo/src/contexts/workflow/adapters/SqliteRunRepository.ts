@@ -1128,6 +1128,17 @@ export class SqliteRunRepository {
                    queue_kind = 'continuation', queue_reason = 'runner-starting'`,
                 [run.run_id, run.project_id, run.admission_sequence, queuedAt],
               );
+              this.#database.run(
+                `INSERT INTO workflow_run_recovery (run_id, state, interrupted_at, detail)
+                 VALUES (?, 'interrupted-sibling', ?, ?)
+                 ON CONFLICT(run_id) DO UPDATE SET interrupted_at = excluded.interrupted_at,
+                   detail = excluded.detail`,
+                [
+                  run.run_id,
+                  queuedAt,
+                  "The Daemon lifecycle interrupted execution. The same Run retains recovery state.",
+                ],
+              );
             }
           })
           .immediate(),

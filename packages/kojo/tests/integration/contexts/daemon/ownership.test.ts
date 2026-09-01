@@ -12,6 +12,8 @@ import { join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 import { startDaemon } from "../../../../src/contexts/daemon/adapters/DaemonOwner.ts";
+import { FileLifecycleJournalRepository } from "../../../../src/contexts/daemon/adapters/FileLifecycleJournalRepository.ts";
+import { SocketDaemonLifecycleControl } from "../../../../src/contexts/daemon/adapters/LifecycleControlTransport.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
 import { LifecycleError } from "../../../../src/contexts/daemon/models/LifecycleError.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
@@ -53,6 +55,7 @@ describe("one idle Daemon owns one data root", () => {
       expect(await response.json()).toEqual(daemon.endpoint);
       expect(lstatSync(join(hostPaths.dataRoot, "kojo.db")).mode & 0o077).toBe(0);
       expect(lstatSync(join(hostPaths.runtimeRoot, "daemon.sock")).mode & 0o077).toBe(0);
+      expect(lstatSync(join(hostPaths.runtimeRoot, "lifecycle-control.sock")).mode & 0o077).toBe(0);
       expect(lstatSync(join(hostPaths.runtimeRoot, "endpoint.json")).mode & 0o077).toBe(0);
       expect(
         JSON.parse(readFileSync(join(hostPaths.runtimeRoot, "endpoint.json"), "utf8")),
@@ -71,5 +74,52 @@ describe("one idle Daemon owns one data root", () => {
 
     expect(() => startDaemon(hostPaths)).toThrow("symbolic link");
     expect(readFileSync(target, "utf8")).toBe("evidence");
+  });
+
+  it("serves the durable handoff and owned cleanup through the production lifecycle socket", async () => {
+    const hostPaths = paths();
+    const daemon = startDaemon(hostPaths);
+    const journal = new FileLifecycleJournalRepository(join(hostPaths.dataRoot, "lifecycle"));
+    const operation = journal.begin({
+      operationId: "production-lifecycle-1",
+      dataIdentity: daemon.endpoint.dataIdentity,
+      originalRequestHash: "a".repeat(64),
+      kind: "stop",
+      sourceReleaseId: "kojo-0.1.0-bun-1.4.0",
+      startedAt: "2026-09-01T10:00:00.000Z",
+    });
+    const control = new SocketDaemonLifecycleControl(hostPaths.runtimeRoot, journal);
+
+    try {
+      const owner = await Effect.runPromise(
+        control.inspectPreflight(
+          operation.operationId,
+          operation.dataIdentity,
+          operation.originalRequestHash,
+        ),
+      );
+      expect(owner.daemonInstanceId).toBe(daemon.endpoint.instanceId);
+      expect(
+        (
+          await Effect.runPromise(
+            control.beginDrain(
+              operation.operationId,
+              operation.dataIdentity,
+              operation.originalRequestHash,
+            ),
+          )
+        ).executingRunIds,
+      ).toEqual([]);
+      const handoff = await Effect.runPromise(control.prepareHandoff(operation.operationId));
+      await Effect.runPromise(
+        control.confirmControllerReady(operation.operationId, handoff.digest),
+      );
+      expect(
+        (await Effect.runPromise(control.stopOwnedProcesses(operation.operationId, 30_000, false)))
+          .daemonInstanceId,
+      ).toBe(daemon.endpoint.instanceId);
+    } finally {
+      await Effect.runPromise(daemon.stop);
+    }
   });
 });

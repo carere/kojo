@@ -5,6 +5,7 @@ import {
   existsSync,
   fchmodSync,
   fstatSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -66,6 +67,7 @@ export const atomicPrivateFile = (path: string, content: string, mode = 0o600): 
   try {
     fchmodSync(descriptor, mode);
     writeFileSync(descriptor, content, "utf8");
+    fsyncSync(descriptor);
     const stat = fstatSync(descriptor);
     if (stat.uid !== uid() || !stat.isFile()) {
       throw new LifecycleError("UNSAFE_HOST_PATH", `${temporary} has unsafe ownership`);
@@ -74,6 +76,12 @@ export const atomicPrivateFile = (path: string, content: string, mode = 0o600): 
     closeSync(descriptor);
   }
   renameSync(temporary, path);
+  const directoryDescriptor = openSync(dirname(path), constants.O_RDONLY);
+  try {
+    fsyncSync(directoryDescriptor);
+  } finally {
+    closeSync(directoryDescriptor);
+  }
 };
 
 export const atomicPrivateFileInOwnedDirectory = (
@@ -91,6 +99,7 @@ export const atomicPrivateFileInOwnedDirectory = (
   try {
     fchmodSync(descriptor, mode);
     writeFileSync(descriptor, content, "utf8");
+    fsyncSync(descriptor);
     const stat = fstatSync(descriptor);
     if (stat.uid !== uid() || !stat.isFile()) {
       throw new LifecycleError("UNSAFE_HOST_PATH", `${temporary} has unsafe ownership`);
@@ -99,6 +108,12 @@ export const atomicPrivateFileInOwnedDirectory = (
     closeSync(descriptor);
   }
   renameSync(temporary, path);
+  const directoryDescriptor = openSync(dirname(path), constants.O_RDONLY);
+  try {
+    fsyncSync(directoryDescriptor);
+  } finally {
+    closeSync(directoryDescriptor);
+  }
 };
 
 export const removeOwnedPlainFile = (path: string): void => {
