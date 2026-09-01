@@ -1,6 +1,6 @@
 // This file is Kojo's own factory, and it is the one used to develop Kojo.
 //
-// Start it with `kojo run factory "<what needs doing>"`.
+// Start it with `kojo workflow start <project-id> factory --payload '{"request":"..."}'`.
 //
 // It is architecture.md §3 as a program: a router reads the request and names a lane, the lanes
 // differ from each other on purpose, and every path then passes one human review before a code phase
@@ -113,8 +113,8 @@ const failures = Schema.Union([
 /**
  * Kojo's own factory.
  *
- * `@public` because nothing in this repository imports it: `kojo run factory` loads this module by
- * path and reads the one workflow bundle it exports. The loader refuses a file that exports two, and
+ * `@public` because nothing in this repository imports it: the Daemon captures this module as a
+ * Workflow Revision. The loader refuses a file that exports two, and
  * refuses one whose declared name is not the file name — so this export is the whole purpose of the
  * file, and an unused-export report about it would be a report about the design working.
  *
@@ -260,7 +260,7 @@ export const factory = workflow(
        *
        * It is outside every sandbox scope, which is the cheapest place a gate can be: the run holds
        * no worktree and no container while it waits, and the process that started it is free to exit.
-       * `kojo gate answer`, the Console, or `kojo watch` resumes it — an hour later or on Monday.
+       * A Gate answer through the Daemon resumes it — an hour later or on Monday.
        *
        * The description carries what the reviewer needs and nothing they would have to go and find:
        * which lane ran, what the agent said it did, and what this lane's own commands measured.

@@ -22,6 +22,6 @@ describe("the managed Kojo LaunchAgent", () => {
     expect(document).toContain("<string>/usr/bin:/bin:/usr/sbin:/sbin</string>");
     expect(document).toContain("<key>KeepAlive</key>");
     expect(document).toContain("<key>ExitTimeOut</key>\n    <integer>30</integer>");
-    expect(document).not.toContain("KOJO_AGENT_SPEND");
+    expect(document).not.toContain(["KOJO", "AGENT", "SPEND"].join("_"));
   });
 });

@@ -87,7 +87,7 @@ const workflow = (choices: FactoryChoices) => {
     source: [
       ...ownedByYou("A lane: scout, fix, re-ask until it is right, measure, land."),
       "//",
-      '// Start it with `kojo run hotfix "<what is broken>"`.',
+      "// Register the Project, then start it with `kojo workflow start <project-id> hotfix --payload <json>`.",
       "//",
       "// Three things about the shape are worth keeping when you edit it:",
       "//",
@@ -140,7 +140,7 @@ const workflow = (choices: FactoryChoices) => {
       "/**",
       " * The branch an accepted run lands on. **Change it if your trunk is not called `main`.**",
       " *",
-      " * The merge is performed on the repository you started the run from, so `kojo run` has to be",
+      " * The merge is performed at the registered Project location, so the Project has to be",
       " * launched while that repository is checked out on this branch and has nothing uncommitted in",
       " * it. Anything else and the merge refuses by name — it says which branch it found and which",
       " * one it wanted — rather than landing the work somewhere nobody expected it.",

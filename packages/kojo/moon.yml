@@ -61,12 +61,7 @@ tasks:
       - ~:tsc
     options:
       cache: false
-  # What the published package is: the sources, plus the Console built into `console/`.
-  #
-  # This is the edge console.md §12 asks for — `console:build` is a build dependency of the package,
-  # so `kojo ui` works for somebody who installed Kojo rather than only for somebody who cloned this
-  # repository. The command asserts what landed rather than doing the landing, because the Vite build
-  # writes straight into this project and a second copy step could only ever disagree with it.
+  # The published CLI package contains its sources and the Console assets that the Daemon serves.
   #
   # Not cached: its input is a directory another project writes, so a cache hit here would report a
   # Console that is no longer there.

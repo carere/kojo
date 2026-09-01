@@ -1,13 +1,11 @@
 /**
  * Does the published package actually carry a Console?
  *
- * `kojo ui` looks for `index.html` in one directory and serves a placeholder when it is not there.
- * That fallback is the right behaviour at run time and the wrong one in a build: a package published
- * with the front end missing would install cleanly, start cleanly, and show a placeholder to
- * everybody who did not clone this repository.
+ * The Daemon serves `index.html` from the active managed release. A package with the front end
+ * missing would install cleanly but could not open its Console.
  *
  * So `kojo:build` depends on `console:build` and then asserts three things about what landed:
- * the shell exists where the server looks for it, it is a document rather than an empty file, and it
+ * the shell exists where the Daemon looks for it, it is a document rather than an empty file, and it
  * references a bundle. The third is what separates a real build from a shell prerendered against a
  * broken client build — the exact failure that would leave a blank page with no error anywhere.
  */

@@ -13,9 +13,7 @@ import { ScaffoldError } from "../models/ScaffoldError.ts";
  * This file follows `manifest.ts`, not `stamp.ts`, and for the same reason: a planned file is
  * written whole or kept whole, and a repository's own `.gitignore` is a file that rule would
  * mangle the second time it ran. The rule here is **merge, never rewrite**: what is already there
- * is kept byte for byte, and only the entries nothing covers are appended — one commented block,
- * the same shape this repository's own root `.gitignore` grew by when a database was accidentally
- * committed.
+ * is kept byte for byte, and only the entries nothing covers are appended in one commented block.
  *
  * **The lockfile is deliberately not ignored.** The install writes one — `bun.lock`,
  * `package-lock.json`, whichever the manager owns — and it belongs in the history, not in this

@@ -27,12 +27,6 @@ jobs:
     # Console first. Twenty minutes is roughly four times the observed run, which leaves room for a
     # slow runner without letting a hung daemon hold the queue all day.
     timeout-minutes: 30
-    env:
-      # **Said out loud rather than left to the default.** An unattended process is refused anyway —
-      # no terminal on stdin — but a guard this repository paid two unauthorised agent calls to
-      # learn is worth stating where somebody reading the workflow can see it. Nothing in CI may
-      # spend, and the real-agent suites stay skipped for want of `KOJO_REAL_AGENT`.
-      KOJO_AGENT_SPEND: refuse
     steps:
       - name: Git checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -114,8 +108,6 @@ jobs:
     name: Native systemd host evidence
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    env:
-      KOJO_AGENT_SPEND: refuse
     steps:
       - name: Git checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

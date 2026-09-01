@@ -91,7 +91,7 @@ const template = Flag.choice("template", templateNames).pipe(
 const describe = (outcome: "created" | "kept", path: string): string =>
   `${outcome === "created" ? "created" : "kept   "}  ${path}`;
 
-/** `kojo@0.0.0, effect@4.0.0-beta.106` — the entries, as one line. */
+/** `@carere/kojo-runtime@0.0.0, effect@4.0.0-beta.106` — the entries, as one line. */
 const listing = (declared: ReadonlyArray<Declared>): string =>
   declared.map((entry) => `${entry.name}@${entry.specifier}`).join(", ");
 
@@ -167,20 +167,8 @@ export const init = Command.make(
       Flag.withDescription("Override the image tag derived from the repository's directory name"),
       Flag.optional,
     ),
-    skipImage: Flag.boolean("skip-image").pipe(
-      Flag.withDescription("Deprecated compatibility flag. Init never builds an image"),
-    ),
   },
-  Effect.fn(function* ({
-    agent,
-    model,
-    sandbox,
-    template,
-    path,
-    packageManager,
-    image,
-    skipImage,
-  }) {
+  Effect.fn(function* ({ agent, model, sandbox, template, path, packageManager, image }) {
     // Asked of this process before anything is written, because it is the one answer a stamped
     // factory cannot work out for itself: which `kojo`, and which `effect`, the files about to be
     // written must resolve to. No ordinary install can fail to answer it.
@@ -201,9 +189,6 @@ export const init = Command.make(
       template,
       packageManager: Option.getOrUndefined(packageManager),
       imageName: Option.getOrUndefined(image),
-      skipImage,
-      uid: 0,
-      gid: 0,
     }).pipe(
       Effect.catchTag("ScaffoldError", (error) =>
         commandFailed(`${error.operation} ${error.target}: ${error.reason}`),
@@ -243,7 +228,7 @@ export const init = Command.make(
         `Next, in this order — \`.kojo/README.md\` says the same thing at length:`,
         "",
         `  1. ${firstInstall(factory.choices.toolchain.manager)}`,
-        "     Every file under .kojo/ imports `kojo` and `effect`. None of them resolves until now.",
+        "     Factory source imports `@carere/kojo-runtime` and `effect`. Neither resolves until now.",
         "     It writes node_modules/, which is ignored — see the .gitignore line above — and a",
         "     lockfile, which is not: the sandbox restores dependencies frozen against it, so it",
         "     belongs in the history.",
@@ -256,6 +241,11 @@ export const init = Command.make(
         "     belong in that commit.",
         "  4. kojo doctor",
         "     It says whether this factory can actually run, and refuses it while it cannot.",
+        "  5. kojo daemon install",
+        "     One per-user Daemon owns execution, Gate application, the Console, and storage.",
+        "  6. kojo project register --path .",
+        "     Then use `kojo workflow list --project <project-id>` and",
+        "     `kojo workflow start <project-id> <workflow> --payload <json>`.",
         "",
         "An agent working in this repository now finds `.claude/skills/kojo/SKILL.md` on its own:",
         "how to drive this factory, and the rules that bind anyone editing the workflow.",

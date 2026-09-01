@@ -1,5 +1,5 @@
 /**
- * One asking of one gate, as `GET /api/gates` carries it.
+ * One Asking of one Gate, as `GET /api/v1/askings` carries it.
  *
  * The request half is everything a person needs to decide — what is being asked, who was asked, what
  * they may answer, and by when — plus the **token**, which is the whole of the authority to answer.

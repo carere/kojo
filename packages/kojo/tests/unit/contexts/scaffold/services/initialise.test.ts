@@ -17,8 +17,6 @@ const request = (overrides?: Partial<InitialiseRequest>): InitialiseRequest => (
   sandbox: "docker",
   template: "review",
   engine: someEngine,
-  uid: 501,
-  gid: 20,
   ...overrides,
 });
 

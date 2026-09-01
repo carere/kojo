@@ -1,14 +1,12 @@
 import { useMutation, useQueryClient } from "@tanstack/solid-query";
 import { readDaemon, recordGateVerdict } from "../../daemon/services/browserAccess.ts";
-import type { RunnerPresence } from "../../shared/models/Health.ts";
 
 /**
  * What the Daemon Gate-answer endpoint gives back.
  *
  * **There is no `applied` field, and there cannot be one.** Applying is a runner picking the answer
  * up on its own poll, which by definition has not happened when this response is written. What the
- * The old Console adapter also returned a Runner observation. Keep it optional while the view moves
- * to Daemon-owned Run state; it is not execution authority.
+ * The receipt reports the durable Verdict. Application remains a separate Daemon-owned state.
  */
 export interface GateReceipt {
   readonly verdict: {
@@ -17,7 +15,6 @@ export interface GateReceipt {
     readonly answerer: string;
     readonly answeredAt: number;
   };
-  readonly runner?: RunnerPresence;
 }
 
 /** What a browser sends. The answerer is not in it: the server records the OS user (console.md §9). */

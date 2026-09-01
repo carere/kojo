@@ -28,7 +28,7 @@ import { GateAnswering } from "./GateAnswering.tsx";
  *
  * | Source | What only it can say |
  * |---|---|
- * | `GET /api/gates` | the request, and whether a verdict has been **recorded** |
+ * | `GET /api/v1/askings` | the request, and whether a Verdict has been **Recorded** |
  * | the run document | whether the run **settled** this asking, which is the only proof it applied |
  *
  * A gate that settled long ago has a record and no asking — the askings table is the reference

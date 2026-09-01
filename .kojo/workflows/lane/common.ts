@@ -4,7 +4,7 @@
 // how dependencies are restored, and how a set of commands becomes half of an acceptance.
 //
 // It is a module rather than a workflow, and it lives in `workflows/lane/` for that reason: only the
-// *top level* of `.kojo/workflows/` is a `kojo run` name, so anything nested here is a module the
+// *top level* of `.kojo/workflows/` is a Workflow name, so anything nested here is a module the
 // workflow imports and never a name a person can type.
 
 import * as SandcastleAgentInvoker from "@carere/kojo-runtime/contexts/agent/adapters/SandcastleAgentInvoker";

@@ -25,7 +25,7 @@ import * as YamlRoster from "./YamlRoster.ts";
 /**
  * The reference agent invoker: a real agent process, in the sandbox the phase is standing in.
  *
- * It is the one adapter that makes `kojo run` cost money, and it is built out of two things that
+ * It is the one adapter that starts a paid agent process, and it is built out of two things that
  * already existed and were never joined — Sandcastle's agent providers, and Kojo's `Sandbox` handle.
  * Everything below is the join, and the four decisions in it are the ones worth reading.
  *

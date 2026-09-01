@@ -25,7 +25,7 @@ export type SandboxId = typeof SandboxId.Type;
  *   scope twice inside one millisecond. Every one of those acquisitions is a separate container owed
  *   a separate row, and two rows sharing an id is a join nobody can undo afterwards.
  * - *A counter alone* collides across processes, which is the shape this whole design is built
- *   around: `kojo run` starts a run that suspends and exits, `kojo gate answer` resumes it days
+ *   around: `kojo workflow start` creates a Run, and `kojo gate answer` resumes it days
  *   later, and an in-memory counter restarts at one in the second process.
  *
  * **This is prophylactic, and the record should say so.** No run has been observed colliding. The

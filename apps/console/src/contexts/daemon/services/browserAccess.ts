@@ -26,6 +26,7 @@ import type {
   WorkflowSnapshot,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
+import { problemOf } from "../../shared/services/api.ts";
 
 interface StoredSession {
   readonly credential: string;
@@ -151,7 +152,7 @@ const authorizedRead = async <A>(path: string): Promise<A> => {
     access = undefined;
     throw new ConsoleAccessError("access-required", "Run `kojo ui` again to open this Console.");
   }
-  if (!response.ok) throw new ConsoleAccessError("api-refused", "The Daemon API refused the read.");
+  if (!response.ok) throw await problemOf(path, response);
   return (await response.json()) as A;
 };
 

@@ -48,9 +48,9 @@ export type WriteScope = typeof WriteScope.Type;
  * from `git ls-files` cannot hide a path with no index entry. The bar lives in the guard rather than
  * in this list on purpose: it is **Kojo's** rule about Kojo's own directory, so a factory already
  * stamped gets it without editing a workflow, and this list stays what it says it is — the specific
- * files that decide how an agent is graded, and the list the sandbox mask is built from. `permits`
- * grants {@link runOwnPaths} first, so the two directories an agent is *meant* to write into stay
- * writable under every scope.
+ * files that decide how an agent is graded, and the list the sandbox mask is built from. The Daemon
+ * keeps Run data and captured Artifacts outside the Project, so there is no repository-local
+ * runtime-data exception.
  */
 export const factoryOwnPaths: ReadonlyArray<string> = [
   ".kojo/kojo.config.yaml",
@@ -61,17 +61,6 @@ export const factoryOwnPaths: ReadonlyArray<string> = [
   ".kojo/prompts/",
 ];
 
-/**
- * What a **run** records, which no factory may bar and no author has to remember — ticket 54.
- *
- * The artifacts a phase writes and the run's own data directory. `permits` grants these before it
- * reads anything the author wrote, for the same reason `alwaysWritable` exists at all: an agent that
- * cannot record its work is an agent whose failure nobody can read, and that ability must not hang
- * on a list somebody could forget to fill in. Every stamped factory ships `alwaysWritable: []`, so
- * left to the author these would have been barred the moment the directory itself was.
- */
-export const runOwnPaths: ReadonlyArray<string> = [".kojo/artifacts/", ".kojo/data/"];
-
 /** Everything the guard needs to decide one path, gathered for one agent call. */
 export interface PermissionPolicy {
   /** Whose writes these are. Named on the breach, so the trace says who overstepped. */
@@ -79,14 +68,7 @@ export interface PermissionPolicy {
   readonly writes: WriteScope;
   /** Paths no agent may change unless its own scope names them. Usually `factoryOwnPaths`. */
   readonly protectedPaths: ReadonlyArray<string>;
-  /**
-   * Where every agent may write whatever else its scope says — the run's own data directory, where
-   * prompts, raw output, envelopes and handoffs land.
-   *
-   * Granted here rather than left to `.gitignore`. The data directory is normally ignored, so it
-   * never reaches a fingerprint at all — but an agent's ability to record its work must not hang on
-   * an ignore entry that anybody can delete.
-   */
+  /** Additional Project paths that every agent may write. */
   readonly alwaysWritable: ReadonlyArray<string>;
 }
 

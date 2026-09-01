@@ -28,22 +28,9 @@ dist
 playwright-report
 test-results
 
-# a factory's own run data — the trace database, its WAL sidecars, and the worktrees.
-# The design puts these in an ignored directory; committing a database is never right, and
-# any kojo command run from the repo root creates one here.
-.kojo/data
-.kojo/*.db
-.kojo/*.db-shm
-.kojo/*.db-wal
-
-# beside the database: the lock the first command to touch it takes, and the mark that says it was
-# created and migrated. Both are this machine's, and neither belongs in the history.
-.kojo/*.db.first-run*
-.kojo/*.db.migrated
-
 # Sandcastle's own working directory: the linked worktree every run is cut into, and its logs.
-# **Not `.kojo/data`, and not ours to move** — Sandcastle derives the path from the repo and the
-# branch, and `CreateSandboxOptions` has no override.
+# Sandcastle derives the path from the Project and branch, and `CreateSandboxOptions` has no
+# override.
 #
 # It writes `.sandcastle/.gitignore` holding `*`, so git already ignores it. This line is here for
 # the tools that read the *root* ignore file and no nested one: after one run, `bun biome check .`

@@ -12,12 +12,12 @@ import solid from "vite-plugin-solid";
  * **`spa.prerender.outputPath` is `/index`, not the default.** The shell page is queued with
  * `outputPath` taken from `spa.prerender`, and the prerenderer recognises it as the shell — so it
  * writes `<outputPath>.html` verbatim instead of the `<path>/index.html` it writes for ordinary
- * pages. The default `/_shell` therefore produces `_shell.html`, and `kojo ui` looks for
+ * pages. The default `/_shell` therefore produces `_shell.html`, and the Daemon looks for
  * `index.html`. Naming the output `/index` is what makes the two agree.
  *
- * **The client output lands inside `packages/kojo`.** `kojo ui` has to work for somebody who
+ * **The client output lands inside `packages/kojo`.** The Daemon Console has to work for somebody who
  * installed Kojo rather than only for somebody who cloned this repository, so the published package
- * carries the build (console.md §12). The path is the one `src/cli/ui.ts` already defaults to, and
+ * carries the build (console.md §12). The path is the managed release's Console asset directory, and
  * it is set on the `client` environment rather than on `build.outDir` because the plugin derives the
  * client directory as `join(build.outDir, "client")` — setting the root would bury the shell one
  * level too deep.
@@ -52,8 +52,7 @@ export default defineConfig({
     },
   },
   server: {
-    // `moon run console:dev` serves the front end; the API keeps coming from `kojo ui`, which is the
-    // only thing that can read a trace. The port is `ui`'s own default.
+    // `moon run console:dev` serves only the front end. The API comes from a development Daemon.
     proxy: { "/api": "http://localhost:4321" },
   },
 });

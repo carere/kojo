@@ -79,9 +79,6 @@ const stampedInto = (template: TemplateName) =>
       sandbox: "docker",
       template,
       engine: thisEngine(),
-      uid: 1000,
-      gid: 1000,
-      skipImage: true,
     }).pipe(Effect.provide(InMemoryImageBuilder.layer), Effect.orDie);
 
     yield* fileSystem

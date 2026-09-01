@@ -1,7 +1,7 @@
 /**
  * What a stamped factory has to declare before a single one of its files resolves.
  *
- * Every file `kojo init` writes imports `kojo` and `effect`. Until this ticket, initialisation
+ * Factory source written by `kojo init` imports `@carere/kojo-runtime` and `effect`. Until this ticket, initialisation
  * declared neither and wrote no manifest at all, so a freshly stamped factory could not load one
  * line of itself — and the stamped README asserted the engine was "a versioned dependency in your
  * package.json", a file initialisation never created.

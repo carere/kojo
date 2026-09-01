@@ -4,7 +4,7 @@ import { DecodeIssue } from "../../shared/models/DecodeIssue.ts";
 /**
  * Why an event did not become a run, or why a run could not be reported back.
  *
- * Named rather than one message, because a watcher answers the four very differently. `unreachable`
+ * Named rather than one message, because the Runner answers the four very differently. `unreachable`
  * is retried — the tracker is down, and it will come back. `malformed` and `key-mismatch` are a
  * human's mistake in the factory and retrying repeats it forever. `ack-refused` is the awkward one:
  * the run genuinely happened, and only the telling failed, so nothing may re-start the run on the
@@ -26,7 +26,7 @@ export type TriggerFault = typeof TriggerFault.Type;
  * The trigger could not do what it was asked.
  *
  * A `Schema.TaggedError` for the same reason the other port errors are: it travels an error channel
- * the engine persists, and a watcher that reports a fault has to report the same value the trace
+ * the engine persists, and a Runner that reports a fault has to report the same value the trace
  * stored.
  *
  * `issues` is why decoding an event's payload is worth more than a `JSON.parse`: a webhook body with

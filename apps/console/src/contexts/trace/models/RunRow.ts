@@ -30,7 +30,7 @@ const nothing = "—";
 /**
  * The rows, newest run first.
  *
- * The order is the server's — `GET /api/runs` answers newest first — and it is preserved rather than
+ * The order is the Daemon's — `GET /api/v1/runs` answers newest first — and it is preserved rather than
  * re-sorted here, so one rule about what "newest" means lives in one place.
  */
 export const runRows = (options: {
