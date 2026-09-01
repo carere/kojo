@@ -1707,7 +1707,6 @@ export const fixtureNames = ["busy", "watching", "settled", "empty", "absent"] a
 export type FixtureName = (typeof fixtureNames)[number];
 
 /** Whether this fixture claims a factory exists, which is what the health document reports. */
-export const fixturePresence = (name: FixtureName): FactoryPresence => fixtures[name].factory;
 
 /**
  * Who this fixture says is registered to apply an answer.

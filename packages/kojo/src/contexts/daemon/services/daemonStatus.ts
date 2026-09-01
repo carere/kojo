@@ -36,7 +36,7 @@ const privateRuntimeDirectory = (path: string): boolean => {
   }
 };
 
-const endpointAt = (paths: DaemonPaths): DaemonEndpoint | undefined => {
+export const readDaemonEndpoint = (paths: DaemonPaths): DaemonEndpoint | undefined => {
   if (!privateRuntimeDirectory(paths.runtimeRoot)) return undefined;
   const path = join(paths.runtimeRoot, "endpoint.json");
   if (!privateOwned(path, "file")) return undefined;
@@ -45,6 +45,7 @@ const endpointAt = (paths: DaemonPaths): DaemonEndpoint | undefined => {
     if (
       endpoint.formatVersion !== 1 ||
       endpoint.ready !== true ||
+      !/^http:\/\/127\.0\.0\.1:\d+$/.test(endpoint.consoleOrigin) ||
       endpoint.socketPath !== join(paths.runtimeRoot, "daemon.sock") ||
       !privateOwned(endpoint.socketPath, "socket")
     ) {
@@ -79,7 +80,7 @@ export const inspectDaemon = async (
   nativeService: NativeService,
 ): Promise<DaemonStatus> => {
   const native = nativeService.inspect();
-  const endpoint = endpointAt(paths);
+  const endpoint = readDaemonEndpoint(paths);
   const responsive = endpoint === undefined ? false : await probe(endpoint);
   return {
     installed:

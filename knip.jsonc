@@ -55,8 +55,14 @@
     },
     "packages/kojo": {
       // The scripts are Moon task entry points. The managed LaunchAgent starts the launcher entry
-      // through its immutable bundle, so no TypeScript module imports either kind of program.
-      "entry": ["src/scripts/*.ts", "src/launcher/main.ts"]
+      // through its immutable bundle. The browser tier starts its isolated Daemon and grant client
+      // from Playwright command strings. No TypeScript module imports these programs.
+      "entry": [
+        "src/scripts/*.ts",
+        "src/launcher/main.ts",
+        "tests/support/daemon/authenticatedConsoleServer.ts",
+        "tests/support/daemon/consoleGrant.ts"
+      ]
     }
   }
 }
