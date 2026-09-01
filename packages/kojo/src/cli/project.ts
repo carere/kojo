@@ -11,6 +11,7 @@ import { readDaemonEndpoint } from "../contexts/daemon/services/daemonStatus.ts"
 import { linuxPaths } from "../contexts/daemon/services/linuxPaths.ts";
 import { macPaths } from "../contexts/daemon/services/macPaths.ts";
 import { exactGitWorkingTree } from "../contexts/project/services/gitWorkingTree.ts";
+import type { RevisionDetails } from "../contexts/workflow/models/RevisionMaintenance.ts";
 import { commandFailed } from "./CommandFailed.ts";
 
 class ProjectClientError extends Data.TaggedError("ProjectClientError")<{
@@ -168,7 +169,79 @@ const list = Command.make(
   }),
 ).pipe(Command.withDescription("Read one authoritative Project catalogue snapshot"));
 
+const projectArgument = Argument.string("project").pipe(
+  Argument.withDescription("The full Project ID"),
+);
+
+const revisionFlag = Flag.string("revision").pipe(
+  Flag.withDescription("The full Workflow Revision SHA-256 identity"),
+);
+
+export const revisionLines = (document: RevisionDetails): ReadonlyArray<string> => [
+  `Workflow Revision ${document.revisionId}`,
+  `Package graph ${document.packageGraphId}`,
+  `Manifest ${JSON.stringify(document.manifest)}`,
+  `Packages ${JSON.stringify(document.packages)}`,
+  `Dependent Runs ${JSON.stringify(document.dependentRuns)}`,
+  `Active readers ${JSON.stringify(document.activeReaders)}`,
+  `Protections ${JSON.stringify(document.protections)}`,
+  `Faults ${JSON.stringify(document.faults)}`,
+  `Collection ${JSON.stringify(document.collection)}`,
+];
+
+const status = Command.make(
+  "status",
+  {
+    project: projectArgument,
+    revision: revisionFlag,
+    details: Flag.boolean("details").pipe(
+      Flag.withDescription("Show the complete retained manifest and protections"),
+    ),
+    json: Flag.boolean("json").pipe(Flag.withDescription("Emit one JSON document")),
+  },
+  Effect.fn(function* ({ project, revision, details, json }) {
+    if (!details) {
+      return yield* commandFailed("revision status requires --details");
+    }
+    const document = yield* daemonRequest<RevisionDetails>(
+      `/api/v1/projects/${encodeURIComponent(project)}/revisions/${encodeURIComponent(revision)}`,
+    ).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
+    if (json) {
+      yield* Console.log(JSON.stringify({ formatVersion: 1, revision: document }));
+      return;
+    }
+    for (const line of revisionLines(document)) yield* Console.log(line);
+  }),
+).pipe(Command.withDescription("Inspect one exact retained Workflow Revision"));
+
+const repair = Command.make(
+  "repair",
+  {
+    project: projectArgument,
+    revision: revisionFlag,
+    from: Flag.directory("from", { mustExist: true }).pipe(
+      Flag.withDescription("A directory containing one verified exact-content copy"),
+    ),
+  },
+  Effect.fn(function* ({ project, revision, from }) {
+    const document = yield* daemonRequest<RevisionDetails>(
+      `/api/v1/projects/${encodeURIComponent(project)}/revisions/${encodeURIComponent(revision)}/actions/repair`,
+      { method: "POST", body: { from } },
+    ).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
+    yield* Console.log(`Repaired exact Workflow Revision ${document.revisionId}.`);
+    yield* Console.log(
+      document.faults.length === 0
+        ? "All retained bytes and shared objects match the accepted manifest."
+        : `Remaining faults ${JSON.stringify(document.faults)}`,
+    );
+  }),
+).pipe(
+  Command.withDescription(
+    "Restore exact retained bytes without installation, rebuilding, substitution, or scripts",
+  ),
+);
+
 export const project = Command.make("project").pipe(
   Command.withDescription("Register and inspect Projects owned by the Daemon"),
-  Command.withSubcommands([register, list, lookup, retry]),
+  Command.withSubcommands([register, list, status, repair, lookup, retry]),
 );

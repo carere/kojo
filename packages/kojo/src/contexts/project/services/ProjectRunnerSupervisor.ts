@@ -1,14 +1,21 @@
+import { Data, Deferred, Effect } from "effect";
+
+export class ProjectRunnerError extends Data.TaggedError("ProjectRunnerError")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
+
 export interface ProjectRunnerHandle {
   readonly instanceId: string;
   readonly packageGraphId: string;
   readonly purpose: "execution" | "trigger";
-  /** Resolves only after the owned process has stopped. */
-  readonly stop: () => Promise<void>;
+  /** Completes only after the owned process has stopped. */
+  readonly stop: Effect.Effect<void, ProjectRunnerError>;
 }
 
 interface ProjectState {
   readonly handle?: ProjectRunnerHandle;
-  readonly turn: Promise<void>;
+  readonly turn: Deferred.Deferred<void>;
 }
 
 /** Owns the only Project Runner process and serializes graph-switch preparation per Project. */
@@ -19,44 +26,50 @@ export class ProjectRunnerSupervisor {
     return this.#projects.get(projectId)?.handle?.packageGraphId;
   }
 
-  async prepare<A>(options: {
+  prepare<A>(options: {
     readonly projectId: string;
     readonly packageGraphId: string;
-    readonly stopCurrentPolling: () => Promise<void>;
-    readonly load: () => Promise<A>;
-  }): Promise<A> {
-    const prior = this.#projects.get(options.projectId);
-    const previousTurn = prior?.turn ?? Promise.resolve();
-    let finish: (() => void) | undefined;
-    const turn = new Promise<void>((resolve) => {
-      finish = resolve;
-    });
-    this.#projects.set(options.projectId, {
-      ...(prior?.handle === undefined ? {} : { handle: prior.handle }),
-      turn,
-    });
-    await previousTurn;
-    try {
-      await options.stopCurrentPolling();
-      const current = this.#projects.get(options.projectId)?.handle;
-      if (current !== undefined && current.packageGraphId !== options.packageGraphId) {
-        await current.stop();
-        const selected = this.#projects.get(options.projectId);
-        if (selected?.handle?.instanceId === current.instanceId) {
-          this.#projects.set(options.projectId, { turn });
+    readonly stopCurrentPolling: Effect.Effect<void, ProjectRunnerError>;
+    readonly load: Effect.Effect<A, ProjectRunnerError>;
+  }): Effect.Effect<A, ProjectRunnerError> {
+    const supervisor = this;
+    return Effect.gen(function* () {
+      const prior = supervisor.#projects.get(options.projectId);
+      const turn = yield* Deferred.make<void>();
+      supervisor.#projects.set(options.projectId, {
+        ...(prior?.handle === undefined ? {} : { handle: prior.handle }),
+        turn,
+      });
+      const runTurn = Effect.gen(function* () {
+        if (prior !== undefined) yield* Deferred.await(prior.turn);
+        yield* options.stopCurrentPolling;
+        const current = supervisor.#projects.get(options.projectId)?.handle;
+        if (current !== undefined && current.packageGraphId !== options.packageGraphId) {
+          yield* current.stop;
+          const selected = supervisor.#projects.get(options.projectId);
+          if (selected?.handle?.instanceId === current.instanceId) {
+            supervisor.#projects.set(options.projectId, { turn });
+          }
         }
-      }
-      return await options.load();
-    } finally {
-      finish?.();
-    }
+        return yield* options.load;
+      });
+      return yield* runTurn.pipe(Effect.ensuring(Deferred.succeed(turn, undefined)));
+    });
   }
 
-  async attach(projectId: string, handle: ProjectRunnerHandle): Promise<void> {
-    const state = this.#projects.get(projectId) ?? { turn: Promise.resolve() };
-    const current = state.handle;
-    if (current !== undefined && current.instanceId !== handle.instanceId) await current.stop();
-    this.#projects.set(projectId, { handle, turn: state.turn });
+  attach(projectId: string, handle: ProjectRunnerHandle): Effect.Effect<void, ProjectRunnerError> {
+    const supervisor = this;
+    return Effect.gen(function* () {
+      let state = supervisor.#projects.get(projectId);
+      if (state === undefined) {
+        const turn = yield* Deferred.make<void>();
+        yield* Deferred.succeed(turn, undefined);
+        state = { turn };
+      }
+      const current = state.handle;
+      if (current !== undefined && current.instanceId !== handle.instanceId) yield* current.stop;
+      supervisor.#projects.set(projectId, { handle, turn: state.turn });
+    });
   }
 
   detach(projectId: string, instanceId: string): void {
@@ -65,19 +78,27 @@ export class ProjectRunnerSupervisor {
     this.#projects.set(projectId, { turn: state.turn });
   }
 
-  async stop(projectId: string): Promise<void> {
-    const state = this.#projects.get(projectId);
-    if (state?.handle === undefined) return;
-    await state.handle.stop();
-    this.detach(projectId, state.handle.instanceId);
+  stop(projectId: string): Effect.Effect<void, ProjectRunnerError> {
+    const supervisor = this;
+    return Effect.gen(function* () {
+      const state = supervisor.#projects.get(projectId);
+      if (state?.handle === undefined) return;
+      yield* state.handle.stop;
+      supervisor.detach(projectId, state.handle.instanceId);
+    });
   }
 
-  async shutdown(): Promise<void> {
-    await Promise.allSettled(
-      [...this.#projects.entries()].map(async ([projectId, state]) => {
-        if (state.handle !== undefined) await state.handle.stop();
-        this.detach(projectId, state.handle?.instanceId ?? "");
-      }),
+  shutdown(): Effect.Effect<void> {
+    return Effect.forEach(
+      [...this.#projects.entries()],
+      ([projectId, state]) =>
+        (state.handle?.stop ?? Effect.void).pipe(
+          Effect.ensuring(
+            Effect.sync(() => this.detach(projectId, state.handle?.instanceId ?? "")),
+          ),
+          Effect.ignore,
+        ),
+      { concurrency: "unbounded", discard: true },
     );
   }
 }

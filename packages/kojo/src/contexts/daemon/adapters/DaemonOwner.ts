@@ -30,6 +30,7 @@ import { GateApi } from "../../gate/services/GateApi.ts";
 import { SqliteProjectRepository } from "../../project/adapters/SqliteProjectRepository.ts";
 import { ProjectApi } from "../../project/services/ProjectApi.ts";
 import { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRepository.ts";
+import { SqliteRevisionRepository } from "../../workflow/adapters/SqliteRevisionRepository.ts";
 import { SqliteRunRepository } from "../../workflow/adapters/SqliteRunRepository.ts";
 import { RevisionCaptureError } from "../../workflow/models/RevisionCaptureError.ts";
 import { RunApi } from "../../workflow/services/RunApi.ts";
@@ -238,6 +239,7 @@ export const startDaemon = (
     const authority = browserAuthority({ now });
     const projectRepository = new SqliteProjectRepository(database);
     const runRepository = new SqliteRunRepository(database);
+    const revisionRepository = new SqliteRevisionRepository(database, paths.dataRoot);
     const triggerRepository = new SqliteTriggerRepository(database);
     const gateRepository = new SqliteDaemonGateRepository(database);
     const projectApi = new ProjectApi({
@@ -255,6 +257,7 @@ export const startDaemon = (
       now,
       projects: projectRepository,
       runs: runRepository,
+      revisions: revisionRepository,
       triggers: triggerRepository,
       gates: gateRepository,
       ...(options.runnerIdleMillis === undefined
@@ -269,6 +272,78 @@ export const startDaemon = (
       repository: gateRepository,
       runs: runApi,
     });
+    const ownerDatabase = database;
+    const revisionResponse = async (
+      request: Request,
+      url: URL,
+      allowMaintenance: boolean,
+    ): Promise<Response | undefined> => {
+      const matched = url.pathname.match(
+        /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/revisions\/([a-f0-9]{64})(\/actions\/(repair|collect))?$/,
+      );
+      if (matched === null) return undefined;
+      const projectId = matched[1] ?? "invalid";
+      const revisionId = matched[2] ?? "invalid";
+      const registered = ownerDatabase
+        .query<{ readonly found: number }, [string, string]>(
+          `SELECT 1 AS found FROM workflow_revision_registrations
+            WHERE project_id = ? AND revision_id = ? LIMIT 1`,
+        )
+        .get(projectId, revisionId);
+      if (registered === null) {
+        return problem(404, "revision-not-found", "the selected Workflow Revision was not found");
+      }
+      try {
+        if (request.method === "GET" && matched[3] === undefined) {
+          return noStoreJson(
+            await Effect.runPromise(
+              revisionRepository.details(revisionId, new Date(now()).toISOString()),
+            ),
+          );
+        }
+        if (!allowMaintenance) {
+          return problem(
+            405,
+            "cli-maintenance-required",
+            "exact-content repair and collection are available only through the private CLI",
+          );
+        }
+        if (request.method === "POST" && matched[4] === "repair") {
+          const body = await requestJson(request);
+          if (
+            body === null ||
+            typeof body !== "object" ||
+            Array.isArray(body) ||
+            typeof (body as { readonly from?: unknown }).from !== "string"
+          ) {
+            return problem(400, "invalid-repair", "exact revision repair requires one source path");
+          }
+          return noStoreJson(
+            await Effect.runPromise(
+              revisionRepository.repairExact(
+                revisionId,
+                (body as { readonly from: string }).from,
+                new Date(now()).toISOString(),
+              ),
+            ),
+          );
+        }
+        if (request.method === "POST" && matched[4] === "collect") {
+          return noStoreJson(
+            await Effect.runPromise(
+              revisionRepository.collect(revisionId, new Date(now()).toISOString()),
+            ),
+          );
+        }
+        return problem(405, "method-not-allowed", "the revision action does not allow this method");
+      } catch (cause) {
+        return problem(
+          409,
+          "revision-maintenance-refused",
+          cause instanceof Error ? cause.message : String(cause),
+        );
+      }
+    };
     const gateSnapshot = async (projectId?: string): Promise<Response> =>
       noStoreJson(await Effect.runPromise(gateApi.snapshot(projectId)));
     const answerGate = async (
@@ -630,6 +705,8 @@ export const startDaemon = (
             };
             return noStoreJson(body);
           }
+          const revision = await revisionResponse(request, url, false);
+          if (revision !== undefined) return revision;
           if (request.method === "GET" && url.pathname === "/api/v1/projects") {
             return Effect.runPromise(projectApi.snapshot());
           }
@@ -739,6 +816,8 @@ export const startDaemon = (
             launchUrl: `${consoleOrigin}/daemon#grant=${encodeURIComponent(grant.secret)}`,
           });
         }
+        const revision = await revisionResponse(request, url, true);
+        if (revision !== undefined) return revision;
         if (request.method === "GET" && url.pathname === "/api/v1/projects") {
           return Effect.runPromise(projectApi.snapshot());
         }

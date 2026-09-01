@@ -26,6 +26,7 @@ import {
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
 import { SqliteProjectRepository } from "../../../../src/contexts/project/adapters/SqliteProjectRepository.ts";
 import { SqliteRunRepository } from "../../../../src/contexts/workflow/adapters/SqliteRunRepository.ts";
+import type { RevisionDetails } from "../../../../src/contexts/workflow/models/RevisionMaintenance.ts";
 import { captureWorkflowRevision } from "../../../../src/contexts/workflow/services/captureRevision.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
 import { linkEngine } from "../../../support/linkEngine.ts";
@@ -746,8 +747,50 @@ describe("Daemon no-Trigger Run API", () => {
     expect(compile?.startedAt).not.toBe(run.finishedAt);
     const pid = Number(readFileSync(runnerPid, "utf8"));
     expect(() => process.kill(pid, 0)).not.toThrow();
+    const loadedRevision = (await (
+      await call(
+        daemon,
+        `/api/v1/projects/${registered.project.projectId}/revisions/${captured.revisionId}`,
+      )
+    ).json()) as RevisionDetails;
+    expect(loadedRevision.activeReaders).toEqual([
+      expect.objectContaining({ kind: "loaded", runnerInstanceId: expect.any(String) }),
+    ]);
+    expect(loadedRevision.protections).toEqual(
+      expect.arrayContaining([expect.objectContaining({ reason: "loaded-registration" })]),
+    );
     await Bun.sleep(700);
     expect(() => process.kill(pid, 0)).toThrow();
+
+    const revisionResponse = await call(
+      daemon,
+      `/api/v1/projects/${registered.project.projectId}/revisions/${captured.revisionId}`,
+    );
+    expect(revisionResponse.status, await revisionResponse.clone().text()).toBe(200);
+    const revision = (await revisionResponse.json()) as RevisionDetails;
+    expect(revision).toMatchObject({
+      revisionId: captured.revisionId,
+      packageGraphId: captured.packageGraphId,
+      manifest: captured.manifest,
+      dependentRuns: [{ runId: admitted.runId, state: "succeeded" }],
+      activeReaders: [],
+      collection: { state: "protected" },
+    });
+    expect(revision.protections.map((entry) => entry.reason).sort()).toEqual([
+      "current-workflow",
+      "retained-run",
+    ]);
+    const repairResponse = await call(
+      daemon,
+      `/api/v1/projects/${registered.project.projectId}/revisions/${captured.revisionId}/actions/repair`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ from: captured.publishedPath }),
+      },
+    );
+    expect(repairResponse.status, await repairResponse.clone().text()).toBe(200);
+    expect((await repairResponse.json()) as RevisionDetails).toMatchObject({ faults: [] });
 
     const snapshot = (await (await call(daemon, "/api/v1/runs")).json()) as RunSnapshot;
     expect(snapshot.runs).toEqual([run]);
