@@ -44,19 +44,6 @@ const printStatus = (status: DaemonStatus): Effect.Effect<void> =>
     discard: true,
   });
 
-const useLifecycle = <A>(operation: (lifecycle: DaemonLifecycle) => Promise<A>) =>
-  Effect.tryPromise({
-    try: () => operation(productionLifecycle()),
-    catch: (cause) =>
-      cause instanceof LifecycleError
-        ? cause
-        : new LifecycleError(
-            "LIFECYCLE_FAILED",
-            cause instanceof Error ? cause.message : String(cause),
-            cause,
-          ),
-  }).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)));
-
 const useLifecycleEffect = <A>(
   operation: (lifecycle: DaemonLifecycle) => Effect.Effect<A, LifecycleError>,
 ) =>
@@ -79,7 +66,7 @@ const install = Command.make(
   "install",
   {},
   Effect.fn(function* () {
-    const result = yield* useLifecycle((lifecycle) => lifecycle.install());
+    const result = yield* useLifecycleEffect((lifecycle) => lifecycle.install);
     yield* Console.log(
       result.changed
         ? "Installed, enabled, and started one managed Daemon for this OS user."
@@ -97,7 +84,7 @@ const status = Command.make(
   "status",
   {},
   Effect.fn(function* () {
-    yield* printStatus(yield* useLifecycle((lifecycle) => lifecycle.status()));
+    yield* printStatus(yield* useLifecycleEffect((lifecycle) => lifecycle.status));
   }),
 ).pipe(Command.withDescription("Inspect the installation and service without starting work"));
 
@@ -105,7 +92,7 @@ const start = Command.make(
   "start",
   {},
   Effect.fn(function* () {
-    yield* printStatus(yield* useLifecycle((lifecycle) => lifecycle.start()));
+    yield* printStatus(yield* useLifecycleEffect((lifecycle) => lifecycle.start));
   }),
 ).pipe(Command.withDescription("Start the installed Daemon without changing automatic start"));
 
@@ -113,7 +100,7 @@ const stop = Command.make(
   "stop",
   {},
   Effect.fn(function* () {
-    yield* printStatus(yield* useLifecycle((lifecycle) => lifecycle.stop()));
+    yield* printStatus(yield* useLifecycleEffect((lifecycle) => lifecycle.stop));
   }),
 ).pipe(Command.withDescription("Stop the Daemon and keep automatic start unchanged"));
 
@@ -121,7 +108,7 @@ const enable = Command.make(
   "enable",
   {},
   Effect.fn(function* () {
-    yield* printStatus(yield* useLifecycle((lifecycle) => lifecycle.enable()));
+    yield* printStatus(yield* useLifecycleEffect((lifecycle) => lifecycle.enable));
   }),
 ).pipe(Command.withDescription("Enable automatic start without starting a stopped Daemon"));
 
@@ -133,7 +120,7 @@ const disable = Command.make(
     ),
   },
   Effect.fn(function* ({ now }) {
-    yield* printStatus(yield* useLifecycle((lifecycle) => lifecycle.disable(now)));
+    yield* printStatus(yield* useLifecycleEffect((lifecycle) => lifecycle.disable(now)));
   }),
 ).pipe(Command.withDescription("Disable automatic start and leave the current Daemon running"));
 

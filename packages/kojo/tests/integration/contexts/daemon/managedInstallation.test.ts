@@ -75,7 +75,7 @@ describe("the managed Daemon installation", () => {
       bunExecutable: process.execPath,
     });
 
-    const first = await lifecycle.install();
+    const first = await Effect.runPromise(lifecycle.install);
     observation = {
       automaticStart: "disabled",
       manager: "unloaded",
@@ -83,7 +83,7 @@ describe("the managed Daemon installation", () => {
       loginLifetime: "test login lifetime",
       logoutPersistence: "disabled",
     };
-    const second = await lifecycle.install();
+    const second = await Effect.runPromise(lifecycle.install);
     await Effect.runPromise(lifecycle.keepRunningAfterLogout);
 
     expect(first.changed).toBe(true);
@@ -153,7 +153,9 @@ describe("the managed Daemon installation", () => {
       keepRunningAfterLogout: () => {},
     };
 
-    await expect(manageDaemon(paths, native).install()).rejects.toThrow("unsupported Host");
+    await expect(Effect.runPromise(manageDaemon(paths, native).install)).rejects.toThrow(
+      "unsupported Host",
+    );
     expect(existsSync(installationRoot)).toBe(false);
   });
 });

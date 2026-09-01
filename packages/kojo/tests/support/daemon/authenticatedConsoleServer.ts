@@ -1,5 +1,6 @@
 import { rmSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { Effect } from "effect";
 import { startDaemon } from "../../../src/contexts/daemon/adapters/DaemonOwner.ts";
 import type { DaemonPaths } from "../../../src/contexts/daemon/models/DaemonPaths.ts";
 import { publishConsoleRelease } from "./consoleRelease.ts";
@@ -15,8 +16,10 @@ const installationRoot = join(root, "installation");
 const paths: DaemonPaths = {
   installationRoot,
   dataRoot: join(root, "data"),
+  configurationRoot: join(root, "config"),
+  cacheRoot: join(root, "cache"),
   runtimeRoot: join(root, "runtime"),
-  launchAgent: join(root, "LaunchAgents", "dev.kojo.test.plist"),
+  serviceDefinition: join(root, "LaunchAgents", "dev.kojo.test.plist"),
   managedCli: join(installationRoot, "bin", "kojo"),
   managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
 };
@@ -24,8 +27,8 @@ publishConsoleRelease(paths, { assets, releaseId: "kojo-browser-test" });
 const daemon = startDaemon(paths, { consolePort: port });
 
 const stop = (): void => {
-  void daemon.stop().finally(() => rmSync(root, { recursive: true, force: true }));
+  void Effect.runPromise(daemon.stop).finally(() => rmSync(root, { recursive: true, force: true }));
 };
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
-await daemon.stopped;
+await Effect.runPromise(daemon.stopped);

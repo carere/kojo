@@ -11,6 +11,7 @@ import {
   statSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { Effect } from "effect";
 import type { DaemonPaths } from "../models/DaemonPaths.ts";
 import { LifecycleError } from "../models/LifecycleError.ts";
 import type { ManagedReleaseManifest } from "../models/ManagedRelease.ts";
@@ -124,88 +125,102 @@ export const managedInstallationIsPresent = (paths: DaemonPaths): boolean => {
   }
 };
 
-export const installManagedRelease = async (
+export const installManagedRelease = (
   options: ManagedInstallationOptions,
-): Promise<InstallationResult> => {
-  const { paths } = options;
-  if (managedInstallationIsPresent(paths)) {
-    return {
-      outcome: "kept",
-      releaseId: readFileSync(join(paths.installationRoot, "active-release"), "utf8").trim(),
-    };
-  }
+): Effect.Effect<InstallationResult, LifecycleError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const { paths } = options;
+      if (managedInstallationIsPresent(paths)) {
+        return {
+          outcome: "kept",
+          releaseId: readFileSync(join(paths.installationRoot, "active-release"), "utf8").trim(),
+        } as const;
+      }
 
-  const root = options.sourceRoot ?? sourcePackage;
-  const packageManifest = manifestAt(root);
-  const releaseId = `kojo-${packageManifest.version}-bun-${Bun.version}`;
-  const releases = join(paths.installationRoot, "releases");
-  const stagingRoot = join(paths.installationRoot, "staging");
-  const staging = join(stagingRoot, crypto.randomUUID());
-  const release = join(releases, releaseId);
-  const bunExecutable = options.bunExecutable ?? process.execPath;
+      const root = options.sourceRoot ?? sourcePackage;
+      const packageManifest = manifestAt(root);
+      const releaseId = `kojo-${packageManifest.version}-bun-${Bun.version}`;
+      const releases = join(paths.installationRoot, "releases");
+      const stagingRoot = join(paths.installationRoot, "staging");
+      const staging = join(stagingRoot, crypto.randomUUID());
+      const release = join(releases, releaseId);
+      const bunExecutable = options.bunExecutable ?? process.execPath;
 
-  ensurePrivateDirectory(paths.installationRoot);
-  ensurePrivateDirectory(paths.dataRoot);
-  ensurePrivateDirectory(paths.configurationRoot);
-  ensurePrivateDirectory(paths.cacheRoot);
-  ensurePrivateDirectory(paths.runtimeRoot);
-  ensurePrivateDirectory(releases);
-  ensurePrivateDirectory(stagingRoot);
-  ensurePrivateDirectory(staging);
-  mkdirSync(join(staging, "runtime"), { mode: 0o700 });
+      ensurePrivateDirectory(paths.installationRoot);
+      ensurePrivateDirectory(paths.dataRoot);
+      ensurePrivateDirectory(paths.configurationRoot);
+      ensurePrivateDirectory(paths.cacheRoot);
+      ensurePrivateDirectory(paths.runtimeRoot);
+      ensurePrivateDirectory(releases);
+      ensurePrivateDirectory(stagingRoot);
+      ensurePrivateDirectory(staging);
+      mkdirSync(join(staging, "runtime"), { mode: 0o700 });
 
-  try {
-    cpSync(bunExecutable, join(staging, "runtime", "bun"), { errorOnExist: true });
-    chmodSync(join(staging, "runtime", "bun"), 0o700);
-    await buildEntry(join(root, "src", "main.ts"), staging, "cli.js");
-    await buildEntry(join(root, "src", "launcher", "main.ts"), staging, "launcher.js");
+      try {
+        cpSync(bunExecutable, join(staging, "runtime", "bun"), { errorOnExist: true });
+        chmodSync(join(staging, "runtime", "bun"), 0o700);
+        await buildEntry(join(root, "src", "main.ts"), staging, "cli.js");
+        await buildEntry(join(root, "src", "launcher", "main.ts"), staging, "launcher.js");
 
-    const consoleAssets = join(root, "console");
-    if (!existsSync(join(consoleAssets, "index.html"))) {
-      throw new LifecycleError(
-        "CONSOLE_ASSETS_MISSING",
-        "the installed Kojo package does not contain its Console build",
-      );
-    }
-    cpSync(consoleAssets, join(staging, "console"), { recursive: true });
-    const releaseManifest: ManagedReleaseManifest = {
-      formatVersion: 1,
-      releaseId,
-      kojoVersion: packageManifest.version,
-      bunVersion: Bun.version,
-      createdAt: new Date().toISOString(),
-    };
-    atomicPrivateFile(
-      join(staging, "release.json"),
-      `${JSON.stringify(releaseManifest, null, 2)}\n`,
-    );
-    immutable(staging);
-    chmodSync(staging, 0o700);
+        const consoleAssets = join(root, "console");
+        if (!existsSync(join(consoleAssets, "index.html"))) {
+          throw new LifecycleError(
+            "CONSOLE_ASSETS_MISSING",
+            "the installed Kojo package does not contain its Console build",
+          );
+        }
+        cpSync(consoleAssets, join(staging, "console"), { recursive: true });
+        const releaseManifest: ManagedReleaseManifest = {
+          formatVersion: 1,
+          releaseId,
+          kojoVersion: packageManifest.version,
+          bunVersion: Bun.version,
+          createdAt: new Date().toISOString(),
+        };
+        atomicPrivateFile(
+          join(staging, "release.json"),
+          `${JSON.stringify(releaseManifest, null, 2)}\n`,
+        );
+        immutable(staging);
+        chmodSync(staging, 0o700);
 
-    if (!existsSync(release)) {
-      renameSync(staging, release);
-      immutable(release);
-    } else discardTree(staging);
+        if (!existsSync(release)) {
+          renameSync(staging, release);
+          immutable(release);
+        } else discardTree(staging);
 
-    ensurePrivateDirectory(dirname(paths.managedCli));
-    atomicPrivateFile(paths.managedCli, stableProgram(paths.installationRoot, "cli.js"), 0o700);
-    atomicPrivateFile(
-      paths.managedLauncher,
-      stableProgram(paths.installationRoot, "launcher.js"),
-      0o700,
-    );
-    atomicPrivateFile(join(paths.installationRoot, "active-release"), `${releaseId}\n`);
-    atomicPrivateFileInOwnedDirectory(paths.serviceDefinition, options.serviceDocument(paths));
-  } catch (cause) {
-    if (existsSync(staging)) {
-      discardTree(staging);
-    }
-    if (cause instanceof LifecycleError) throw cause;
-    throw new LifecycleError("MANAGED_RELEASE_INSTALL_FAILED", "could not install Kojo", cause);
-  }
+        ensurePrivateDirectory(dirname(paths.managedCli));
+        atomicPrivateFile(paths.managedCli, stableProgram(paths.installationRoot, "cli.js"), 0o700);
+        atomicPrivateFile(
+          paths.managedLauncher,
+          stableProgram(paths.installationRoot, "launcher.js"),
+          0o700,
+        );
+        atomicPrivateFile(join(paths.installationRoot, "active-release"), `${releaseId}\n`);
+        atomicPrivateFileInOwnedDirectory(paths.serviceDefinition, options.serviceDocument(paths));
+      } catch (cause) {
+        if (existsSync(staging)) {
+          discardTree(staging);
+        }
+        if (cause instanceof LifecycleError) throw cause;
+        throw new LifecycleError("MANAGED_RELEASE_INSTALL_FAILED", "could not install Kojo", cause);
+      }
 
-  if (!statSync(release).isDirectory() || basename(release) !== releaseId) {
-    throw new LifecycleError("MANAGED_RELEASE_INSTALL_FAILED", "managed release was not published");
-  }
-  return { outcome: "installed", releaseId };
-};
+      if (!statSync(release).isDirectory() || basename(release) !== releaseId) {
+        throw new LifecycleError(
+          "MANAGED_RELEASE_INSTALL_FAILED",
+          "managed release was not published",
+        );
+      }
+      return { outcome: "installed", releaseId } as const;
+    },
+    catch: (cause) =>
+      cause instanceof LifecycleError
+        ? cause
+        : new LifecycleError(
+            "MANAGED_RELEASE_INSTALL_FAILED",
+            cause instanceof Error ? cause.message : String(cause),
+            cause,
+          ),
+  });

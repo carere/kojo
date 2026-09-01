@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Effect } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 import { startDaemon } from "../../../../src/contexts/daemon/adapters/DaemonOwner.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
@@ -57,7 +58,7 @@ describe("one idle Daemon owns one data root", () => {
         JSON.parse(readFileSync(join(hostPaths.runtimeRoot, "endpoint.json"), "utf8")),
       ).toEqual(daemon.endpoint);
     } finally {
-      await daemon.stop();
+      await Effect.runPromise(daemon.stop);
     }
   });
 
