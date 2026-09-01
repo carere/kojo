@@ -98,4 +98,50 @@ describe("durable Project Runner recovery", () => {
     });
     database.close(false);
   });
+
+  it("uses changed supervision settings only for later recovery attempts", async () => {
+    const database = open();
+    let settings = {
+      replacementDelaysMillis: [1_000],
+      healthyResetMillis: 10_000,
+    };
+    const repository = new SqliteProjectRecoveryRepository(database, {
+      settings: () => settings,
+    });
+    const first = await Effect.runPromise(
+      repository.recordFailure({
+        projectId: "project-a",
+        runnerInstanceId: "runner-first",
+        failedAt: "2026-09-01T00:00:00.000Z",
+        fault: "first failure",
+        operationFailed: true,
+      }),
+    );
+    expect(first.nextAttemptAt).toBe("2026-09-01T00:00:01.000Z");
+    await Effect.runPromise(
+      repository.confirmTermination("project-a", "runner-first", "2026-09-01T00:00:00.001Z"),
+    );
+    await Effect.runPromise(
+      repository.confirmSafety("project-a", "runner-first", "2026-09-01T00:00:00.001Z"),
+    );
+
+    settings = {
+      replacementDelaysMillis: [2_000, 3_000],
+      healthyResetMillis: 5,
+    };
+    const second = await Effect.runPromise(
+      repository.recordFailure({
+        projectId: "project-a",
+        runnerInstanceId: "runner-second",
+        failedAt: "2026-09-01T00:00:02.000Z",
+        fault: "second failure",
+        operationFailed: true,
+      }),
+    );
+    expect(second).toMatchObject({
+      attempts: 2,
+      nextAttemptAt: "2026-09-01T00:00:05.000Z",
+    });
+    database.close(false);
+  });
 });

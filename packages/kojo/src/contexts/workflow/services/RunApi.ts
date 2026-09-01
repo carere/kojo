@@ -18,7 +18,7 @@ import {
 } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import type { OperationReplyBody } from "@carere/kojo-runner-contracts/contexts/project/contracts/execution";
 import type { RunnerFrame } from "@carere/kojo-runner-contracts/contexts/project/contracts/frame";
-import { Data, Effect } from "effect";
+import { Data, Duration, Effect, Option } from "effect";
 import type { SqliteDaemonGateRepository } from "../../gate/adapters/SqliteDaemonGateRepository.ts";
 import type { SqliteProjectRecoveryRepository } from "../../project/adapters/SqliteProjectRecoveryRepository.ts";
 import type {
@@ -275,8 +275,14 @@ export class RunApi {
   readonly #gates: SqliteDaemonGateRepository;
   readonly #resources: SqliteResourceLeaseRepository;
   readonly #artifacts: AtomicArtifactRepository;
-  readonly #runnerIdleMillis: number;
-  readonly #runnerCleanupMillis: number;
+  readonly #runnerSettings: () => {
+    readonly idleMs: number;
+    readonly handshakeMs: number;
+    readonly heartbeatMs: number;
+    readonly unhealthyMs: number;
+    readonly cleanupMs: number;
+    readonly recoveryCheckMs: number;
+  };
   readonly #resourceMutationFault?:
     | ((mutation: RunnerMutationFault) => "before-commit" | "after-commit" | undefined)
     | undefined;
@@ -312,6 +318,14 @@ export class RunApi {
     readonly artifacts: AtomicArtifactRepository;
     readonly runnerIdleMillis?: number;
     readonly runnerCleanupMillis?: number;
+    readonly runnerSettings?: () => {
+      readonly idleMs: number;
+      readonly handshakeMs: number;
+      readonly heartbeatMs: number;
+      readonly unhealthyMs: number;
+      readonly cleanupMs: number;
+      readonly recoveryCheckMs: number;
+    };
     readonly resourceMutationFault?:
       | ((mutation: RunnerMutationFault) => "before-commit" | "after-commit" | undefined)
       | undefined;
@@ -331,8 +345,16 @@ export class RunApi {
     this.#gates = options.gates;
     this.#resources = options.resources;
     this.#artifacts = options.artifacts;
-    this.#runnerIdleMillis = options.runnerIdleMillis ?? DEFAULT_RUNNER_IDLE_MILLIS;
-    this.#runnerCleanupMillis = options.runnerCleanupMillis ?? 30_000;
+    this.#runnerSettings =
+      options.runnerSettings ??
+      (() => ({
+        idleMs: options.runnerIdleMillis ?? DEFAULT_RUNNER_IDLE_MILLIS,
+        handshakeMs: 10_000,
+        heartbeatMs: 5_000,
+        unhealthyMs: 30_000,
+        cleanupMs: options.runnerCleanupMillis ?? 30_000,
+        recoveryCheckMs: 60_000,
+      }));
     this.#resourceMutationFault = options.resourceMutationFault;
     this.#resourceRecoveryBoundary = options.resourceRecoveryBoundary;
     this.#daemonDispatchHeld = options.daemonDispatchHeld ?? false;
@@ -644,7 +666,7 @@ export class RunApi {
     targetRunIds: ReadonlyArray<string>,
     requestedAt: string,
   ): Promise<void> {
-    const deadline = Date.now() + this.#runnerCleanupMillis;
+    const deadline = Date.now() + this.#runnerSettings().cleanupMs;
     let controls: ReadonlyArray<ActiveExecutionControl> = [];
     while (Date.now() <= deadline) {
       controls = [
@@ -955,6 +977,7 @@ export class RunApi {
 
   async #dispatch(reserved: ReservedRun): Promise<void> {
     const { run } = reserved;
+    const attemptSettings = this.#runnerSettings();
     let authority: RunAuthority | undefined;
     try {
       const current = await Effect.runPromise(
@@ -1085,9 +1108,7 @@ export class RunApi {
               confirmedAt,
             ),
           );
-          if (this.#resourceRecoveryBoundary !== undefined) {
-            await Effect.runPromise(this.#resourceRecoveryBoundary());
-          }
+          await this.#runResourceRecoveryBoundary(attemptSettings.recoveryCheckMs);
           await Effect.runPromise(
             this.#resources.confirmRunnerTermination({
               projectId: run.projectId,
@@ -1160,6 +1181,10 @@ export class RunApi {
           ).catch(() => undefined);
         }
         await Effect.runPromise(this.#gates.reconcileTerminalInabilities()).catch(() => undefined);
+      } else {
+        await Effect.runPromise(this.#runs.releaseReservation(reserved.reservationId)).catch(
+          () => undefined,
+        );
       }
     } finally {
       await Effect.runPromise(
@@ -1570,6 +1595,7 @@ export class RunApi {
     }>;
     readonly stop: () => Promise<void>;
     readonly cause: unknown;
+    readonly recoveryCheckMs: number;
   }): Promise<void> {
     const failedAt = new Date(this.#now()).toISOString();
     let recovery = await Effect.runPromise(
@@ -1591,9 +1617,7 @@ export class RunApi {
           confirmedAt,
         ),
       );
-      if (this.#resourceRecoveryBoundary !== undefined) {
-        await Effect.runPromise(this.#resourceRecoveryBoundary());
-      }
+      await this.#runResourceRecoveryBoundary(options.recoveryCheckMs);
       await Effect.runPromise(
         this.#resources.confirmRunnerTermination({
           projectId: options.projectId,
@@ -1715,10 +1739,21 @@ export class RunApi {
     }
   }
 
+  async #runResourceRecoveryBoundary(timeoutMillis: number): Promise<void> {
+    if (this.#resourceRecoveryBoundary === undefined) return;
+    const outcome = await Effect.runPromise(
+      this.#resourceRecoveryBoundary().pipe(Effect.timeoutOption(Duration.millis(timeoutMillis))),
+    );
+    if (Option.isNone(outcome)) {
+      throw new Error(`Project Runner recovery check exceeded ${timeoutMillis} milliseconds`);
+    }
+  }
+
   async #createTriggerGroup(
     bootstrap: ExecutionRevision,
     bootstrapMaterialized: MaterializedRevision,
   ): Promise<ProjectTriggerGroup> {
+    const settings = this.#runnerSettings();
     await Effect.runPromise(this.#runnerSupervisor.stop(bootstrap.projectId));
     const runnerInstanceId = crypto.randomUUID();
     const connectionSecret = crypto.getRandomValues(new Uint8Array(32)).toHex();
@@ -1968,7 +2003,7 @@ export class RunApi {
         child.exited.then((exit) =>
           Promise.reject(new Error(`Project Runner exited ${exit} before Trigger binding`)),
         ),
-        Bun.sleep(10_000).then(() =>
+        Bun.sleep(settings.handshakeMs).then(() =>
           Promise.reject(new Error("Project Runner Trigger binding timed out")),
         ),
       ]);
@@ -2067,6 +2102,7 @@ export class RunApi {
               pollers: failedPollers,
               stop: stopGroup,
               cause,
+              recoveryCheckMs: settings.recoveryCheckMs,
             }).catch(() => undefined);
           }
         }
@@ -2076,7 +2112,7 @@ export class RunApi {
       let lastHealthyAt = this.#now();
       healthTimer = setInterval(() => {
         if (healthPending) {
-          if (this.#now() - lastHealthyAt >= 30_000) socket?.destroy();
+          if (this.#now() - lastHealthyAt >= settings.unhealthyMs) socket?.destroy();
           return;
         }
         healthPending = true;
@@ -2094,10 +2130,10 @@ export class RunApi {
           },
           () => {
             healthPending = false;
-            if (this.#now() - lastHealthyAt >= 30_000) socket?.destroy();
+            if (this.#now() - lastHealthyAt >= settings.unhealthyMs) socket?.destroy();
           },
         );
-      }, 5_000);
+      }, settings.heartbeatMs);
 
       let group: ProjectTriggerGroup;
       const stop = (): Promise<void> => {
@@ -2106,7 +2142,7 @@ export class RunApi {
             if (child !== undefined && child.exitCode === null) {
               const stopped = await Promise.race([
                 command("Shutdown", null),
-                Bun.sleep(this.#runnerCleanupMillis).then(() => undefined),
+                Bun.sleep(settings.cleanupMs).then(() => undefined),
               ]).catch(() => undefined);
               if (stopped?.kind !== "Stopped") await forceProcessGroup();
             }
@@ -2255,6 +2291,7 @@ export class RunApi {
         }),
     authority?: RunAuthority,
   ): Promise<A> {
+    const settings = this.#runnerSettings();
     if (mode === "execute") {
       await Effect.runPromise(this.#runnerSupervisor.stop(request.projectId));
     }
@@ -2316,7 +2353,7 @@ export class RunApi {
         child.exited.then((exit) =>
           Promise.reject(new Error(`Project Runner exited ${exit} before private binding`)),
         ),
-        Bun.sleep(10_000).then(() =>
+        Bun.sleep(settings.handshakeMs).then(() =>
           Promise.reject(new Error("Project Runner private binding timed out")),
         ),
       ]);
@@ -2831,7 +2868,7 @@ export class RunApi {
       let lastHealthyAt = this.#now();
       healthTimer = setInterval(() => {
         if (healthPending) {
-          if (this.#now() - lastHealthyAt >= 30_000) socket?.destroy();
+          if (this.#now() - lastHealthyAt >= settings.unhealthyMs) socket?.destroy();
           return;
         }
         healthPending = true;
@@ -2849,10 +2886,10 @@ export class RunApi {
           },
           () => {
             healthPending = false;
-            if (this.#now() - lastHealthyAt >= 30_000) socket?.destroy();
+            if (this.#now() - lastHealthyAt >= settings.unhealthyMs) socket?.destroy();
           },
         );
-      }, 5_000);
+      }, settings.heartbeatMs);
       const forceProcessGroup = async (): Promise<void> => {
         if (child === undefined) return;
         try {
@@ -2962,7 +2999,7 @@ export class RunApi {
           releaseCommit = undefined;
           if (executionState === "finished") {
             executionState = "committed";
-            timer = setTimeout(() => void stop().catch(() => undefined), this.#runnerIdleMillis);
+            timer = setTimeout(() => void stop().catch(() => undefined), settings.idleMs);
           }
         },
       };
@@ -2978,7 +3015,7 @@ export class RunApi {
       detached = true;
       const beforeExecution = await Effect.runPromise(this.#runs.read(authority.runId));
       if (beforeExecution?.cancellation?.state === "requested") {
-        await control.cancelAndStop(this.#runnerCleanupMillis);
+        await control.cancelAndStop(this.#runnerSettings().cleanupMs);
         await Effect.runPromise(
           this.#runs.confirmProjectRunnerStopped(
             request.projectId,

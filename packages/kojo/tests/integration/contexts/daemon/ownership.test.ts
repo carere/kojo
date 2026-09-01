@@ -122,4 +122,48 @@ describe("one idle Daemon owns one data root", () => {
       await Effect.runPromise(daemon.stop);
     }
   });
+
+  it("serves atomic configuration only through the private Daemon socket", async () => {
+    const hostPaths = paths();
+    const daemon = startDaemon(hostPaths);
+    const request = (path: string, init: RequestInit = {}) =>
+      fetch(`http://localhost${path}`, {
+        ...init,
+        unix: daemon.endpoint.socketPath,
+      } as RequestInit & { readonly unix: string });
+
+    try {
+      const before = await request("/api/v1/daemon/configuration");
+      expect(before.status).toBe(200);
+      expect(await before.json()).toMatchObject({
+        formatVersion: 1,
+        scope: "daemon",
+        restartRequired: false,
+      });
+      const invalid = await request("/api/v1/daemon/actions/configure", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ patch: { set: { secret: "not-allowed" } } }),
+      });
+      expect(invalid.status).toBe(400);
+      expect(await invalid.json()).toMatchObject({ code: "INVALID_CONFIGURATION_PATCH" });
+
+      const applied = await request("/api/v1/daemon/actions/configure", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ patch: { set: { limits: { executingRuns: 2 } } } }),
+      });
+      expect(applied.status).toBe(202);
+      const result = (await applied.json()) as {
+        readonly status: {
+          readonly fields: ReadonlyArray<{ readonly path: string; readonly effective: unknown }>;
+        };
+      };
+      expect(
+        result.status.fields.find((field) => field.path === "limits.executingRuns")?.effective,
+      ).toBe(2);
+    } finally {
+      await Effect.runPromise(daemon.stop);
+    }
+  });
 });

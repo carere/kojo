@@ -22,17 +22,23 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
   readonly #runs: RunApi;
   readonly #receipts: DaemonLifecycleReceiptRepository;
   readonly #ready: Effect.Effect<void, LifecycleError>;
+  readonly #activatePendingConfiguration: Effect.Effect<void, LifecycleError>;
+  readonly #cleanupMillis: () => number;
 
   constructor(options: {
     readonly dataIdentity: string;
     readonly runs: RunApi;
     readonly receipts: DaemonLifecycleReceiptRepository;
     readonly ready?: Effect.Effect<void, LifecycleError>;
+    readonly activatePendingConfiguration?: Effect.Effect<void, LifecycleError>;
+    readonly cleanupMillis?: () => number;
   }) {
     this.#dataIdentity = options.dataIdentity;
     this.#runs = options.runs;
     this.#receipts = options.receipts;
     this.#ready = options.ready ?? Effect.void;
+    this.#activatePendingConfiguration = options.activatePendingConfiguration ?? Effect.void;
+    this.#cleanupMillis = options.cleanupMillis ?? (() => 30_000);
   }
 
   #owner(): LifecycleRecordedOwner {
@@ -176,7 +182,7 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
 
   readonly stopOwnedProcesses = (
     operationId: string,
-    cleanupMillis: number,
+    _cleanupMillis: number,
     replacementExpected: boolean,
     forceAuthorizationId?: string,
   ): Effect.Effect<LifecycleRecordedOwner, LifecycleError> => {
@@ -229,7 +235,7 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
         ...(forceAuthorizationId === undefined ? {} : { forceAuthorizationId }),
       });
       const owner = yield* api.#runs
-        .stopForDaemonLifecycle(cleanupMillis, forceAuthorizationId !== undefined)
+        .stopForDaemonLifecycle(api.#cleanupMillis(), forceAuthorizationId !== undefined)
         .pipe(Effect.mapError(asLifecycleError));
       yield* api.#receipts.advance({
         operationId,
@@ -280,6 +286,7 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
         );
       }
       yield* api.#ready;
+      yield* api.#activatePendingConfiguration;
       yield* api.#receipts.advance({
         operationId,
         expectedRevision: receipt.revision,
