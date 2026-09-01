@@ -46,6 +46,12 @@ describe("SQLite Run admission", () => {
       expect(admitted.run.payload).toEqual([1]);
       expect(database.query("SELECT * FROM workflow_queue").all()).toHaveLength(1);
       expect(database.query("SELECT * FROM workflow_admission_receipts").all()).toHaveLength(1);
+      yield* repository.failQueuedRun(admitted.run.runId, "2026-09-01T10:00:01.000Z");
+      expect(yield* repository.read(admitted.run.runId)).toMatchObject({
+        state: "failed",
+        finishedAt: "2026-09-01T10:00:01.000Z",
+      });
+      expect(database.query("SELECT * FROM workflow_queue").all()).toHaveLength(0);
       database.close(false);
     }),
   );

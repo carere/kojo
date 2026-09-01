@@ -1,5 +1,5 @@
 import type { JsonValue } from "@carere/kojo-runner-contracts/contexts/shared/codecs/json";
-import { Clock, Effect, Exit, Fiber, Layer, Option, Scope } from "effect";
+import { Clock, Duration, Effect, Exit, Fiber, Layer, Option, Scope } from "effect";
 import { Workflow, WorkflowEngine } from "effect/unstable/workflow";
 import { DaemonExecutionRepository } from "../ports/DaemonExecutionRepository.ts";
 
@@ -76,8 +76,11 @@ export const layer = (
             executions.set(options.executionId, state);
             yield* resume(options.executionId);
           }
+          const result = yield* Fiber.join(
+            state.fiber as Fiber.Fiber<Workflow.Result<unknown, unknown>>,
+          );
           if (options.discard) return yield* Effect.void;
-          return yield* Fiber.join(state.fiber as Fiber.Fiber<Workflow.Result<unknown, unknown>>);
+          return result;
         }) as WorkflowEngine.Encoded["execute"],
         poll: (_workflow, executionId) =>
           Effect.sync(() => {
@@ -138,12 +141,29 @@ export const layer = (
           }
           return result;
         }),
-        deferredResult: () =>
-          Effect.die("Durable Deferreds are not part of the no-Trigger Runner slice"),
-        deferredDone: () =>
-          Effect.die("Durable Deferreds are not part of the no-Trigger Runner slice"),
-        scheduleClock: () =>
-          Effect.die("Durable clocks are not part of the no-Trigger Runner slice"),
+        deferredResult: Effect.fnUntraced(function* (deferred) {
+          const instance = yield* WorkflowEngine.WorkflowInstance;
+          const result = yield* repository.readDeferred(instance.executionId, deferred.name);
+          return result === undefined
+            ? Option.none()
+            : Option.some(result as unknown as Exit.Exit<unknown, unknown>);
+        }),
+        deferredDone: (options) =>
+          repository.commitDeferred(
+            options.executionId,
+            options.deferredName,
+            JSON.parse(JSON.stringify(options.exit)) as JsonValue,
+          ),
+        scheduleClock: (_workflow, options) =>
+          Clock.currentTimeMillis.pipe(
+            Effect.flatMap((now) =>
+              repository.scheduleWakeup(
+                options.executionId,
+                options.clock.deferred.name,
+                now + Duration.toMillis(options.clock.duration),
+              ),
+            ),
+          ),
       });
 
       yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));

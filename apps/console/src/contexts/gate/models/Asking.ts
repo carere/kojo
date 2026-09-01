@@ -12,6 +12,9 @@
  * a meaning out of it; it is an identity, and the route that carries it encodes it.
  */
 export interface Asking {
+  readonly daemonState?: "unanswered" | "recorded" | "applied" | "expired";
+  readonly appliedAt?: number;
+  readonly terminalInability?: "run-cancelled" | "run-failed";
   readonly request: {
     readonly runId: string;
     /** The gate's authored name, stable across every asking of it. */

@@ -19,8 +19,11 @@ import type {
   BrowserSessionResponse,
   DaemonDocument,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/browser";
+import type { RecordVerdictRequest } from "@carere/kojo-client-contracts/contexts/client/contracts/gate";
 import { decodeJsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
-import { Effect } from "effect";
+import { Cause, Effect, Option } from "effect";
+import { SqliteDaemonGateRepository } from "../../gate/adapters/SqliteDaemonGateRepository.ts";
+import { GateApi } from "../../gate/services/GateApi.ts";
 import { SqliteProjectRepository } from "../../project/adapters/SqliteProjectRepository.ts";
 import { ProjectApi } from "../../project/services/ProjectApi.ts";
 import { SqliteRunRepository } from "../../workflow/adapters/SqliteRunRepository.ts";
@@ -230,6 +233,7 @@ export const startDaemon = (
     const authority = browserAuthority({ now });
     const projectRepository = new SqliteProjectRepository(database);
     const runRepository = new SqliteRunRepository(database);
+    const gateRepository = new SqliteDaemonGateRepository(database);
     const projectApi = new ProjectApi({
       dataIdentity,
       instanceId,
@@ -245,7 +249,75 @@ export const startDaemon = (
       now,
       projects: projectRepository,
       runs: runRepository,
+      gates: gateRepository,
     });
+    const gateApi = new GateApi({
+      dataIdentity,
+      instanceId,
+      now,
+      repository: gateRepository,
+      runs: runApi,
+    });
+    const gateSnapshot = async (projectId?: string): Promise<Response> =>
+      noStoreJson(await Effect.runPromise(gateApi.snapshot(projectId)));
+    const answerGate = async (
+      request: Request,
+      clientSuppliesAnswerer: boolean,
+    ): Promise<Response> => {
+      let input: RecordVerdictRequest;
+      try {
+        const value = await requestJson(request);
+        if (value === null || typeof value !== "object" || Array.isArray(value))
+          return problem(400, "invalid-verdict", "the Verdict request must be a JSON object");
+        const record = value as Record<string, unknown>;
+        if (
+          Object.keys(record).some(
+            (key) =>
+              key !== "requestId" &&
+              key !== "dataIdentity" &&
+              key !== "token" &&
+              key !== "choice" &&
+              key !== "reason" &&
+              key !== "answerer",
+          ) ||
+          typeof record.requestId !== "string" ||
+          typeof record.dataIdentity !== "string" ||
+          typeof record.token !== "string" ||
+          typeof record.choice !== "string" ||
+          typeof record.reason !== "string" ||
+          (record.answerer !== undefined && typeof record.answerer !== "string")
+        ) {
+          return problem(400, "invalid-verdict", "the Verdict request has invalid fields");
+        }
+        input = {
+          requestId: record.requestId,
+          dataIdentity: record.dataIdentity,
+          token: record.token,
+          choice: record.choice,
+          reason: record.reason,
+          ...(clientSuppliesAnswerer && typeof record.answerer === "string"
+            ? { answerer: record.answerer }
+            : {}),
+        };
+      } catch {
+        return problem(400, "invalid-json", "the Verdict request body is invalid");
+      }
+      const result = await Effect.runPromiseExit(gateApi.record(input));
+      if (result._tag === "Success") return noStoreJson(result.value);
+      const failure = Option.getOrUndefined(Cause.findErrorOption(result.cause)) as
+        | { readonly code?: string; readonly message?: string }
+        | undefined;
+      if (failure?.code === "DEADLINE_PASSED")
+        return problem(409, "deadline-passed", "the Verdict was not recorded before the Deadline");
+      if (failure?.code === "ASKING_NOT_FOUND")
+        return problem(404, "asking-not-found", "the Gate token was not found");
+      return problem(409, "verdict-refused", failure?.message ?? Cause.pretty(result.cause));
+    };
+    void Effect.runPromise(runApi.resumeQueued()).catch(() => undefined);
+    void Effect.runPromise(gateApi.expireDue()).catch(() => undefined);
+    const gateDeadlineTimer = setInterval(() => {
+      void Effect.runPromise(gateApi.expireDue()).catch(() => undefined);
+    }, 100);
     const startRun = async (
       request: Request,
       projectId: string,
@@ -412,6 +484,7 @@ export const startDaemon = (
               "project-catalogue",
               "workflow-revisions",
               "no-trigger-runs",
+              "gate-verdicts",
               "client-request-journal",
             ],
             packageVersion: release.packageVersion,
@@ -515,6 +588,18 @@ export const startDaemon = (
           if (request.method === "GET" && url.pathname === "/api/v1/runs") {
             return noStoreJson(await Effect.runPromise(runApi.snapshot()));
           }
+          if (request.method === "GET" && url.pathname === "/api/v1/askings") {
+            return gateSnapshot();
+          }
+          if (request.method === "POST" && url.pathname === "/api/v1/gate-answers") {
+            return answerGate(request, false);
+          }
+          const projectAskings = url.pathname.match(
+            /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/askings$/,
+          );
+          if (request.method === "GET" && projectAskings !== null) {
+            return gateSnapshot(projectAskings[1]);
+          }
           const oneRun = url.pathname.match(/^\/api\/v1\/runs\/([A-Za-z0-9_-]+)$/);
           if (request.method === "GET" && oneRun !== null) {
             const run = await Effect.runPromise(runApi.run(oneRun[1] ?? "invalid"));
@@ -602,6 +687,19 @@ export const startDaemon = (
         if (request.method === "GET" && url.pathname === "/api/v1/runs") {
           return noStoreJson(await Effect.runPromise(runApi.snapshot()));
         }
+        if (request.method === "GET" && url.pathname === "/api/v1/askings") {
+          return gateSnapshot();
+        }
+        if (request.method === "POST" && url.pathname === "/api/v1/gate-answers") {
+          if (!isJson(request)) return problem(415, "json-required", "Gate answer requires JSON");
+          return answerGate(request, true);
+        }
+        const projectAskings = url.pathname.match(
+          /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/askings$/,
+        );
+        if (request.method === "GET" && projectAskings !== null) {
+          return gateSnapshot(projectAskings[1]);
+        }
         const oneRun = url.pathname.match(/^\/api\/v1\/runs\/([A-Za-z0-9_-]+)$/);
         if (request.method === "GET" && oneRun !== null) {
           const run = await Effect.runPromise(runApi.run(oneRun[1] ?? "invalid"));
@@ -666,6 +764,7 @@ export const startDaemon = (
       stopping = Promise.resolve().then(async () => {
         refreshCoordinatorStopped = true;
         clearInterval(refreshInventoryTimer);
+        clearInterval(gateDeadlineTimer);
         socketServer?.stop(true);
         consoleServer?.stop(true);
         await Promise.allSettled([...projectRefreshes.values()]);

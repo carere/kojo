@@ -9,6 +9,7 @@ import type {
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import type { OperationReplyBody } from "@carere/kojo-runner-contracts/contexts/project/contracts/execution";
 import { Data, Effect } from "effect";
+import type { SqliteDaemonGateRepository } from "../../gate/adapters/SqliteDaemonGateRepository.ts";
 import type { SqliteProjectRepository } from "../../project/adapters/SqliteProjectRepository.ts";
 import { materializeRevision } from "../../project/services/materializeRevision.ts";
 import { makeRunnerFrameReader, writeRunnerFrame } from "../../project/services/runnerChannel.ts";
@@ -40,9 +41,23 @@ interface RunnerInspection {
 
 interface RunnerExecution extends RunnerInspection {
   readonly runId: string;
-  readonly outcome: "succeeded" | "failed";
+  readonly outcome: "succeeded" | "failed" | "suspended";
   readonly recordedResults: Readonly<Record<string, JsonValue>>;
   readonly phases: ReadonlyArray<PhaseResult>;
+  readonly askings: ReadonlyArray<{
+    readonly runId: string;
+    readonly gatePath: string;
+    readonly asking: string;
+    readonly description: string;
+    readonly actor: string;
+    readonly choices: ReadonlyArray<string>;
+    readonly requestedAt: number;
+    readonly deadlineAt: number;
+    readonly expiryBranch: "fail" | "reject" | "escalate";
+    readonly internalDeferredName: string;
+  }>;
+  readonly deferredResults: Readonly<Record<string, JsonValue>>;
+  readonly scheduledWakeups: Readonly<Record<string, string>>;
 }
 
 const INTERNAL_PHASE_DESCRIPTION = "__kojo_internal_activity__";
@@ -58,7 +73,8 @@ const runApiFault = (cause: unknown): RunApiFault =>
     cause,
   });
 
-const terminal = (run: DaemonRun): boolean => run.state === "succeeded" || run.state === "failed";
+const terminal = (run: DaemonRun): boolean =>
+  run.state === "succeeded" || run.state === "failed" || run.state === "cancelled";
 
 const documentOf = (run: DaemonRun, phases: ReadonlyArray<PhaseResult>): RunDocument => ({
   runId: run.runId,
@@ -109,6 +125,8 @@ export class RunApi {
   readonly #now: () => number;
   readonly #projects: SqliteProjectRepository;
   readonly #runs: SqliteRunRepository;
+  readonly #gates: SqliteDaemonGateRepository;
+  readonly #dispatching = new Set<string>();
 
   constructor(options: {
     readonly dataIdentity: string;
@@ -117,6 +135,7 @@ export class RunApi {
     readonly now: () => number;
     readonly projects: SqliteProjectRepository;
     readonly runs: SqliteRunRepository;
+    readonly gates: SqliteDaemonGateRepository;
   }) {
     this.#dataIdentity = options.dataIdentity;
     this.#instanceId = options.instanceId;
@@ -124,6 +143,7 @@ export class RunApi {
     this.#now = options.now;
     this.#projects = options.projects;
     this.#runs = options.runs;
+    this.#gates = options.gates;
   }
 
   readonly start = (options: {
@@ -258,6 +278,79 @@ export class RunApi {
       catch: runApiFault,
     });
 
+  readonly continueRun = (runId: string): Effect.Effect<void, RunApiFault> =>
+    Effect.tryPromise({ try: () => this.#continue(runId), catch: runApiFault });
+
+  readonly resumeQueued = (): Effect.Effect<void, RunApiFault> =>
+    Effect.tryPromise({
+      try: async () => {
+        const runs = await Effect.runPromise(this.#runs.list);
+        await Promise.all(
+          runs.filter((run) => run.state === "queued").map((run) => this.#continue(run.runId)),
+        );
+      },
+      catch: runApiFault,
+    });
+
+  async #continue(runId: string): Promise<void> {
+    if (this.#dispatching.has(runId)) return;
+    this.#dispatching.add(runId);
+    let authority: RunAuthority | undefined;
+    try {
+      const run = await Effect.runPromise(this.#runs.read(runId));
+      if (run === undefined || run.state !== "queued") return;
+      const revision = await Effect.runPromise(
+        this.#projects.pinnedExecutionRevision(run.projectId, run.workflowName, run.revisionId),
+      );
+      const executionRoot = join(this.#dataRoot, "runner-materialized");
+      mkdirSync(executionRoot, { recursive: true, mode: 0o700 });
+      const materialized = materializeRevision({
+        retainedRoot: revision.publishedPath,
+        executionRoot,
+        revisionId: revision.revisionId,
+        packageGraphId: revision.packageGraphId,
+      });
+      const runnerInstanceId = crypto.randomUUID();
+      const registration: RunnerRegistration = {
+        registrationVersion: 1,
+        selectedProtocol: 1,
+        daemonInstanceId: this.#instanceId,
+        runnerInstanceId,
+        projectId: revision.projectId,
+        boundProjectId: revision.projectId,
+        revisionId: revision.revisionId,
+        packageGraphId: revision.packageGraphId,
+        boundPackageGraphId: revision.packageGraphId,
+        executionRoot: materialized.root,
+        workflowName: revision.workflowName,
+        entrySource: revision.entrySource,
+        payload: run.payload,
+        connectionSecret: crypto.getRandomValues(new Uint8Array(32)).toHex(),
+      };
+      try {
+        authority = await Effect.runPromise(
+          this.#runs.claim(run.runId, runnerInstanceId, new Date(this.#now()).toISOString()),
+        );
+        await this.#execute(revision.location, materialized.runner, registration, authority);
+      } finally {
+        materialized.dispose();
+      }
+    } catch (cause) {
+      const failedAt = new Date(this.#now()).toISOString();
+      if (authority === undefined) {
+        await Effect.runPromise(this.#runs.failQueuedRun(runId, failedAt)).catch(() => undefined);
+      } else {
+        await Effect.runPromise(this.#runs.completeRun(authority, "failed", failedAt)).catch(
+          () => undefined,
+        );
+      }
+      await Effect.runPromise(this.#gates.reconcileTerminalInabilities()).catch(() => undefined);
+      throw cause;
+    } finally {
+      this.#dispatching.delete(runId);
+    }
+  }
+
   async #execute(
     project: string,
     runner: string,
@@ -271,6 +364,25 @@ export class RunApi {
         phase.encodedResult,
       ]),
     );
+    const applications = await Effect.runPromise(this.#gates.deferredApplications(authority.runId));
+    const deferredResults = Object.fromEntries(
+      applications.map((application) => [
+        JSON.stringify([authority.runId, application.deferredName]),
+        {
+          _id: "Exit",
+          _tag: "Success",
+          value:
+            application.result === null
+              ? null
+              : {
+                  choice: application.result.choice,
+                  reason: application.result.reason,
+                  answerer: application.result.answerer,
+                  answeredAt: Date.parse(application.result.recordedAt),
+                },
+        } satisfies JsonValue,
+      ]),
+    );
     const executed = await this.#runner<RunnerExecution>(
       project,
       runner,
@@ -279,6 +391,8 @@ export class RunApi {
         ...registration,
         runId: authority.runId,
         recordedResults,
+        deferredResults,
+        scheduledWakeups: {},
       },
       authority,
     );
@@ -303,6 +417,47 @@ export class RunApi {
         this.#runs.completePhase(authority, { ...phase, encodedResult: result }),
       );
     }
+    for (const application of applications) {
+      await Effect.runPromise(this.#gates.markApplied(authority, application.wakeupId, endedAt));
+    }
+    if (executed.outcome === "suspended") {
+      const asking = executed.askings[0];
+      if (asking === undefined) {
+        throw new Error("the Runner suspended without creating an Asking");
+      }
+      const parts = asking.internalDeferredName.split("/");
+      const escalated = parts.at(-1) === "escalated";
+      const numberAt = escalated ? parts.length - 2 : parts.length - 1;
+      const askingNumber = Number(parts[numberAt]);
+      if (parts[0] !== "gate" || !Number.isInteger(askingNumber) || askingNumber < 1) {
+        throw new Error("the Runner returned an invalid structured Asking identity");
+      }
+      const gatePath = parts.slice(1, numberAt).join("/");
+      if (gatePath.length === 0) throw new Error("the Runner returned an empty Gate path");
+      const token = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
+      await Effect.runPromise(
+        this.#gates.createAskingAndSuspend(authority, {
+          identity: {
+            identityVersion: 1,
+            runId: authority.runId,
+            gatePath,
+            askingNumber,
+            escalationStage: escalated ? 1 : 0,
+          },
+          token,
+          projectId: registration.projectId,
+          workflowName: registration.workflowName,
+          description: asking.description,
+          actor: asking.actor,
+          choices: asking.choices,
+          deadline: new Date(asking.deadlineAt).toISOString(),
+          expiryBranch: asking.expiryBranch,
+          internalDeferredName: asking.internalDeferredName,
+          createdAt: new Date(asking.requestedAt).toISOString(),
+        }),
+      );
+      return;
+    }
     await Effect.runPromise(this.#runs.completeRun(authority, executed.outcome, endedAt));
   }
 
@@ -315,6 +470,8 @@ export class RunApi {
       | (RunnerRegistration & {
           readonly runId: string;
           readonly recordedResults: Readonly<Record<string, JsonValue>>;
+          readonly deferredResults: Readonly<Record<string, JsonValue>>;
+          readonly scheduledWakeups: Readonly<Record<string, string>>;
         }),
     authority?: RunAuthority,
   ): Promise<A> {
@@ -438,6 +595,8 @@ export class RunApi {
               workflowName: request.workflowName,
               payload: request.payload,
               recordedResults: request.recordedResults,
+              deferredResults: request.deferredResults,
+              scheduledWakeups: request.scheduledWakeups,
             },
           }),
         );

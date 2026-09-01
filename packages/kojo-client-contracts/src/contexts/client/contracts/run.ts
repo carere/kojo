@@ -1,6 +1,12 @@
 import type { JsonValue } from "../../shared/codecs/json.ts";
 
-export type RunExecutionState = "queued" | "executing" | "succeeded" | "failed";
+export type RunExecutionState =
+  | "queued"
+  | "executing"
+  | "suspended"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
 
 export interface RunPhaseDocument {
   readonly phasePath: string;

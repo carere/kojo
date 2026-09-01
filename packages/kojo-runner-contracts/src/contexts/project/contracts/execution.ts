@@ -25,6 +25,8 @@ export interface ExecuteRunBody {
   readonly workflowName: string;
   readonly payload: JsonValue;
   readonly recordedResults: Readonly<Record<string, JsonValue>>;
+  readonly deferredResults: Readonly<Record<string, JsonValue>>;
+  readonly scheduledWakeups: Readonly<Record<string, string>>;
 }
 
 export interface ReadResultBody {
@@ -102,6 +104,8 @@ export const decodeExecuteRunBody = (input: unknown): DecodeResult<ExecuteRunBod
     "workflowName",
     "payload",
     "recordedResults",
+    "deferredResults",
+    "scheduledWakeups",
   ]);
   if (!record.ok) return record;
   if (record.value.executionVersion !== 1)
@@ -126,11 +130,35 @@ export const decodeExecuteRunBody = (input: unknown): DecodeResult<ExecuteRunBod
   ) {
     return decodeFailure(["recordedResults"], "Expected a JSON object of recorded results");
   }
+  const deferredResults = decodeJsonValue(record.value.deferredResults);
+  if (!deferredResults.ok) return deferredResults;
+  if (
+    deferredResults.value === null ||
+    Array.isArray(deferredResults.value) ||
+    typeof deferredResults.value !== "object"
+  ) {
+    return decodeFailure(["deferredResults"], "Expected a JSON object of Deferred results");
+  }
+  const scheduledWakeups = decodeJsonValue(record.value.scheduledWakeups);
+  if (!scheduledWakeups.ok) return scheduledWakeups;
+  if (
+    scheduledWakeups.value === null ||
+    Array.isArray(scheduledWakeups.value) ||
+    typeof scheduledWakeups.value !== "object" ||
+    Object.values(scheduledWakeups.value).some((value) => typeof value !== "string")
+  ) {
+    return decodeFailure(
+      ["scheduledWakeups"],
+      "Expected a JSON object of absolute wake-up instants",
+    );
+  }
   return decodeSuccess({
     executionVersion: 1,
     workflowName: workflowName.value,
     payload: payload.value,
     recordedResults: recordedResults.value as Readonly<Record<string, JsonValue>>,
+    deferredResults: deferredResults.value as Readonly<Record<string, JsonValue>>,
+    scheduledWakeups: scheduledWakeups.value as Readonly<Record<string, string>>,
   });
 };
 

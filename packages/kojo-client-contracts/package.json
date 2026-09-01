@@ -21,6 +21,7 @@
   "exports": {
     "./contexts/client/contracts/bootstrap": "./src/contexts/client/contracts/bootstrap.ts",
     "./contexts/client/contracts/browser": "./src/contexts/client/contracts/browser.ts",
+    "./contexts/client/contracts/gate": "./src/contexts/client/contracts/gate.ts",
     "./contexts/client/contracts/mutation": "./src/contexts/client/contracts/mutation.ts",
     "./contexts/client/contracts/observation": "./src/contexts/client/contracts/observation.ts",
     "./contexts/client/contracts/operation": "./src/contexts/client/contracts/operation.ts",

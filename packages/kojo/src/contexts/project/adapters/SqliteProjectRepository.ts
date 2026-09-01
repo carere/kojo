@@ -595,6 +595,48 @@ export class SqliteProjectRepository {
       ),
     );
 
+  readonly pinnedExecutionRevision = (
+    projectId: string,
+    workflowName: string,
+    revisionId: string,
+  ): Effect.Effect<ExecutionRevision, ProjectStoreError> =>
+    Effect.try({
+      try: () => {
+        const row = this.#database
+          .query<
+            {
+              readonly location: string;
+              readonly package_graph_id: string;
+              readonly published_path: string;
+              readonly manifest_json: string;
+            },
+            [string, string, string]
+          >(
+            `SELECT p.location, r.package_graph_id, r.published_path, r.manifest_json
+               FROM projects p
+               JOIN workflow_runs run ON run.project_id = p.project_id
+               JOIN workflow_revisions r ON r.revision_id = run.revision_id
+              WHERE p.project_id = ? AND run.workflow_name = ? AND r.revision_id = ?
+              LIMIT 1`,
+          )
+          .get(projectId, workflowName, revisionId);
+        if (row === null) throw new Error("the pinned Workflow Revision is missing");
+        const manifest = JSON.parse(row.manifest_json) as { readonly entrySource?: unknown };
+        if (typeof manifest.entrySource !== "string")
+          throw new Error("the pinned Workflow Revision manifest has no entry source");
+        return {
+          projectId,
+          location: row.location,
+          workflowName,
+          revisionId,
+          packageGraphId: row.package_graph_id,
+          publishedPath: row.published_path,
+          entrySource: manifest.entrySource,
+        };
+      },
+      catch: failed,
+    });
+
   readonly receipt = (
     dataIdentity: string,
     requestId: string,

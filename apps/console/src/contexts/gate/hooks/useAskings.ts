@@ -1,5 +1,6 @@
 import { type UseQueryResult, useQuery } from "@tanstack/solid-query";
 import type { Accessor } from "solid-js";
+import { readAskings } from "../../daemon/services/browserAccess.ts";
 import { fetchJson } from "../../shared/services/api.ts";
 import { pollMillis } from "../../shared/services/queryClient.ts";
 import type { Asking } from "../models/Asking.ts";
@@ -19,6 +20,44 @@ import type { Asking } from "../models/Asking.ts";
 export const useAskings = (live: Accessor<boolean>): UseQueryResult<ReadonlyArray<Asking>, Error> =>
   useQuery(() => ({
     queryKey: ["gates"],
-    queryFn: () => fetchJson<ReadonlyArray<Asking>>("/api/gates"),
+    queryFn: async () => {
+      try {
+        const snapshot = await readAskings();
+        return snapshot.askings.map(
+          (asking): Asking => ({
+            daemonState: asking.state,
+            ...(asking.appliedAt === undefined ? {} : { appliedAt: Date.parse(asking.appliedAt) }),
+            ...(asking.terminalInability === undefined
+              ? {}
+              : { terminalInability: asking.terminalInability }),
+            request: {
+              runId: asking.identity.runId,
+              gate: asking.identity.gatePath,
+              asking: `gate/${asking.identity.gatePath}/${asking.identity.askingNumber}/${asking.identity.escalationStage}`,
+              description: asking.description,
+              actor: asking.actor,
+              choices: asking.choices,
+              token: asking.token,
+              requestedAt: Date.parse(asking.createdAt),
+              deadlineAt: Date.parse(asking.deadline),
+              onExpiry: asking.expiryBranch,
+            },
+            ...(asking.verdict === undefined
+              ? {}
+              : {
+                  verdict: {
+                    choice: asking.verdict.choice,
+                    reason: asking.verdict.reason,
+                    answerer: asking.verdict.answerer,
+                    answeredAt: Date.parse(asking.verdict.recordedAt),
+                  },
+                }),
+            ...(asking.expiredAt === undefined ? {} : { expiredAt: Date.parse(asking.expiredAt) }),
+          }),
+        );
+      } catch {
+        return fetchJson<ReadonlyArray<Asking>>("/api/gates");
+      }
+    },
     refetchInterval: live() ? pollMillis : (false as const),
   }));

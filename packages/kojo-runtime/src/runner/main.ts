@@ -4,8 +4,11 @@ import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { RUNNER_PROTOCOL_VERSION } from "@carere/kojo-runner-contracts/contexts/project/contracts/frame";
 import type { JsonValue } from "@carere/kojo-runner-contracts/contexts/shared/codecs/json";
-import { Effect, Layer, Schema } from "effect";
+import { Effect, Layer, Option, Schema } from "effect";
 import { WorkflowEngine } from "effect/unstable/workflow";
+import type { GateRequest } from "../contexts/gate/models/GateRequest.ts";
+import { Gate } from "../contexts/gate/ports/Gate.ts";
+import { GateRepository } from "../contexts/gate/ports/GateRepository.ts";
 import {
   makeRunnerFrameReader,
   writeRunnerFrame,
@@ -44,13 +47,31 @@ export interface RegisteredPayload {
 export interface ExecuteRegisteredRequest extends BoundRegistrationRequest {
   readonly runId: string;
   readonly recordedResults: Readonly<Record<string, JsonValue>>;
+  readonly deferredResults: Readonly<Record<string, JsonValue>>;
+  readonly scheduledWakeups: Readonly<Record<string, string>>;
 }
 
 export interface ExecuteRegisteredResult extends RegisteredPayload {
   readonly runId: string;
-  readonly outcome: "succeeded" | "failed";
+  readonly outcome: "succeeded" | "failed" | "suspended";
   readonly recordedResults: Readonly<Record<string, JsonValue>>;
   readonly phases: ReadonlyArray<RunnerPhaseResult>;
+  readonly askings: ReadonlyArray<RunnerAsking>;
+  readonly deferredResults: Readonly<Record<string, JsonValue>>;
+  readonly scheduledWakeups: Readonly<Record<string, string>>;
+}
+
+export interface RunnerAsking {
+  readonly runId: string;
+  readonly gatePath: string;
+  readonly asking: string;
+  readonly description: string;
+  readonly actor: string;
+  readonly choices: ReadonlyArray<string>;
+  readonly requestedAt: number;
+  readonly deadlineAt: number;
+  readonly expiryBranch: "fail" | "reject" | "escalate";
+  readonly internalDeferredName: string;
 }
 
 export interface RunnerPhaseResult {
@@ -150,6 +171,9 @@ export const executeRegisteredRevision = async (
 ): Promise<ExecuteRegisteredResult> => {
   const { bundle, payload } = await loadRegisteredRevision(request);
   const results = new Map(Object.entries(request.recordedResults));
+  const deferredResults = new Map(Object.entries(request.deferredResults));
+  const scheduledWakeups = new Map(Object.entries(request.scheduledWakeups));
+  const askings = new Map<string, RunnerAsking>();
   const initiallyRecorded = new Set(results.keys());
   const completedPhases = new Map<string, Omit<RunnerPhaseResult, "encodedResult">>();
   const activityTimes = new Map<string, { readonly startedAt: number; readonly endedAt: number }>();
@@ -164,6 +188,43 @@ export const executeRegisteredRevision = async (
         results.set(key, result);
         activityTimes.set(key, timing);
       }),
+    readDeferred: (runId, deferredName) =>
+      Effect.sync(() => deferredResults.get(JSON.stringify([runId, deferredName]))),
+    commitDeferred: (runId, deferredName, result) =>
+      Effect.sync(() => {
+        const key = JSON.stringify([runId, deferredName]);
+        if (!deferredResults.has(key)) deferredResults.set(key, result);
+      }),
+    scheduleWakeup: (runId, deferredName, dueAt) =>
+      Effect.sync(() => {
+        const key = JSON.stringify([runId, deferredName]);
+        if (!scheduledWakeups.has(key)) scheduledWakeups.set(key, new Date(dueAt).toISOString());
+      }),
+  });
+  const gateLayer = Layer.succeed(Gate, {
+    request: (asking: GateRequest) =>
+      Effect.sync(() => {
+        askings.set(asking.asking, {
+          runId: asking.runId,
+          gatePath: asking.gate,
+          asking: asking.asking,
+          description: asking.description,
+          actor: asking.actor,
+          choices: asking.choices,
+          requestedAt: asking.requestedAt,
+          deadlineAt: asking.deadlineAt,
+          expiryBranch: asking.onExpiry,
+          internalDeferredName: asking.asking,
+        });
+      }),
+    describe: (asking) => asking.description,
+  });
+  const gateRepositoryLayer = Layer.succeed(GateRepository, {
+    asked: () => Effect.void,
+    recorded: () => Effect.succeed(false),
+    expired: () => Effect.succeed(false),
+    byToken: () => Effect.succeed(Option.none()),
+    all: Effect.succeed([]),
   });
   const tracerLayer = Layer.succeed(Tracer, {
     runStarted: () => Effect.void,
@@ -193,19 +254,19 @@ export const executeRegisteredRevision = async (
     Tracer | WorkflowEngine.WorkflowEngine
   >;
   const registration = authoredLayer.pipe(
-    Layer.provideMerge(Layer.merge(engineLayer, tracerLayer)),
+    Layer.provideMerge(Layer.mergeAll(engineLayer, tracerLayer, gateLayer, gateRepositoryLayer)),
   );
   const execution = Effect.gen(function* () {
     const engine = yield* WorkflowEngine.WorkflowEngine;
-    return yield* Effect.result(
-      engine.execute(bundle.definition as never, {
-        executionId: request.runId,
-        payload: bundle.encodeEnginePayload(payload),
-        discard: false,
-      }),
-    );
+    yield* engine.execute(bundle.definition as never, {
+      executionId: request.runId,
+      payload: bundle.encodeEnginePayload(payload),
+      discard: true,
+    });
+    const result = yield* engine.poll(bundle.definition as never, request.runId);
+    return Option.getOrThrow(result);
   }).pipe(Effect.provide(registration)) as unknown as Effect.Effect<
-    { readonly _tag: "Success" | "Failure" },
+    { readonly _tag: "Complete" | "Suspended"; readonly exit?: { readonly _tag?: string } },
     never,
     never
   >;
@@ -231,9 +292,17 @@ export const executeRegisteredRevision = async (
     idempotencyKey: bundle.authoredIdempotencyKey(payload),
     enginePayload: bundle.encodeEnginePayload(payload),
     runId: request.runId,
-    outcome: outcome._tag === "Success" ? "succeeded" : "failed",
+    outcome:
+      outcome._tag === "Suspended"
+        ? "suspended"
+        : outcome.exit?._tag === "Success"
+          ? "succeeded"
+          : "failed",
     recordedResults: Object.fromEntries(results),
     phases,
+    askings: [...askings.values()],
+    deferredResults: Object.fromEntries(deferredResults),
+    scheduledWakeups: Object.fromEntries(scheduledWakeups),
   };
 };
 
@@ -359,6 +428,8 @@ const runPrivateProtocol = async (): Promise<void> => {
         readonly workflowName: string;
         readonly payload: JsonValue;
         readonly recordedResults: Readonly<Record<string, JsonValue>>;
+        readonly deferredResults: Readonly<Record<string, JsonValue>>;
+        readonly scheduledWakeups: Readonly<Record<string, string>>;
       };
       const result = await executeRegisteredRevision({
         ...registration,
@@ -366,6 +437,8 @@ const runPrivateProtocol = async (): Promise<void> => {
         workflowName: execute.workflowName,
         payload: execute.payload,
         recordedResults: execute.recordedResults,
+        deferredResults: execute.deferredResults,
+        scheduledWakeups: execute.scheduledWakeups,
       });
       await Effect.runPromise(
         writeRunnerFrame(socket, {

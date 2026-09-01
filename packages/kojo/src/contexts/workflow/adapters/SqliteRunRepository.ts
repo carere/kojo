@@ -89,7 +89,7 @@ export class SqliteRunRepository {
         payload_json TEXT NOT NULL,
         revision_id TEXT NOT NULL,
         package_graph_id TEXT NOT NULL,
-        state TEXT NOT NULL CHECK(state IN ('queued', 'executing', 'succeeded', 'failed')),
+        state TEXT NOT NULL CHECK(state IN ('queued', 'executing', 'suspended', 'succeeded', 'failed', 'cancelled')),
         admission_sequence INTEGER NOT NULL UNIQUE,
         admitted_at TEXT NOT NULL,
         started_at TEXT,
@@ -401,6 +401,25 @@ export class SqliteRunRepository {
             );
             this.#database.run("DELETE FROM workflow_slots WHERE run_id = ?", [authority.runId]);
             this.#database.run("DELETE FROM workflow_claims WHERE run_id = ?", [authority.runId]);
+          })
+          .immediate(),
+      catch: failure,
+    });
+
+  /** A continuation can fail before it acquires a Claim, for example during revision materialization. */
+  readonly failQueuedRun = (
+    runId: string,
+    finishedAt: string,
+  ): Effect.Effect<void, RunStoreError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            this.#database.run(
+              "UPDATE workflow_runs SET state = 'failed', finished_at = ? WHERE run_id = ? AND state = 'queued'",
+              [finishedAt, runId],
+            );
+            this.#database.run("DELETE FROM workflow_queue WHERE run_id = ?", [runId]);
           })
           .immediate(),
       catch: failure,

@@ -4,6 +4,11 @@ import type {
   BrowserSessionResponse,
   DaemonDocument,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/browser";
+import type {
+  AskingSnapshot,
+  RecordVerdictRequest,
+  RecordVerdictResult,
+} from "@carere/kojo-client-contracts/contexts/client/contracts/gate";
 import type { ProjectSnapshot } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
 import type {
   RunDocument,
@@ -139,6 +144,33 @@ const authorizedRead = async <A>(path: string): Promise<A> => {
   return (await response.json()) as A;
 };
 
+const authorizedMutation = async <A>(path: string, body: unknown): Promise<A> => {
+  const session = await currentAccess();
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      authorization: `Bearer ${session.credential}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (response.status === 401 || response.status === 403) {
+    window.sessionStorage.removeItem(storageKey);
+    access = undefined;
+    throw new ConsoleAccessError("access-required", "Run `kojo ui` again to open this Console.");
+  }
+  if (!response.ok) {
+    const problem = (await response.json().catch(() => ({}))) as { readonly message?: string };
+    throw new ConsoleAccessError(
+      "api-refused",
+      problem.message ?? "The Daemon API refused the mutation.",
+    );
+  }
+  return (await response.json()) as A;
+};
+
 export const readDaemon = (): Promise<DaemonDocument> =>
   authorizedRead<DaemonDocument>("/api/v1/daemon");
 
@@ -156,3 +188,12 @@ export const readRuns = (): Promise<RunSnapshot> => authorizedRead<RunSnapshot>(
 
 export const readRun = (runId: string): Promise<RunDocument> =>
   authorizedRead<RunDocument>(`/api/v1/runs/${encodeURIComponent(runId)}`);
+
+export const readAskings = (): Promise<AskingSnapshot> =>
+  authorizedRead<AskingSnapshot>("/api/v1/askings");
+
+/** The Console omits Answerer. The Daemon records the current OS user. */
+export const recordGateVerdict = (
+  request: Omit<RecordVerdictRequest, "answerer">,
+): Promise<RecordVerdictResult> =>
+  authorizedMutation<RecordVerdictResult>("/api/v1/gate-answers", request);

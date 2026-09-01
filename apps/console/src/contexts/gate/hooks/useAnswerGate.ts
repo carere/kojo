@@ -1,4 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/solid-query";
+import { readDaemon, recordGateVerdict } from "../../daemon/services/browserAccess.ts";
 import type { RunnerPresence } from "../../shared/models/Health.ts";
 import { postJson } from "../../shared/services/api.ts";
 
@@ -18,7 +19,7 @@ export interface GateReceipt {
     readonly answerer: string;
     readonly answeredAt: number;
   };
-  readonly runner: RunnerPresence;
+  readonly runner?: RunnerPresence;
 }
 
 /** What a browser sends. The answerer is not in it: the server records the OS user (console.md §9). */
@@ -48,11 +49,34 @@ export const useAnswerGate = (subject: { readonly runId: () => string }) => {
   const client = useQueryClient();
   return useMutation(() => ({
     mutationKey: ["gate-answer"],
-    mutationFn: (given: { readonly token: string; readonly answer: GateAnswer }) =>
-      postJson<GateReceipt>(
-        `/api/gates/${encodeURIComponent(given.token)}/answer`,
-        given.answer satisfies GateAnswer,
-      ),
+    mutationFn: async (given: { readonly token: string; readonly answer: GateAnswer }) => {
+      try {
+        const daemon = await readDaemon();
+        const result = await recordGateVerdict({
+          requestId: crypto.randomUUID(),
+          dataIdentity: daemon.dataIdentity,
+          token: given.token,
+          choice: given.answer.choice,
+          reason: given.answer.reason,
+        });
+        const verdict = result.asking.verdict;
+        if (verdict === undefined)
+          throw new Error("the Daemon did not return the Recorded Verdict");
+        return {
+          verdict: {
+            choice: verdict.choice,
+            reason: verdict.reason,
+            answerer: verdict.answerer,
+            answeredAt: Date.parse(verdict.recordedAt),
+          },
+        } satisfies GateReceipt;
+      } catch {
+        return postJson<GateReceipt>(
+          `/api/gates/${encodeURIComponent(given.token)}/answer`,
+          given.answer satisfies GateAnswer,
+        );
+      }
+    },
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["gates"] });
       void client.invalidateQueries({ queryKey: ["run", subject.runId()] });
