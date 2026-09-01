@@ -14,11 +14,11 @@
 //  - There is no gate inside the lane. The one review is the parent's, after everything has been
 //    measured, which is the ordinary order — the hotfix lane is the one that inverts it.
 
-import type { SandboxProvider } from "@carere/kojo/contexts/sandbox/models/SandboxProvider";
-import { withPermissions } from "@carere/kojo/contexts/workflow/guards/Permissions";
-import { agent } from "@carere/kojo/contexts/workflow/services/phase/agent";
-import { commit } from "@carere/kojo/contexts/workflow/services/phase/commit";
-import { sandboxed } from "@carere/kojo/contexts/workflow/services/sandboxed";
+import type { SandboxProvider } from "@carere/kojo-runtime/contexts/sandbox/models/SandboxProvider";
+import { withPermissions } from "@carere/kojo-runtime/contexts/workflow/guards/Permissions";
+import { agent } from "@carere/kojo-runtime/contexts/workflow/services/phase/agent";
+import { commit } from "@carere/kojo-runtime/contexts/workflow/services/phase/commit";
+import { sandboxed } from "@carere/kojo-runtime/contexts/workflow/services/sandboxed";
 import { Effect } from "effect";
 import { built as builtChecks, planned as plannedChecks } from "../../checks.ts";
 import { commands } from "../../commands.ts";

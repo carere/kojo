@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, symlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { enginePackage } from "../../src/contexts/shared/models/FactoryLayout.ts";
+import { enginePackage, runtimePackage } from "../../src/contexts/shared/models/FactoryLayout.ts";
 
 /**
  * What `bun install` leaves a target repository holding, made by hand and with nothing copied.
@@ -45,6 +45,10 @@ export const linkEngine = (options: {
   // this line is correct either way and does not assume the engine stays scoped.
   mkdirSync(dirname(engineLink), { recursive: true });
   link(packageRoot, engineLink);
+
+  const runtimeLink = join(root, "node_modules", runtimePackage);
+  mkdirSync(dirname(runtimeLink), { recursive: true });
+  link(join(dirname(packageRoot), "kojo-runtime"), runtimeLink);
 
   for (const dependency of dependencies) {
     link(join(packageRoot, "node_modules", dependency), join(root, "node_modules", dependency));

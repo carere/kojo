@@ -57,3 +57,6 @@ export const defaultTrunk = "main";
  * this constant from drifting.
  */
 export const enginePackage = "@carere/kojo";
+
+/** The Project-local package that authored Factory modules import. */
+export const runtimePackage = "@carere/kojo-runtime";

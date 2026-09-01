@@ -73,7 +73,7 @@ export const readme = (choices: FactoryChoices, starter: Starter): string => {
     "# Your factory",
     "",
     "`kojo init` wrote this directory once. **Nothing in it is a copy of the Kojo engine** — the",
-    "engine is a versioned dependency in the `package.json` at the root of this repository, which",
+    "Project runtime is a versioned dependency in the `package.json` at the root of this repository, which",
     "`kojo init` wrote the two entries of. Upgrading it is therefore a version bump and never a",
     "re-stamp. Everything here is yours to change, and running `kojo init` again keeps every file",
     "that already exists.",
@@ -89,7 +89,7 @@ export const readme = (choices: FactoryChoices, starter: Starter): string => {
     "",
     "Two entries went into `package.json` at the repository root:",
     "",
-    `- \`${choices.engine.kojo.name}\` — \`${choices.engine.kojo.specifier}\``,
+    `- \`${choices.engine.runtime.name}\` — \`${choices.engine.runtime.specifier}\``,
     `- \`${choices.engine.effect.name}\` — \`${choices.engine.effect.specifier}\``,
     "",
     ...(choices.engine.reach === "linked"
@@ -235,7 +235,7 @@ export const readme = (choices: FactoryChoices, starter: Starter): string => {
     "",
     ...(buildsAnImage(choices.sandbox)
       ? [
-          `Built as \`${choices.imageName}\` from \`sandbox/Dockerfile\`. \`workflows/${workflow.file}\``,
+          `Build \`${choices.imageName}\` from \`sandbox/Dockerfile\` before the first Run. \`workflows/${workflow.file}\``,
           "names the same string, so renaming it in one place means renaming it in the other.",
           "",
           "Rebuild it after you edit the Dockerfile:",
@@ -249,7 +249,7 @@ export const readme = (choices: FactoryChoices, starter: Starter): string => {
           "user and refuses an image built for a different one.",
         ]
       : [
-          `This factory was initialised with \`--sandbox ${choices.sandbox}\`, so no image was built.`,
+          `This Factory uses \`--sandbox ${choices.sandbox}\`, so it needs no local image.`,
           "`sandbox/Dockerfile` is stamped anyway, because the day you move to a container is the",
           "day you need it — and because it is the written record of the toolchain your phases",
           "assume. Keep it in step with `commands.ts`.",

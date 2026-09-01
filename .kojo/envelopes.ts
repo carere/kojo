@@ -6,7 +6,7 @@
 // agent is shown, and the wire contract. `renderPrompt` appends the envelope's own schema to every
 // call, so there is never a hand-written example here to drift out of step with the decoder.
 
-import { EnvelopeBase } from "@carere/kojo/contexts/workflow/models/Envelope";
+import { EnvelopeBase } from "@carere/kojo-runtime/contexts/workflow/models/Envelope";
 import { Schema } from "effect";
 
 /**

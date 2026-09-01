@@ -14,7 +14,7 @@ import {
 import { isPlaceholder } from "../../../../../src/contexts/scaffold/models/Placeholder.ts";
 import { initialise } from "../../../../../src/contexts/scaffold/services/initialise.ts";
 import { starters } from "../../../../../src/contexts/scaffold/services/plan.ts";
-import { enginePackage } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
+import { runtimePackage } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
 import { thisEngine } from "../../../../support/engineDependency.ts";
 
 /**
@@ -87,9 +87,7 @@ describe("a factory stamped into a real repository", () => {
             `${file.path} was reported ${file.outcome} and is not there`,
           ).toBe(true);
         }
-        // Made on the first run, not on the first use, so the ignore rule below is true before
-        // anything that needs it has been written.
-        expect(yield* fileSystem.exists(path.join(root, ".kojo/data"))).toBe(true);
+        expect(yield* fileSystem.exists(path.join(root, ".kojo/data"))).toBe(false);
       }),
     ),
   );
@@ -200,7 +198,9 @@ describe("a factory stamped into a real repository", () => {
         expect(stamped.manifest.outcome).toBe("created");
         // Both entries, at the specifiers this engine resolves — and `effect` exactly, because two
         // copies are two `Schema` modules and a run then dies inside the framework.
-        expect(manifest.dependencies?.[enginePackage]).toBe(stamped.choices.engine.kojo.specifier);
+        expect(manifest.dependencies?.[runtimePackage]).toBe(
+          stamped.choices.engine.runtime.specifier,
+        );
         expect(manifest.dependencies?.effect).toBe(stamped.choices.engine.effect.specifier);
         expect(stamped.choices.engine.effect.version).toBe(thisEngine().effect.version);
       }),
@@ -228,7 +228,7 @@ describe("a factory stamped into a real repository", () => {
           expect(manifest.name).toBe("somebody-elses-repository");
           expect(manifest.scripts).toEqual({ build: "tsc" });
           expect(manifest.dependencies?.zod).toBe("3.0.0");
-          expect(manifest.dependencies?.[enginePackage]).toBeDefined();
+          expect(manifest.dependencies?.[runtimePackage]).toBeDefined();
         }),
       {
         "package.json": `${JSON.stringify(

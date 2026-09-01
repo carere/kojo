@@ -1,6 +1,5 @@
 import { Console, Effect, Option } from "effect";
 import { Command, Flag, Prompt } from "effect/unstable/cli";
-import * as DockerImageBuilder from "../contexts/scaffold/adapters/DockerImageBuilder.ts";
 import type { Declared } from "../contexts/scaffold/models/EngineDependency.ts";
 import {
   agentInstalls,
@@ -18,19 +17,6 @@ import type { ManifestReport } from "../contexts/scaffold/services/manifest.ts";
 import { starters } from "../contexts/scaffold/services/plan.ts";
 import { engineDependency } from "../contexts/scaffold/services/resolveEngine.ts";
 import { commandFailed } from "./CommandFailed.ts";
-
-/**
- * The uid and gid the image's `agent` user is built with.
- *
- * The host's own, because Sandcastle starts containers as `--user <host uid>:<host gid>` and its
- * pre-flight refuses an image built for a different one. On a platform with no such concept the
- * functions are absent, and 1000 is the base image's own — which is also what Sandcastle falls
- * back to.
- */
-const hostIdentity = Effect.sync(() => ({
-  uid: process.getuid?.() ?? 1000,
-  gid: process.getgid?.() ?? 1000,
-}));
 
 /**
  * The four answers, as flags that prompt when they are absent.
@@ -68,13 +54,13 @@ const model = Flag.string("model").pipe(
 );
 
 const sandbox = Flag.choice("sandbox", sandboxChoices).pipe(
-  Flag.withDescription("Where the work runs. docker and podman are the ones an image is built for"),
+  Flag.withDescription("Where the work runs. Init writes, but does not build, a container image"),
   Flag.withFallbackPrompt(
     Prompt.select({
       message: "Where does the work run?",
       choices: [
-        { title: "docker", value: "docker" as const, description: "a container, image built here" },
-        { title: "podman", value: "podman" as const, description: "a container, image built here" },
+        { title: "docker", value: "docker" as const, description: "a container; build it later" },
+        { title: "podman", value: "podman" as const, description: "a container; build it later" },
         { title: "vercel", value: "vercel" as const, description: "isolated; no local image" },
         { title: "daytona", value: "daytona" as const, description: "isolated; no local image" },
         {
@@ -182,7 +168,7 @@ export const init = Command.make(
       Flag.optional,
     ),
     skipImage: Flag.boolean("skip-image").pipe(
-      Flag.withDescription("Stamp the files and stop. Nothing is built, and no daemon is needed"),
+      Flag.withDescription("Deprecated compatibility flag. Init never builds an image"),
     ),
   },
   Effect.fn(function* ({
@@ -195,8 +181,6 @@ export const init = Command.make(
     image,
     skipImage,
   }) {
-    const { uid, gid } = yield* hostIdentity;
-
     // Asked of this process before anything is written, because it is the one answer a stamped
     // factory cannot work out for itself: which `kojo`, and which `effect`, the files about to be
     // written must resolve to. No ordinary install can fail to answer it.
@@ -218,12 +202,9 @@ export const init = Command.make(
       packageManager: Option.getOrUndefined(packageManager),
       imageName: Option.getOrUndefined(image),
       skipImage,
-      uid,
-      gid,
+      uid: 0,
+      gid: 0,
     }).pipe(
-      Effect.provide(
-        DockerImageBuilder.layer({ command: sandbox === "podman" ? "podman" : "docker" }),
-      ),
       Effect.catchTag("ScaffoldError", (error) =>
         commandFailed(`${error.operation} ${error.target}: ${error.reason}`),
       ),
@@ -282,7 +263,7 @@ export const init = Command.make(
     );
   }),
 ).pipe(
-  Command.withDescription("Stamp a factory into this repository and build the image it runs in"),
+  Command.withDescription("Stamp a Factory into this repository without starting execution"),
   Command.withExamples([
     {
       command: "kojo init",

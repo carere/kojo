@@ -115,6 +115,7 @@
     "./contexts/workflow/models/NotAccepted": "./src/contexts/workflow/models/NotAccepted.ts",
     "./contexts/workflow/models/PermissionBreach": "./src/contexts/workflow/models/PermissionBreach.ts",
     "./contexts/workflow/models/PermissionPolicy": "./src/contexts/workflow/models/PermissionPolicy.ts",
+    "./contexts/workflow/models/Placeholder": "./src/contexts/workflow/models/Placeholder.ts",
     "./contexts/workflow/models/RunClaim": "./src/contexts/workflow/models/RunClaim.ts",
     "./contexts/workflow/models/RunFailure": "./src/contexts/workflow/models/RunFailure.ts",
     "./contexts/workflow/models/RunLocked": "./src/contexts/workflow/models/RunLocked.ts",

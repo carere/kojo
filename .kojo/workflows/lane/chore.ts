@@ -13,11 +13,11 @@
 //  - It is the only lane whose commands can fail *because the work succeeded*: removing the last use
 //    of something makes `bun knip` find it, which is exactly the signal wanted.
 
-import type { SandboxProvider } from "@carere/kojo/contexts/sandbox/models/SandboxProvider";
-import { withPermissions } from "@carere/kojo/contexts/workflow/guards/Permissions";
-import { agent } from "@carere/kojo/contexts/workflow/services/phase/agent";
-import { commit } from "@carere/kojo/contexts/workflow/services/phase/commit";
-import { sandboxed } from "@carere/kojo/contexts/workflow/services/sandboxed";
+import type { SandboxProvider } from "@carere/kojo-runtime/contexts/sandbox/models/SandboxProvider";
+import { withPermissions } from "@carere/kojo-runtime/contexts/workflow/guards/Permissions";
+import { agent } from "@carere/kojo-runtime/contexts/workflow/services/phase/agent";
+import { commit } from "@carere/kojo-runtime/contexts/workflow/services/phase/commit";
+import { sandboxed } from "@carere/kojo-runtime/contexts/workflow/services/sandboxed";
 import { Effect } from "effect";
 import { built as builtChecks } from "../../checks.ts";
 import { commands } from "../../commands.ts";

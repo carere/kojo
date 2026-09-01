@@ -3,7 +3,7 @@
 // Every real invocation Kojo's factory makes. **None of them is a placeholder** — this is the file a
 // freshly stamped factory lies in, and the first thing a person is told to finish.
 
-import { isPlaceholder } from "@carere/kojo/contexts/scaffold/models/Placeholder";
+import { isPlaceholder } from "@carere/kojo-runtime/contexts/workflow/models/Placeholder";
 
 /**
  * What a code phase of Kojo's factory runs, in the run's own worktree.

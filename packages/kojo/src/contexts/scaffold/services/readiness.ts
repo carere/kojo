@@ -19,8 +19,8 @@ import { describeInvisible } from "../../agent/guards/invisibleChecks.ts";
 import type { AgentSpend } from "../../agent/models/AgentSpend.ts";
 import { describeSpend, spendVariable } from "../../agent/models/AgentSpend.ts";
 import {
-  enginePackage,
   factoryDirectory,
+  runtimePackage,
   workflowsDirectory,
 } from "../../shared/models/FactoryLayout.ts";
 import type { ResolvedPackage } from "../../shared/models/ResolvedPackage.ts";
@@ -255,8 +255,8 @@ export const factoryFinding = (evidence: FactoryEvidence): Finding => {
 export interface DependencyEvidence {
   /** What the `kojo` doing the looking is, and what it resolves. Absent when it cannot say. */
   readonly engine: EngineDependency | undefined;
-  /** What `${factoryDirectory}/` resolves `kojo` to, or nothing when it resolves none. */
-  readonly kojo: ResolvedPackage | undefined;
+  /** What `${factoryDirectory}/` resolves the Project runtime to, or nothing when it resolves none. */
+  readonly runtime: ResolvedPackage | undefined;
   /** What `${factoryDirectory}/` resolves `effect` to, or nothing when it resolves none. */
   readonly effect: ResolvedPackage | undefined;
   /** The manager whose install command a remedy tells a person to run. */
@@ -288,12 +288,12 @@ export const dependencyFinding = (evidence: DependencyEvidence): Finding => {
     );
   }
 
-  const here = { kojo: evidence.kojo, effect: evidence.effect };
+  const here = { runtime: evidence.runtime, effect: evidence.effect };
   const missing = [
-    ...(here.kojo === undefined ? [enginePackage] : []),
+    ...(here.runtime === undefined ? [runtimePackage] : []),
     ...(here.effect === undefined ? ["effect"] : []),
   ];
-  if (here.kojo === undefined || here.effect === undefined) {
+  if (here.runtime === undefined || here.effect === undefined) {
     return failed(
       subject,
       `${factoryDirectory}/ cannot resolve ${missing.join(" or ")}`,
@@ -306,9 +306,9 @@ export const dependencyFinding = (evidence: DependencyEvidence): Finding => {
   // `effect` first: when both are wrong it is the one whose failure is unreadable.
   const pairs: ReadonlyArray<readonly [Declared, ResolvedPackage]> = [
     [evidence.engine.effect, here.effect],
-    [evidence.engine.kojo, here.kojo],
+    [evidence.engine.runtime, here.runtime],
   ];
-  const split = pairs.find(([mine, theirs]) => mine.directory !== theirs.directory);
+  const split = pairs.find(([mine, theirs]) => mine.version !== theirs.version);
 
   if (split !== undefined) {
     const [mine, theirs] = split;
@@ -324,13 +324,13 @@ export const dependencyFinding = (evidence: DependencyEvidence): Finding => {
             `built against — and run \`${install}\` so one copy serves both.`
         : "The factory would import a different engine from the one running this command, so its " +
             "ports are different services and no layer can satisfy them. Declare " +
-            `\`"${enginePackage}": "${mine.specifier}"\` in package.json and run \`${install}\`.`,
+            `\`"${runtimePackage}": "${mine.specifier}"\` in package.json and run \`${install}\`.`,
     );
   }
 
   return ok(
     subject,
-    `${identify(evidence.engine.kojo)} and ${evidence.engine.effect.name} ` +
+    `${identify(evidence.engine.runtime)} and ${evidence.engine.effect.name} ` +
       `${evidence.engine.effect.version} — one copy of each`,
   );
 };
@@ -414,7 +414,7 @@ const asIfStamped = (sandbox: SandboxChoice): FactoryChoices => {
     template: "review",
     toolchain: toolchainFor("npm"),
     imageName: "",
-    engine: { reach: "published", kojo: nothing, effect: nothing },
+    engine: { reach: "published", runtime: nothing, effect: nothing },
   };
 };
 

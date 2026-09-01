@@ -36,7 +36,7 @@ import {
   toolchainFinding,
   workflowsFinding,
 } from "../../../../../src/contexts/scaffold/services/readiness.ts";
-import { enginePackage } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
+import { runtimePackage } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
 import { someEngine } from "../../../../support/engineDependency.ts";
 
 const ran = (exitCode: number, output = "") => ({ ran: true, exitCode, output });
@@ -229,7 +229,7 @@ describe("whether this factory and this engine hold the same effect", () => {
   it("passes when one copy of each serves both", () => {
     const finding = dependencyFinding({
       engine: mine,
-      kojo: { ...mine.kojo },
+      runtime: { ...mine.runtime },
       effect: same,
       manager: "bun",
     });
@@ -237,20 +237,18 @@ describe("whether this factory and this engine hold the same effect", () => {
     expect(finding.detail).toContain("one copy of each");
   });
 
-  it("refuses two copies of effect, and names both versions and both directories", () => {
+  it("refuses an incompatible Effect version", () => {
     const finding = dependencyFinding({
       engine: mine,
-      kojo: { ...mine.kojo },
-      effect: elsewhere,
+      runtime: { ...mine.runtime },
+      effect: { ...elsewhere, version: "3.0.0" },
       manager: "bun",
     });
 
     expect(finding.standing).toBe("failed");
-    // The versions are equal here on purpose: that is the ordinary case, and a check that compared
-    // versions would call this healthy. What differs, and what a person acts on, is the directory.
     expect(finding.detail).toContain(mine.effect.directory);
     expect(finding.detail).toContain(elsewhere.directory);
-    expect(finding.detail).toContain("4.0.0-test");
+    expect(finding.detail).toContain("3.0.0");
     // The failure a person would otherwise meet, named where they can recognise it.
     expect(finding.remedy).toContain("Cannot convert a symbol to a string");
     expect(finding.remedy).toContain(`"effect": "${mine.effect.specifier}"`);
@@ -259,33 +257,33 @@ describe("whether this factory and this engine hold the same effect", () => {
   it("refuses two copies of kojo for a different reason, because the remedy is different", () => {
     const finding = dependencyFinding({
       engine: mine,
-      kojo: { name: enginePackage, version: "0.0.1", directory: "/repo/node_modules/kojo" },
+      runtime: { name: runtimePackage, version: "0.0.1", directory: "/repo/node_modules/kojo" },
       effect: same,
       manager: "bun",
     });
 
     expect(finding.standing).toBe("failed");
-    expect(finding.detail).toContain(`two copies of ${enginePackage}`);
+    expect(finding.detail).toContain(`two copies of ${runtimePackage}`);
     expect(finding.remedy).toContain("different services");
   });
 
   it("says which package is unresolvable, and names the install that fixes it", () => {
     const finding = dependencyFinding({
       engine: mine,
-      kojo: undefined,
+      runtime: undefined,
       effect: undefined,
       manager: "pnpm",
     });
 
     expect(finding.standing).toBe("failed");
-    expect(finding.detail).toContain("kojo or effect");
+    expect(finding.detail).toContain("@carere/kojo-runtime or effect");
     expect(finding.remedy).toContain("pnpm install");
   });
 
   it("skips rather than guesses when this engine cannot say where it is", () => {
     const finding = dependencyFinding({
       engine: undefined,
-      kojo: undefined,
+      runtime: undefined,
       effect: undefined,
       manager: "npm",
     });

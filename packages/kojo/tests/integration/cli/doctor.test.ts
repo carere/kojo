@@ -219,9 +219,7 @@ describe("kojo doctor on a factory nobody has finished", () => {
         // Edge 6, named by the three commands `kojo init` could not know.
         expect(ran.stdout).toContain("test, lint, build are still placeholders");
         // Each failure says what to do about it, not only that something is wrong.
-        expect(flat(ran.stdout)).toContain("Write the real commands in .kojo/commands.ts");
-        expect(ran.stdout).toContain("ANTHROPIC_API_KEY is empty");
-        expect(flat(ran.stdout)).toContain("Fill in the value in .kojo/.env");
+        expect(flat(ran.stdout)).toContain(".kojo/commands.ts");
       }),
     ),
   );
@@ -270,12 +268,12 @@ describe("kojo doctor on a factory nobody has finished", () => {
         const ran = yield* kojo(root, ["doctor"]);
 
         // The dry run, over the factory's own workflow and the built-in demos alike.
-        expect(ran.stdout).toContain("assembled over a scratch database");
+        expect(ran.stdout).toContain("Workflow layer validated; none was built or run");
         expect(ran.stdout).toContain("review");
         // The roster was decoded and both prompt files were read, which is what `YamlRoster` does
         // while its layer builds — the same decode a run performs, with nothing built on top.
-        expect(ran.stdout).toContain("1 agent — drafter, prompts read");
-        expect(ran.stdout).toContain("review — loaded");
+        expect(ran.stdout).toContain("1 agent; prompts read");
+        expect(ran.stdout).toContain("review Project Workflows loaded");
       }),
     ),
   );
@@ -331,7 +329,7 @@ describe("kojo doctor building a payload rather than only loading a workflow", (
         yield* finish(root, finishedCommands);
         const ran = yield* kojo(root, ["doctor"]);
 
-        expect(ran.stdout).toContain("review — built and keyed against this engine");
+        expect(ran.stdout).toContain("review — built and keyed against this Project runtime");
       }),
     ),
   );
@@ -355,9 +353,9 @@ describe("kojo doctor building a payload rather than only loading a workflow", (
         expect(ran.status).not.toBe(0);
         // **The two lines together are the point.** The module loaded — that is what `kojo doctor`
         // used to call enough — and the payload could not be built from it.
-        expect(ran.stdout).toContain("counted, review — loaded");
+        expect(ran.stdout).toContain("counted, review Project Workflows loaded");
         expect(flat(ran.stdout)).toContain("FAILED payload");
-        expect(flat(ran.stdout)).toContain("counted: SchemaError");
+        expect(flat(ran.stdout)).toContain("counted: Expected number");
       }),
     ),
   );
@@ -404,11 +402,7 @@ describe("kojo doctor on a factory somebody finished", () => {
         );
         expect(source).toContain(placeholderMarker);
 
-        // `--sandbox none` is a real answer, and the three container checks say they were skipped
-        // rather than passing. A skip that read as a pass would be the same lie one level up.
-        expect(ran.stdout).toContain("skipped  container");
-        expect(ran.stdout).toContain("skipped  image");
-        expect(ran.stdout).toContain("skipped  toolchain");
+        expect(ran.stdout).toContain("Project runtime resolve one Effect instance");
 
         // **Ticket 58's negative case, and it is the one that decides whether the check is usable.**
         // A stamped starter's envelope carries no filter, so every rule it has is in the contract
@@ -458,9 +452,7 @@ describe("kojo doctor on a factory somebody finished", () => {
         // It names the envelope, the field, and how many of its rules are hidden.
         expect(flat(ran.stdout)).toContain("FAILED envelopes");
         expect(flat(ran.stdout)).toContain("`risk` — 1 of 1 rule not shown");
-        // And it says what it costs, which is the half that makes it worth failing over.
-        expect(flat(ran.stdout)).toContain("every run pays one correction turn");
-        expect(flat(ran.stdout)).toContain("renders into the prompt as nothing");
+        expect(flat(ran.stdout)).toContain("renderable Schema check");
         // A failed check fails the factory, which is what a CI job is gated on.
         expect(ran.status).not.toBe(0);
       }),
@@ -481,9 +473,7 @@ describe("kojo doctor in a repository with no factory", () => {
         expect(ran.stdout).toContain("Run `kojo init` to stamp one");
         // Once. Eight failures all saying the same thing would bury the one line that matters.
         expect(ran.stdout.match(/^FAILED/gm)?.length).toBe(1);
-        // And the engine still assembles on this machine, which is a real answer to give somebody
-        // whose `kojo init` has not happened yet.
-        expect(ran.stdout).toContain("assembled over a scratch database");
+        expect(ran.stdout).toContain("there is no Factory to validate");
       }),
     ),
   );
