@@ -1,3 +1,8 @@
+import { readFile } from "node:fs/promises";
+import type {
+  RunDocument,
+  StartRunResult,
+} from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 import type { WorkflowSnapshot } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import { Console, Data, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
@@ -5,6 +10,7 @@ import type { DaemonPaths } from "../contexts/daemon/models/DaemonPaths.ts";
 import { readDaemonEndpoint } from "../contexts/daemon/services/daemonStatus.ts";
 import { linuxPaths } from "../contexts/daemon/services/linuxPaths.ts";
 import { macPaths } from "../contexts/daemon/services/macPaths.ts";
+import { clientExit } from "./ClientExit.ts";
 import { commandFailed } from "./CommandFailed.ts";
 
 class WorkflowClientError extends Data.TaggedError("WorkflowClientError")<{
@@ -65,6 +71,122 @@ const render = (snapshot: WorkflowSnapshot, json: boolean): Effect.Effect<void> 
   return Effect.forEach(workflowLines(snapshot), (line) => Console.log(line), { discard: true });
 };
 
+export const decodePayloadText = (text: string): unknown => JSON.parse(text) as unknown;
+
+export const timeoutMillis = (text: string): number | undefined => {
+  if (text === "none") return undefined;
+  const match = text.match(/^(\d+(?:\.\d+)?)(ms|s|m|h)?$/);
+  if (match === null)
+    throw new Error("--timeout needs positive ms, s, m, h, bare seconds, or none");
+  const value = Number(match[1]);
+  if (!(value > 0)) throw new Error("--timeout must be positive");
+  const scale =
+    match[2] === "ms" ? 1 : match[2] === "m" ? 60_000 : match[2] === "h" ? 3_600_000 : 1_000;
+  return value * scale;
+};
+
+const startRun = Command.make(
+  "start",
+  {
+    projectId: Argument.string("project-id"),
+    workflowName: Argument.string("workflow-name"),
+    payload: Flag.string("payload").pipe(Flag.optional),
+    payloadFile: Flag.string("payload-file").pipe(Flag.optional),
+    wait: Flag.boolean("wait"),
+    timeout: Flag.string("timeout").pipe(Flag.optional),
+    json: Flag.boolean("json"),
+  },
+  Effect.fn(function* ({ projectId, workflowName, payload, payloadFile, wait, timeout, json }) {
+    const inline = Option.getOrUndefined(payload);
+    const file = Option.getOrUndefined(payloadFile);
+    if ((inline === undefined) === (file === undefined)) {
+      return yield* clientExit(2, "Start requires exactly one --payload or --payload-file");
+    }
+    if (!wait && Option.isSome(timeout)) {
+      return yield* clientExit(2, "--timeout is valid only with --wait");
+    }
+    const parsed = yield* Effect.tryPromise({
+      try: async () => {
+        const text =
+          inline ??
+          (file === "-"
+            ? await readFile("/dev/stdin", "utf8")
+            : await readFile(file as string, "utf8"));
+        return decodePayloadText(text);
+      },
+      catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
+    }).pipe(
+      Effect.catch((message) =>
+        clientExit(2, `the supplied payload is not valid JSON: ${message}`),
+      ),
+    );
+    const deadline = yield* Effect.try({
+      try: () => {
+        const duration = Option.isSome(timeout) ? timeoutMillis(timeout.value) : 60_000;
+        return duration === undefined ? undefined : Date.now() + duration;
+      },
+      catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
+    }).pipe(Effect.catch((message) => clientExit(2, message)));
+    const result = yield* Effect.tryPromise({
+      try: async () => {
+        const endpoint = readDaemonEndpoint(productionPaths());
+        if (endpoint === undefined)
+          throw new Error("the Daemon is not ready; run `kojo daemon start`");
+        const path = `/api/v1/projects/${encodeURIComponent(projectId)}/workflows/${encodeURIComponent(workflowName)}/actions/start`;
+        const response = await fetch(`http://localhost${path}`, {
+          unix: endpoint.socketPath,
+          method: "POST",
+          headers: { accept: "application/json", "content-type": "application/json" },
+          body: JSON.stringify({
+            requestId: crypto.randomUUID(),
+            dataIdentity: endpoint.dataIdentity,
+            payload: parsed,
+          }),
+        } as RequestInit & { readonly unix: string });
+        if (!response.ok) {
+          const body = (await response.json().catch(() => ({}))) as { readonly message?: string };
+          throw new Error(body.message ?? `the Daemon refused Start (${response.status})`);
+        }
+        return { endpoint, result: (await response.json()) as StartRunResult };
+      },
+      catch: (cause) =>
+        new WorkflowClientError({
+          reason: cause instanceof Error ? cause.message : String(cause),
+          cause,
+        }),
+    }).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
+    if (!wait) {
+      yield* Console.log(
+        json
+          ? JSON.stringify({ formatVersion: 1, ...result.result })
+          : `Run ${result.result.runId} admitted at revision ${result.result.revisionId}.`,
+      );
+      return;
+    }
+    let run: RunDocument | undefined;
+    while (deadline === undefined || Date.now() < deadline) {
+      const response = yield* Effect.promise(() =>
+        fetch(`http://localhost/api/v1/runs/${encodeURIComponent(result.result.runId)}`, {
+          unix: result.endpoint.socketPath,
+          headers: { accept: "application/json" },
+        } as RequestInit & { readonly unix: string }),
+      );
+      if (response.ok) {
+        run = (yield* Effect.promise(() => response.json())) as RunDocument;
+        if (run.state === "succeeded" || run.state === "failed") break;
+      }
+      yield* Effect.sleep("50 millis");
+    }
+    if (run?.state !== "succeeded" && run?.state !== "failed") {
+      return yield* clientExit(3, `Run ${result.result.runId} continues after the client timeout`);
+    }
+    yield* Console.log(
+      json ? JSON.stringify({ formatVersion: 1, run }) : `Run ${run.runId} ${run.state}.`,
+    );
+    if (run.state === "failed") return yield* clientExit(1, `Run ${run.runId} failed`);
+  }),
+).pipe(Command.withDescription("Admit one no-Trigger JSON Run through the Daemon"));
+
 const list = Command.make(
   "list",
   {
@@ -107,6 +229,6 @@ const status = Command.make(
 ).pipe(Command.withDescription("Inspect one Project Workflow by full structured identity"));
 
 export const workflow = Command.make("workflow").pipe(
-  Command.withDescription("Inspect Daemon-owned Project Workflows without executing them"),
-  Command.withSubcommands([list, status]),
+  Command.withDescription("Start and inspect Daemon-owned Project Workflows"),
+  Command.withSubcommands([list, status, startRun]),
 );

@@ -8,6 +8,13 @@ import {
 } from "../../shared/codecs/json.ts";
 import { decodeRunnerIdentity, decodeSha256 } from "../../shared/models/identity.ts";
 import { decodeArtifactChunkBody } from "../contracts/artifact.ts";
+import {
+  decodeCommitActionResultBody,
+  decodeExecuteRunBody,
+  decodeOperationReplyBody,
+  decodeReadResultBody,
+  decodeRegisterRevisionBody,
+} from "../contracts/execution.ts";
 import type { RunnerFrame } from "../contracts/frame.ts";
 import { decodeHelloBody, decodeWelcomeBody } from "../contracts/handshake.ts";
 import { isExecutionMutationKind, isRunnerOperationKind } from "../contracts/operations.ts";
@@ -63,6 +70,16 @@ export const decodeRunnerFrame = (input: unknown): DecodeResult<RunnerFrame> => 
     body = prefixIssues(decodeWelcomeBody(base.value.body), ["body"]);
   } else if (base.value.kind === "WriteArtifactChunk") {
     body = prefixIssues(decodeArtifactChunkBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "RegisterRevision") {
+    body = prefixIssues(decodeRegisterRevisionBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "ExecuteRun") {
+    body = prefixIssues(decodeExecuteRunBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "ReadResult") {
+    body = prefixIssues(decodeReadResultBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "CommitActionResult") {
+    body = prefixIssues(decodeCommitActionResultBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "Ready") {
+    body = prefixIssues(decodeOperationReplyBody(base.value.body), ["body"]);
   } else {
     body = prefixIssues(decodeJsonValue(base.value.body), ["body"]);
   }

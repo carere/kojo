@@ -5,6 +5,10 @@ import type {
   DaemonDocument,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/browser";
 import type { ProjectSnapshot } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
+import type {
+  RunDocument,
+  RunSnapshot,
+} from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 import type { WorkflowSnapshot } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 
 interface StoredSession {
@@ -147,3 +151,8 @@ export const readWorkflows = (projectId?: string): Promise<WorkflowSnapshot> =>
       ? "/api/v1/workflows"
       : `/api/v1/projects/${encodeURIComponent(projectId)}/workflows`,
   );
+
+export const readRuns = (): Promise<RunSnapshot> => authorizedRead<RunSnapshot>("/api/v1/runs");
+
+export const readRun = (runId: string): Promise<RunDocument> =>
+  authorizedRead<RunDocument>(`/api/v1/runs/${encodeURIComponent(runId)}`);

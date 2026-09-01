@@ -8,6 +8,7 @@ import { ends, reachedStatus } from "./ends.ts";
 import { created, factory, readyFor } from "./factory.ts";
 import { reportPhases } from "./reportPhases.ts";
 import { root } from "./root.ts";
+import { runStatusCommands } from "./runStatus.ts";
 import { describeStop } from "./stopLine.ts";
 import { choices, type Runnable, resolve } from "./workflows.ts";
 
@@ -123,4 +124,7 @@ export const run = Command.make(
       // trace; the handler then reads the askings and the trace back, so both halves stay exported.
     }).pipe(Effect.provide(runnable.layer.pipe(Layer.provideMerge(factory(database)))));
   }),
-).pipe(Command.withDescription("Start a workflow and report where it stopped"));
+).pipe(
+  Command.withDescription("Start a workflow and report where it stopped"),
+  Command.withSubcommands(runStatusCommands),
+);

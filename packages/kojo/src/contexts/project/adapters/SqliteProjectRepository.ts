@@ -46,6 +46,16 @@ interface ReceiptRow {
   readonly receipt_json: string;
 }
 
+export interface ExecutionRevision {
+  readonly projectId: string;
+  readonly location: string;
+  readonly workflowName: string;
+  readonly revisionId: string;
+  readonly packageGraphId: string;
+  readonly publishedPath: string;
+  readonly entrySource: string;
+}
+
 const documentOf = (row: ProjectRow): ProjectDocument => ({
   projectId: row.project_id,
   label: basename(row.location),
@@ -540,6 +550,50 @@ export class SqliteProjectRepository {
       },
       catch: failed,
     });
+
+  readonly executionRevision = (
+    projectId: string,
+    workflowName: string,
+  ): Effect.Effect<ExecutionRevision, ProjectStoreError> =>
+    this.admissibleRevision(projectId, workflowName).pipe(
+      Effect.flatMap((revisionId) =>
+        Effect.try({
+          try: () => {
+            const row = this.#database
+              .query<
+                {
+                  readonly location: string;
+                  readonly package_graph_id: string;
+                  readonly published_path: string;
+                  readonly manifest_json: string;
+                },
+                [string, string]
+              >(
+                `SELECT p.location, r.package_graph_id, r.published_path, r.manifest_json
+                   FROM projects p
+                   JOIN workflow_revisions r ON r.revision_id = ?
+                  WHERE p.project_id = ?`,
+              )
+              .get(revisionId, projectId);
+            if (row === null) throw new Error("the pinned Workflow Revision is missing");
+            const manifest = JSON.parse(row.manifest_json) as { readonly entrySource?: unknown };
+            if (typeof manifest.entrySource !== "string") {
+              throw new Error("the pinned Workflow Revision manifest has no entry source");
+            }
+            return {
+              projectId,
+              location: row.location,
+              workflowName,
+              revisionId,
+              packageGraphId: row.package_graph_id,
+              publishedPath: row.published_path,
+              entrySource: manifest.entrySource,
+            };
+          },
+          catch: failed,
+        }),
+      ),
+    );
 
   readonly receipt = (
     dataIdentity: string,

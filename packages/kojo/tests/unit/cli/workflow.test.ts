@@ -1,8 +1,24 @@
 import type { WorkflowSnapshot } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import { describe, expect, it } from "vitest";
-import { workflowLines } from "../../../src/cli/workflow.ts";
+import { decodePayloadText, timeoutMillis, workflowLines } from "../../../src/cli/workflow.ts";
 
 describe("Workflow CLI view", () => {
+  it("keeps scalar, array, object, and null JSON payloads unchanged", () => {
+    expect(decodePayloadText("null")).toBeNull();
+    expect(decodePayloadText('"value"')).toBe("value");
+    expect(decodePayloadText("[1,null]")).toEqual([1, null]);
+    expect(decodePayloadText('{"one":1}')).toEqual({ one: 1 });
+    expect(() => decodePayloadText("not-json")).toThrow();
+  });
+
+  it("parses the accepted client timeout units", () => {
+    expect(timeoutMillis("250ms")).toBe(250);
+    expect(timeoutMillis("2")).toBe(2_000);
+    expect(timeoutMillis("3m")).toBe(180_000);
+    expect(timeoutMillis("none")).toBeUndefined();
+    expect(() => timeoutMillis("0s")).toThrow("positive");
+  });
+
   it("keeps Project, Factory, refresh, activity, availability, source, revision, and Trigger separate", () => {
     const snapshot: WorkflowSnapshot = {
       observationVersion: 1,

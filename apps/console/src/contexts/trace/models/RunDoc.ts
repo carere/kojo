@@ -154,6 +154,12 @@ export interface InFlightLine {
 }
 
 export interface RunDoc {
+  readonly daemon?: {
+    readonly projectId: string;
+    readonly revisionId: string;
+    readonly state: "queued" | "executing" | "succeeded" | "failed";
+    readonly queueReason?: string;
+  };
   readonly run: {
     readonly run: {
       readonly runId: string;
