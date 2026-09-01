@@ -40,7 +40,7 @@ tasks:
       - tests/support/**/*
       - vitest.config.ts
   test-host:
-    command: bun node_modules/.bin/vitest run --project host
+    command: bun node_modules/.bin/vitest run --project host --reporter=verbose
     inputs:
       - src/**/*
       - tests/host/**/*
