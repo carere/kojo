@@ -54,8 +54,9 @@
       "entry": ["tests/browser/realFactory.ts"]
     },
     "packages/kojo": {
-      // These are Moon task entry points. No TypeScript module imports a command-line guard.
-      "entry": ["src/scripts/*.ts"]
+      // The scripts are Moon task entry points. The managed LaunchAgent starts the launcher entry
+      // through its immutable bundle, so no TypeScript module imports either kind of program.
+      "entry": ["src/scripts/*.ts", "src/launcher/main.ts"]
     }
   }
 }

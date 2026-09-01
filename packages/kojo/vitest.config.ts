@@ -32,6 +32,14 @@ export default defineConfig({
           fileParallelism: false,
         },
       },
+      {
+        test: {
+          name: "host",
+          include: ["tests/host/**/*.test.ts"],
+          fileParallelism: false,
+          testTimeout: 60_000,
+        },
+      },
     ],
   },
 });

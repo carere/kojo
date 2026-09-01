@@ -39,6 +39,14 @@ tasks:
       - tests/integration/**/*
       - tests/support/**/*
       - vitest.config.ts
+  test-host:
+    command: bun node_modules/.bin/vitest run --project host
+    inputs:
+      - src/**/*
+      - tests/host/**/*
+      - vitest.config.ts
+    options:
+      cache: false
   # Sandcastle's build asserts Effect never leaks out of its published types. This asserts the
   # inverse for Kojo: no bare promise reaches ours, so the boundary in
   # contexts/sandbox/adapters/boundary.ts cannot quietly spread.

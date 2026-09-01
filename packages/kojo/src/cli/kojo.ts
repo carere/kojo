@@ -1,5 +1,6 @@
 import { Command } from "effect/unstable/cli";
 import { thisEngine } from "../contexts/shared/services/resolvePackage.ts";
+import { daemon } from "./daemon.ts";
 import { doctor } from "./doctor.ts";
 import { gate } from "./gate.ts";
 import { init } from "./init.ts";
@@ -15,7 +16,9 @@ import { watch } from "./watch.ts";
  * this module — the handlers do `yield* root`, and building the tree here keeps that from being an
  * import cycle.
  */
-export const kojo = root.pipe(Command.withSubcommands([init, doctor, run, watch, gate, ui]));
+export const kojo = root.pipe(
+  Command.withSubcommands([init, doctor, run, watch, gate, ui, daemon]),
+);
 
 /**
  * What `kojo --version` prints: this package's own `version`, read off its own `package.json`.
