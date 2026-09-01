@@ -14,7 +14,7 @@ const frontMatter = [
   "name: kojo",
   "description: >-",
   "  Drive the Kojo factory in this repository: start a run, see what is waiting on a human, answer",
-  "  a gate, apply an answer, and read a run back out of the trace. Use whenever the task is to run,",
+  "  a gate, observe its application, and inspect a Run. Use whenever the task is to run,",
   "  resume, unblock, inspect or author a Kojo workflow, or whenever a `.kojo/` directory is present",
   "  and the work touches it.",
   "---",

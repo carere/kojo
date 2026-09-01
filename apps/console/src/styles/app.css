@@ -5,7 +5,7 @@
  *
  * Named after role rather than colour, so a component says `bg-muted` and never `bg-zinc-100`. The
  * dark values are a media query rather than a class because the Console has no theme switch and no
- * place to persist one: v1 is one factory, one process, no settings.
+ * place to persist one: v1 has no appearance setting.
  */
 
 @theme {

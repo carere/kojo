@@ -1,9 +1,7 @@
 import { createSignal, For, type JSX, Show } from "solid-js";
 import { Badge, type BadgeTone } from "../../shared/components/Badge.tsx";
-import { refusal, settled } from "../../shared/hooks/settled.ts";
-import { useHealth } from "../../shared/hooks/useHealth.ts";
+import { refusal } from "../../shared/hooks/settled.ts";
 import { humanDuration } from "../../shared/lib/duration.ts";
-import type { RunnerPresence } from "../../shared/models/Health.ts";
 import { useNow } from "../../shared/ports/Now.tsx";
 import { useAnswerGate } from "../hooks/useAnswerGate.ts";
 import type { Asking } from "../models/Asking.ts";
@@ -14,7 +12,6 @@ import {
   answeringHeadline,
   answeringState,
   isRecorded,
-  isSettled,
   type SettledAsking,
 } from "../models/answering.ts";
 
@@ -26,23 +23,12 @@ import {
  * into one of three states, each with its own word, and *applied* is drawn from the run's own
  * settled record and from nothing else.
  *
- * Where the runner presence comes from is the other half of that honesty:
- *
- * - **The receipt**, at the instant the verdict was written. The server reads the runner table as it
- *   writes, so the first rendering after a click is right with no second round trip.
- * - **The health document afterwards**, polled while — and only while — a verdict is recorded and
- *   nothing has applied it. A watcher can be killed while this card sits on screen, and a card still
- *   saying *applying…* half an hour later would be the same lie in slow motion.
- *
- * The two are ordered by which was measured later, using the cache's own timestamps rather than a
- * clock read here: `dataUpdatedAt` and `submittedAt` are both stamped by TanStack, so the comparison
- * needs no `Date.now()` and the injected clock stays the only time this component renders.
+ * The Daemon Asking state and the Run record are the only sources for Recorded and Applied.
  */
 
 const tones: Record<AnsweringState, BadgeTone> = {
   waiting: "waiting",
   overdue: "danger",
-  applying: "running",
   applied: "good",
   // Not *good*. A gate that ran out of time is a decision the factory asked for and never got, and
   // drawing it in the colour of a success would hide the one thing worth noticing about it.
@@ -63,36 +49,15 @@ export const GateAnswering = (props: {
 
   const receipt = () => answer.data;
 
-  /**
-   * Is a verdict written down with nothing yet to show for it? That is when presence is worth asking.
-   *
-   * It stops at any settlement, not only at an applied one: once the run has recorded how this
-   * asking ended — answered or expired — no runner is going to apply anything to it, and a poll that
-   * kept running would be asking a question whose answer can no longer change what is on screen.
-   */
-  const pending = () =>
-    (props.asking.verdict !== undefined || receipt() !== undefined) &&
-    !isSettled(props.asking, props.settled);
-
-  const health = useHealth(pending);
-
-  /**
-   * Whether anybody can apply an answer, from whichever source measured it last.
-   *
-   * `undefined` while nothing has answered yet, which `answeringState` reads as *nothing is
-   * running* — the safe direction, and it is corrected within one poll.
-   */
-  const runner = (): RunnerPresence | undefined => {
-    const document = settled(health);
-    if (document !== undefined && health.dataUpdatedAt > answer.submittedAt) return document.runner;
-    return receipt()?.runner ?? document?.runner;
+  const observedAsking = (): Asking => {
+    const verdict = receipt()?.verdict;
+    return verdict === undefined ? props.asking : { ...props.asking, verdict };
   };
 
   const state = (): AnsweringState =>
     answeringState({
-      asking: props.asking,
+      asking: observedAsking(),
       settled: props.settled,
-      runner: runner(),
       now: now(),
     });
 
@@ -117,11 +82,7 @@ export const GateAnswering = (props: {
       >
         <div class="flex flex-wrap items-center gap-2">
           <Badge tone={tones[state()]}>{answeringHeadline[state()]}</Badge>
-          {/*
-           * How long it has been in this state, drawn beside it rather than hidden. *Applying* is
-           * normal for around ten seconds; the only way somebody can tell that from an apply that is
-           * never coming is to be shown the number.
-           */}
+          {/* How long the Recorded Verdict has waited for application. */}
           <Show when={isRecorded(state()) && sinceAnswer() !== undefined}>
             <span data-answering-since class="text-muted-foreground text-xs">
               {sinceAnswer()} ago

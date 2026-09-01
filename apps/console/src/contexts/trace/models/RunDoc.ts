@@ -1,5 +1,5 @@
 /**
- * `GET /api/runs/:runId` — one whole run, as the wire carries it.
+ * `GET /api/v1/runs/:runId` — one whole Run, as the Daemon wire carries it.
  *
  * Read structurally, never decoded. console.md §10 asks the Console to ignore what a newer factory
  * grew that this build does not know about, which is the whole value of the additive-migration
@@ -114,7 +114,7 @@ export interface SandboxLine {
 }
 
 /**
- * One **settled** asking. A gate still waiting has no record; it comes from `/api/gates`.
+ * One **settled** Asking. A Gate still waiting comes from `/api/v1/askings`.
  *
  * **Its presence is the Console's only proof that an answer was applied.** The record is written by
  * the run itself, in the activity that follows the suspension, so a record keyed by an asking means

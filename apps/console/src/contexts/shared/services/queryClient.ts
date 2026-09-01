@@ -5,14 +5,14 @@ import { refused } from "./api.ts";
 export const pollMillis = 1_000;
 
 /**
- * The Console's server cache.
+ * The Console's Daemon API cache.
  *
  * Two defaults here are decisions rather than tuning, and both come out of console.md §10's rule
  * that an unreachable API must never blank the view:
  *
  * - **Retry forever, with a capped backoff — but only what is worth retrying.** A bounded retry ends
- *   in an error state, and an error state is a Console that has given up on a `kojo ui` somebody is
- *   about to restart. Retrying without end is what makes *keep the last data on screen, show a
+ *   in an error state, and an error state is a Console that has given up on a Daemon that may
+ *   recover. Retrying without end is what makes *keep the last data on screen, show a
  *   retrying banner* true rather than true for thirty seconds. The cap keeps a long outage from
  *   backing off into minutes. **A refusal is exempt**: a `404 no-such-run` is the server answering,
  *   and asking again for a run that does not exist can only ever produce the same answer more

@@ -44,20 +44,3 @@ export const workflowExtension = ".ts";
  */
 /** @public */
 export const defaultTrunk = "main";
-
-/**
- * What this engine is called on the registry, which is what a stamped factory has to depend on.
- *
- * One name, for the same reason `defaultTrunk` is one, and the two halves are further apart here:
- * `kojo init` *declares* it in the target's `package.json`, every file `init` stamps *imports* it,
- * and `kojo doctor` *resolves* it to check that the factory and the engine running the command are
- * one copy. Three readings of one string, and a factory whose declaration and imports disagree
- * fails with `Cannot find module` at the first line of the first file it loads.
- *
- * **It is not the command name and it is not the branch prefix.** Those are `kojo` too and they
- * stay `kojo`: a person types `kojo`, and a Factory owns `kojo/*` branches. Only the registry
- * name carries the scope. `templatesImportTheEngine.test.ts` is what keeps the stamped imports and
- * this constant from drifting.
- */
-/** @public */
-export const enginePackage = "@carere/kojo";

@@ -1,6 +1,5 @@
 import { type UseQueryResult, useQuery } from "@tanstack/solid-query";
 import { readRuns } from "../../daemon/services/browserAccess.ts";
-import { fetchJson } from "../../shared/services/api.ts";
 import { pollMillis } from "../../shared/services/queryClient.ts";
 import { allSettled, type RunLine } from "../models/RunLine.ts";
 
@@ -12,34 +11,27 @@ import { allSettled, type RunLine } from "../models/RunLine.ts";
  * answer back in. When every run has reached a terminal outcome the interval is `false`, and the
  * Console stops asking for good — a finished run left open in a tab costs one request in total.
  *
- * The list is fetched whole rather than by cursor. console.md §7 confines the cursor to occurrences,
- * which are genuinely unbounded; a factory's run list is not, and replacing it wholesale removes
- * every merge concern a partial update would create.
+ * The list is fetched whole from the authenticated Daemon API. Replacing it removes every merge
+ * concern a partial update would create.
  */
 export const useRuns = (): UseQueryResult<ReadonlyArray<RunLine>, Error> =>
   useQuery(() => ({
     queryKey: ["runs"],
-    queryFn: async () => {
-      try {
-        const snapshot = await readRuns();
-        return snapshot.runs.map(
-          (run): RunLine => ({
-            run: {
-              runId: run.runId,
-              workflow: run.workflowName,
-              startedAt: Date.parse(run.startedAt ?? run.admittedAt),
-            },
-            executionState: run.state,
-            ...(run.queueReason === undefined ? {} : { queueReason: run.queueReason }),
-            ...(run.state === "succeeded" || run.state === "failed" || run.state === "cancelled"
-              ? { outcome: run.state }
-              : {}),
-          }),
-        );
-      } catch {
-        return fetchJson<ReadonlyArray<RunLine>>("/api/runs");
-      }
-    },
+    queryFn: async () =>
+      (await readRuns()).runs.map(
+        (run): RunLine => ({
+          run: {
+            runId: run.runId,
+            workflow: run.workflowName,
+            startedAt: Date.parse(run.startedAt ?? run.admittedAt),
+          },
+          executionState: run.state,
+          ...(run.queueReason === undefined ? {} : { queueReason: run.queueReason }),
+          ...(run.state === "succeeded" || run.state === "failed" || run.state === "cancelled"
+            ? { outcome: run.state }
+            : {}),
+        }),
+      ),
     refetchInterval: (query: {
       readonly state: { readonly data: ReadonlyArray<RunLine> | undefined };
     }) => (allSettled(query.state.data ?? []) ? (false as const) : pollMillis),

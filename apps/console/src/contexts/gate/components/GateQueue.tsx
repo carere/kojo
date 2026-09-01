@@ -11,8 +11,6 @@ import {
   TableRow,
 } from "../../shared/components/Table.tsx";
 import { retrying, settled } from "../../shared/hooks/settled.ts";
-import { useHealth } from "../../shared/hooks/useHealth.ts";
-import { noFactoryNotice } from "../../shared/models/Health.ts";
 import { useNow } from "../../shared/ports/Now.tsx";
 import { useRuns } from "../../trace/hooks/useRuns.ts";
 import { allSettled } from "../../trace/models/RunLine.ts";
@@ -38,14 +36,12 @@ import { type QueueRow, queueRows, settledRows, waitingRows } from "../models/qu
  */
 export const GateQueue = (): JSX.Element => {
   const now = useNow();
-  const health = useHealth();
   const runs = useRuns();
   // The same rule the run list follows: an asking carries no outcome of its own, so the runs are
   // what say whether this factory still has anything that could ask or answer.
   const askings = useAskings(() => !allSettled(settled(runs) ?? []));
 
   const rows = () => queueRows({ askings: settled(askings) ?? [], now: now() });
-  const absent = () => settled(health)?.factory === "absent";
 
   return (
     <main class="mx-auto flex w-full max-w-5xl flex-col gap-4 px-6 py-8">
@@ -69,47 +65,38 @@ export const GateQueue = (): JSX.Element => {
       </Show>
 
       <Show
-        when={!absent()}
-        fallback={
-          <Notice tone="empty" title={settled(health)?.notice ?? noFactoryNotice}>
-            <p class="mt-1">Nothing can be waiting on anybody in a repository with no factory.</p>
-          </Notice>
-        }
+        when={settled(askings)}
+        fallback={<p class="text-muted-foreground text-sm">Loading the queue…</p>}
       >
         <Show
-          when={settled(askings)}
-          fallback={<p class="text-muted-foreground text-sm">Loading the queue…</p>}
-        >
-          <Show
-            when={waitingRows(rows()).length > 0}
-            fallback={
-              <Notice tone="empty" title="Nothing is waiting on a human.">
-                <p class="mt-1">
-                  No run in this factory has stopped at a gate. Nothing has gone wrong.
-                </p>
-              </Notice>
-            }
-          >
-            <QueueTable rows={waitingRows(rows())} />
-          </Show>
-
-          {/*
-           * Settled — answered or expired — and never claimed to have been applied. This page reads
-           * one list across every run and has no run document to check, so it says what it knows
-           * and points at the run, which can prove the rest. The one exception is *expired*, which
-           * the run itself wrote down: that fact needs no document.
-           */}
-          <Show when={settledRows(rows()).length > 0}>
-            <section class="flex flex-col gap-2" data-queue="recorded">
-              <h2 class="text-sm font-semibold">Settled</h2>
-              <p class="text-muted-foreground text-xs">
-                Answered, or expired. A verdict written down here is recorded, not applied — whether
-                a runner has applied it is on the run, open one to see. An expired asking cannot be
-                answered any more.
+          when={waitingRows(rows()).length > 0}
+          fallback={
+            <Notice tone="empty" title="Nothing is waiting on a human.">
+              <p class="mt-1">
+                No run in this factory has stopped at a gate. Nothing has gone wrong.
               </p>
-              <QueueTable rows={settledRows(rows())} />
-            </section>
-          </Show>
+            </Notice>
+          }
+        >
+          <QueueTable rows={waitingRows(rows())} />
+        </Show>
+
+        {/*
+         * Settled — answered or expired — and never claimed to have been applied. This page reads
+         * one list across every run and has no run document to check, so it says what it knows
+         * and points at the run, which can prove the rest. The one exception is *expired*, which
+         * the run itself wrote down: that fact needs no document.
+         */}
+        <Show when={settledRows(rows()).length > 0}>
+          <section class="flex flex-col gap-2" data-queue="recorded">
+            <h2 class="text-sm font-semibold">Settled</h2>
+            <p class="text-muted-foreground text-xs">
+              Answered, or expired. A verdict written down here is recorded, not applied — whether a
+              runner has applied it is on the run, open one to see. An expired asking cannot be
+              answered any more.
+            </p>
+            <QueueTable rows={settledRows(rows())} />
+          </section>
         </Show>
       </Show>
     </main>

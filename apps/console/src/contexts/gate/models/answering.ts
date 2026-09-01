@@ -1,11 +1,10 @@
-import type { RunnerPresence } from "../../shared/models/Health.ts";
 import type { Asking } from "./Asking.ts";
 
 /**
  * Where one asking stands — console.md §9, and the rule the whole surface turns on.
  *
- * **A recorded answer is never rendered as an applied one.** The Console writes a verdict; a live
- * runner applies it. Those are two events, they can be days apart, and an *approved ✓* that means
+ * **A recorded answer is never rendered as an applied one.** The Console writes a Verdict; the
+ * Daemon Runner applies it. Those are two events, they can be days apart, and an *approved ✓* that means
  * nothing is the single failure that destroys trust in a control surface (adr/gate/0001). So the
  * six states below are six different words, and nothing collapses them.
  */
@@ -14,9 +13,7 @@ export type AnsweringState =
   | "waiting"
   /** Nobody has answered, and the deadline has passed. The run is stuck on a stale question. */
   | "overdue"
-  /** The verdict is written down and a runner is alive. Normal, and it can last ten seconds. */
-  | "applying"
-  /** The verdict is written down and nothing is running. It applies when a runner next starts. */
+  /** The verdict is written down and awaits Daemon-owned application. */
   | "idle"
   /** The run settled the asking without an answer: the deadline won, and it took its branch. */
   | "expired"
@@ -99,32 +96,20 @@ export const awaitingApply = (asking: Asking, settled: ReadonlyArray<SettledAski
  * The order of the questions is the order of certainty. A settled record outranks everything,
  * because it is the run's own account of having moved — and *how* it settled is asked in the same
  * breath, because a record is written for an expiry exactly as it is for an answer. A verdict
- * without a record is recorded and not applied, and which of the two recorded states it is turns on
- * one thing only — whether anybody is alive to apply it. Only then is the deadline worth reading,
- * because a gate the run has already settled cannot go overdue.
+ * without a record is Recorded and not Applied. Only then is the Deadline worth reading, because a
+ * Gate the Run has already settled cannot go overdue.
  */
 export const answeringState = (options: {
   readonly asking: Asking;
   /** Every settled asking of this run, from the run document. */
   readonly settled: ReadonlyArray<SettledAsking>;
-  /**
-   * Whether anybody is registered to apply an answer, or `undefined` while that is not yet known.
-   *
-   * Unknown is treated as *nothing is running*, and the asymmetry is deliberate: the two errors are
-   * not equal. Guessing `live` would put *applying…* on screen over a factory with nothing running,
-   * which is the lie this module exists to prevent; guessing `none` understates and tells somebody
-   * to start a watcher that is already up, which the next poll corrects within a second.
-   */
-  readonly runner: RunnerPresence | undefined;
   readonly now: number;
 }): AnsweringState => {
   if (options.asking.terminalInability !== undefined) return "unable";
   if (isSettled(options.asking, options.settled)) {
     return isApplied(options.asking, options.settled) ? "applied" : "expired";
   }
-  if (options.asking.verdict !== undefined) {
-    return options.runner === "live" ? "applying" : "idle";
-  }
+  if (options.asking.verdict !== undefined) return "idle";
   return options.now > options.asking.request.deadlineAt ? "overdue" : "waiting";
 };
 
@@ -139,7 +124,7 @@ export const answerable = (state: AnsweringState): boolean =>
 
 /** Has somebody answered, whether or not anything has acted on it? */
 export const isRecorded = (state: AnsweringState): boolean =>
-  state === "applying" || state === "idle" || state === "applied" || state === "unable";
+  state === "idle" || state === "applied" || state === "unable";
 
 /**
  * The sentence each state puts in front of a person.
@@ -150,10 +135,9 @@ export const isRecorded = (state: AnsweringState): boolean =>
 export const answeringHeadline: Record<AnsweringState, string> = {
   waiting: "Waiting on a human",
   overdue: "Overdue — nobody answered in time",
-  applying: "Recorded — applying…",
   applied: "Applied — the run resumed",
   expired: "Expired — the run moved on without an answer",
-  idle: "Recorded — nothing is running",
+  idle: "Recorded — awaiting Daemon application",
   unable: "Recorded — the run cannot apply it",
 };
 
@@ -162,12 +146,10 @@ export const answeringDetail: Record<AnsweringState, string> = {
   waiting: "This run has stopped and holds nothing. It moves the moment somebody answers.",
   overdue:
     "The deadline has passed. The run takes its expiry branch when a runner next reaches it, and an answer given now may arrive too late.",
-  applying:
-    "The verdict is written down and a runner is alive. It picks up an answer written by another process on its own poll, so around ten seconds here is ordinary rather than a failure.",
   applied: "A runner picked the answer up and the run settled this asking.",
   expired:
     "Nobody answered before the deadline, and the run has settled this asking on its expiry branch. There is nothing left to decide here; what it cost is the wait above.",
-  idle: "The verdict is written down. The Daemon will schedule its application when the Run can continue.",
+  idle: "The Verdict is durable. The Daemon will apply it when the Run can continue.",
   unable:
     "The verdict remains in the durable record, but the run failed or was cancelled before a Runner could apply it.",
 };

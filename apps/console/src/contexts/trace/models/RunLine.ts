@@ -1,5 +1,5 @@
 /**
- * One line of `GET /api/runs`, as the wire carries it.
+ * One line of `GET /api/v1/runs`, as the Daemon wire carries it.
  *
  * The server's `RunSummary` holds the whole immutable run record; the list reads the three fields it
  * puts on screen and the two mutable ones that say where the run stands.

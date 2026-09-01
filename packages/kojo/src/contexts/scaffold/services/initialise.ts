@@ -25,7 +25,7 @@ export interface InitialiseRequest {
   readonly sandbox: SandboxChoice;
   readonly template: TemplateName;
   /**
-   * What the stamped repository must declare to resolve `kojo` and `effect`.
+   * What the stamped repository must declare to resolve `@carere/kojo-runtime` and `effect`.
    *
    * An argument rather than something read here, because it is a fact about the **process doing the
    * stamping** and not about the repository being stamped. Passing it in is also what keeps this
@@ -36,11 +36,6 @@ export interface InitialiseRequest {
   readonly packageManager?: PackageManager | undefined;
   /** Overrides the name derived from the repository directory. */
   readonly imageName?: string | undefined;
-  /** Deprecated compatibility input. Initialisation never builds an image. */
-  readonly skipImage?: boolean | undefined;
-  /** Deprecated compatibility inputs. Initialisation never builds an image. */
-  readonly uid: number;
-  readonly gid: number;
 }
 
 /** What a factory came out as: the answers it was built from, and what happened to each file. */
@@ -60,11 +55,11 @@ export interface Initialised {
  *
  * Nothing here copies engine source into the target. Every stamped file either declares something
  * (the roster, the envelopes, the checks, the commands) or is a program the target owns that
- * *imports* Kojo. Upgrading Kojo is a version bump; it is never a re-stamp.
+ * imports the Project runtime. Upgrading the runtime is a version bump; it is never a re-stamp.
  *
  * **Which is why the manifest is written first.** "Imports Kojo" is only half a design until
- * something declares Kojo, and for four tickets it was the missing half: eleven files that each
- * imported `kojo` and `effect`, into a repository that declared neither.
+ * something declares the runtime, and for four tickets it was the missing half: eleven files that
+ * each imported the runtime and `effect`, into a repository that declared neither.
  */
 export const initialise = (
   request: InitialiseRequest,

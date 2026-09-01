@@ -69,7 +69,6 @@ const answered = [
   "docker",
   "--template",
   "review",
-  "--skip-image",
 ];
 
 describe("initialising a factory from the command line", () => {
@@ -127,11 +126,15 @@ describe("initialising a factory from the command line", () => {
 
   it.effect("refuses a template it cannot stamp", () =>
     Effect.gen(function* () {
-      const { outcome } = yield* runCli([
-        ...answered.slice(0, 8),
-        "parallel-planner",
-        "--skip-image",
-      ]);
+      const { outcome } = yield* runCli([...answered.slice(0, 8), "parallel-planner"]);
+      expect(Result.isFailure(outcome)).toBe(true);
+    }),
+  );
+
+  it.effect("refuses the removed image-build compatibility flag", () =>
+    Effect.gen(function* () {
+      const removed = ["--skip", "image"].join("-");
+      const { outcome } = yield* runCli([...answered, removed]);
       expect(Result.isFailure(outcome)).toBe(true);
     }),
   );

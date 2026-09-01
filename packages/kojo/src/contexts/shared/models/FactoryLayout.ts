@@ -39,20 +39,8 @@ export const workflowsDirectory = "workflows";
  */
 export const defaultTrunk = "main";
 
-/**
- * What this engine is called on the registry, which is what a stamped factory has to depend on.
- *
- * One name, for the same reason `defaultTrunk` is one, and the two halves are further apart here:
- * `kojo init` *declares* it in the target's `package.json`, every file `init` stamps *imports* it,
- * and `kojo doctor` *resolves* it to check that the factory and the engine running the command are
- * one copy. Three readings of one string, and a factory whose declaration and imports disagree
- * fails with `Cannot find module` at the first line of the first file it loads.
- *
- * **It is not the command name and it is not the branch prefix.** Those are `kojo` too and they
- * stay `kojo`: a person types `kojo`, and a Factory owns `kojo/*` branches. Only the registry
- * name carries the scope.
- */
-export const enginePackage = "@carere/kojo";
+/** The host CLI package linked by integration fixtures. Factory modules do not import it. */
+export const cliPackage = "@carere/kojo";
 
 /** The Project-local package that authored Factory modules import. */
 export const runtimePackage = "@carere/kojo-runtime";
