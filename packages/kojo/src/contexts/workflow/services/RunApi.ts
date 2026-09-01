@@ -19,10 +19,12 @@ import type { OperationReplyBody } from "@carere/kojo-runner-contracts/contexts/
 import type { RunnerFrame } from "@carere/kojo-runner-contracts/contexts/project/contracts/frame";
 import { Data, Effect } from "effect";
 import type { SqliteDaemonGateRepository } from "../../gate/adapters/SqliteDaemonGateRepository.ts";
+import type { SqliteProjectRecoveryRepository } from "../../project/adapters/SqliteProjectRecoveryRepository.ts";
 import type {
   ExecutionRevision,
   SqliteProjectRepository,
 } from "../../project/adapters/SqliteProjectRepository.ts";
+import type { ProjectRecovery } from "../../project/models/ProjectRecovery.ts";
 import {
   type MaterializedRevision,
   materializeRevision,
@@ -31,7 +33,11 @@ import {
   ProjectRunnerError,
   ProjectRunnerSupervisor,
 } from "../../project/services/ProjectRunnerSupervisor.ts";
-import { makeRunnerFrameReader, writeRunnerFrame } from "../../project/services/runnerChannel.ts";
+import {
+  makeRunnerFrameReader,
+  RunnerChannelError,
+  writeRunnerFrame,
+} from "../../project/services/runnerChannel.ts";
 import type { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRepository.ts";
 import type { SqliteRevisionRepository } from "../adapters/SqliteRevisionRepository.ts";
 import type { SqliteRunRepository } from "../adapters/SqliteRunRepository.ts";
@@ -87,6 +93,11 @@ interface RunnerExecution extends RunnerInspection {
 const INTERNAL_PHASE_DESCRIPTION = "__kojo_internal_activity__";
 
 class RunApiFault extends Data.TaggedError("RunApiFault")<{
+  readonly message: string;
+  readonly cause: unknown;
+}> {}
+
+class ProjectRunnerConnectionLost extends Data.TaggedError("ProjectRunnerConnectionLost")<{
   readonly message: string;
   readonly cause: unknown;
 }> {}
@@ -184,6 +195,7 @@ export class RunApi {
   readonly #dataRoot: string;
   readonly #now: () => number;
   readonly #projects: SqliteProjectRepository;
+  readonly #projectRecovery: SqliteProjectRecoveryRepository;
   readonly #runs: SqliteRunRepository;
   readonly #revisions: SqliteRevisionRepository;
   readonly #triggers: SqliteTriggerRepository;
@@ -203,6 +215,7 @@ export class RunApi {
     readonly dataRoot: string;
     readonly now: () => number;
     readonly projects: SqliteProjectRepository;
+    readonly projectRecovery: SqliteProjectRecoveryRepository;
     readonly runs: SqliteRunRepository;
     readonly revisions: SqliteRevisionRepository;
     readonly triggers: SqliteTriggerRepository;
@@ -215,6 +228,7 @@ export class RunApi {
     this.#dataRoot = options.dataRoot;
     this.#now = options.now;
     this.#projects = options.projects;
+    this.#projectRecovery = options.projectRecovery;
     this.#runs = options.runs;
     this.#revisions = options.revisions;
     this.#triggers = options.triggers;
@@ -650,6 +664,65 @@ export class RunApi {
             ? this.#runs.holdReserved(reserved.reservationId, fault, heldAt)
             : this.#runs.hold(authority, fault, heldAt),
         ).catch(() => undefined);
+      } else if (cause instanceof ProjectRunnerConnectionLost && authority !== undefined) {
+        const failedAt = new Date(this.#now()).toISOString();
+        let recovery = await Effect.runPromise(
+          this.#projectRecovery.recordFailure({
+            projectId: run.projectId,
+            runnerInstanceId: authority.runnerInstanceId,
+            failedAt,
+            fault: cause.message,
+            operationFailed: true,
+          }),
+        );
+        try {
+          await Effect.runPromise(this.#runnerSupervisor.stop(run.projectId));
+          recovery = await Effect.runPromise(
+            this.#projectRecovery.confirmSafety(
+              run.projectId,
+              authority.runnerInstanceId,
+              new Date(this.#now()).toISOString(),
+            ),
+          );
+        } catch (terminationCause) {
+          recovery = await Effect.runPromise(
+            this.#projectRecovery.holdUncertain(
+              run.projectId,
+              authority.runnerInstanceId,
+              `Project Runner termination is not confirmed: ${terminationCause instanceof Error ? terminationCause.message : String(terminationCause)}`,
+            ),
+          );
+        }
+        if (recovery.state === "held" || recovery.safety !== "safe") {
+          await Effect.runPromise(
+            this.#runs.hold(
+              authority,
+              {
+                code: "PROJECT_RECOVERY_REQUIRED",
+                detail: recovery.lastFault ?? "Project Runner recovery needs explicit repair",
+                remedy: `Run \`kojo project repair ${run.projectId}\` after Project safety can be established.`,
+                retry: "after-repair",
+                scope: {
+                  projectId: run.projectId,
+                  workflowName: run.workflowName,
+                  revisionId: run.revisionId,
+                  packageGraphId: run.packageGraphId,
+                },
+              },
+              new Date(this.#now()).toISOString(),
+            ),
+          );
+        } else {
+          const delay = Math.max(0, Date.parse(recovery.nextAttemptAt ?? failedAt) - this.#now());
+          if (delay > 0) await Bun.sleep(delay);
+          await Effect.runPromise(
+            this.#runs.recoverProjectRunnerFailure(
+              authority,
+              new Date(this.#now()).toISOString(),
+              "The Project Runner connection was lost. The same Run will recover under a new fenced Claim.",
+            ),
+          );
+        }
       } else if (authority !== undefined) {
         const current = await Effect.runPromise(this.#runs.read(authority.runId)).catch(
           () => undefined,
@@ -711,6 +784,27 @@ export class RunApi {
       try: async () => {
         const run = await Effect.runPromise(this.#runs.read(runId));
         if (run?.state === "queued") void this.#pump();
+      },
+      catch: runApiFault,
+    });
+
+  readonly projectRecovery = (
+    projectId: string,
+  ): Effect.Effect<ProjectRecovery | undefined, RunApiFault> =>
+    this.#projectRecovery.read(projectId).pipe(Effect.mapError(runApiFault));
+
+  readonly repairProject = (projectId: string): Effect.Effect<ProjectRecovery, RunApiFault> =>
+    Effect.tryPromise({
+      try: async () => {
+        const requestedAt = new Date(this.#now()).toISOString();
+        const recovery = await Effect.runPromise(
+          this.#projectRecovery.repair(projectId, requestedAt),
+        );
+        if (recovery.state === "recovering") {
+          await Effect.runPromise(this.#runs.repairProjectRecoveryHolds(projectId, requestedAt));
+          void this.#pump();
+        }
+        return recovery;
       },
       catch: runApiFault,
     });
@@ -822,9 +916,15 @@ export class RunApi {
             createdAt: new Date(asking.requestedAt).toISOString(),
           }),
         );
+        await Effect.runPromise(
+          this.#projectRecovery.observeHealthy(registration.projectId, endedAt, true),
+        ).catch(() => undefined);
         return;
       }
       await Effect.runPromise(this.#runs.completeRun(authority, executed.outcome, endedAt));
+      await Effect.runPromise(
+        this.#projectRecovery.observeHealthy(registration.projectId, endedAt, true),
+      ).catch(() => undefined);
     } finally {
       this.#activeExecutions.get(authority.runId)?.settleCommit();
     }
@@ -862,6 +962,55 @@ export class RunApi {
       (poller) => poller.projectId === projectId,
     );
     for (const poller of pollers) {
+      await this.#ensureTriggerPoller(poller.projectId, poller.workflowName, poller.pollerId).catch(
+        () => undefined,
+      );
+    }
+  }
+
+  async #recoverFailedTriggerRunner(options: {
+    readonly projectId: string;
+    readonly runnerInstanceId: string;
+    readonly pollers: ReadonlyArray<{
+      readonly projectId: string;
+      readonly workflowName: string;
+      readonly pollerId: string;
+    }>;
+    readonly stop: () => Promise<void>;
+    readonly cause: unknown;
+  }): Promise<void> {
+    const failedAt = new Date(this.#now()).toISOString();
+    let recovery = await Effect.runPromise(
+      this.#projectRecovery.recordFailure({
+        projectId: options.projectId,
+        runnerInstanceId: options.runnerInstanceId,
+        failedAt,
+        fault: options.cause instanceof Error ? options.cause.message : String(options.cause),
+        operationFailed: true,
+      }),
+    );
+    try {
+      await options.stop();
+      recovery = await Effect.runPromise(
+        this.#projectRecovery.confirmSafety(
+          options.projectId,
+          options.runnerInstanceId,
+          new Date(this.#now()).toISOString(),
+        ),
+      );
+    } catch (terminationCause) {
+      recovery = await Effect.runPromise(
+        this.#projectRecovery.holdUncertain(
+          options.projectId,
+          options.runnerInstanceId,
+          `Project Runner termination is not confirmed: ${terminationCause instanceof Error ? terminationCause.message : String(terminationCause)}`,
+        ),
+      );
+    }
+    if (recovery.state === "held" || recovery.safety !== "safe" || this.#stopping) return;
+    const delay = Math.max(0, Date.parse(recovery.nextAttemptAt ?? failedAt) - this.#now());
+    if (delay > 0) await Bun.sleep(delay);
+    for (const poller of options.pollers) {
       await this.#ensureTriggerPoller(poller.projectId, poller.workflowName, poller.pollerId).catch(
         () => undefined,
       );
@@ -947,9 +1096,11 @@ export class RunApi {
     let readerDone: Promise<void> | undefined;
     let readerFailure: unknown;
     let stopGroup: (() => Promise<void>) | undefined;
+    let healthTimer: ReturnType<typeof setInterval> | undefined;
     const cleanup = (): void => {
       socket?.destroy();
       server?.close();
+      if (healthTimer !== undefined) clearInterval(healthTimer);
       rmSync(channelRoot, { recursive: true, force: true });
     };
     const reply = (frame: RunnerFrame, result: JsonValue): Promise<void> =>
@@ -969,7 +1120,13 @@ export class RunApi {
         }),
       );
     const command = async (
-      kind: "RegisterRevision" | "DisposeRevision" | "StartTrigger" | "StopTrigger" | "Shutdown",
+      kind:
+        | "Health"
+        | "RegisterRevision"
+        | "DisposeRevision"
+        | "StartTrigger"
+        | "StopTrigger"
+        | "Shutdown",
       body: JsonValue,
     ): Promise<RunnerFrame> => {
       if (socket === undefined) throw new Error("the Project Runner channel is not connected");
@@ -1210,6 +1367,11 @@ export class RunApi {
         for (const selected of pending.values()) selected.reject(cause);
         pending.clear();
         if (stopping === undefined && !this.#stopping) {
+          const failedPollers = Array.from(registrations.values(), (registered) => ({
+            projectId: registered.revision.projectId,
+            workflowName: registered.revision.workflowName,
+            pollerId: registered.pollerId,
+          }));
           for (const registered of registrations.values()) {
             void Effect.runPromise(
               this.#projects.observeTrigger({
@@ -1221,10 +1383,37 @@ export class RunApi {
               }),
             ).catch(() => undefined);
           }
+          if (stopGroup !== undefined) {
+            void this.#recoverFailedTriggerRunner({
+              projectId: bootstrap.projectId,
+              runnerInstanceId,
+              pollers: failedPollers,
+              stop: stopGroup,
+              cause,
+            }).catch(() => undefined);
+          }
         }
-        void stopGroup?.().catch(() => undefined);
         throw cause;
       });
+      let healthPending = false;
+      let lastHealthyAt = this.#now();
+      healthTimer = setInterval(() => {
+        if (healthPending) {
+          if (this.#now() - lastHealthyAt >= 30_000) socket?.destroy();
+          return;
+        }
+        healthPending = true;
+        void command("Health", null).then(
+          () => {
+            lastHealthyAt = this.#now();
+            healthPending = false;
+          },
+          () => {
+            healthPending = false;
+            if (this.#now() - lastHealthyAt >= 30_000) socket?.destroy();
+          },
+        );
+      }, 5_000);
 
       let group: ProjectTriggerGroup;
       const stop = (): Promise<void> => {
@@ -1389,6 +1578,7 @@ export class RunApi {
     let child: ReturnType<typeof Bun.spawn> | undefined;
     let detached = false;
     let processExitConfirmed = false;
+    let healthTimer: ReturnType<typeof setInterval> | undefined;
     const revisionReaderId = JSON.stringify([
       "runner-registration",
       request.runnerInstanceId,
@@ -1400,6 +1590,7 @@ export class RunApi {
       socket?.destroy();
       server?.close();
       child?.kill();
+      if (healthTimer !== undefined) clearInterval(healthTimer);
       rmSync(channelRoot, { recursive: true, force: true });
     };
     try {
@@ -1596,7 +1787,7 @@ export class RunApi {
         pending.clear();
       });
       const command = async (
-        kind: "ExecuteRun" | "CancelRun" | "Shutdown",
+        kind: "Health" | "ExecuteRun" | "CancelRun" | "Shutdown",
         body: JsonValue,
       ): Promise<JsonValue> => {
         const requestId = crypto.randomUUID();
@@ -1612,7 +1803,7 @@ export class RunApi {
               requestId,
               daemonInstanceId: request.daemonInstanceId,
               runnerInstanceId: request.runnerInstanceId,
-              ...(kind === "Shutdown"
+              ...(kind === "Shutdown" || kind === "Health"
                 ? {}
                 : {
                     runId: authority.runId,
@@ -1628,6 +1819,25 @@ export class RunApi {
         });
         return result;
       };
+      let healthPending = false;
+      let lastHealthyAt = this.#now();
+      healthTimer = setInterval(() => {
+        if (healthPending) {
+          if (this.#now() - lastHealthyAt >= 30_000) socket?.destroy();
+          return;
+        }
+        healthPending = true;
+        void command("Health", null).then(
+          () => {
+            lastHealthyAt = this.#now();
+            healthPending = false;
+          },
+          () => {
+            healthPending = false;
+            if (this.#now() - lastHealthyAt >= 30_000) socket?.destroy();
+          },
+        );
+      }, 5_000);
       const forceProcessGroup = async (): Promise<void> => {
         if (child === undefined) return;
         try {
@@ -1783,6 +1993,19 @@ export class RunApi {
         await stop().catch(() => undefined);
         throw cause;
       }
+    } catch (cause) {
+      if (
+        cause instanceof RunnerChannelError ||
+        (cause instanceof Error &&
+          (cause.message.includes("Project Runner exited") ||
+            cause.message.includes("private binding timed out")))
+      ) {
+        throw new ProjectRunnerConnectionLost({
+          message: cause instanceof Error ? cause.message : String(cause),
+          cause,
+        });
+      }
+      throw cause;
     } finally {
       if (!detached) {
         if (child !== undefined) {
