@@ -471,6 +471,31 @@ export class SqliteDaemonGateRepository {
       catch: fault,
     });
 
+  /**
+   * Read every committed Deferred result for replay, including a wake-up already marked Applied.
+   *
+   * Applied is an acknowledgement. It is not permission to delete the value that a fresh Runner
+   * must read when the Daemon stopped before it could commit the Run completion.
+   */
+  readonly deferredResults = (
+    runId: string,
+  ): Effect.Effect<ReadonlyArray<DeferredApplication>, GateTransitionError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .query<WakeupRow, [string]>(
+            "SELECT wakeup_id, deferred_name, kind, verdict_json FROM workflow_wakeups WHERE run_id = ? ORDER BY due_at, wakeup_id",
+          )
+          .all(runId)
+          .map((row) => ({
+            wakeupId: row.wakeup_id,
+            deferredName: row.deferred_name,
+            kind: row.kind,
+            result: row.verdict_json === null ? null : JSON.parse(row.verdict_json),
+          })),
+      catch: fault,
+    });
+
   /** Persist a Recorded Verdict that can no longer be applied after a terminal Run transition. */
   readonly reconcileTerminalInabilities = (): Effect.Effect<void, GateTransitionError> =>
     Effect.try({

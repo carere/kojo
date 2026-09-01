@@ -167,7 +167,7 @@ export const answeringDetail: Record<AnsweringState, string> = {
   applied: "A runner picked the answer up and the run settled this asking.",
   expired:
     "Nobody answered before the deadline, and the run has settled this asking on its expiry branch. There is nothing left to decide here; what it cost is the wait above.",
-  idle: "The verdict is written down and nothing is running, so the run has not moved. Start `kojo watch` and it applies. Nothing is lost in the meantime.",
+  idle: "The verdict is written down. The Daemon will schedule its application when the Run can continue.",
   unable:
     "The verdict remains in the durable record, but the run failed or was cancelled before a Runner could apply it.",
 };

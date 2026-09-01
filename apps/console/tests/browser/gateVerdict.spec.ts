@@ -73,5 +73,7 @@ test("records a Verdict with the Daemon OS user as Answerer", async ({ page }) =
   const panel = page.locator("[data-detail-panel]");
   await panel.locator('[data-gate-choice="approve"]').click();
   await expect(panel.locator("[data-answering-verdict]")).toContainText(userInfo().username);
-  await expect(panel.locator("[data-answering]")).toHaveAttribute("data-answering", "idle");
+  // This fixture has no executable retained revision. The Daemon records the OS-user Verdict,
+  // then reports the honest terminal inability when its continuation cannot load that revision.
+  await expect(panel.locator("[data-answering]")).toHaveAttribute("data-answering", "unable");
 });

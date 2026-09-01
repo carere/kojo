@@ -25,9 +25,13 @@ const productionPaths = (): DaemonPaths => {
   throw new GateClientError({ reason: "Kojo Gate access supports macOS and Linux" });
 };
 
-const daemonEndpoint = () => {
-  const endpoint = readDaemonEndpoint(productionPaths());
-  if (endpoint === undefined) throw new Error("the Daemon is not ready; run `kojo daemon start`");
+const daemonEndpoint = (paths: () => DaemonPaths) => {
+  const endpoint = readDaemonEndpoint(paths());
+  if (endpoint === undefined)
+    throw new GateClientError({
+      code: "ENDPOINT_UNAVAILABLE",
+      reason: "the Daemon is not ready; run `kojo daemon start`",
+    });
   return endpoint;
 };
 
@@ -44,10 +48,13 @@ const problemOf = async (
   };
 };
 
-const readSnapshot = (projectId?: string): Effect.Effect<AskingSnapshot, GateClientError> =>
+const readSnapshot = (
+  paths: () => DaemonPaths,
+  projectId?: string,
+): Effect.Effect<AskingSnapshot, GateClientError> =>
   Effect.tryPromise({
     try: async () => {
-      const endpoint = daemonEndpoint();
+      const endpoint = daemonEndpoint(paths);
       const path =
         projectId === undefined
           ? "/api/v1/askings"
@@ -72,6 +79,7 @@ const readSnapshot = (projectId?: string): Effect.Effect<AskingSnapshot, GateCli
   });
 
 const recordVerdict = (
+  paths: () => DaemonPaths,
   input: Omit<RecordVerdictRequest, "dataIdentity">,
 ): Effect.Effect<
   {
@@ -82,7 +90,7 @@ const recordVerdict = (
 > =>
   Effect.tryPromise({
     try: async () => {
-      const endpoint = daemonEndpoint();
+      const endpoint = daemonEndpoint(paths);
       const body: RecordVerdictRequest = { ...input, dataIdentity: endpoint.dataIdentity };
       const response = await fetch("http://localhost/api/v1/gate-answers", {
         unix: endpoint.socketPath,
@@ -102,7 +110,10 @@ const recordVerdict = (
     catch: (cause) =>
       cause instanceof GateClientError
         ? cause
-        : new GateClientError({ reason: cause instanceof Error ? cause.message : String(cause) }),
+        : new GateClientError({
+            code: "OUTCOME_UNKNOWN",
+            reason: cause instanceof Error ? cause.message : String(cause),
+          }),
   });
 
 /** Default Gate listing includes each Asking that can still change what the user must do. */
@@ -158,103 +169,117 @@ const sameAsking = (left: AskingDocument, right: AskingDocument): boolean =>
   left.identity.askingNumber === right.identity.askingNumber &&
   left.identity.escalationStage === right.identity.escalationStage;
 
-const list = Command.make(
-  "list",
-  {
-    projectId: Flag.string("project").pipe(Flag.optional),
-    all: Flag.boolean("all"),
-    json: Flag.boolean("json"),
-  },
-  Effect.fn(function* ({ projectId, all, json }) {
-    const snapshot = yield* readSnapshot(Option.getOrUndefined(projectId)).pipe(
-      Effect.catch((cause) => commandFailed(cause.reason)),
-    );
-    const selected = visibleAskings(snapshot, all);
-    if (json) {
-      yield* Console.log(JSON.stringify({ formatVersion: 1, ...snapshot, askings: selected }));
-      return;
-    }
-    if (selected.length === 0) {
-      yield* Console.log("No unsettled Gate Askings are recorded.");
-      return;
-    }
-    yield* Effect.forEach(selected, (asking) => Console.log(askingLine(asking)), {
-      discard: true,
-    });
-  }),
-).pipe(Command.withDescription("List Daemon-owned Gate Askings without starting a Runner"));
-
-const answer = Command.make(
-  "answer",
-  {
-    token: Argument.string("token"),
-    choice: Flag.string("choice"),
-    reason: Flag.string("reason").pipe(Flag.withDefault("")),
-    as: Flag.string("as").pipe(Flag.optional),
-    wait: Flag.boolean("wait"),
-    timeout: Flag.string("timeout").pipe(Flag.optional),
-    json: Flag.boolean("json"),
-  },
-  Effect.fn(function* ({ token, choice, reason, as, wait, timeout, json }) {
-    const timeoutText = Option.getOrUndefined(timeout);
-    const within = yield* Effect.try({
-      try: () =>
-        validateGateAnswerFlags({
-          wait,
-          ...(timeoutText === undefined ? {} : { timeout: timeoutText }),
-        }),
-      catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
-    }).pipe(Effect.catch((message) => clientExit(2, message)));
-    const answerer = Option.getOrUndefined(as);
-    const recorded = yield* recordVerdict({
-      requestId: crypto.randomUUID(),
-      token,
-      choice,
-      reason,
-      ...(answerer === undefined ? {} : { answerer }),
-    }).pipe(Effect.catch((cause) => clientExit(1, cause.reason)));
-    yield* Console.log(
-      json
-        ? JSON.stringify({ formatVersion: 1, ...recorded.result })
-        : `Recorded ${choice} for Run ${recorded.result.asking.identity.runId} as ${recorded.result.asking.verdict?.answerer ?? "unknown"}.`,
-    );
-    if (!wait) return;
-
-    const deadline = within === undefined ? undefined : Date.now() + within;
-    while (deadline === undefined || Date.now() < deadline) {
-      const snapshot = yield* readSnapshot(recorded.result.asking.projectId).pipe(
+export const makeGateCommand = (paths: () => DaemonPaths = productionPaths) => {
+  const list = Command.make(
+    "list",
+    {
+      projectId: Flag.string("project").pipe(Flag.optional),
+      all: Flag.boolean("all"),
+      limit: Flag.integer("limit").pipe(Flag.withDefault(50)),
+      cursor: Flag.integer("cursor").pipe(Flag.optional),
+      json: Flag.boolean("json"),
+    },
+    Effect.fn(function* ({ projectId, all, limit, cursor, json }) {
+      if (limit < 1) return yield* clientExit(2, "--limit must be a positive integer");
+      const offset = Option.getOrElse(cursor, () => 0);
+      if (offset < 0) return yield* clientExit(2, "--cursor must not be negative");
+      const snapshot = yield* readSnapshot(paths, Option.getOrUndefined(projectId)).pipe(
         Effect.catch((cause) => commandFailed(cause.reason)),
       );
-      const asking = snapshot.askings.find((candidate) =>
-        sameAsking(candidate, recorded.result.asking),
-      );
-      if (asking !== undefined) {
-        const exit = gateWaitExit(asking);
-        if (exit === 0) {
-          yield* Console.log(
-            json
-              ? JSON.stringify({ formatVersion: 1, asking })
-              : `Applied the Verdict to Run ${asking.identity.runId}.`,
-          );
-          return;
-        }
-        if (exit === 1) {
-          return yield* clientExit(
-            1,
-            `Run ${asking.identity.runId} cannot apply the Recorded Verdict: ${asking.terminalInability}`,
-          );
-        }
+      const visible = visibleAskings(snapshot, all);
+      const selected = all ? visible : visible.slice(offset, offset + limit);
+      if (json) {
+        yield* Console.log(JSON.stringify({ formatVersion: 1, ...snapshot, askings: selected }));
+        return;
       }
-      yield* Effect.sleep("50 millis");
-    }
-    return yield* clientExit(
-      3,
-      `the Verdict is Recorded but Run ${recorded.result.asking.identity.runId} continues after the client timeout`,
-    );
-  }),
-).pipe(Command.withDescription("Record one Gate Verdict through the Daemon and optionally wait"));
+      if (selected.length === 0) {
+        yield* Console.log("No unsettled Gate Askings are recorded.");
+        return;
+      }
+      yield* Effect.forEach(selected, (asking) => Console.log(askingLine(asking)), {
+        discard: true,
+      });
+    }),
+  ).pipe(Command.withDescription("List Daemon-owned Gate Askings without starting a Runner"));
 
-export const gate = Command.make("gate").pipe(
-  Command.withDescription("List and answer Daemon-owned Gate Askings"),
-  Command.withSubcommands([list, answer]),
-);
+  const answer = Command.make(
+    "answer",
+    {
+      token: Argument.string("token"),
+      choice: Flag.string("choice"),
+      reason: Flag.string("reason").pipe(Flag.withDefault("")),
+      as: Flag.string("as").pipe(Flag.optional),
+      wait: Flag.boolean("wait"),
+      timeout: Flag.string("timeout").pipe(Flag.optional),
+      json: Flag.boolean("json"),
+    },
+    Effect.fn(function* ({ token, choice, reason, as, wait, timeout, json }) {
+      const timeoutText = Option.getOrUndefined(timeout);
+      const within = yield* Effect.try({
+        try: () =>
+          validateGateAnswerFlags({
+            wait,
+            ...(timeoutText === undefined ? {} : { timeout: timeoutText }),
+          }),
+        catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
+      }).pipe(Effect.catch((message) => clientExit(2, message)));
+      const answerer = Option.getOrUndefined(as);
+      const recorded = yield* recordVerdict(paths, {
+        requestId: crypto.randomUUID(),
+        token,
+        choice,
+        reason,
+        ...(answerer === undefined ? {} : { answerer }),
+      }).pipe(
+        Effect.catch((cause) => clientExit(cause.code === "OUTCOME_UNKNOWN" ? 4 : 1, cause.reason)),
+      );
+      if (!wait) {
+        yield* Console.log(
+          json
+            ? JSON.stringify({ formatVersion: 1, ...recorded.result })
+            : `Recorded ${choice} for Run ${recorded.result.asking.identity.runId} as ${recorded.result.asking.verdict?.answerer ?? "unknown"}.`,
+        );
+        return;
+      }
+
+      const deadline = within === undefined ? undefined : Date.now() + within;
+      while (deadline === undefined || Date.now() < deadline) {
+        const snapshot = yield* readSnapshot(paths, recorded.result.asking.projectId).pipe(
+          Effect.catch((cause) => commandFailed(cause.reason)),
+        );
+        const asking = snapshot.askings.find((candidate) =>
+          sameAsking(candidate, recorded.result.asking),
+        );
+        if (asking !== undefined) {
+          const exit = gateWaitExit(asking);
+          if (exit === 0) {
+            yield* Console.log(
+              json
+                ? JSON.stringify({ formatVersion: 1, asking })
+                : `Applied the Verdict to Run ${asking.identity.runId}.`,
+            );
+            return;
+          }
+          if (exit === 1) {
+            return yield* clientExit(
+              1,
+              `Run ${asking.identity.runId} cannot apply the Recorded Verdict: ${asking.terminalInability}`,
+            );
+          }
+        }
+        yield* Effect.sleep("50 millis");
+      }
+      return yield* clientExit(
+        3,
+        `the Verdict is Recorded but Run ${recorded.result.asking.identity.runId} continues after the client timeout`,
+      );
+    }),
+  ).pipe(Command.withDescription("Record one Gate Verdict through the Daemon and optionally wait"));
+
+  return Command.make("gate").pipe(
+    Command.withDescription("List and answer Daemon-owned Gate Askings"),
+    Command.withSubcommands([list, answer]),
+  );
+};
+
+export const gate = makeGateCommand();

@@ -83,27 +83,6 @@ export const fetchCompatibility = (): Promise<BootstrapResponse> =>
   fetchJson<BootstrapResponse>("/_kojo/compat");
 
 /**
- * The one write this Console makes: a verdict, against a token.
- *
- * It is not retried and it must never be. `POST /api/gates/:token/answer` refuses a second answer
- * with `409 already-answered` on purpose — the first answer is the one that counts — so a retry
- * could only ever turn a success into a refusal over a verdict that had already been written. The
- * mutation surfaces the failure instead, and the three refusals arrive as {@link ApiError} with the
- * API's own code, which is what lets the card say *which* of them happened.
- */
-export const postJson = async <A>(path: string, body: unknown): Promise<A> => {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    throw await problemOf(path, response);
-  }
-  return (await response.json()) as A;
-};
-
-/**
  * One artifact, as text.
  *
  * The three artifact routes answer with the artifact's own media type — markdown, ndjson, a patch —

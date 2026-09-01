@@ -36,5 +36,8 @@ export class DaemonGateRepository extends Context.Service<
     readonly deferredApplications: (
       runId: string,
     ) => Effect.Effect<ReadonlyArray<DeferredApplication>, GateTransitionError>;
+    readonly deferredResults: (
+      runId: string,
+    ) => Effect.Effect<ReadonlyArray<DeferredApplication>, GateTransitionError>;
   }
 >()("kojo/gate/DaemonGateRepository") {}

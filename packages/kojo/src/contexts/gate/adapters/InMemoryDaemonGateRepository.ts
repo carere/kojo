@@ -200,4 +200,13 @@ export const layer = (state: InMemoryGateState = makeState()): Layer.Layer<Daemo
             ),
         ),
       ),
+    deferredResults: (runId) =>
+      Effect.sync(() =>
+        [...state.wakeups.values()].filter((wakeup) =>
+          [...state.askings.values()].some(
+            (asking) =>
+              asking.identity.runId === runId && wakeupId(asking, wakeup.kind) === wakeup.wakeupId,
+          ),
+        ),
+      ),
   });

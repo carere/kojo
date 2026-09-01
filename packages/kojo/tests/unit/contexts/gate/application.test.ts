@@ -72,6 +72,7 @@ describe("Gate application", () => {
         expect(applied.state).toBe("applied");
         expect(applied.appliedAt).toBe("2026-09-01T20:02:00.000Z");
         expect(yield* repository.deferredApplications(authority.runId)).toHaveLength(0);
+        expect(yield* repository.deferredResults(authority.runId)).toEqual([application]);
 
         const repeated = yield* repository.markApplied(
           authority,

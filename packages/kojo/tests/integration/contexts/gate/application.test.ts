@@ -123,21 +123,32 @@ describe("SQLite Gate application", () => {
       expect(applied.state).toBe("applied");
       expect(applied.appliedAt).toBe("2026-09-01T20:02:00.000Z");
 
+      database.close(false);
+      const reopened = new Database(path, { create: true, strict: true });
+      reopened.run("PRAGMA foreign_keys = ON");
+      const replacement = new SqliteDaemonGateRepository(reopened);
+      expect(await Effect.runPromise(replacement.deferredApplications(authority.runId))).toEqual(
+        [],
+      );
+      expect(await Effect.runPromise(replacement.deferredResults(authority.runId))).toEqual([
+        application,
+      ]);
+
       const repeated = await Effect.runPromise(
-        repository.markApplied(
+        replacement.markApplied(
           continuation,
           application?.wakeupId ?? "missing",
           "2026-09-01T20:03:00.000Z",
         ),
       );
       expect(repeated.appliedAt).toBe("2026-09-01T20:02:00.000Z");
-      expect(database.query("SELECT count(*) AS count FROM gate_askings").get()).toEqual({
+      expect(reopened.query("SELECT count(*) AS count FROM gate_askings").get()).toEqual({
         count: 1,
       });
-      expect(database.query("SELECT count(*) AS count FROM workflow_runs").get()).toEqual({
+      expect(reopened.query("SELECT count(*) AS count FROM workflow_runs").get()).toEqual({
         count: 1,
       });
-      database.close(false);
+      reopened.close(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

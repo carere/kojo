@@ -200,7 +200,7 @@ describe("fresh Project Runner replay", () => {
     }
   });
 
-  it("applies one Deferred under the same Run and repeated wake-up replay does not repeat work", async () => {
+  it("replays an Applied Deferred after owner loss before Run completion without repeating work", async () => {
     const directory = mkdtempSync(join(tmpdir(), "kojo-runner-gate-"));
     const counter = join(directory, "effects.txt");
     writeFileSync(counter, "");

@@ -284,6 +284,9 @@ export class RunApi {
   readonly resumeQueued = (): Effect.Effect<void, RunApiFault> =>
     Effect.tryPromise({
       try: async () => {
+        await Effect.runPromise(
+          this.#runs.recoverInterruptedExecutions(new Date(this.#now()).toISOString()),
+        );
         const runs = await Effect.runPromise(this.#runs.list);
         await Promise.all(
           runs.filter((run) => run.state === "queued").map((run) => this.#continue(run.runId)),
@@ -365,8 +368,9 @@ export class RunApi {
       ]),
     );
     const applications = await Effect.runPromise(this.#gates.deferredApplications(authority.runId));
+    const durableDeferreds = await Effect.runPromise(this.#gates.deferredResults(authority.runId));
     const deferredResults = Object.fromEntries(
-      applications.map((application) => [
+      durableDeferreds.map((application) => [
         JSON.stringify([authority.runId, application.deferredName]),
         {
           _id: "Exit",
