@@ -46,6 +46,7 @@ import type { DaemonLifecycleControl } from "../ports/DaemonLifecycleControl.ts"
 import { activeConsoleRelease } from "../services/activeConsoleRelease.ts";
 import { browserAuthority } from "../services/browserAuthority.ts";
 import { DaemonLifecycleApi } from "../services/DaemonLifecycleApi.ts";
+import { ManagedUpgradePreflight } from "../services/ManagedUpgradePreflight.ts";
 import {
   assertPrivateNode,
   atomicPrivateFile,
@@ -59,7 +60,9 @@ import {
   type LifecycleControlServer,
   startLifecycleControlServer,
 } from "./LifecycleControlTransport.ts";
+import { readCheckedManagedRelease } from "./ManagedInstallation.ts";
 import { SqliteDaemonLifecycleReceiptRepository } from "./SqliteDaemonLifecycleReceiptRepository.ts";
+import { SqliteUpgradePreflightRepository } from "./SqliteUpgradePreflightRepository.ts";
 
 interface LockHandle {
   readonly unlock: () => void;
@@ -214,6 +217,13 @@ export const startDaemon = (
   options: StartDaemonOptions = {},
 ): RunningDaemon => {
   const release = activeConsoleRelease(paths);
+  const sourceManifestPath = join(
+    paths.installationRoot,
+    "releases",
+    release.releaseId,
+    "release.json",
+  );
+  const sourceManifest = readFileSync(sourceManifestPath, "utf8");
   const now = options.now ?? Date.now;
   const startedAt = new Date(now()).toISOString();
   ensurePrivateDirectory(paths.dataRoot);
@@ -279,6 +289,10 @@ export const startDaemon = (
     const triggerRepository = new SqliteTriggerRepository(database);
     const gateRepository = new SqliteDaemonGateRepository(database);
     const lifecycleReceipts = new SqliteDaemonLifecycleReceiptRepository(database);
+    const upgradePreflight = new ManagedUpgradePreflight(
+      new SqliteUpgradePreflightRepository(database, dataIdentity, revisionRepository),
+      now,
+    );
     const artifactRepository = new AtomicArtifactRepository(database, paths.dataRoot);
     const runApi = new RunApi({
       dataIdentity,
@@ -346,6 +360,74 @@ export const startDaemon = (
       runs: runApi,
     });
     const ownerDatabase = database;
+    const upgradeResponse = async (request: Request, url: URL): Promise<Response | undefined> => {
+      if (url.pathname !== "/api/v1/daemon/upgrade-check") return undefined;
+      try {
+        if (request.method === "GET") {
+          const latest = await Effect.runPromise(upgradePreflight.latest);
+          return latest === undefined
+            ? problem(404, "upgrade-check-not-found", "no managed upgrade check is recorded")
+            : noStoreJson(latest);
+        }
+        if (request.method !== "POST") {
+          return problem(405, "method-not-allowed", "managed upgrade check supports GET and POST");
+        }
+        if (!isJson(request)) {
+          return problem(415, "json-required", "managed upgrade check requires JSON");
+        }
+        const value = await requestJson(request);
+        if (value === null || typeof value !== "object" || Array.isArray(value)) {
+          return problem(400, "invalid-upgrade-check", "the managed upgrade check body is invalid");
+        }
+        const body = value as Record<string, unknown>;
+        if (
+          Object.keys(body).some(
+            (key) => key !== "candidateReleaseId" && key !== "approvalToken",
+          ) ||
+          typeof body.candidateReleaseId !== "string" ||
+          !/^[A-Za-z0-9._-]+$/.test(body.candidateReleaseId) ||
+          (body.approvalToken !== undefined &&
+            (typeof body.approvalToken !== "string" || body.approvalToken.length === 0))
+        ) {
+          return problem(400, "invalid-upgrade-check", "the managed upgrade check body is invalid");
+        }
+        const selectedSource = activeConsoleRelease(paths);
+        if (
+          selectedSource.releaseId !== release.releaseId ||
+          readFileSync(sourceManifestPath, "utf8") !== sourceManifest
+        ) {
+          throw new LifecycleError(
+            "ACTIVE_RELEASE_CHANGED",
+            "the active managed release changed after this Daemon became its owner",
+          );
+        }
+        const sourceFormat = (JSON.parse(sourceManifest) as { readonly formatVersion?: unknown })
+          .formatVersion;
+        if (sourceFormat === 2) readCheckedManagedRelease(paths, release.releaseId);
+        const candidate = readCheckedManagedRelease(paths, body.candidateReleaseId);
+        return noStoreJson(
+          await Effect.runPromise(
+            upgradePreflight.check({
+              candidate,
+              sourceReleaseId: release.releaseId,
+              ...(body.approvalToken === undefined
+                ? {}
+                : { approvalToken: body.approvalToken as string }),
+            }),
+          ),
+        );
+      } catch (cause) {
+        const fault =
+          cause instanceof LifecycleError
+            ? cause
+            : new LifecycleError(
+                "UPGRADE_PREFLIGHT_FAILED",
+                cause instanceof Error ? cause.message : String(cause),
+                cause,
+              );
+        return problem(409, fault.code, fault.message);
+      }
+    };
     const revisionResponse = async (
       request: Request,
       url: URL,
@@ -1054,6 +1136,8 @@ export const startDaemon = (
         }
         const revision = await revisionResponse(request, url, true);
         if (revision !== undefined) return revision;
+        const upgrade = await upgradeResponse(request, url);
+        if (upgrade !== undefined) return upgrade;
         if (request.method === "GET" && url.pathname === "/api/v1/projects") {
           return Effect.runPromise(projectApi.snapshot());
         }

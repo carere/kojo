@@ -34,7 +34,7 @@ export const activeConsoleRelease = (paths: DaemonPaths): ConsoleRelease => {
 
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as ReleaseManifest;
   if (
-    manifest.formatVersion !== 1 ||
+    (manifest.formatVersion !== 1 && manifest.formatVersion !== 2) ||
     manifest.releaseId !== releaseId ||
     typeof manifest.kojoVersion !== "string" ||
     manifest.kojoVersion.length === 0 ||
