@@ -10,14 +10,19 @@ import type {
   StartTriggerWorkflowResult,
   StopWorkflowResult,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
-import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
+import {
+  decodeJsonValue,
+  type JsonValue,
+} from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import type { OperationReplyBody } from "@carere/kojo-runner-contracts/contexts/project/contracts/execution";
 import { Data, Effect } from "effect";
 import type { SqliteProjectRepository } from "../../project/adapters/SqliteProjectRepository.ts";
 import { materializeRevision } from "../../project/services/materializeRevision.ts";
 import { makeRunnerFrameReader, writeRunnerFrame } from "../../project/services/runnerChannel.ts";
+import type { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRepository.ts";
 import type { SqliteRunRepository } from "../adapters/SqliteRunRepository.ts";
 import type { ClaimedRun, DaemonRun, PhaseResult, RunAuthority } from "../models/DaemonRun.ts";
+import { DEFAULT_RUNNER_IDLE_MILLIS } from "../models/SchedulingDefaults.ts";
 import { canonicalJson } from "./canonicalJson.ts";
 
 interface RunnerRegistration {
@@ -34,6 +39,7 @@ interface RunnerRegistration {
   readonly workflowName: string;
   readonly entrySource: string;
   readonly payload: JsonValue;
+  readonly purpose?: "execution" | "trigger";
   readonly connectionSecret: string;
 }
 
@@ -44,7 +50,7 @@ interface RunnerInspection {
 
 interface RunnerExecution extends RunnerInspection {
   readonly runId: string;
-  readonly outcome: "succeeded" | "failed";
+  readonly outcome: "succeeded" | "failed" | "suspended";
   readonly recordedResults: Readonly<Record<string, JsonValue>>;
   readonly phases: ReadonlyArray<PhaseResult>;
 }
@@ -115,7 +121,12 @@ export class RunApi {
   readonly #now: () => number;
   readonly #projects: SqliteProjectRepository;
   readonly #runs: SqliteRunRepository;
+  readonly #triggers: SqliteTriggerRepository;
+  readonly #runnerIdleMillis: number;
+  readonly #idleRunners = new Map<string, { readonly stop: () => Promise<void> }>();
+  readonly #triggerProcesses = new Map<string, { readonly stop: () => Promise<void> }>();
   #pumping = false;
+  #stopping = false;
 
   constructor(options: {
     readonly dataIdentity: string;
@@ -124,6 +135,8 @@ export class RunApi {
     readonly now: () => number;
     readonly projects: SqliteProjectRepository;
     readonly runs: SqliteRunRepository;
+    readonly triggers: SqliteTriggerRepository;
+    readonly runnerIdleMillis?: number;
   }) {
     this.#dataIdentity = options.dataIdentity;
     this.#instanceId = options.instanceId;
@@ -131,6 +144,8 @@ export class RunApi {
     this.#now = options.now;
     this.#projects = options.projects;
     this.#runs = options.runs;
+    this.#triggers = options.triggers;
+    this.#runnerIdleMillis = options.runnerIdleMillis ?? DEFAULT_RUNNER_IDLE_MILLIS;
   }
 
   readonly start = (options: {
@@ -170,6 +185,13 @@ export class RunApi {
               changedAt: new Date(this.#now()).toISOString(),
             }),
           );
+          if (receipt.pollerId === undefined)
+            throw new Error("the active Trigger Workflow has no poller identity");
+          await this.#ensureTriggerPoller(
+            receipt.projectId,
+            receipt.workflowName,
+            receipt.pollerId,
+          );
           return {
             kind: "trigger",
             projectId: receipt.projectId,
@@ -202,6 +224,7 @@ export class RunApi {
             changedAt: new Date(this.#now()).toISOString(),
           }),
         );
+        await this.#stopTriggerPoller(options.projectId, options.workflowName);
         return {
           kind: "stop",
           projectId: receipt.projectId,
@@ -209,6 +232,29 @@ export class RunApi {
           activity: "inactive",
           admittedRunsContinue: true,
         };
+      },
+      catch: runApiFault,
+    });
+
+  readonly restore = (): Effect.Effect<void, RunApiFault> =>
+    Effect.tryPromise({
+      try: async () => {
+        for (const poller of await Effect.runPromise(this.#projects.triggerPollers)) {
+          await this.#ensureTriggerPoller(poller.projectId, poller.workflowName, poller.pollerId);
+        }
+        void this.#pump();
+      },
+      catch: runApiFault,
+    });
+
+  readonly shutdown = (): Effect.Effect<void, RunApiFault> =>
+    Effect.tryPromise({
+      try: async () => {
+        this.#stopping = true;
+        await Promise.allSettled([
+          ...Array.from(this.#triggerProcesses.values(), (process) => process.stop()),
+          ...Array.from(this.#idleRunners.values(), (process) => process.stop()),
+        ]);
       },
       catch: runApiFault,
     });
@@ -302,7 +348,7 @@ export class RunApi {
   }
 
   async #pump(): Promise<void> {
-    if (this.#pumping) return;
+    if (this.#pumping || this.#stopping) return;
     this.#pumping = true;
     try {
       while (true) {
@@ -321,6 +367,7 @@ export class RunApi {
   async #dispatch(claimed: ClaimedRun): Promise<void> {
     const { run, authority } = claimed;
     try {
+      await this.#stopTriggerPoller(run.projectId, run.workflowName);
       const revision = await Effect.runPromise(
         this.#projects.retainedExecutionRevision(run.projectId, run.workflowName, run.revisionId),
       );
@@ -359,6 +406,17 @@ export class RunApi {
       await Effect.runPromise(
         this.#projects.settleManualActivity(run.projectId, run.workflowName),
       ).catch(() => undefined);
+      const poller = (await Effect.runPromise(this.#projects.triggerPollers).catch(() => [])).find(
+        (candidate) =>
+          candidate.projectId === run.projectId && candidate.workflowName === run.workflowName,
+      );
+      if (poller !== undefined && !this.#stopping) {
+        await this.#ensureTriggerPoller(
+          poller.projectId,
+          poller.workflowName,
+          poller.pollerId,
+        ).catch(() => undefined);
+      }
     }
   }
 
@@ -444,7 +502,353 @@ export class RunApi {
         this.#runs.completePhase(authority, { ...phase, encodedResult: result }),
       );
     }
-    await Effect.runPromise(this.#runs.completeRun(authority, executed.outcome, endedAt));
+    if (executed.outcome === "suspended") {
+      await Effect.runPromise(this.#runs.suspend(authority, endedAt));
+    } else {
+      await Effect.runPromise(this.#runs.completeRun(authority, executed.outcome, endedAt));
+    }
+  }
+
+  #pollerKey(projectId: string, workflowName: string): string {
+    return JSON.stringify([projectId, workflowName]);
+  }
+
+  async #stopTriggerPoller(projectId: string, workflowName: string): Promise<void> {
+    const process = this.#triggerProcesses.get(this.#pollerKey(projectId, workflowName));
+    if (process !== undefined) await process.stop();
+  }
+
+  async #ensureTriggerPoller(
+    projectId: string,
+    workflowName: string,
+    pollerId: string,
+  ): Promise<void> {
+    const key = this.#pollerKey(projectId, workflowName);
+    if (this.#triggerProcesses.has(key)) return;
+    const idleRunner = this.#idleRunners.get(projectId);
+    if (idleRunner !== undefined) await idleRunner.stop();
+    let stopRequested = false;
+    let admittedWork = false;
+    let stopAction = async (): Promise<void> => {};
+    let resolveReady: (() => void) | undefined;
+    let rejectReady: ((cause: unknown) => void) | undefined;
+    let resolveDone: (() => void) | undefined;
+    const ready = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+    const done = new Promise<void>((resolve) => {
+      resolveDone = resolve;
+    });
+    const handle = {
+      stop: async (): Promise<void> => {
+        stopRequested = true;
+        await stopAction();
+        await done;
+      },
+    };
+    this.#triggerProcesses.set(key, handle);
+    void (async () => {
+      const revision = await Effect.runPromise(
+        this.#projects.executionRevision(projectId, workflowName),
+      );
+      const executionRoot = join(this.#dataRoot, "runner-materialized");
+      mkdirSync(executionRoot, { recursive: true, mode: 0o700 });
+      const materialized = materializeRevision({
+        retainedRoot: revision.publishedPath,
+        executionRoot,
+        revisionId: revision.revisionId,
+        packageGraphId: revision.packageGraphId,
+      });
+      const runnerInstanceId = crypto.randomUUID();
+      const connectionSecret = crypto.getRandomValues(new Uint8Array(32)).toHex();
+      const channelRoot = join(this.#dataRoot, "runner-channels", crypto.randomUUID());
+      const channel = join(channelRoot, "runner.sock");
+      mkdirSync(channelRoot, { recursive: true, mode: 0o700 });
+      let server: Server | undefined;
+      let socket: Socket | undefined;
+      let child: ReturnType<typeof Bun.spawn> | undefined;
+      const cleanup = async (): Promise<void> => {
+        socket?.destroy();
+        server?.close();
+        child?.kill();
+        await child?.exited.catch(() => undefined);
+        rmSync(channelRoot, { recursive: true, force: true });
+        materialized.dispose();
+      };
+      stopAction = cleanup;
+      try {
+        const accepted = new Promise<Socket>((resolve, reject) => {
+          server = createServer(resolve);
+          server.once("error", reject);
+          server.listen(channel);
+        });
+        await new Promise<void>((resolve, reject) => {
+          server?.once("listening", resolve);
+          server?.once("error", reject);
+        });
+        chmodSync(channel, 0o600);
+        child = Bun.spawn([process.execPath, materialized.runner], {
+          cwd: revision.location,
+          env: runnerEnvironment(channel, {
+            daemonInstanceId: this.#instanceId,
+            runnerInstanceId,
+            projectId,
+            packageGraphId: revision.packageGraphId,
+          }),
+          stdin: new Blob([connectionSecret]),
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        socket = await Promise.race([
+          accepted,
+          child.exited.then((exit) =>
+            Promise.reject(new Error(`Project Runner exited ${exit} before Trigger binding`)),
+          ),
+          Bun.sleep(10_000).then(() =>
+            Promise.reject(new Error("Project Runner Trigger binding timed out")),
+          ),
+        ]);
+        server?.close();
+        const reader = makeRunnerFrameReader(socket);
+        const hello = await Effect.runPromise(reader.read);
+        if (
+          hello.kind !== "Hello" ||
+          hello.daemonInstanceId !== this.#instanceId ||
+          hello.runnerInstanceId !== runnerInstanceId ||
+          hello.body.connectionSecret !== connectionSecret ||
+          hello.body.projectId !== projectId ||
+          hello.body.packageGraphId !== revision.packageGraphId
+        ) {
+          throw new Error("the Trigger Runner Hello does not match its private binding");
+        }
+        await Effect.runPromise(
+          writeRunnerFrame(socket, {
+            version: 1,
+            kind: "Welcome",
+            requestId: crypto.randomUUID(),
+            daemonInstanceId: this.#instanceId,
+            runnerInstanceId,
+            body: {
+              welcomeVersion: 1,
+              packageGraphId: revision.packageGraphId,
+              projectId,
+              selectedProtocol: 1,
+              features: [],
+            },
+          }),
+        );
+        const registerRequestId = crypto.randomUUID();
+        await Effect.runPromise(
+          writeRunnerFrame(socket, {
+            version: 1,
+            kind: "RegisterRevision",
+            requestId: registerRequestId,
+            daemonInstanceId: this.#instanceId,
+            runnerInstanceId,
+            body: {
+              registrationVersion: 1,
+              purpose: "trigger",
+              revisionId: revision.revisionId,
+              packageGraphId: revision.packageGraphId,
+              workflowName,
+              retainedRoot: materialized.root,
+              entrySource: revision.entrySource,
+              payload: null,
+            },
+          }),
+        );
+        const registered = await Effect.runPromise(reader.read);
+        const registeredBody = registered.body as unknown as OperationReplyBody;
+        if (
+          registered.kind !== "Ready" ||
+          registeredBody.operationRequestId !== registerRequestId ||
+          registeredBody.state !== "committed" ||
+          registeredBody.result === null ||
+          typeof registeredBody.result !== "object" ||
+          Array.isArray(registeredBody.result) ||
+          !("triggerDeclared" in registeredBody.result) ||
+          registeredBody.result.triggerDeclared !== true
+        ) {
+          throw new Error("the Project Runner did not register one authored Trigger");
+        }
+        const startRequestId = crypto.randomUUID();
+        await Effect.runPromise(
+          writeRunnerFrame(socket, {
+            version: 1,
+            kind: "StartTrigger",
+            requestId: startRequestId,
+            daemonInstanceId: this.#instanceId,
+            runnerInstanceId,
+            body: { pollerId },
+          }),
+        );
+        const started = await Effect.runPromise(reader.read);
+        const startedBody = started.body as unknown as OperationReplyBody;
+        if (
+          started.kind !== "Ready" ||
+          startedBody.operationRequestId !== startRequestId ||
+          startedBody.state !== "committed"
+        ) {
+          throw new Error("the Project Runner did not start its authored Trigger");
+        }
+        await Effect.runPromise(
+          this.#projects.observeTrigger({
+            projectId,
+            workflowName,
+            state: "polling",
+            detail: "listening in the bound Project Runner",
+            observedAt: new Date(this.#now()).toISOString(),
+          }),
+        );
+        resolveReady?.();
+        while (!stopRequested) {
+          const frame = await Effect.runPromise(reader.read);
+          if (
+            frame.daemonInstanceId !== this.#instanceId ||
+            frame.runnerInstanceId !== runnerInstanceId
+          ) {
+            throw new Error("the Trigger Runner frame escaped its private binding");
+          }
+          const reply = async (result: JsonValue): Promise<void> =>
+            Effect.runPromise(
+              writeRunnerFrame(socket as Socket, {
+                version: 1,
+                kind: "Ready",
+                requestId: crypto.randomUUID(),
+                daemonInstanceId: this.#instanceId,
+                runnerInstanceId,
+                body: {
+                  replyVersion: 1,
+                  operationRequestId: frame.requestId,
+                  state: "committed",
+                  result,
+                },
+              }),
+            );
+          const body = frame.body as unknown as Record<string, unknown>;
+          if (body.projectId !== projectId || body.workflowName !== workflowName) {
+            throw new Error("the Trigger Runner operation escaped its Project Workflow binding");
+          }
+          if (frame.kind === "AdmitTriggerRequest") {
+            try {
+              const payload = decodeJsonValue(body.payload);
+              if (
+                typeof body.source !== "string" ||
+                typeof body.eventId !== "string" ||
+                typeof body.idempotencyKey !== "string" ||
+                typeof body.deliveredAt !== "string" ||
+                body.revisionId !== revision.revisionId ||
+                body.packageGraphId !== revision.packageGraphId ||
+                !payload.ok
+              ) {
+                throw new Error("the Trigger admission body is invalid or outside its revision");
+              }
+              const admission = await Effect.runPromise(
+                this.#triggers.admit({
+                  projectId,
+                  workflowName,
+                  source: body.source,
+                  eventId: body.eventId,
+                  idempotencyKey: body.idempotencyKey,
+                  payload: payload.value,
+                  revisionId: revision.revisionId,
+                  packageGraphId: revision.packageGraphId,
+                  deliveredAt: body.deliveredAt,
+                }),
+              );
+              admittedWork = true;
+              await reply({
+                accepted: true,
+                duplicate: admission.duplicate,
+                runId: admission.run.runId,
+              });
+            } catch (cause) {
+              const code =
+                typeof cause === "object" && cause !== null && "code" in cause
+                  ? String(cause.code)
+                  : "STORE_FAILED";
+              await reply({
+                accepted: false,
+                retry: code === "QUEUE_FULL" || code === "STORE_FAILED",
+                reason: cause instanceof Error ? cause.message : String(cause),
+              });
+            }
+          } else if (frame.kind === "RecordRejectedTriggerEvent") {
+            const reason = body.reason;
+            if (
+              typeof reason !== "string" ||
+              typeof body.source !== "string" ||
+              typeof body.eventId !== "string" ||
+              typeof body.deliveredAt !== "string" ||
+              body.revisionId !== revision.revisionId ||
+              body.packageGraphId !== revision.packageGraphId
+            ) {
+              throw new Error("the Trigger rejection body is invalid or outside its revision");
+            }
+            await Effect.runPromise(
+              this.#triggers.reject(
+                {
+                  projectId,
+                  workflowName,
+                  source: body.source,
+                  eventId: body.eventId,
+                  revisionId: revision.revisionId,
+                  packageGraphId: revision.packageGraphId,
+                  deliveredAt: body.deliveredAt,
+                },
+                reason,
+              ),
+            );
+            await reply({ recorded: true });
+          } else if (frame.kind === "RecordTriggerProgress") {
+            const state = body.state;
+            if (state !== "polling" && state !== "delayed" && state !== "failed")
+              throw new Error("the Trigger progress state is invalid");
+            await Effect.runPromise(
+              this.#projects.observeTrigger({
+                projectId,
+                workflowName,
+                state,
+                detail: String(body.detail ?? "Trigger progress"),
+                observedAt: String(body.observedAt ?? new Date(this.#now()).toISOString()),
+              }),
+            );
+            await reply({ recorded: true });
+            if (state === "polling") {
+              admittedWork = false;
+              void this.#pump();
+            }
+          } else if (frame.kind === "Fault") {
+            throw new Error(String(body.message ?? "the Trigger Runner reported a fault"));
+          } else {
+            throw new Error(`the Trigger Runner sent unexpected ${frame.kind}`);
+          }
+        }
+      } finally {
+        await cleanup();
+      }
+    })()
+      .catch(async (cause) => {
+        rejectReady?.(cause);
+        if (!stopRequested && !this.#stopping) {
+          await Effect.runPromise(
+            this.#projects.observeTrigger({
+              projectId,
+              workflowName,
+              state: "failed",
+              detail: cause instanceof Error ? cause.message : String(cause),
+              observedAt: new Date(this.#now()).toISOString(),
+            }),
+          ).catch(() => undefined);
+        }
+      })
+      .finally(() => {
+        if (this.#triggerProcesses.get(key) === handle) this.#triggerProcesses.delete(key);
+        if (admittedWork) void this.#pump();
+        resolveDone?.();
+      });
+    await ready;
   }
 
   async #runner<A>(
@@ -459,12 +863,23 @@ export class RunApi {
         }),
     authority?: RunAuthority,
   ): Promise<A> {
+    if (mode === "execute") {
+      const priorIdle = this.#idleRunners.get(request.projectId);
+      if (priorIdle !== undefined) await priorIdle.stop();
+    }
     const channelRoot = join(this.#dataRoot, "runner-channels", crypto.randomUUID());
     const channel = join(channelRoot, "runner.sock");
     mkdirSync(channelRoot, { recursive: true, mode: 0o700 });
     let server: Server | undefined;
     let socket: Socket | undefined;
     let child: ReturnType<typeof Bun.spawn> | undefined;
+    let detached = false;
+    const cleanup = (): void => {
+      socket?.destroy();
+      server?.close();
+      child?.kill();
+      rmSync(channelRoot, { recursive: true, force: true });
+    };
     try {
       const accepted = new Promise<Socket>((resolve, reject) => {
         server = createServer(resolve);
@@ -538,6 +953,7 @@ export class RunApi {
           runnerInstanceId: request.runnerInstanceId,
           body: {
             registrationVersion: 1,
+            purpose: request.purpose ?? "execution",
             revisionId: request.revisionId,
             packageGraphId: request.packageGraphId,
             workflowName: request.workflowName,
@@ -596,37 +1012,57 @@ export class RunApi {
         }
         result = executedBody.result;
       }
-      await Effect.runPromise(
-        writeRunnerFrame(socket, {
-          version: 1,
-          kind: "Shutdown",
-          requestId: crypto.randomUUID(),
-          daemonInstanceId: request.daemonInstanceId,
-          runnerInstanceId: request.runnerInstanceId,
-          body: null,
-        }),
-      );
-      const stopped = await Effect.runPromise(reader.read);
-      if (
-        stopped.kind !== "Stopped" ||
-        stopped.daemonInstanceId !== request.daemonInstanceId ||
-        stopped.runnerInstanceId !== request.runnerInstanceId
-      ) {
-        throw new Error("the Project Runner did not stop cleanly");
-      }
-      socket.end();
-      const exit = await child.exited;
-      const [standardOutput, standardError] = await Promise.all([output, error]);
-      if (exit !== 0)
-        throw new Error(
-          `Project Runner exited ${exit}: ${standardError.trim()}${standardOutput.trim()}`,
+      const shutdown = async (): Promise<void> => {
+        await Effect.runPromise(
+          writeRunnerFrame(socket as Socket, {
+            version: 1,
+            kind: "Shutdown",
+            requestId: crypto.randomUUID(),
+            daemonInstanceId: request.daemonInstanceId,
+            runnerInstanceId: request.runnerInstanceId,
+            body: null,
+          }),
         );
+        const stopped = await Effect.runPromise(reader.read);
+        if (
+          stopped.kind !== "Stopped" ||
+          stopped.daemonInstanceId !== request.daemonInstanceId ||
+          stopped.runnerInstanceId !== request.runnerInstanceId
+        ) {
+          throw new Error("the Project Runner did not stop cleanly");
+        }
+        socket?.end();
+        const exit = await child?.exited;
+        const [standardOutput, standardError] = await Promise.all([output, error]);
+        if (exit !== 0)
+          throw new Error(
+            `Project Runner exited ${exit}: ${standardError.trim()}${standardOutput.trim()}`,
+          );
+      };
+      if (mode === "execute") {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let stopping: Promise<void> | undefined;
+        const idle = {
+          stop: (): Promise<void> => {
+            if (stopping !== undefined) return stopping;
+            if (timer !== undefined) clearTimeout(timer);
+            stopping = shutdown().finally(() => {
+              cleanup();
+              if (this.#idleRunners.get(request.projectId) === idle)
+                this.#idleRunners.delete(request.projectId);
+            });
+            return stopping;
+          },
+        };
+        this.#idleRunners.set(request.projectId, idle);
+        timer = setTimeout(() => void idle.stop().catch(() => undefined), this.#runnerIdleMillis);
+        detached = true;
+      } else {
+        await shutdown();
+      }
       return result as A;
     } finally {
-      socket?.destroy();
-      server?.close();
-      child?.kill();
-      rmSync(channelRoot, { recursive: true, force: true });
+      if (!detached) cleanup();
     }
   }
 }

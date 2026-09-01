@@ -1,10 +1,11 @@
 import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Effect } from "effect";
 import { startDaemon } from "../../../src/contexts/daemon/adapters/DaemonOwner.ts";
 import type { DaemonPaths } from "../../../src/contexts/daemon/models/DaemonPaths.ts";
+import { captureWorkflowRevision } from "../../../src/contexts/workflow/services/captureRevision.ts";
 import { publishConsoleRelease } from "./consoleRelease.ts";
 
 const root = resolve(process.argv[2] ?? "");
@@ -74,6 +75,51 @@ if (fixture === "projects" || fixture === "workflows") {
 }
 
 if (fixture === "workflows") {
+  const workflowProject = join(root, "project-missing");
+  mkdirSync(join(workflowProject, ".kojo", "workflows"), { recursive: true });
+  writeFileSync(
+    join(workflowProject, "package.json"),
+    JSON.stringify({ name: "console-workflow-fixture", private: true, type: "module" }),
+  );
+  symlinkSync(
+    resolve(import.meta.dirname, "../../../../../node_modules"),
+    join(workflowProject, "node_modules"),
+  );
+  writeFileSync(
+    join(workflowProject, ".kojo", "factory.json"),
+    JSON.stringify({ formatVersion: 1, assets: [] }),
+  );
+  writeFileSync(
+    join(workflowProject, ".kojo", "workflows", "available.ts"),
+    `import { Effect, Layer, Schema, Stream } from "effect";
+import { Trigger } from "@carere/kojo-runtime/contexts/trigger/ports/Trigger";
+import { workflow } from "@carere/kojo-runtime/contexts/workflow/services/workflow";
+
+const trigger = Layer.succeed(Trigger)({
+  stream: Stream.never,
+  ack: () => Effect.void,
+});
+
+export const available = workflow(
+  {
+    name: "available",
+    payload: Schema.Null,
+    success: Schema.Null,
+    error: Schema.Never,
+    idempotencyKey: () => "fixture",
+    trigger,
+  },
+  () => Effect.succeed(null),
+);
+`,
+  );
+  execFileSync("git", ["-C", workflowProject, "add", ".kojo", "package.json"]);
+  execFileSync("git", ["-C", workflowProject, "commit", "-m", "test: add Workflow fixture"]);
+  const captured = captureWorkflowRevision({
+    project: workflowProject,
+    dataRoot: paths.dataRoot,
+    workflowName: "available",
+  });
   const database = new Database(join(paths.dataRoot, "kojo.db"));
   const project = database
     .query<{ readonly project_id: string }, []>(
@@ -82,16 +128,26 @@ if (fixture === "workflows") {
     .get();
   if (project === null) throw new Error("the Workflow fixture has no Project");
   const now = "2026-09-01T00:00:00.000Z";
-  const available = "a".repeat(64);
+  const available = captured.revisionId;
   const removed = "b".repeat(64);
-  for (const revision of [available, removed]) {
-    database.run(
-      `INSERT INTO workflow_revisions (
-         revision_id, package_graph_id, manifest_json, published_path, published_at
-       ) VALUES (?, ?, '{}', ?, ?)`,
-      [revision, revision, join(paths.dataRoot, "revisions", revision), now],
-    );
-  }
+  database.run(
+    `INSERT INTO workflow_revisions (
+       revision_id, package_graph_id, manifest_json, published_path, published_at
+     ) VALUES (?, ?, ?, ?, ?)`,
+    [
+      captured.revisionId,
+      captured.packageGraphId,
+      JSON.stringify(captured.manifest),
+      captured.publishedPath,
+      now,
+    ],
+  );
+  database.run(
+    `INSERT INTO workflow_revisions (
+       revision_id, package_graph_id, manifest_json, published_path, published_at
+     ) VALUES (?, ?, '{}', ?, ?)`,
+    [removed, removed, join(paths.dataRoot, "revisions", removed), now],
+  );
   database.run(
     `UPDATE projects
         SET factory_state = 'available', refresh_state = 'current', refreshed_at = ?,
@@ -162,7 +218,7 @@ if (fixture === "workflows") {
        run_id, project_id, workflow_name, idempotency_key, payload_json, revision_id,
        package_graph_id, state, admission_sequence, admitted_at
      ) VALUES ('run-queued', ?, 'available', 'fixture', 'null', ?, ?, 'queued', 1, ?)`,
-    [project.project_id, available, available, now],
+    [project.project_id, available, captured.packageGraphId, now],
   );
   database.run(
     `INSERT INTO workflow_queue (

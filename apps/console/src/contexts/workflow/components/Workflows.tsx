@@ -38,18 +38,21 @@ const tone = (state: string): BadgeTone => {
   return "neutral";
 };
 
-const WorkflowActions = (props: { readonly workflow: WorkflowDocument }): JSX.Element => {
+const WorkflowActions = (props: {
+  readonly workflow: WorkflowDocument;
+  readonly notice: () => string | undefined;
+  readonly onNotice: (notice: string | undefined) => void;
+}): JSX.Element => {
   const [payload, setPayload] = createSignal("{}");
   const [pending, setPending] = createSignal(false);
-  const [notice, setNotice] = createSignal<string>();
   const trigger = () => props.workflow.trigger.state !== "not-declared";
   const start = async (): Promise<void> => {
     setPending(true);
-    setNotice(undefined);
+    props.onNotice(undefined);
     try {
       if (trigger()) {
         await startTriggerWorkflow(props.workflow.projectId, props.workflow.workflowName);
-        setNotice("Trigger listening. No immediate Run was created.");
+        props.onNotice("Trigger listening. No immediate Run was created.");
       } else {
         const parsed = JSON.parse(payload()) as JsonValue;
         const result = await startManualWorkflow(
@@ -57,22 +60,22 @@ const WorkflowActions = (props: { readonly workflow: WorkflowDocument }): JSX.El
           props.workflow.workflowName,
           parsed,
         );
-        setNotice(`Run ${result.runId} admitted.`);
+        props.onNotice(`Run ${result.runId} admitted.`);
       }
     } catch (cause) {
-      setNotice(cause instanceof Error ? cause.message : String(cause));
+      props.onNotice(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setPending(false);
     }
   };
   const stop = async (): Promise<void> => {
     setPending(true);
-    setNotice(undefined);
+    props.onNotice(undefined);
     try {
       await stopWorkflow(props.workflow.projectId, props.workflow.workflowName);
-      setNotice("Inactive. Admitted Runs remain eligible.");
+      props.onNotice("Inactive. Admitted Runs remain eligible.");
     } catch (cause) {
-      setNotice(cause instanceof Error ? cause.message : String(cause));
+      props.onNotice(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setPending(false);
     }
@@ -111,74 +114,87 @@ const WorkflowActions = (props: { readonly workflow: WorkflowDocument }): JSX.El
           Current Runs ({props.workflow.currentRuns.length})
         </a>
       </div>
-      {notice() === undefined ? null : <p role="status">{notice()}</p>}
+      {props.notice() === undefined ? null : <p role="status">{props.notice()}</p>}
     </div>
   );
 };
 
-const columns = helper.columns([
-  helper.accessor("workflowName", { header: "Workflow" }),
-  helper.accessor("projectState", {
-    header: "Project",
-    cell: (info) => <Badge tone={tone(info.getValue())}>{info.getValue()}</Badge>,
-  }),
-  helper.accessor("factoryState", {
-    header: "Factory",
-    cell: (info) => <Badge tone={tone(info.getValue())}>{info.getValue()}</Badge>,
-  }),
-  helper.accessor("refreshState", {
-    header: "Refresh",
-    cell: (info) => <Badge tone={tone(info.getValue())}>{info.getValue()}</Badge>,
-  }),
-  helper.accessor("activity", {
-    header: "Activity",
-    cell: (info) => <Badge tone={tone(info.getValue())}>{info.getValue()}</Badge>,
-  }),
-  helper.accessor("availability", {
-    header: "Availability",
-    cell: (info) => <Badge tone={tone(info.getValue())}>{info.getValue()}</Badge>,
-  }),
-  helper.display({
-    id: "source",
-    header: "Source",
-    cell: (info) => (
-      <span class="block max-w-72">
-        <span class="block truncate font-mono text-xs">{info.row.original.source}</span>
-        {info.row.original.sourceFault === undefined ? null : (
-          <span class="block text-red-700 text-xs dark:text-red-300">
-            {info.row.original.sourceFault}
-          </span>
-        )}
-      </span>
-    ),
-  }),
-  helper.display({
-    id: "revision",
-    header: "Revision",
-    cell: (info) => (
-      <span class="font-mono text-xs">
-        {(
-          info.row.original.candidateRevisionId ??
-          info.row.original.currentRevisionId ??
-          "none"
-        ).slice(0, 12)}
-      </span>
-    ),
-  }),
-  helper.display({
-    id: "trigger",
-    header: "Trigger observation",
-    cell: (info) => <span>{info.row.original.trigger.state}</span>,
-  }),
-  helper.display({
-    id: "actions",
-    header: "Actions and current Runs",
-    cell: (info) => <WorkflowActions workflow={info.row.original} />,
-  }),
-]);
+const workflowColumns = (
+  notice: (workflow: WorkflowDocument) => string | undefined,
+  onNotice: (workflow: WorkflowDocument, value: string | undefined) => void,
+) =>
+  helper.columns([
+    helper.accessor("workflowName", { header: "Workflow" }),
+    helper.accessor("projectState", {
+      header: "Project",
+      cell: (info) => <Badge tone={tone(info.getValue())}>{info.getValue()}</Badge>,
+    }),
+    helper.accessor("factoryState", {
+      header: "Factory",
+      cell: (info) => <Badge tone={tone(info.getValue())}>{info.getValue()}</Badge>,
+    }),
+    helper.accessor("refreshState", {
+      header: "Refresh",
+      cell: (info) => <Badge tone={tone(info.getValue())}>{info.getValue()}</Badge>,
+    }),
+    helper.accessor("activity", {
+      header: "Activity",
+      cell: (info) => <Badge tone={tone(info.getValue())}>{info.getValue()}</Badge>,
+    }),
+    helper.accessor("availability", {
+      header: "Availability",
+      cell: (info) => <Badge tone={tone(info.getValue())}>{info.getValue()}</Badge>,
+    }),
+    helper.display({
+      id: "source",
+      header: "Source",
+      cell: (info) => (
+        <span class="block max-w-72">
+          <span class="block truncate font-mono text-xs">{info.row.original.source}</span>
+          {info.row.original.sourceFault === undefined ? null : (
+            <span class="block text-red-700 text-xs dark:text-red-300">
+              {info.row.original.sourceFault}
+            </span>
+          )}
+        </span>
+      ),
+    }),
+    helper.display({
+      id: "revision",
+      header: "Revision",
+      cell: (info) => (
+        <span class="font-mono text-xs">
+          {(
+            info.row.original.candidateRevisionId ??
+            info.row.original.currentRevisionId ??
+            "none"
+          ).slice(0, 12)}
+        </span>
+      ),
+    }),
+    helper.display({
+      id: "trigger",
+      header: "Trigger observation",
+      cell: (info) => <span>{info.row.original.trigger.state}</span>,
+    }),
+    helper.display({
+      id: "actions",
+      header: "Actions and current Runs",
+      cell: (info) => (
+        <WorkflowActions
+          workflow={info.row.original}
+          notice={() => notice(info.row.original)}
+          onNotice={(value) => onNotice(info.row.original, value)}
+        />
+      ),
+    }),
+  ]);
 
 export const Workflows = (props: { readonly projectId: string }): JSX.Element => {
   const workflows = useWorkflows(props.projectId);
+  const [notices, setNotices] = createSignal<Readonly<Record<string, string | undefined>>>({});
+  const noticeKey = (workflow: WorkflowDocument): string =>
+    `${workflow.projectId}:${workflow.workflowName}`;
   const [filters, setFilters] = createSignal(filterFromUrl());
   const rows = createMemo(() => {
     const query = filters();
@@ -206,7 +222,11 @@ export const Workflows = (props: { readonly projectId: string }): JSX.Element =>
   });
   const table = createTable({
     features,
-    columns,
+    columns: workflowColumns(
+      (workflow) => notices()[noticeKey(workflow)],
+      (workflow, notice) =>
+        setNotices((current) => ({ ...current, [noticeKey(workflow)]: notice })),
+    ),
     get data() {
       return rows();
     },

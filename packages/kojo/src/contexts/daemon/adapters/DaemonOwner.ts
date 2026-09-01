@@ -100,6 +100,7 @@ export interface StartDaemonOptions {
   readonly consolePort?: number;
   readonly now?: () => number;
   readonly automaticRefresh?: boolean;
+  readonly runnerIdleMillis?: number;
 }
 
 const retainedDirectories = [
@@ -234,7 +235,7 @@ export const startDaemon = (
     const authority = browserAuthority({ now });
     const projectRepository = new SqliteProjectRepository(database);
     const runRepository = new SqliteRunRepository(database);
-    new SqliteTriggerRepository(database);
+    const triggerRepository = new SqliteTriggerRepository(database);
     const projectApi = new ProjectApi({
       dataIdentity,
       instanceId,
@@ -250,7 +251,12 @@ export const startDaemon = (
       now,
       projects: projectRepository,
       runs: runRepository,
+      triggers: triggerRepository,
+      ...(options.runnerIdleMillis === undefined
+        ? {}
+        : { runnerIdleMillis: options.runnerIdleMillis }),
     });
+    void Effect.runPromise(runApi.restore()).catch(() => undefined);
     const startRun = async (
       request: Request,
       projectId: string,
@@ -736,6 +742,7 @@ export const startDaemon = (
         socketServer?.stop(true);
         consoleServer?.stop(true);
         await Promise.allSettled([...projectRefreshes.values()]);
+        await Effect.runPromise(runApi.shutdown());
         database?.close(false);
         if (currentEndpointIs(runtimeEndpoint, endpoint.instanceId)) {
           removeOwnedPlainFile(runtimeEndpoint);

@@ -18,6 +18,7 @@ export interface RegisterRevisionBody {
   readonly retainedRoot: string;
   readonly entrySource: string;
   readonly payload: JsonValue;
+  readonly purpose?: "execution" | "trigger";
 }
 
 export interface ExecuteRunBody {
@@ -69,6 +70,7 @@ export const decodeRegisterRevisionBody = (input: unknown): DecodeResult<Registe
     "retainedRoot",
     "entrySource",
     "payload",
+    "purpose",
   ]);
   if (!record.ok) return record;
   if (record.value.registrationVersion !== 1)
@@ -85,6 +87,13 @@ export const decodeRegisterRevisionBody = (input: unknown): DecodeResult<Registe
   if (!entrySource.ok) return entrySource;
   const payload = decodeJsonValue(record.value.payload);
   if (!payload.ok) return payload;
+  let purpose: "execution" | "trigger" | undefined;
+  if ("purpose" in record.value) {
+    if (record.value.purpose !== "execution" && record.value.purpose !== "trigger") {
+      return decodeFailure(["purpose"], "Expected execution or trigger registration purpose");
+    }
+    purpose = record.value.purpose;
+  }
   return decodeSuccess({
     registrationVersion: 1,
     revisionId: revisionId.value,
@@ -93,6 +102,7 @@ export const decodeRegisterRevisionBody = (input: unknown): DecodeResult<Registe
     retainedRoot: retainedRoot.value,
     entrySource: entrySource.value,
     payload: payload.value,
+    ...(purpose === undefined ? {} : { purpose }),
   });
 };
 

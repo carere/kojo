@@ -13,8 +13,11 @@ import type { TriggerEvent } from "../models/TriggerEvent.ts";
  */
 export interface TriggerOutcome {
   readonly runId: RunId;
-  /** Where the run stopped. Never `running`: an event is acknowledged once its run has settled. */
-  readonly outcome: RunOutcome;
+  /**
+   * `admitted` means the Daemon committed the Run before it asked the source to acknowledge.
+   * The terminal values remain for the standalone driver, which waits for execution.
+   */
+  readonly outcome: "admitted" | RunOutcome;
 }
 
 /**

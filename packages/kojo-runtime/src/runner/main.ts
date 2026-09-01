@@ -3,14 +3,19 @@ import { connect, type Socket } from "node:net";
 import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { RUNNER_PROTOCOL_VERSION } from "@carere/kojo-runner-contracts/contexts/project/contracts/frame";
-import type { JsonValue } from "@carere/kojo-runner-contracts/contexts/shared/codecs/json";
-import { Effect, Layer, Schema } from "effect";
+import {
+  decodeJsonValue,
+  type JsonValue,
+} from "@carere/kojo-runner-contracts/contexts/shared/codecs/json";
+import { Data, Effect, Layer, Schema, Stream } from "effect";
 import { WorkflowEngine } from "effect/unstable/workflow";
 import {
   makeRunnerFrameReader,
+  type RunnerFrameReader,
   writeRunnerFrame,
 } from "../contexts/project/services/runnerChannel.ts";
 import { Tracer } from "../contexts/trace/ports/Tracer.ts";
+import { Trigger } from "../contexts/trigger/ports/Trigger.ts";
 import { layer as daemonEngine } from "../contexts/workflow/adapters/DaemonWorkflowEngine.ts";
 import { DaemonExecutionRepository } from "../contexts/workflow/ports/DaemonExecutionRepository.ts";
 
@@ -32,6 +37,7 @@ export interface BoundRegistrationRequest {
   readonly workflowName: string;
   readonly entrySource: string;
   readonly payload: unknown;
+  readonly purpose?: "execution" | "trigger";
   readonly connectionSecret: string;
 }
 
@@ -48,7 +54,7 @@ export interface ExecuteRegisteredRequest extends BoundRegistrationRequest {
 
 export interface ExecuteRegisteredResult extends RegisteredPayload {
   readonly runId: string;
-  readonly outcome: "succeeded" | "failed";
+  readonly outcome: "succeeded" | "failed" | "suspended";
   readonly recordedResults: Readonly<Record<string, JsonValue>>;
   readonly phases: ReadonlyArray<RunnerPhaseResult>;
 }
@@ -73,6 +79,7 @@ interface LoadedBundle {
   readonly authoredPayloadSchema: Schema.Top;
   readonly authoredIdempotencyKey: (payload: unknown) => string;
   readonly encodeEnginePayload: (payload: unknown) => Record<string, unknown>;
+  readonly trigger?: Layer.Layer<Trigger, never, unknown>;
 }
 
 const hasProperties = (value: unknown): value is Record<string, unknown> =>
@@ -83,9 +90,7 @@ const inside = (root: string, path: string): boolean => {
   return child !== ".." && !child.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`);
 };
 
-const loadRegisteredRevision = async (
-  request: BoundRegistrationRequest,
-): Promise<{ readonly bundle: LoadedBundle; readonly payload: unknown }> => {
+const loadRegisteredBundle = async (request: BoundRegistrationRequest): Promise<LoadedBundle> => {
   if (
     request.registrationVersion !== 1 ||
     request.selectedProtocol !== 1 ||
@@ -122,6 +127,13 @@ const loadRegisteredRevision = async (
     throw new Error("the exact revision did not register one named Workflow");
   const bundle = bundles[0];
   if (bundle === undefined) throw new Error("the exact revision has no Workflow");
+  return bundle;
+};
+
+const loadRegisteredRevision = async (
+  request: BoundRegistrationRequest,
+): Promise<{ readonly bundle: LoadedBundle; readonly payload: unknown }> => {
+  const bundle = await loadRegisteredBundle(request);
   const payload = await Effect.runPromise(
     Schema.decodeUnknownEffect(bundle.authoredPayloadSchema)(request.payload) as Effect.Effect<
       unknown,
@@ -237,6 +249,188 @@ export const executeRegisteredRevision = async (
   };
 };
 
+const triggerRetryDelays = [1_000, 2_000, 4_000, 8_000, 16_000] as const;
+
+class TriggerProcessError extends Data.TaggedError("TriggerProcessError")<{
+  readonly message: string;
+  readonly cause: unknown;
+}> {}
+
+const triggerProcessError = (cause: unknown): TriggerProcessError =>
+  new TriggerProcessError({
+    message: cause instanceof Error ? cause.message : String(cause),
+    cause,
+  });
+
+const committedReply = async (
+  reader: RunnerFrameReader,
+  binding: RunnerBinding,
+  operationRequestId: string,
+): Promise<Record<string, JsonValue>> => {
+  const frame = await Effect.runPromise(reader.read);
+  assertAddress(frame, binding);
+  const body = frame.body as unknown as {
+    readonly operationRequestId?: string;
+    readonly state?: string;
+    readonly result?: JsonValue;
+  };
+  if (
+    frame.kind !== "Ready" ||
+    body.operationRequestId !== operationRequestId ||
+    body.state !== "committed" ||
+    body.result === null ||
+    Array.isArray(body.result) ||
+    typeof body.result !== "object"
+  ) {
+    throw new Error("the Daemon did not commit the Trigger operation reply");
+  }
+  return body.result as Record<string, JsonValue>;
+};
+
+const runRegisteredTrigger = async (options: {
+  readonly registration: BoundRegistrationRequest;
+  readonly binding: RunnerBinding;
+  readonly pollerId: string;
+  readonly socket: Socket;
+  readonly reader: RunnerFrameReader;
+}): Promise<void> => {
+  const bundle = await loadRegisteredBundle(options.registration);
+  if (bundle.trigger === undefined)
+    throw new Error("the exact Workflow revision does not declare a Trigger");
+  const sendMutation = async (
+    kind: "AdmitTriggerRequest" | "RecordRejectedTriggerEvent" | "RecordTriggerProgress",
+    body: JsonValue,
+  ): Promise<Record<string, JsonValue>> => {
+    const requestId = crypto.randomUUID();
+    await Effect.runPromise(
+      writeRunnerFrame(options.socket, {
+        version: 1,
+        kind,
+        requestId,
+        daemonInstanceId: options.binding.daemonInstanceId,
+        runnerInstanceId: options.binding.runnerInstanceId,
+        runId: options.pollerId,
+        revisionId: options.registration.revisionId,
+        claimGeneration: 1,
+        body,
+      }),
+    );
+    return committedReply(options.reader, options.binding, requestId);
+  };
+  const processEvent = async (
+    trigger: Trigger["Service"],
+    event: Parameters<Trigger["Service"]["ack"]>[0],
+  ): Promise<void> => {
+    const encodedPayload = decodeJsonValue(event.payload);
+    let payload: unknown;
+    let rejection: string | undefined;
+    if (!encodedPayload.ok) {
+      rejection = "the Trigger payload is not a JSON value";
+    } else {
+      payload = await Effect.runPromise(
+        Schema.decodeEffect(bundle.authoredPayloadSchema)(encodedPayload.value) as Effect.Effect<
+          unknown,
+          Schema.SchemaError,
+          never
+        >,
+      ).catch((cause) => {
+        rejection = cause instanceof Error ? cause.message : String(cause);
+        return undefined;
+      });
+      if (rejection === undefined && bundle.authoredIdempotencyKey(payload) !== event.key) {
+        rejection = `the Workflow idempotency key does not match Trigger key ${event.key}`;
+      }
+    }
+    const deliveredAt = new Date(event.receivedAt).toISOString();
+    if (rejection !== undefined) {
+      await sendMutation("RecordRejectedTriggerEvent", {
+        projectId: options.registration.projectId,
+        workflowName: options.registration.workflowName,
+        source: event.source,
+        eventId: event.key,
+        revisionId: options.registration.revisionId,
+        packageGraphId: options.registration.packageGraphId,
+        deliveredAt,
+        reason: rejection,
+      });
+      return;
+    }
+    let admission: Record<string, JsonValue> | undefined;
+    for (let attempt = 0; attempt <= triggerRetryDelays.length; attempt += 1) {
+      admission = await sendMutation("AdmitTriggerRequest", {
+        projectId: options.registration.projectId,
+        workflowName: options.registration.workflowName,
+        source: event.source,
+        eventId: event.key,
+        idempotencyKey: event.key,
+        payload: encodedPayload.ok ? encodedPayload.value : null,
+        revisionId: options.registration.revisionId,
+        packageGraphId: options.registration.packageGraphId,
+        deliveredAt,
+      });
+      if (admission.accepted === true) break;
+      if (admission.retry !== true || attempt === triggerRetryDelays.length) {
+        throw new Error(String(admission.reason ?? "the Trigger event was refused"));
+      }
+      await Bun.sleep(triggerRetryDelays[attempt] ?? 16_000);
+    }
+    const runId = admission?.runId;
+    if (typeof runId !== "string")
+      throw new Error("durable Trigger admission did not return a Run ID");
+    let acknowledged = false;
+    let acknowledgementCause: unknown;
+    for (let attempt = 0; attempt <= triggerRetryDelays.length; attempt += 1) {
+      try {
+        await Effect.runPromise(trigger.ack(event, { runId: runId as never, outcome: "admitted" }));
+        acknowledged = true;
+        break;
+      } catch (cause) {
+        acknowledgementCause = cause;
+        if (attempt < triggerRetryDelays.length)
+          await Bun.sleep(triggerRetryDelays[attempt] ?? 16_000);
+      }
+    }
+    if (!acknowledged) {
+      const reason =
+        acknowledgementCause instanceof Error
+          ? acknowledgementCause.message
+          : String(acknowledgementCause);
+      await sendMutation("RecordTriggerProgress", {
+        projectId: options.registration.projectId,
+        workflowName: options.registration.workflowName,
+        state: "failed",
+        detail: `Trigger acknowledgement retry cycle was exhausted: ${reason}`,
+        observedAt: new Date().toISOString(),
+      });
+      throw new Error(reason);
+    }
+    await sendMutation("RecordTriggerProgress", {
+      projectId: options.registration.projectId,
+      workflowName: options.registration.workflowName,
+      state: "polling",
+      detail: `event ${event.key} acknowledged after durable admission`,
+      observedAt: new Date().toISOString(),
+    });
+  };
+  const program = Effect.gen(function* () {
+    const trigger = yield* Trigger;
+    yield* trigger.stream.pipe(
+      Stream.runForEach((event) =>
+        Effect.tryPromise({
+          try: () => processEvent(trigger, event),
+          catch: triggerProcessError,
+        }),
+      ),
+    );
+  }).pipe(Effect.provide(bundle.trigger as Layer.Layer<Trigger, never, never>)) as Effect.Effect<
+    void,
+    unknown,
+    never
+  >;
+  await Effect.runPromise(program);
+  throw new Error("the live Trigger stream ended");
+};
+
 interface RunnerBinding {
   readonly daemonInstanceId: string;
   readonly runnerInstanceId: string;
@@ -314,6 +508,7 @@ const runPrivateProtocol = async (): Promise<void> => {
       readonly retainedRoot: string;
       readonly entrySource: string;
       readonly payload: JsonValue;
+      readonly purpose?: "execution" | "trigger";
     };
     const registration: BoundRegistrationRequest = {
       registrationVersion: body.registrationVersion,
@@ -329,9 +524,16 @@ const runPrivateProtocol = async (): Promise<void> => {
       workflowName: body.workflowName,
       entrySource: body.entrySource,
       payload: body.payload,
+      ...(body.purpose === undefined ? {} : { purpose: body.purpose }),
       connectionSecret,
     };
-    const inspected = await inspectRegisteredRevision(registration);
+    const inspected =
+      registration.purpose === "trigger"
+        ? {
+            registrationVersion: 1 as const,
+            triggerDeclared: (await loadRegisteredBundle(registration)).trigger !== undefined,
+          }
+        : await inspectRegisteredRevision(registration);
     await Effect.runPromise(
       writeRunnerFrame(socket, {
         version: 1,
@@ -382,6 +584,33 @@ const runPrivateProtocol = async (): Promise<void> => {
           },
         }),
       );
+    } else if (operation.kind === "StartTrigger") {
+      const start = operation.body as unknown as { readonly pollerId?: string };
+      if (registration.purpose !== "trigger" || typeof start.pollerId !== "string") {
+        throw new Error("the Trigger start does not match its bound registration");
+      }
+      await Effect.runPromise(
+        writeRunnerFrame(socket, {
+          version: 1,
+          kind: "Ready",
+          requestId: crypto.randomUUID(),
+          daemonInstanceId: binding.daemonInstanceId,
+          runnerInstanceId: binding.runnerInstanceId,
+          body: {
+            replyVersion: 1,
+            operationRequestId: operation.requestId,
+            state: "committed",
+            result: { polling: true },
+          },
+        }),
+      );
+      await runRegisteredTrigger({
+        registration,
+        binding,
+        pollerId: start.pollerId,
+        socket,
+        reader,
+      });
     } else if (operation.kind !== "Shutdown") {
       throw new Error("the Project Runner received an unexpected bound operation");
     }
