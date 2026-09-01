@@ -1,4 +1,4 @@
-import { runtimePackage } from "../../shared/models/FactoryLayout.ts";
+import { runnerContractsPackage, runtimePackage } from "../../shared/models/FactoryLayout.ts";
 import { installedPackage, thisEngine } from "../../shared/services/resolvePackage.ts";
 import { dependencyFor, type EngineDependency } from "../models/EngineDependency.ts";
 
@@ -20,8 +20,16 @@ export const engineDependency = (): EngineDependency | undefined => {
   const runtime = installed
     ? { name: runtimePackage, version: engine.version, directory: engine.directory }
     : installedPackage(engine.directory, runtimePackage);
-
-  return runtime === undefined
+  const runnerContracts = installed
     ? undefined
-    : dependencyFor({ runtime, effect, reach: installed ? "published" : "linked" });
+    : installedPackage(engine.directory, runnerContractsPackage);
+
+  return runtime === undefined || (!installed && runnerContracts === undefined)
+    ? undefined
+    : dependencyFor({
+        runtime,
+        effect,
+        reach: installed ? "published" : "linked",
+        runnerContracts,
+      });
 };

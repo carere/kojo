@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Path } from "effect";
-import { enginePackage } from "../../../src/contexts/shared/models/FactoryLayout.ts";
+import { runtimePackage } from "../../../src/contexts/shared/models/FactoryLayout.ts";
 
 /**
  * **`kojo init`'s printed instructions, followed literally, all the way to the merge.**
@@ -121,7 +121,7 @@ const fakeClaude = [
  * person can do: a scaffolder cannot know how a repository runs its suite.
  */
 const editedCommands = [
-  'import { isPlaceholder } from "@carere/kojo/contexts/scaffold/models/Placeholder";',
+  'import { isPlaceholder } from "@carere/kojo-runtime/contexts/workflow/models/Placeholder";',
   "",
   "export const commands = {",
   '  install: "true",',
@@ -240,7 +240,9 @@ describe("a factory stamped, installed and run exactly as `kojo init` instructs"
         // What the install wrote: the directory that sank wave 15's walk, and the lockfile. The
         // first must be ignored; the second must not be — the stamped `commands.install` restores
         // dependencies frozen against it, so it belongs in the history.
-        expect(yield* fileSystem.exists(path.join(root, "node_modules", enginePackage))).toBe(true);
+        expect(yield* fileSystem.exists(path.join(root, "node_modules", runtimePackage))).toBe(
+          true,
+        );
         expect(yield* fileSystem.exists(path.join(root, "bun.lock"))).toBe(true);
         expect(git(root, ["check-ignore", "node_modules"]).trim()).toBe("node_modules");
         expect(() => git(root, ["check-ignore", "bun.lock"])).toThrow();

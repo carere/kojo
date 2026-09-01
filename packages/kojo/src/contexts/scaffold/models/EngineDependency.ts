@@ -49,6 +49,8 @@ export interface EngineDependency {
   readonly reach: Reach;
   readonly runtime: Declared;
   readonly effect: Declared;
+  /** A checkout-only override for the runtime's internal workspace dependency. */
+  readonly runnerContracts?: Declared | undefined;
 }
 
 /**
@@ -62,6 +64,7 @@ export const dependencyFor = (options: {
   readonly runtime: ResolvedPackage;
   readonly effect: ResolvedPackage;
   readonly reach: Reach;
+  readonly runnerContracts?: ResolvedPackage | undefined;
 }): EngineDependency => {
   const reach = options.reach;
   const specifier = (resolved: ResolvedPackage) =>
@@ -74,7 +77,14 @@ export const dependencyFor = (options: {
     directory: resolved.directory,
   });
 
-  return { reach, runtime: declare(options.runtime), effect: declare(options.effect) };
+  return {
+    reach,
+    runtime: declare(options.runtime),
+    effect: declare(options.effect),
+    ...(options.runnerContracts === undefined
+      ? {}
+      : { runnerContracts: declare(options.runnerContracts) }),
+  };
 };
 
 /** The two entries in the order they are declared and reported. */

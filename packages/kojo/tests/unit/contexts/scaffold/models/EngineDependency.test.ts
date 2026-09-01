@@ -26,6 +26,11 @@ const checkedOutEffect: ResolvedPackage = {
   version: "4.0.0-beta.106",
   directory: "/home/somebody/kojo/node_modules/effect",
 };
+const checkedOutRunnerContracts: ResolvedPackage = {
+  name: "@carere/kojo-runner-contracts",
+  version: "0.0.0",
+  directory: "/home/somebody/kojo/packages/kojo-runner-contracts",
+};
 
 describe("what a stamped repository has to declare", () => {
   it("names the version, when the engine doing the stamping was installed", () => {
@@ -58,6 +63,7 @@ describe("what a stamped repository has to declare", () => {
       runtime: checkedOutEngine,
       effect: checkedOutEffect,
       reach: "linked",
+      runnerContracts: checkedOutRunnerContracts,
     });
 
     expect(declared.reach).toBe("linked");
@@ -67,6 +73,9 @@ describe("what a stamped repository has to declare", () => {
     // different directory, two `Schema` modules — which is the failure this whole model exists to
     // prevent. Both must point at the copies this engine itself loaded.
     expect(declared.effect.specifier).toBe("file:/home/somebody/kojo/node_modules/effect");
+    expect(declared.runnerContracts?.specifier).toBe(
+      "file:/home/somebody/kojo/packages/kojo-runner-contracts",
+    );
   });
 
   it("keeps the version beside the specifier, because a diagnosis names versions", () => {
@@ -74,6 +83,7 @@ describe("what a stamped repository has to declare", () => {
       runtime: checkedOutEngine,
       effect: checkedOutEffect,
       reach: "linked",
+      runnerContracts: checkedOutRunnerContracts,
     });
 
     expect(declared.effect.version).toBe("4.0.0-beta.106");
