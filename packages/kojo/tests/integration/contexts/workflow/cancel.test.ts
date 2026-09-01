@@ -42,6 +42,33 @@ const admit = (runs: SqliteRunRepository, key: string, at: number) =>
   });
 
 describe("SQLite Run cancellation", () => {
+  it.effect("moves lifecycle-interrupted execution to recovery without cancellation", () =>
+    Effect.gen(function* () {
+      const { database, runs } = fixture();
+      const admission = yield* admit(runs, "lifecycle-force", 1);
+      const authority = yield* runs.claim(
+        admission.run.runId,
+        "runner-before-force",
+        new Date(2).toISOString(),
+      );
+
+      yield* runs.recoverInterruptedExecutions(new Date(3).toISOString());
+
+      const recovered = yield* runs.read(admission.run.runId);
+      expect(recovered).toMatchObject({
+        state: "queued",
+        recovery: { state: "interrupted-sibling" },
+      });
+      expect(recovered?.cancellation).toBeUndefined();
+      expect(
+        Result.isFailure(
+          yield* Effect.result(runs.completeRun(authority, "succeeded", new Date(4).toISOString())),
+        ),
+      ).toBe(true);
+      database.close(false);
+    }),
+  );
+
   it.effect("commits the forced Stop boundary before a later Start", () =>
     Effect.gen(function* () {
       const { database, runs } = fixture();

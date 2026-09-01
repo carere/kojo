@@ -1,4 +1,4 @@
-import { Data, Deferred, Effect } from "effect";
+import { Data, Deferred, Duration, Effect, Option } from "effect";
 
 export class ProjectRunnerError extends Data.TaggedError("ProjectRunnerError")<{
   readonly message: string;
@@ -24,6 +24,12 @@ export class ProjectRunnerSupervisor {
 
   currentGraph(projectId: string): string | undefined {
     return this.#projects.get(projectId)?.handle?.packageGraphId;
+  }
+
+  owners(): ReadonlyArray<string> {
+    return [...this.#projects.values()].flatMap((state) =>
+      state.handle === undefined ? [] : [state.handle.instanceId],
+    );
   }
 
   prepare<A, StopError, LoadError>(options: {
@@ -99,6 +105,33 @@ export class ProjectRunnerSupervisor {
           Effect.ignore,
         ),
       { concurrency: "unbounded", discard: true },
+    );
+  }
+
+  /** Lifecycle cleanup fails closed and names every process whose stop was not confirmed. */
+  shutdownOwnedStrict(
+    cleanupMillis: number,
+  ): Effect.Effect<ReadonlyArray<string>, ProjectRunnerError> {
+    const expected = [...this.#projects.entries()].flatMap(([projectId, state]) =>
+      state.handle === undefined ? [] : [{ projectId, handle: state.handle }],
+    );
+    return Effect.forEach(
+      expected,
+      ({ projectId, handle }) =>
+        handle.stop.pipe(
+          Effect.timeoutOption(Duration.millis(cleanupMillis)),
+          Effect.flatMap((stopped) =>
+            Option.isSome(stopped)
+              ? Effect.sync(() => this.detach(projectId, handle.instanceId))
+              : Effect.fail(
+                  new ProjectRunnerError({
+                    message: `Project Runner ${handle.instanceId} did not confirm stop in ${cleanupMillis} ms`,
+                  }),
+                ),
+          ),
+          Effect.as(handle.instanceId),
+        ),
+      { concurrency: "unbounded" },
     );
   }
 }

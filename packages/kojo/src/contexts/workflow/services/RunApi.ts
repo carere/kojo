@@ -285,6 +285,7 @@ export class RunApi {
   readonly #triggerProcesses = new Map<string, { readonly stop: () => Promise<void> }>();
   readonly #triggerGroups = new Map<string, ProjectTriggerGroup>();
   readonly #activeExecutions = new Map<string, ActiveExecutionControl>();
+  readonly #activeDispatchRunIds = new Set<string>();
   readonly #projectDispatchHolds = new Set<string>();
   readonly #projectDispatches = new Map<string, number>();
   readonly #recoveryWaits = new Set<{
@@ -293,6 +294,7 @@ export class RunApi {
   }>();
   #pumping = false;
   #stopping = false;
+  #daemonDispatchHeld: boolean;
 
   constructor(options: {
     readonly dataIdentity: string;
@@ -314,6 +316,7 @@ export class RunApi {
       | ((mutation: RunnerMutationFault) => "before-commit" | "after-commit" | undefined)
       | undefined;
     readonly resourceRecoveryBoundary?: (() => Effect.Effect<void>) | undefined;
+    readonly daemonDispatchHeld?: boolean;
   }) {
     this.#dataIdentity = options.dataIdentity;
     this.#instanceId = options.instanceId;
@@ -332,6 +335,7 @@ export class RunApi {
     this.#runnerCleanupMillis = options.runnerCleanupMillis ?? 30_000;
     this.#resourceMutationFault = options.resourceMutationFault;
     this.#resourceRecoveryBoundary = options.resourceRecoveryBoundary;
+    this.#daemonDispatchHeld = options.daemonDispatchHeld ?? false;
   }
 
   readonly start = (options: {
@@ -492,6 +496,108 @@ export class RunApi {
       try: async () => {
         this.#projectDispatchHolds.add(projectId);
         await this.#stopProjectTriggerPollers(projectId, detail);
+      },
+      catch: runApiFault,
+    });
+
+  /** Persisted lifecycle state supplies the initial hold after Daemon replacement. */
+  readonly beginDaemonDrain = (): Effect.Effect<
+    {
+      readonly held: true;
+      readonly executingRunIds: ReadonlyArray<string>;
+      readonly observedAt: string;
+    },
+    RunApiFault
+  > =>
+    Effect.tryPromise({
+      try: async () => {
+        this.#daemonDispatchHeld = true;
+        await Promise.all(Array.from(this.#triggerProcesses.values(), (process) => process.stop()));
+        return this.#daemonDrainProgress();
+      },
+      catch: runApiFault,
+    });
+
+  readonly daemonDrainProgress = (): Effect.Effect<
+    {
+      readonly held: true;
+      readonly executingRunIds: ReadonlyArray<string>;
+      readonly observedAt: string;
+    },
+    RunApiFault
+  > => Effect.tryPromise({ try: () => this.#daemonDrainProgress(), catch: runApiFault });
+
+  readonly releaseDaemonDispatch = (): Effect.Effect<void, RunApiFault> =>
+    Effect.tryPromise({
+      try: async () => {
+        this.#daemonDispatchHeld = false;
+        for (const project of await Effect.runPromise(this.#projects.projects)) {
+          await this.#restoreProjectTriggerPollers(project.projectId);
+        }
+        void this.#pump();
+      },
+      catch: runApiFault,
+    });
+
+  async #daemonDrainProgress(): Promise<{
+    readonly held: true;
+    readonly executingRunIds: ReadonlyArray<string>;
+    readonly observedAt: string;
+  }> {
+    const runs = await Effect.runPromise(this.#runs.list);
+    return {
+      held: true,
+      executingRunIds: [
+        ...new Set([
+          ...runs.filter((run) => run.state === "executing").map((run) => run.runId),
+          ...this.#activeDispatchRunIds,
+        ]),
+      ].toSorted(),
+      observedAt: new Date(this.#now()).toISOString(),
+    };
+  }
+
+  readonly lifecycleOwner = (): {
+    readonly daemonInstanceId: string;
+    readonly runnerInstanceIds: ReadonlyArray<string>;
+    readonly recordedAt: string;
+  } => ({
+    daemonInstanceId: this.#instanceId,
+    runnerInstanceIds: this.#runnerSupervisor.owners().toSorted(),
+    recordedAt: new Date(this.#now()).toISOString(),
+  });
+
+  /** Stop only processes owned by this Daemon. Forced Runs return to recovery, not cancellation. */
+  readonly stopForDaemonLifecycle = (
+    cleanupMillis: number,
+    forced: boolean,
+  ): Effect.Effect<ReturnType<RunApi["lifecycleOwner"]>, RunApiFault> =>
+    Effect.tryPromise({
+      try: async () => {
+        if (!Number.isSafeInteger(cleanupMillis) || cleanupMillis < 1) {
+          throw new Error("Daemon cleanup requires a positive finite interval");
+        }
+        const progress = await this.#daemonDrainProgress();
+        if (!forced && progress.executingRunIds.length > 0) {
+          throw new Error("planned Daemon cleanup cannot interrupt an executing Run");
+        }
+        const owner = this.lifecycleOwner();
+        this.#stopping = true;
+        const stoppedOwners = await Effect.runPromise(
+          this.#runnerSupervisor.shutdownOwnedStrict(cleanupMillis),
+        );
+        const missingOwners = owner.runnerInstanceIds.filter(
+          (runnerInstanceId) => !stoppedOwners.includes(runnerInstanceId),
+        );
+        if (missingOwners.length > 0) {
+          throw new Error(`Project Runner stop is unconfirmed for ${missingOwners.join(", ")}`);
+        }
+        if (forced) {
+          await Effect.runPromise(
+            this.#runs.recoverInterruptedExecutions(new Date(this.#now()).toISOString()),
+          );
+        }
+        return owner;
       },
       catch: runApiFault,
     });
@@ -796,10 +902,11 @@ export class RunApi {
   }
 
   async #pump(): Promise<void> {
-    if (this.#pumping || this.#stopping) return;
+    if (this.#pumping || this.#stopping || this.#daemonDispatchHeld) return;
     this.#pumping = true;
     try {
       while (true) {
+        if (this.#daemonDispatchHeld) break;
         const reservationId = crypto.randomUUID();
         const now = this.#now();
         const blockedProjectIds = new Set(
@@ -823,15 +930,18 @@ export class RunApi {
             blockedProjectIds.add(project.projectId);
           }
         }
+        if (this.#daemonDispatchHeld) break;
         const reserved = await Effect.runPromise(
           this.#runs.reserveNext(reservationId, new Date(now).toISOString(), blockedProjectIds),
         );
         if (reserved === undefined) break;
+        this.#activeDispatchRunIds.add(reserved.run.runId);
         this.#projectDispatches.set(
           reserved.run.projectId,
           (this.#projectDispatches.get(reserved.run.projectId) ?? 0) + 1,
         );
         void this.#dispatch(reserved).finally(() => {
+          this.#activeDispatchRunIds.delete(reserved.run.runId);
           const remaining = (this.#projectDispatches.get(reserved.run.projectId) ?? 1) - 1;
           if (remaining === 0) this.#projectDispatches.delete(reserved.run.projectId);
           else this.#projectDispatches.set(reserved.run.projectId, remaining);
@@ -1538,6 +1648,7 @@ export class RunApi {
       (candidate) => candidate.projectId === projectId,
     );
     if (
+      this.#daemonDispatchHeld ||
       project === undefined ||
       project.projectState !== "available" ||
       !project.locationActive ||
