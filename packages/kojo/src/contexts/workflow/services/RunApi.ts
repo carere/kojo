@@ -1,4 +1,5 @@
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync } from "node:fs";
+import { createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
 import type {
   RunDocument,
@@ -6,9 +7,11 @@ import type {
   StartRunResult,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
+import type { OperationReplyBody } from "@carere/kojo-runner-contracts/contexts/project/contracts/execution";
 import { Data, Effect } from "effect";
 import type { SqliteProjectRepository } from "../../project/adapters/SqliteProjectRepository.ts";
 import { materializeRevision } from "../../project/services/materializeRevision.ts";
+import { makeRunnerFrameReader, writeRunnerFrame } from "../../project/services/runnerChannel.ts";
 import type { SqliteRunRepository } from "../adapters/SqliteRunRepository.ts";
 import type { DaemonRun, PhaseResult, RunAuthority } from "../models/DaemonRun.ts";
 import { canonicalJson } from "./canonicalJson.ts";
@@ -39,7 +42,10 @@ interface RunnerExecution extends RunnerInspection {
   readonly runId: string;
   readonly outcome: "succeeded" | "failed";
   readonly recordedResults: Readonly<Record<string, JsonValue>>;
+  readonly phases: ReadonlyArray<PhaseResult>;
 }
+
+const INTERNAL_PHASE_DESCRIPTION = "__kojo_internal_activity__";
 
 class RunApiFault extends Data.TaggedError("RunApiFault")<{
   readonly message: string;
@@ -65,22 +71,34 @@ const documentOf = (run: DaemonRun, phases: ReadonlyArray<PhaseResult>): RunDocu
   admittedAt: run.admittedAt,
   ...(run.startedAt === undefined ? {} : { startedAt: run.startedAt }),
   ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
-  phases: phases.map((phase) => ({
-    phasePath: phase.phasePath,
-    attempt: phase.attempt,
-    kind: phase.kind,
-    outcome: phase.outcome,
-    description: phase.description,
-    startedAt: phase.startedAt,
-    endedAt: phase.endedAt,
-    result: phase.encodedResult,
-  })),
+  phases: phases
+    .filter((phase) => phase.description !== INTERNAL_PHASE_DESCRIPTION)
+    .map((phase) => ({
+      phasePath: phase.phasePath,
+      attempt: phase.attempt,
+      kind: phase.kind,
+      outcome: phase.outcome,
+      description: phase.description,
+      startedAt: phase.startedAt,
+      endedAt: phase.endedAt,
+      result: phase.encodedResult,
+    })),
 });
 
-const runnerEnvironment = (): Record<string, string> => ({
+const runnerEnvironment = (
+  channel: string,
+  binding: {
+    readonly daemonInstanceId: string;
+    readonly runnerInstanceId: string;
+    readonly projectId: string;
+    readonly packageGraphId: string;
+  },
+): Record<string, string> => ({
   PATH: process.env.PATH ?? "",
   ...(process.env.HOME === undefined ? {} : { HOME: process.env.HOME }),
   ...(process.env.TMPDIR === undefined ? {} : { TMPDIR: process.env.TMPDIR }),
+  KOJO_RUNNER_CHANNEL: channel,
+  KOJO_RUNNER_BINDING: JSON.stringify(binding),
 });
 
 /** Daemon-owned no-Trigger admission, dispatch, and observation service. */
@@ -253,29 +271,36 @@ export class RunApi {
         phase.encodedResult,
       ]),
     );
-    const executed = await this.#runner<RunnerExecution>(project, runner, "execute", {
-      ...registration,
-      runId: authority.runId,
-      recordedResults,
-    });
+    const executed = await this.#runner<RunnerExecution>(
+      project,
+      runner,
+      "execute",
+      {
+        ...registration,
+        runId: authority.runId,
+        recordedResults,
+      },
+      authority,
+    );
     const endedAt = new Date(this.#now()).toISOString();
+    const phaseByKey = new Map(
+      executed.phases.map((phase) => [
+        JSON.stringify([authority.runId, authority.revisionId, phase.phasePath, phase.attempt]),
+        phase,
+      ]),
+    );
     for (const [key, result] of Object.entries(executed.recordedResults)) {
       if (key in recordedResults) continue;
       const tuple = JSON.parse(key) as [string, string, string, number];
       if (tuple[0] !== authority.runId || tuple[1] !== authority.revisionId) {
         throw new Error("the Runner returned a result outside its Run or revision");
       }
+      const phase = phaseByKey.get(key);
+      if (phase === undefined) {
+        throw new Error("the Runner omitted timing for a committed Phase result");
+      }
       await Effect.runPromise(
-        this.#runs.completePhase(authority, {
-          phasePath: tuple[2],
-          attempt: tuple[3],
-          kind: "code",
-          outcome: "succeeded",
-          description: tuple[2],
-          startedAt: endedAt,
-          endedAt,
-          encodedResult: result,
-        }),
+        this.#runs.completePhase(authority, { ...phase, encodedResult: result }),
       );
     }
     await Effect.runPromise(this.#runs.completeRun(authority, executed.outcome, endedAt));
@@ -285,21 +310,182 @@ export class RunApi {
     project: string,
     runner: string,
     mode: "execute" | "inspect",
-    request: unknown,
+    request:
+      | RunnerRegistration
+      | (RunnerRegistration & {
+          readonly runId: string;
+          readonly recordedResults: Readonly<Record<string, JsonValue>>;
+        }),
+    authority?: RunAuthority,
   ): Promise<A> {
-    const child = Bun.spawn([process.execPath, runner, mode], {
-      cwd: project,
-      env: runnerEnvironment(),
-      stdin: new Blob([JSON.stringify(request)]),
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [exit, output, error] = await Promise.all([
-      child.exited,
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ]);
-    if (exit !== 0) throw new Error(`Project Runner exited ${exit}: ${error.trim()}`);
-    return JSON.parse(output) as A;
+    const channelRoot = join(this.#dataRoot, "runner-channels", crypto.randomUUID());
+    const channel = join(channelRoot, "runner.sock");
+    mkdirSync(channelRoot, { recursive: true, mode: 0o700 });
+    let server: Server | undefined;
+    let socket: Socket | undefined;
+    let child: ReturnType<typeof Bun.spawn> | undefined;
+    try {
+      const accepted = new Promise<Socket>((resolve, reject) => {
+        server = createServer(resolve);
+        server.once("error", reject);
+        server.listen(channel);
+      });
+      await new Promise<void>((resolve, reject) => {
+        server?.once("listening", resolve);
+        server?.once("error", reject);
+      });
+      chmodSync(channel, 0o600);
+      child = Bun.spawn([process.execPath, runner], {
+        cwd: project,
+        env: runnerEnvironment(channel, {
+          daemonInstanceId: request.daemonInstanceId,
+          runnerInstanceId: request.runnerInstanceId,
+          projectId: request.projectId,
+          packageGraphId: request.packageGraphId,
+        }),
+        stdin: new Blob([request.connectionSecret]),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const output = new Response(child.stdout as ReadableStream<Uint8Array>).text();
+      const error = new Response(child.stderr as ReadableStream<Uint8Array>).text();
+      socket = await Promise.race([
+        accepted,
+        child.exited.then((exit) =>
+          Promise.reject(new Error(`Project Runner exited ${exit} before private binding`)),
+        ),
+        Bun.sleep(10_000).then(() =>
+          Promise.reject(new Error("Project Runner private binding timed out")),
+        ),
+      ]);
+      server?.close();
+      const reader = makeRunnerFrameReader(socket);
+      const hello = await Effect.runPromise(reader.read);
+      if (
+        hello.kind !== "Hello" ||
+        hello.daemonInstanceId !== request.daemonInstanceId ||
+        hello.runnerInstanceId !== request.runnerInstanceId ||
+        hello.body.connectionSecret !== request.connectionSecret ||
+        hello.body.projectId !== request.projectId ||
+        hello.body.packageGraphId !== request.packageGraphId
+      ) {
+        throw new Error("the Project Runner Hello does not match its private binding");
+      }
+      await Effect.runPromise(
+        writeRunnerFrame(socket, {
+          version: 1,
+          kind: "Welcome",
+          requestId: crypto.randomUUID(),
+          daemonInstanceId: request.daemonInstanceId,
+          runnerInstanceId: request.runnerInstanceId,
+          body: {
+            welcomeVersion: 1,
+            packageGraphId: request.packageGraphId,
+            projectId: request.projectId,
+            selectedProtocol: 1,
+            features: [],
+          },
+        }),
+      );
+      const registerRequestId = crypto.randomUUID();
+      await Effect.runPromise(
+        writeRunnerFrame(socket, {
+          version: 1,
+          kind: "RegisterRevision",
+          requestId: registerRequestId,
+          daemonInstanceId: request.daemonInstanceId,
+          runnerInstanceId: request.runnerInstanceId,
+          body: {
+            registrationVersion: 1,
+            revisionId: request.revisionId,
+            packageGraphId: request.packageGraphId,
+            workflowName: request.workflowName,
+            retainedRoot: request.executionRoot,
+            entrySource: request.entrySource,
+            payload: request.payload,
+          },
+        }),
+      );
+      const registered = await Effect.runPromise(reader.read);
+      const registeredBody = registered.body as unknown as OperationReplyBody;
+      if (
+        registered.kind !== "Ready" ||
+        registered.daemonInstanceId !== request.daemonInstanceId ||
+        registered.runnerInstanceId !== request.runnerInstanceId ||
+        registeredBody.operationRequestId !== registerRequestId ||
+        registeredBody.state !== "committed" ||
+        registeredBody.result === undefined
+      ) {
+        throw new Error("the Project Runner did not commit exact revision registration");
+      }
+      let result = registeredBody.result;
+      if (mode === "execute") {
+        if (authority === undefined || !("runId" in request))
+          throw new Error("Runner execution requires current authority");
+        const executeRequestId = crypto.randomUUID();
+        await Effect.runPromise(
+          writeRunnerFrame(socket, {
+            version: 1,
+            kind: "ExecuteRun",
+            requestId: executeRequestId,
+            daemonInstanceId: request.daemonInstanceId,
+            runnerInstanceId: request.runnerInstanceId,
+            runId: authority.runId,
+            revisionId: authority.revisionId,
+            claimGeneration: authority.generation,
+            body: {
+              executionVersion: 1,
+              workflowName: request.workflowName,
+              payload: request.payload,
+              recordedResults: request.recordedResults,
+            },
+          }),
+        );
+        const executed = await Effect.runPromise(reader.read);
+        const executedBody = executed.body as unknown as OperationReplyBody;
+        if (
+          executed.kind !== "Ready" ||
+          executed.daemonInstanceId !== request.daemonInstanceId ||
+          executed.runnerInstanceId !== request.runnerInstanceId ||
+          executedBody.operationRequestId !== executeRequestId ||
+          executedBody.state !== "committed" ||
+          executedBody.result === undefined
+        ) {
+          throw new Error("the Project Runner did not commit execution reply");
+        }
+        result = executedBody.result;
+      }
+      await Effect.runPromise(
+        writeRunnerFrame(socket, {
+          version: 1,
+          kind: "Shutdown",
+          requestId: crypto.randomUUID(),
+          daemonInstanceId: request.daemonInstanceId,
+          runnerInstanceId: request.runnerInstanceId,
+          body: null,
+        }),
+      );
+      const stopped = await Effect.runPromise(reader.read);
+      if (
+        stopped.kind !== "Stopped" ||
+        stopped.daemonInstanceId !== request.daemonInstanceId ||
+        stopped.runnerInstanceId !== request.runnerInstanceId
+      ) {
+        throw new Error("the Project Runner did not stop cleanly");
+      }
+      socket.end();
+      const exit = await child.exited;
+      const [standardOutput, standardError] = await Promise.all([output, error]);
+      if (exit !== 0)
+        throw new Error(
+          `Project Runner exited ${exit}: ${standardError.trim()}${standardOutput.trim()}`,
+        );
+      return result as A;
+    } finally {
+      socket?.destroy();
+      server?.close();
+      child?.kill();
+      rmSync(channelRoot, { recursive: true, force: true });
+    }
   }
 }

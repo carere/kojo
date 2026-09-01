@@ -3,6 +3,7 @@ import {
   decodeClosedRecord,
   decodeFailure,
   decodeInteger,
+  decodeString,
   decodeStringArray,
   decodeSuccess,
 } from "../../shared/codecs/json.ts";
@@ -10,6 +11,7 @@ import { decodeRunnerIdentity, decodeSha256 } from "../../shared/models/identity
 
 export interface HelloBody {
   readonly helloVersion: 1;
+  readonly connectionSecret: string;
   readonly packageGraphId: string;
   readonly projectId: string;
   readonly supportedProtocols: ReadonlyArray<1>;
@@ -40,6 +42,7 @@ const decodeProtocolList = (
 export const decodeHelloBody = (input: unknown): DecodeResult<HelloBody> => {
   const record = decodeClosedRecord(input, [
     "helloVersion",
+    "connectionSecret",
     "packageGraphId",
     "projectId",
     "supportedProtocols",
@@ -49,6 +52,11 @@ export const decodeHelloBody = (input: unknown): DecodeResult<HelloBody> => {
   if (record.value.helloVersion !== 1) {
     return decodeFailure(["helloVersion"], "Expected Hello body version 1");
   }
+  const connectionSecret = decodeString(record.value.connectionSecret, ["connectionSecret"], {
+    minLength: 64,
+    pattern: /^[a-f0-9]+$/,
+  });
+  if (!connectionSecret.ok) return connectionSecret;
   const packageGraphId = decodeSha256(record.value.packageGraphId, ["packageGraphId"]);
   if (!packageGraphId.ok) return packageGraphId;
   const projectId = decodeRunnerIdentity(record.value.projectId, ["projectId"]);
@@ -61,6 +69,7 @@ export const decodeHelloBody = (input: unknown): DecodeResult<HelloBody> => {
   if (!requiredFeatures.ok) return requiredFeatures;
   return decodeSuccess({
     helloVersion: 1,
+    connectionSecret: connectionSecret.value,
     packageGraphId: packageGraphId.value,
     projectId: projectId.value,
     supportedProtocols: supportedProtocols.value,

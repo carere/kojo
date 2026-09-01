@@ -22,7 +22,7 @@ const execution = {
   runId: "run_1",
   revisionId: sha256,
   claimGeneration: 1,
-  body: { executionVersion: 1, workflowName: "example", payload: null },
+  body: { executionVersion: 1, workflowName: "example", payload: null, recordedResults: {} },
 } as const;
 
 describe("Runner contract golden fixtures", () => {
@@ -32,6 +32,7 @@ describe("Runner contract golden fixtures", () => {
       kind: "Hello",
       body: {
         helloVersion: 1,
+        connectionSecret: "b".repeat(64),
         packageGraphId: sha256,
         projectId: "project_1",
         supportedProtocols: [1],

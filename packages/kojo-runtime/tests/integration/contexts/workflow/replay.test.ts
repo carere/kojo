@@ -1,8 +1,15 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { OperationReplyBody } from "@carere/kojo-runner-contracts/contexts/project/contracts/execution";
+import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
+import {
+  makeRunnerFrameReader,
+  writeRunnerFrame,
+} from "../../../../src/contexts/project/services/runnerChannel.ts";
 import type {
   ExecuteRegisteredRequest,
   ExecuteRegisteredResult,
@@ -15,20 +22,137 @@ const execute = async (
   request: ExecuteRegisteredRequest,
   counter: string,
 ): Promise<ExecuteRegisteredResult> => {
-  const child = Bun.spawn([process.execPath, runner, "execute"], {
+  const channel = join(dirname(counter), `runner-${crypto.randomUUID()}.sock`);
+  let accepted: (socket: Socket) => void = () => undefined;
+  const connection = new Promise<Socket>((resolve) => {
+    accepted = resolve;
+  });
+  const server = createServer((socket) => accepted(socket));
+  server.listen(channel);
+  await new Promise<void>((resolve, reject) => {
+    server.once("listening", resolve);
+    server.once("error", reject);
+  });
+  const child = Bun.spawn([process.execPath, runner], {
     cwd: executionRoot,
-    env: { ...process.env, KOJO_EFFECT_COUNTER: counter },
-    stdin: new Blob([JSON.stringify(request)]),
+    env: {
+      ...process.env,
+      KOJO_EFFECT_COUNTER: counter,
+      KOJO_RUNNER_CHANNEL: channel,
+      KOJO_RUNNER_BINDING: JSON.stringify({
+        daemonInstanceId: request.daemonInstanceId,
+        runnerInstanceId: request.runnerInstanceId,
+        projectId: request.projectId,
+        packageGraphId: request.packageGraphId,
+      }),
+    },
+    stdin: new Blob([request.connectionSecret]),
     stdout: "pipe",
     stderr: "pipe",
   });
-  const [exit, output, error] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  if (exit !== 0) throw new Error(`Runner exited ${exit}: ${error}`);
-  return JSON.parse(output) as ExecuteRegisteredResult;
+  const output = new Response(child.stdout).text();
+  const error = new Response(child.stderr).text();
+  const socket = await connection;
+  server.close();
+  const reader = makeRunnerFrameReader(socket);
+  const readFrame = async () => {
+    try {
+      return await Effect.runPromise(reader.read);
+    } catch {
+      const exit = await child.exited;
+      throw new Error(`Runner exited ${exit}: ${await error}`);
+    }
+  };
+  const hello = await readFrame();
+  expect(hello).toMatchObject({
+    kind: "Hello",
+    daemonInstanceId: request.daemonInstanceId,
+    runnerInstanceId: request.runnerInstanceId,
+    body: {
+      connectionSecret: request.connectionSecret,
+      projectId: request.projectId,
+      packageGraphId: request.packageGraphId,
+    },
+  });
+  await Effect.runPromise(
+    writeRunnerFrame(socket, {
+      version: 1,
+      kind: "Welcome",
+      requestId: "welcome_1",
+      daemonInstanceId: request.daemonInstanceId,
+      runnerInstanceId: request.runnerInstanceId,
+      body: {
+        welcomeVersion: 1,
+        packageGraphId: request.packageGraphId,
+        projectId: request.projectId,
+        selectedProtocol: 1,
+        features: [],
+      },
+    }),
+  );
+  await Effect.runPromise(
+    writeRunnerFrame(socket, {
+      version: 1,
+      kind: "RegisterRevision",
+      requestId: "register_1",
+      daemonInstanceId: request.daemonInstanceId,
+      runnerInstanceId: request.runnerInstanceId,
+      body: {
+        registrationVersion: 1,
+        revisionId: request.revisionId,
+        packageGraphId: request.packageGraphId,
+        workflowName: request.workflowName,
+        retainedRoot: request.executionRoot,
+        entrySource: request.entrySource,
+        payload: request.payload as never,
+      },
+    }),
+  );
+  expect(await readFrame()).toMatchObject({
+    kind: "Ready",
+    body: { operationRequestId: "register_1", state: "committed" },
+  });
+  await Effect.runPromise(
+    writeRunnerFrame(socket, {
+      version: 1,
+      kind: "ExecuteRun",
+      requestId: "execute_1",
+      daemonInstanceId: request.daemonInstanceId,
+      runnerInstanceId: request.runnerInstanceId,
+      runId: request.runId,
+      revisionId: request.revisionId,
+      claimGeneration: 1,
+      body: {
+        executionVersion: 1,
+        workflowName: request.workflowName,
+        payload: request.payload as never,
+        recordedResults: request.recordedResults,
+      },
+    }),
+  );
+  const executed = await readFrame();
+  const executedBody = executed.body as unknown as OperationReplyBody;
+  expect(executed).toMatchObject({
+    kind: "Ready",
+    body: { operationRequestId: "execute_1", state: "committed" },
+  });
+  await Effect.runPromise(
+    writeRunnerFrame(socket, {
+      version: 1,
+      kind: "Shutdown",
+      requestId: "shutdown_1",
+      daemonInstanceId: request.daemonInstanceId,
+      runnerInstanceId: request.runnerInstanceId,
+      body: null,
+    }),
+  );
+  expect(await readFrame()).toMatchObject({ kind: "Stopped" });
+  socket.end();
+  const exit = await child.exited;
+  const [standardOutput, standardError] = await Promise.all([output, error]);
+  expect(standardOutput).toBe("");
+  if (exit !== 0) throw new Error(`Runner exited ${exit}: ${standardError}`);
+  return executedBody.result as unknown as ExecuteRegisteredResult;
 };
 
 describe("fresh Project Runner replay", () => {
@@ -51,7 +175,7 @@ describe("fresh Project Runner replay", () => {
         workflowName: "example",
         entrySource: "example.ts",
         payload: null,
-        connectionSecret: "s".repeat(32),
+        connectionSecret: "ab".repeat(32),
         runId: "daemon-assigned-run",
         recordedResults: {},
       };

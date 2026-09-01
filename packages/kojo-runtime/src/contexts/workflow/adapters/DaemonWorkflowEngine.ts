@@ -1,5 +1,5 @@
 import type { JsonValue } from "@carere/kojo-runner-contracts/contexts/shared/codecs/json";
-import { Effect, Exit, Fiber, Layer, Option, Scope } from "effect";
+import { Clock, Effect, Exit, Fiber, Layer, Option, Scope } from "effect";
 import { Workflow, WorkflowEngine } from "effect/unstable/workflow";
 import { DaemonExecutionRepository } from "../ports/DaemonExecutionRepository.ts";
 
@@ -119,17 +119,21 @@ export const layer = (
             instance.executionId,
           );
           activityInstance.interrupted = instance.interrupted;
+          const startedAt = yield* Clock.currentTimeMillis;
           const result = yield* activity.executeEncoded.pipe(
             Workflow.intoResult,
             Effect.provideService(WorkflowEngine.WorkflowInstance, activityInstance),
           );
           if (result._tag === "Complete") {
+            const endedAt = yield* Clock.currentTimeMillis;
+            const encoded = JSON.parse(JSON.stringify(result)) as JsonValue;
             yield* repository.commitResult(
               instance.executionId,
               revisionId,
               activity.name,
               attempt,
-              result as unknown as JsonValue,
+              encoded,
+              { startedAt, endedAt },
             );
           }
           return result;

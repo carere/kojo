@@ -24,6 +24,7 @@ export interface ExecuteRunBody {
   readonly executionVersion: 1;
   readonly workflowName: string;
   readonly payload: JsonValue;
+  readonly recordedResults: Readonly<Record<string, JsonValue>>;
 }
 
 export interface ReadResultBody {
@@ -96,7 +97,12 @@ export const decodeRegisterRevisionBody = (input: unknown): DecodeResult<Registe
 };
 
 export const decodeExecuteRunBody = (input: unknown): DecodeResult<ExecuteRunBody> => {
-  const record = decodeClosedRecord(input, ["executionVersion", "workflowName", "payload"]);
+  const record = decodeClosedRecord(input, [
+    "executionVersion",
+    "workflowName",
+    "payload",
+    "recordedResults",
+  ]);
   if (!record.ok) return record;
   if (record.value.executionVersion !== 1)
     return decodeFailure(["executionVersion"], "Expected execution version 1");
@@ -104,10 +110,27 @@ export const decodeExecuteRunBody = (input: unknown): DecodeResult<ExecuteRunBod
   if (!workflowName.ok) return workflowName;
   const payload = decodeJsonValue(record.value.payload);
   if (!payload.ok) return payload;
+  const recordedResults = decodeJsonValue(record.value.recordedResults);
+  if (!recordedResults.ok)
+    return {
+      ok: false,
+      issues: recordedResults.issues.map((issue) => ({
+        ...issue,
+        path: ["recordedResults", ...issue.path],
+      })),
+    };
+  if (
+    recordedResults.value === null ||
+    Array.isArray(recordedResults.value) ||
+    typeof recordedResults.value !== "object"
+  ) {
+    return decodeFailure(["recordedResults"], "Expected a JSON object of recorded results");
+  }
   return decodeSuccess({
     executionVersion: 1,
     workflowName: workflowName.value,
     payload: payload.value,
+    recordedResults: recordedResults.value as Readonly<Record<string, JsonValue>>,
   });
 };
 

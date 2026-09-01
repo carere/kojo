@@ -183,11 +183,17 @@ describe("Daemon no-Trigger Run API", () => {
           attempt: 1,
           kind: "code",
           outcome: "succeeded",
-          description: "compile",
+          description: "Compile the retained Project revision",
           result: expect.objectContaining({ _tag: "Complete" }),
         }),
       ]),
     );
+    const compile = run.phases.find((phase) => phase.phasePath === "compile");
+    expect(compile).toBeDefined();
+    expect(Date.parse(compile?.startedAt ?? "")).toBeLessThanOrEqual(
+      Date.parse(compile?.endedAt ?? ""),
+    );
+    expect(compile?.startedAt).not.toBe(run.finishedAt);
 
     const snapshot = (await (await call(daemon, "/api/v1/runs")).json()) as RunSnapshot;
     expect(snapshot.runs).toEqual([run]);

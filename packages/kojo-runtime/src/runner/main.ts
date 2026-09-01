@@ -1,10 +1,15 @@
 import { readFile } from "node:fs/promises";
+import { connect, type Socket } from "node:net";
 import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { RUNNER_PROTOCOL_VERSION } from "@carere/kojo-runner-contracts/contexts/project/contracts/frame";
 import type { JsonValue } from "@carere/kojo-runner-contracts/contexts/shared/codecs/json";
 import { Effect, Layer, Schema } from "effect";
 import { WorkflowEngine } from "effect/unstable/workflow";
+import {
+  makeRunnerFrameReader,
+  writeRunnerFrame,
+} from "../contexts/project/services/runnerChannel.ts";
 import { Tracer } from "../contexts/trace/ports/Tracer.ts";
 import { layer as daemonEngine } from "../contexts/workflow/adapters/DaemonWorkflowEngine.ts";
 import { DaemonExecutionRepository } from "../contexts/workflow/ports/DaemonExecutionRepository.ts";
@@ -45,6 +50,18 @@ export interface ExecuteRegisteredResult extends RegisteredPayload {
   readonly runId: string;
   readonly outcome: "succeeded" | "failed";
   readonly recordedResults: Readonly<Record<string, JsonValue>>;
+  readonly phases: ReadonlyArray<RunnerPhaseResult>;
+}
+
+export interface RunnerPhaseResult {
+  readonly phasePath: string;
+  readonly attempt: number;
+  readonly kind: "actor" | "code" | "agent";
+  readonly outcome: "succeeded" | "failed" | "interrupted";
+  readonly description: string;
+  readonly startedAt: string;
+  readonly endedAt: string;
+  readonly encodedResult: JsonValue;
 }
 
 interface LoadedBundle {
@@ -127,29 +144,46 @@ export const inspectRegisteredRevision = async (
   };
 };
 
-const tracerLayer = Layer.succeed(Tracer, {
-  runStarted: () => Effect.void,
-  runFinished: () => Effect.void,
-  phaseEntered: () => Effect.void,
-  phase: () => Effect.void,
-  gate: () => Effect.void,
-  sandbox: () => Effect.void,
-  occurrence: () => Effect.void,
-});
-
 /** Execute under the Daemon-assigned Run identity and return committed encoded Phase results. */
 export const executeRegisteredRevision = async (
   request: ExecuteRegisteredRequest,
 ): Promise<ExecuteRegisteredResult> => {
   const { bundle, payload } = await loadRegisteredRevision(request);
   const results = new Map(Object.entries(request.recordedResults));
+  const initiallyRecorded = new Set(results.keys());
+  const completedPhases = new Map<string, Omit<RunnerPhaseResult, "encodedResult">>();
+  const activityTimes = new Map<string, { readonly startedAt: number; readonly endedAt: number }>();
   const keyOf = (runId: string, revisionId: string, phasePath: string, attempt: number): string =>
     JSON.stringify([runId, revisionId, phasePath, attempt]);
   const repository = Layer.succeed(DaemonExecutionRepository, {
     readResult: (runId, revisionId, phasePath, attempt) =>
       Effect.sync(() => results.get(keyOf(runId, revisionId, phasePath, attempt))),
-    commitResult: (runId, revisionId, phasePath, attempt, result) =>
-      Effect.sync(() => void results.set(keyOf(runId, revisionId, phasePath, attempt), result)),
+    commitResult: (runId, revisionId, phasePath, attempt, result, timing) =>
+      Effect.sync(() => {
+        const key = keyOf(runId, revisionId, phasePath, attempt);
+        results.set(key, result);
+        activityTimes.set(key, timing);
+      }),
+  });
+  const tracerLayer = Layer.succeed(Tracer, {
+    runStarted: () => Effect.void,
+    runFinished: () => Effect.void,
+    phaseEntered: () => Effect.void,
+    phase: (phase) =>
+      Effect.sync(() => {
+        completedPhases.set(keyOf(request.runId, request.revisionId, phase.name, phase.attempt), {
+          phasePath: phase.name,
+          attempt: phase.attempt,
+          kind: phase.kind,
+          outcome: phase.outcome,
+          description: phase.description,
+          startedAt: new Date(phase.startedAt).toISOString(),
+          endedAt: new Date(phase.endedAt).toISOString(),
+        });
+      }),
+    gate: () => Effect.void,
+    sandbox: () => Effect.void,
+    occurrence: () => Effect.void,
   });
   const engineLayer = daemonEngine(request.revisionId).pipe(Layer.provide(repository));
   // Dynamic authored layers have a service type known only in their own Project process.
@@ -176,6 +210,22 @@ export const executeRegisteredRevision = async (
     never
   >;
   const outcome = await Effect.runPromise(execution);
+  const phases = Array.from(results.entries()).flatMap(([key, encodedResult]) => {
+    if (initiallyRecorded.has(key)) return [];
+    const tuple = JSON.parse(key) as [string, string, string, number];
+    const timing = activityTimes.get(key);
+    if (timing === undefined) return [];
+    const phase = completedPhases.get(key) ?? {
+      phasePath: tuple[2],
+      attempt: tuple[3],
+      kind: "code" as const,
+      outcome: "succeeded" as const,
+      description: "__kojo_internal_activity__",
+      startedAt: new Date(timing.startedAt).toISOString(),
+      endedAt: new Date(timing.endedAt).toISOString(),
+    };
+    return [{ ...phase, encodedResult }];
+  });
   return {
     registrationVersion: 1,
     idempotencyKey: bundle.authoredIdempotencyKey(payload),
@@ -183,17 +233,176 @@ export const executeRegisteredRevision = async (
     runId: request.runId,
     outcome: outcome._tag === "Success" ? "succeeded" : "failed",
     recordedResults: Object.fromEntries(results),
+    phases,
   };
 };
 
-if (import.meta.main) {
-  const mode = process.argv[2];
-  const request = JSON.parse(await readFile("/dev/stdin", "utf8")) as ExecuteRegisteredRequest;
-  const result =
-    mode === "inspect"
-      ? await inspectRegisteredRevision(request)
-      : mode === "execute"
-        ? await executeRegisteredRevision(request)
-        : await Promise.reject(new Error("the Project Runner needs a private operation mode"));
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+interface RunnerBinding {
+  readonly daemonInstanceId: string;
+  readonly runnerInstanceId: string;
+  readonly projectId: string;
+  readonly packageGraphId: string;
 }
+
+const openPrivateChannel = (path: string): Promise<Socket> =>
+  new Promise((resolve, reject) => {
+    const socket = connect(path);
+    socket.once("connect", () => resolve(socket));
+    socket.once("error", reject);
+  });
+
+const assertAddress = (
+  frame: { readonly daemonInstanceId: string; readonly runnerInstanceId: string },
+  binding: RunnerBinding,
+): void => {
+  if (
+    frame.daemonInstanceId !== binding.daemonInstanceId ||
+    frame.runnerInstanceId !== binding.runnerInstanceId
+  ) {
+    throw new Error("the private Runner frame has a different instance binding");
+  }
+};
+
+const runPrivateProtocol = async (): Promise<void> => {
+  const channel = process.env.KOJO_RUNNER_CHANNEL;
+  const encodedBinding = process.env.KOJO_RUNNER_BINDING;
+  if (channel === undefined || encodedBinding === undefined)
+    throw new Error("the Project Runner needs a private channel binding");
+  const binding = JSON.parse(encodedBinding) as RunnerBinding;
+  const connectionSecret = (await readFile("/dev/stdin", "utf8")).trim();
+  const socket = await openPrivateChannel(channel);
+  const reader = makeRunnerFrameReader(socket);
+  try {
+    const helloRequestId = crypto.randomUUID();
+    await Effect.runPromise(
+      writeRunnerFrame(socket, {
+        version: 1,
+        kind: "Hello",
+        requestId: helloRequestId,
+        daemonInstanceId: binding.daemonInstanceId,
+        runnerInstanceId: binding.runnerInstanceId,
+        body: {
+          helloVersion: 1,
+          connectionSecret,
+          packageGraphId: binding.packageGraphId,
+          projectId: binding.projectId,
+          supportedProtocols: [1],
+          requiredFeatures: [],
+        },
+      }),
+    );
+    const welcome = await Effect.runPromise(reader.read);
+    assertAddress(welcome, binding);
+    if (
+      welcome.kind !== "Welcome" ||
+      welcome.body.packageGraphId !== binding.packageGraphId ||
+      welcome.body.projectId !== binding.projectId ||
+      welcome.body.selectedProtocol !== 1
+    ) {
+      throw new Error("the Daemon Welcome does not match the Runner binding");
+    }
+
+    const register = await Effect.runPromise(reader.read);
+    assertAddress(register, binding);
+    if (register.kind !== "RegisterRevision")
+      throw new Error("the first bound Runner operation must register a revision");
+    const body = register.body as unknown as {
+      readonly registrationVersion: 1;
+      readonly revisionId: string;
+      readonly packageGraphId: string;
+      readonly workflowName: string;
+      readonly retainedRoot: string;
+      readonly entrySource: string;
+      readonly payload: JsonValue;
+    };
+    const registration: BoundRegistrationRequest = {
+      registrationVersion: body.registrationVersion,
+      selectedProtocol: 1,
+      daemonInstanceId: binding.daemonInstanceId,
+      runnerInstanceId: binding.runnerInstanceId,
+      projectId: binding.projectId,
+      boundProjectId: binding.projectId,
+      revisionId: body.revisionId,
+      packageGraphId: body.packageGraphId,
+      boundPackageGraphId: binding.packageGraphId,
+      executionRoot: body.retainedRoot,
+      workflowName: body.workflowName,
+      entrySource: body.entrySource,
+      payload: body.payload,
+      connectionSecret,
+    };
+    const inspected = await inspectRegisteredRevision(registration);
+    await Effect.runPromise(
+      writeRunnerFrame(socket, {
+        version: 1,
+        kind: "Ready",
+        requestId: crypto.randomUUID(),
+        daemonInstanceId: binding.daemonInstanceId,
+        runnerInstanceId: binding.runnerInstanceId,
+        body: {
+          replyVersion: 1,
+          operationRequestId: register.requestId,
+          state: "committed",
+          result: inspected as unknown as JsonValue,
+        },
+      }),
+    );
+
+    const operation = await Effect.runPromise(reader.read);
+    assertAddress(operation, binding);
+    if (operation.kind === "ExecuteRun") {
+      if (operation.revisionId !== registration.revisionId) {
+        throw new Error("the execution revision does not match the bound registration");
+      }
+      const execute = operation.body as unknown as {
+        readonly executionVersion: 1;
+        readonly workflowName: string;
+        readonly payload: JsonValue;
+        readonly recordedResults: Readonly<Record<string, JsonValue>>;
+      };
+      const result = await executeRegisteredRevision({
+        ...registration,
+        runId: operation.runId,
+        workflowName: execute.workflowName,
+        payload: execute.payload,
+        recordedResults: execute.recordedResults,
+      });
+      await Effect.runPromise(
+        writeRunnerFrame(socket, {
+          version: 1,
+          kind: "Ready",
+          requestId: crypto.randomUUID(),
+          daemonInstanceId: binding.daemonInstanceId,
+          runnerInstanceId: binding.runnerInstanceId,
+          body: {
+            replyVersion: 1,
+            operationRequestId: operation.requestId,
+            state: "committed",
+            result: result as unknown as JsonValue,
+          },
+        }),
+      );
+    } else if (operation.kind !== "Shutdown") {
+      throw new Error("the Project Runner received an unexpected bound operation");
+    }
+
+    const shutdown =
+      operation.kind === "Shutdown" ? operation : await Effect.runPromise(reader.read);
+    assertAddress(shutdown, binding);
+    if (shutdown.kind !== "Shutdown") throw new Error("the Project Runner needs Shutdown");
+    await Effect.runPromise(
+      writeRunnerFrame(socket, {
+        version: 1,
+        kind: "Stopped",
+        requestId: crypto.randomUUID(),
+        daemonInstanceId: binding.daemonInstanceId,
+        runnerInstanceId: binding.runnerInstanceId,
+        body: null,
+      }),
+    );
+  } finally {
+    socket.end();
+  }
+};
+
+if (import.meta.main) await runPrivateProtocol();
