@@ -46,6 +46,12 @@ export const runStatusLine = (run: RunDocument, json: boolean, details = false):
         `State=${run.state}`,
         `Revision=${run.revisionId}`,
         ...(run.queueReason === undefined ? [] : [`Queue=${run.queueReason}`]),
+        ...(run.executionFault === undefined
+          ? []
+          : [
+              `Fault=${run.executionFault.code}:${run.executionFault.detail}`,
+              `Remedy=${run.executionFault.remedy}`,
+            ]),
         `Phases=${run.phases.length}`,
         ...(details
           ? [

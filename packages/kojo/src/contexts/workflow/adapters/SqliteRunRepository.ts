@@ -1,7 +1,13 @@
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Effect } from "effect";
-import type { ClaimedRun, DaemonRun, PhaseResult, RunAuthority } from "../models/DaemonRun.ts";
+import type {
+  ClaimedRun,
+  DaemonRun,
+  PhaseResult,
+  RunAuthority,
+  RunExecutionFault,
+} from "../models/DaemonRun.ts";
 import { RunStoreError } from "../models/RunStoreError.ts";
 import {
   CONTINUATION_BURST,
@@ -31,7 +37,11 @@ interface RunRow {
     | "project-capacity"
     | "runner-starting"
     | "package-switch"
+    | "pinned-content"
     | null;
+  readonly hold_code?: RunExecutionFault["code"] | null;
+  readonly hold_detail?: string | null;
+  readonly hold_remedy?: string | null;
 }
 
 interface ClaimRow {
@@ -68,13 +78,24 @@ const runOf = (row: RunRow): DaemonRun => ({
   payload: JSON.parse(row.payload_json) as JsonValue,
   revisionId: row.revision_id,
   packageGraphId: row.package_graph_id,
-  state: row.state,
+  state: row.hold_code === undefined || row.hold_code === null ? row.state : "held",
   admissionSequence: row.admission_sequence,
   admittedAt: row.admitted_at,
   ...(row.started_at === null ? {} : { startedAt: row.started_at }),
   ...(row.finished_at === null ? {} : { finishedAt: row.finished_at }),
   ...(row.queue_kind == null ? {} : { queueKind: row.queue_kind }),
-  ...(row.queue_reason == null ? {} : { queueReason: row.queue_reason }),
+  ...(row.hold_code === undefined || row.hold_code === null
+    ? row.queue_reason == null
+      ? {}
+      : { queueReason: row.queue_reason }
+    : {
+        queueReason: "pinned-content" as const,
+        executionFault: {
+          code: row.hold_code,
+          detail: row.hold_detail ?? "the pinned Workflow Revision cannot execute",
+          remedy: row.hold_remedy ?? "Restore the exact retained content.",
+        },
+      }),
 });
 
 const phaseOf = (row: PhaseRow): PhaseResult => ({
@@ -133,6 +154,14 @@ export class SqliteRunRepository {
     `);
     database.run("INSERT OR IGNORE INTO workflow_scheduler_state (singleton) VALUES (1)");
     database.run(`
+      CREATE TABLE IF NOT EXISTS workflow_reservations (
+        run_id TEXT PRIMARY KEY NOT NULL,
+        reservation_id TEXT NOT NULL UNIQUE,
+        reserved_at TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
+      ) STRICT
+    `);
+    database.run(`
       CREATE TABLE IF NOT EXISTS workflow_project_scheduler_state (
         project_id TEXT PRIMARY KEY NOT NULL,
         continuation_streak INTEGER NOT NULL DEFAULT 0
@@ -183,6 +212,21 @@ export class SqliteRunRepository {
         duplicate INTEGER NOT NULL CHECK(duplicate IN (0, 1)),
         committed_at TEXT NOT NULL,
         PRIMARY KEY (data_identity, request_id),
+        FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
+      ) STRICT
+    `);
+    database.run(`
+      CREATE TABLE IF NOT EXISTS workflow_run_holds (
+        run_id TEXT PRIMARY KEY NOT NULL,
+        code TEXT NOT NULL CHECK(code IN (
+          'RETAINED_CONTENT_MISSING',
+          'RETAINED_CONTENT_CORRUPT',
+          'RETAINED_HOST_INCOMPATIBLE',
+          'RETAINED_PROTOCOL_INCOMPATIBLE'
+        )),
+        detail TEXT NOT NULL,
+        remedy TEXT NOT NULL,
+        held_at TEXT NOT NULL,
         FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
       ) STRICT
     `);
@@ -317,6 +361,18 @@ export class SqliteRunRepository {
                 message: `Run ${runId} is ${run.state}, not queued`,
               });
             }
+            if (
+              this.#database
+                .query<{ readonly run_id: string }, [string]>(
+                  "SELECT run_id FROM workflow_reservations WHERE run_id = ?",
+                )
+                .get(runId) !== null
+            ) {
+              throw new RunStoreError({
+                code: "RUN_NOT_ELIGIBLE",
+                message: "the Run is reserved for graph preparation",
+              });
+            }
             const globalSlots =
               this.#database
                 .query<{ readonly count: number }, []>(
@@ -388,6 +444,11 @@ export class SqliteRunRepository {
                   WHERE NOT EXISTS (
                     SELECT 1 FROM workflow_slots s WHERE s.project_id = q.project_id
                   )
+                    AND NOT EXISTS (
+                      SELECT 1 FROM workflow_reservations z
+                      JOIN workflow_runs zr ON zr.run_id = z.run_id
+                      WHERE zr.project_id = q.project_id
+                    )
                   ORDER BY q.project_id`,
               )
               .all();
@@ -409,6 +470,7 @@ export class SqliteRunRepository {
                      FROM workflow_queue q
                      JOIN workflow_runs r ON r.run_id = q.run_id
                     WHERE q.project_id = ? AND q.queue_kind = ?
+                      AND NOT EXISTS (SELECT 1 FROM workflow_reservations z WHERE z.run_id = r.run_id)
                     ORDER BY q.admission_sequence LIMIT 1`,
                 )
                 .get(project.project_id, kind);
@@ -468,6 +530,173 @@ export class SqliteRunRepository {
       catch: failure,
     });
 
+  readonly reserveNext = (
+    reservationId: string,
+    reservedAt: string,
+  ): Effect.Effect<
+    { readonly run: DaemonRun; readonly reservationId: string } | undefined,
+    RunStoreError
+  > =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            const used =
+              this.#database
+                .query<{ readonly count: number }, []>(
+                  "SELECT (SELECT COUNT(*) FROM workflow_slots) + (SELECT COUNT(*) FROM workflow_reservations) AS count",
+                )
+                .get()?.count ?? 0;
+            if (used >= DEFAULT_DAEMON_EXECUTING_RUNS) return undefined;
+            const lastProject =
+              this.#database
+                .query<{ readonly last_project_id: string | null }, []>(
+                  "SELECT last_project_id FROM workflow_scheduler_state WHERE singleton = 1",
+                )
+                .get()?.last_project_id ?? null;
+            const projects = this.#database
+              .query<{ readonly project_id: string }, []>(
+                `SELECT DISTINCT q.project_id
+                   FROM workflow_queue q
+                  WHERE NOT EXISTS (SELECT 1 FROM workflow_slots s WHERE s.project_id = q.project_id)
+                    AND NOT EXISTS (
+                      SELECT 1 FROM workflow_reservations z
+                      JOIN workflow_runs zr ON zr.run_id = z.run_id
+                      WHERE zr.project_id = q.project_id
+                    )
+                  ORDER BY q.project_id`,
+              )
+              .all();
+            const project =
+              projects.find((candidate) =>
+                lastProject === null ? true : candidate.project_id > lastProject,
+              ) ?? projects[0];
+            if (project === undefined) return undefined;
+            const streak =
+              this.#database
+                .query<{ readonly continuation_streak: number }, [string]>(
+                  "SELECT continuation_streak FROM workflow_project_scheduler_state WHERE project_id = ?",
+                )
+                .get(project.project_id)?.continuation_streak ?? 0;
+            const select = (kind: "new" | "continuation"): RunRow | null =>
+              this.#database
+                .query<RunRow, [string, string]>(
+                  `SELECT r.*, q.queue_kind, q.queue_reason
+                     FROM workflow_queue q JOIN workflow_runs r ON r.run_id = q.run_id
+                    WHERE q.project_id = ? AND q.queue_kind = ?
+                      AND NOT EXISTS (SELECT 1 FROM workflow_reservations z WHERE z.run_id = r.run_id)
+                    ORDER BY q.admission_sequence LIMIT 1`,
+                )
+                .get(project.project_id, kind);
+            const selected =
+              streak >= CONTINUATION_BURST
+                ? (select("new") ?? select("continuation"))
+                : (select("continuation") ?? select("new"));
+            if (selected === null) return undefined;
+            this.#database.run(
+              "INSERT INTO workflow_reservations (run_id, reservation_id, reserved_at) VALUES (?, ?, ?)",
+              [selected.run_id, reservationId, reservedAt],
+            );
+            this.#database.run(
+              "UPDATE workflow_scheduler_state SET last_project_id = ? WHERE singleton = 1",
+              [selected.project_id],
+            );
+            this.#database.run(
+              `INSERT INTO workflow_project_scheduler_state (project_id, continuation_streak)
+               VALUES (?, ?) ON CONFLICT(project_id) DO UPDATE SET continuation_streak = excluded.continuation_streak`,
+              [selected.project_id, selected.queue_kind === "continuation" ? streak + 1 : 0],
+            );
+            return { run: this.#visibleQueueReason(runOf(selected)), reservationId };
+          })
+          .immediate(),
+      catch: failure,
+    });
+
+  readonly claimReserved = (
+    reservationId: string,
+    runnerInstanceId: string,
+    claimedAt: string,
+  ): Effect.Effect<RunAuthority, RunStoreError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            const run = this.#database
+              .query<RunRow, [string]>(
+                `SELECT r.*, q.queue_kind, q.queue_reason
+                   FROM workflow_reservations z
+                   JOIN workflow_runs r ON r.run_id = z.run_id
+                   JOIN workflow_queue q ON q.run_id = r.run_id
+                  WHERE z.reservation_id = ?`,
+              )
+              .get(reservationId);
+            if (run === null || run.state !== "queued") {
+              throw new RunStoreError({
+                code: "RUN_NOT_ELIGIBLE",
+                message: "the reservation is stale",
+              });
+            }
+            const generation =
+              (this.#database
+                .query<{ readonly generation: number }, [string]>(
+                  "SELECT generation FROM workflow_claims WHERE run_id = ?",
+                )
+                .get(run.run_id)?.generation ?? 0) + 1;
+            this.#database.run(
+              `INSERT INTO workflow_claims (run_id, runner_instance_id, generation, revision_id, claimed_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(run_id) DO UPDATE SET runner_instance_id = excluded.runner_instance_id,
+                 generation = excluded.generation, revision_id = excluded.revision_id,
+                 claimed_at = excluded.claimed_at`,
+              [run.run_id, runnerInstanceId, generation, run.revision_id, claimedAt],
+            );
+            this.#database.run(
+              "INSERT INTO workflow_slots (run_id, project_id, runner_instance_id, generation, allocated_at) VALUES (?, ?, ?, ?, ?)",
+              [run.run_id, run.project_id, runnerInstanceId, generation, claimedAt],
+            );
+            this.#database.run("DELETE FROM workflow_queue WHERE run_id = ?", [run.run_id]);
+            this.#database.run("DELETE FROM workflow_reservations WHERE run_id = ?", [run.run_id]);
+            this.#database.run(
+              "UPDATE workflow_runs SET state = 'executing', started_at = COALESCE(started_at, ?) WHERE run_id = ?",
+              [claimedAt, run.run_id],
+            );
+            return { runId: run.run_id, runnerInstanceId, generation, revisionId: run.revision_id };
+          })
+          .immediate(),
+      catch: failure,
+    });
+
+  readonly holdReserved = (
+    reservationId: string,
+    fault: NonNullable<DaemonRun["executionFault"]>,
+    heldAt: string,
+  ): Effect.Effect<void, RunStoreError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            const row = this.#database
+              .query<{ readonly run_id: string }, [string]>(
+                "SELECT run_id FROM workflow_reservations WHERE reservation_id = ?",
+              )
+              .get(reservationId);
+            if (row === null) {
+              throw new RunStoreError({
+                code: "RUN_NOT_ELIGIBLE",
+                message: "the reservation is stale",
+              });
+            }
+            this.#database.run(
+              "INSERT INTO workflow_run_holds (run_id, code, detail, remedy, held_at) VALUES (?, ?, ?, ?, ?)",
+              [row.run_id, fault.code, fault.detail, fault.remedy, heldAt],
+            );
+            this.#database.run("DELETE FROM workflow_queue WHERE run_id = ?", [row.run_id]);
+            this.#database.run("DELETE FROM workflow_reservations WHERE run_id = ?", [row.run_id]);
+          })
+          .immediate(),
+      catch: failure,
+    });
+
   readonly suspend = (
     authority: RunAuthority,
     _suspendedAt: string,
@@ -480,6 +709,37 @@ export class SqliteRunRepository {
             this.#database.run("UPDATE workflow_runs SET state = 'suspended' WHERE run_id = ?", [
               authority.runId,
             ]);
+            this.#database.run("DELETE FROM workflow_slots WHERE run_id = ?", [authority.runId]);
+            this.#database.run("DELETE FROM workflow_claims WHERE run_id = ?", [authority.runId]);
+          })
+          .immediate(),
+      catch: failure,
+    });
+
+  readonly hold = (
+    authority: RunAuthority,
+    fault: NonNullable<DaemonRun["executionFault"]>,
+    heldAt: string,
+  ): Effect.Effect<void, RunStoreError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            this.#assertAuthority(authority);
+            this.#database.run(
+              `INSERT INTO workflow_run_holds (run_id, code, detail, remedy, held_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(run_id) DO UPDATE SET
+                 code = excluded.code,
+                 detail = excluded.detail,
+                 remedy = excluded.remedy,
+                 held_at = excluded.held_at`,
+              [authority.runId, fault.code, fault.detail, fault.remedy, heldAt],
+            );
+            this.#database.run("UPDATE workflow_runs SET state = 'queued' WHERE run_id = ?", [
+              authority.runId,
+            ]);
+            this.#database.run("DELETE FROM workflow_queue WHERE run_id = ?", [authority.runId]);
             this.#database.run("DELETE FROM workflow_slots WHERE run_id = ?", [authority.runId]);
             this.#database.run("DELETE FROM workflow_claims WHERE run_id = ?", [authority.runId]);
           })
@@ -516,8 +776,11 @@ export class SqliteRunRepository {
       try: () => {
         const row = this.#database
           .query<RunRow, [string]>(
-            `SELECT r.*, q.queue_kind, q.queue_reason
-               FROM workflow_runs r LEFT JOIN workflow_queue q ON q.run_id = r.run_id
+            `SELECT r.*, q.queue_kind, q.queue_reason,
+                    h.code AS hold_code, h.detail AS hold_detail, h.remedy AS hold_remedy
+               FROM workflow_runs r
+               LEFT JOIN workflow_queue q ON q.run_id = r.run_id
+               LEFT JOIN workflow_run_holds h ON h.run_id = r.run_id
               WHERE r.run_id = ?`,
           )
           .get(runId);
@@ -530,8 +793,11 @@ export class SqliteRunRepository {
     try: () =>
       this.#database
         .query<RunRow, []>(
-          `SELECT r.*, q.queue_kind, q.queue_reason
-             FROM workflow_runs r LEFT JOIN workflow_queue q ON q.run_id = r.run_id
+          `SELECT r.*, q.queue_kind, q.queue_reason,
+                  h.code AS hold_code, h.detail AS hold_detail, h.remedy AS hold_remedy
+             FROM workflow_runs r
+             LEFT JOIN workflow_queue q ON q.run_id = r.run_id
+             LEFT JOIN workflow_run_holds h ON h.run_id = r.run_id
             ORDER BY r.admission_sequence DESC`,
         )
         .all()
@@ -551,6 +817,7 @@ export class SqliteRunRepository {
       try: () =>
         this.#database
           .transaction(() => {
+            this.#database.run("DELETE FROM workflow_reservations");
             this.#database.run(
               `INSERT INTO workflow_queue (run_id, project_id, admission_sequence, queued_at)
                SELECT run_id, project_id, admission_sequence, ?
@@ -676,8 +943,11 @@ export class SqliteRunRepository {
   #runRow(runId: string): RunRow {
     const row = this.#database
       .query<RunRow, [string]>(
-        `SELECT r.*, q.queue_kind, q.queue_reason
-           FROM workflow_runs r LEFT JOIN workflow_queue q ON q.run_id = r.run_id
+        `SELECT r.*, q.queue_kind, q.queue_reason,
+                h.code AS hold_code, h.detail AS hold_detail, h.remedy AS hold_remedy
+           FROM workflow_runs r
+           LEFT JOIN workflow_queue q ON q.run_id = r.run_id
+           LEFT JOIN workflow_run_holds h ON h.run_id = r.run_id
           WHERE r.run_id = ?`,
       )
       .get(runId);
@@ -720,20 +990,24 @@ export class SqliteRunRepository {
       this.#database
         .query<{ readonly count: number }, []>("SELECT COUNT(*) AS count FROM workflow_slots")
         .get()?.count ?? 0;
-    const projectSlot =
-      this.#database
-        .query<{ readonly count: number }, [string]>(
-          "SELECT COUNT(*) AS count FROM workflow_slots WHERE project_id = ?",
-        )
-        .get(run.projectId)?.count ?? 0;
+    const projectSlot = this.#database
+      .query<{ readonly package_graph_id: string }, [string]>(
+        `SELECT r.package_graph_id
+             FROM workflow_slots s
+             JOIN workflow_runs r ON r.run_id = s.run_id
+            WHERE s.project_id = ?`,
+      )
+      .get(run.projectId);
     return {
       ...run,
       queueReason:
-        globalSlots >= DEFAULT_DAEMON_EXECUTING_RUNS
-          ? "execution-capacity"
-          : projectSlot >= 1
-            ? "project-capacity"
-            : (run.queueReason ?? "runner-starting"),
+        projectSlot !== null && projectSlot.package_graph_id !== run.packageGraphId
+          ? "package-switch"
+          : globalSlots >= DEFAULT_DAEMON_EXECUTING_RUNS
+            ? "execution-capacity"
+            : projectSlot !== null
+              ? "project-capacity"
+              : (run.queueReason ?? "runner-starting"),
     };
   }
 }

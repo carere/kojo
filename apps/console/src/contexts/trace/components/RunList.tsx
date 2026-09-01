@@ -31,6 +31,7 @@ const statusTones: Record<RunStatus, BadgeTone> = {
   queued: "waiting",
   executing: "running",
   suspended: "waiting",
+  held: "danger",
   succeeded: "good",
   failed: "danger",
   cancelled: "danger",

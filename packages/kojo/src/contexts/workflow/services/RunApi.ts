@@ -19,10 +19,12 @@ import { Data, Effect } from "effect";
 import type { SqliteDaemonGateRepository } from "../../gate/adapters/SqliteDaemonGateRepository.ts";
 import type { SqliteProjectRepository } from "../../project/adapters/SqliteProjectRepository.ts";
 import { materializeRevision } from "../../project/services/materializeRevision.ts";
+import { ProjectRunnerSupervisor } from "../../project/services/ProjectRunnerSupervisor.ts";
 import { makeRunnerFrameReader, writeRunnerFrame } from "../../project/services/runnerChannel.ts";
 import type { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRepository.ts";
 import type { SqliteRunRepository } from "../adapters/SqliteRunRepository.ts";
-import type { ClaimedRun, DaemonRun, PhaseResult, RunAuthority } from "../models/DaemonRun.ts";
+import type { DaemonRun, PhaseResult, ReservedRun, RunAuthority } from "../models/DaemonRun.ts";
+import { RetainedContentFault } from "../models/RetainedContentFault.ts";
 import { DEFAULT_RUNNER_IDLE_MILLIS } from "../models/SchedulingDefaults.ts";
 import { canonicalJson } from "./canonicalJson.ts";
 
@@ -99,6 +101,7 @@ const documentOf = (run: DaemonRun, phases: ReadonlyArray<PhaseResult>): RunDocu
   admittedAt: run.admittedAt,
   ...(run.startedAt === undefined ? {} : { startedAt: run.startedAt }),
   ...(run.finishedAt === undefined ? {} : { finishedAt: run.finishedAt }),
+  ...(run.executionFault === undefined ? {} : { executionFault: run.executionFault }),
   phases: phases
     .filter((phase) => phase.description !== INTERNAL_PHASE_DESCRIPTION)
     .map((phase) => ({
@@ -121,12 +124,14 @@ const runnerEnvironment = (
     readonly projectId: string;
     readonly packageGraphId: string;
   },
+  executionRoot: string,
 ): Record<string, string> => ({
   PATH: process.env.PATH ?? "",
   ...(process.env.HOME === undefined ? {} : { HOME: process.env.HOME }),
   ...(process.env.TMPDIR === undefined ? {} : { TMPDIR: process.env.TMPDIR }),
   KOJO_RUNNER_CHANNEL: channel,
   KOJO_RUNNER_BINDING: JSON.stringify(binding),
+  KOJO_FACTORY_ASSET_ROOT: join(executionRoot, ".kojo"),
 });
 
 /** Daemon-owned no-Trigger admission, dispatch, and observation service. */
@@ -140,7 +145,7 @@ export class RunApi {
   readonly #triggers: SqliteTriggerRepository;
   readonly #gates: SqliteDaemonGateRepository;
   readonly #runnerIdleMillis: number;
-  readonly #idleRunners = new Map<string, { readonly stop: () => Promise<void> }>();
+  readonly #runnerSupervisor = new ProjectRunnerSupervisor();
   readonly #triggerProcesses = new Map<string, { readonly stop: () => Promise<void> }>();
   #pumping = false;
   #stopping = false;
@@ -275,7 +280,7 @@ export class RunApi {
         this.#stopping = true;
         await Promise.allSettled([
           ...Array.from(this.#triggerProcesses.values(), (process) => process.stop()),
-          ...Array.from(this.#idleRunners.values(), (process) => process.stop()),
+          this.#runnerSupervisor.shutdown(),
         ]);
       },
       catch: runApiFault,
@@ -374,33 +379,72 @@ export class RunApi {
     this.#pumping = true;
     try {
       while (true) {
-        const runnerInstanceId = crypto.randomUUID();
-        const claimed = await Effect.runPromise(
-          this.#runs.claimNext(runnerInstanceId, new Date(this.#now()).toISOString()),
+        const reservationId = crypto.randomUUID();
+        const reserved = await Effect.runPromise(
+          this.#runs.reserveNext(reservationId, new Date(this.#now()).toISOString()),
         );
-        if (claimed === undefined) break;
-        void this.#dispatch(claimed).finally(() => this.#pump());
+        if (reserved === undefined) break;
+        void this.#dispatch(reserved).finally(() => this.#pump());
       }
     } finally {
       this.#pumping = false;
     }
   }
 
-  async #dispatch(claimed: ClaimedRun): Promise<void> {
-    const { run, authority } = claimed;
+  async #dispatch(reserved: ReservedRun): Promise<void> {
+    const { run } = reserved;
+    let authority: RunAuthority | undefined;
     try {
-      await this.#stopTriggerPoller(run.projectId, run.workflowName);
-      const revision = await Effect.runPromise(
-        this.#projects.retainedExecutionRevision(run.projectId, run.workflowName, run.revisionId),
+      const current = await Effect.runPromise(
+        this.#projects.workflow(run.projectId, run.workflowName),
       );
-      const executionRoot = join(this.#dataRoot, "runner-materialized");
-      mkdirSync(executionRoot, { recursive: true, mode: 0o700 });
-      const materialized = materializeRevision({
-        retainedRoot: revision.publishedPath,
-        executionRoot,
-        revisionId: revision.revisionId,
-        packageGraphId: revision.packageGraphId,
+      const { revision, materialized } = await this.#runnerSupervisor.prepare({
+        projectId: run.projectId,
+        packageGraphId: run.packageGraphId,
+        stopCurrentPolling: () =>
+          this.#stopProjectTriggerPollers(
+            run.projectId,
+            current?.currentRevisionId !== run.revisionId
+              ? `Historical polling delay: pinned revision ${run.revisionId} is executing`
+              : `Trigger polling waits for execution turn ${run.runId}`,
+          ),
+        load: async () => {
+          const revision = await Effect.runPromise(
+            this.#projects.retainedExecutionRevision(
+              run.projectId,
+              run.workflowName,
+              run.revisionId,
+              run.packageGraphId,
+            ),
+          ).catch((cause) => {
+            throw new RetainedContentFault({
+              code: "RETAINED_CONTENT_MISSING",
+              message: `the pinned Workflow Revision ${run.revisionId} is not registered`,
+              remedy:
+                "Restore the exact retained revision metadata and bytes. Do not refresh this Run.",
+              cause,
+            });
+          });
+          const executionRoot = join(this.#dataRoot, "runner-materialized");
+          mkdirSync(executionRoot, { recursive: true, mode: 0o700 });
+          return {
+            revision,
+            materialized: materializeRevision({
+              retainedRoot: revision.publishedPath,
+              executionRoot,
+              revisionId: revision.revisionId,
+              packageGraphId: revision.packageGraphId,
+            }),
+          };
+        },
       });
+      authority = await Effect.runPromise(
+        this.#runs.claimReserved(
+          reserved.reservationId,
+          crypto.randomUUID(),
+          new Date(this.#now()).toISOString(),
+        ),
+      );
       const registration: RunnerRegistration = {
         registrationVersion: 1,
         selectedProtocol: 1,
@@ -420,26 +464,26 @@ export class RunApi {
       await this.#execute(revision.location, materialized.runner, registration, authority).finally(
         materialized.dispose,
       );
-    } catch {
-      await Effect.runPromise(
-        this.#runs.completeRun(authority, "failed", new Date(this.#now()).toISOString()),
-      ).catch(() => undefined);
-      await Effect.runPromise(this.#gates.reconcileTerminalInabilities()).catch(() => undefined);
+    } catch (cause) {
+      if (cause instanceof RetainedContentFault) {
+        const heldAt = new Date(this.#now()).toISOString();
+        const fault = { code: cause.code, detail: cause.message, remedy: cause.remedy };
+        await Effect.runPromise(
+          authority === undefined
+            ? this.#runs.holdReserved(reserved.reservationId, fault, heldAt)
+            : this.#runs.hold(authority, fault, heldAt),
+        ).catch(() => undefined);
+      } else if (authority !== undefined) {
+        await Effect.runPromise(
+          this.#runs.completeRun(authority, "failed", new Date(this.#now()).toISOString()),
+        ).catch(() => undefined);
+        await Effect.runPromise(this.#gates.reconcileTerminalInabilities()).catch(() => undefined);
+      }
     } finally {
       await Effect.runPromise(
         this.#projects.settleManualActivity(run.projectId, run.workflowName),
       ).catch(() => undefined);
-      const poller = (await Effect.runPromise(this.#projects.triggerPollers).catch(() => [])).find(
-        (candidate) =>
-          candidate.projectId === run.projectId && candidate.workflowName === run.workflowName,
-      );
-      if (poller !== undefined && !this.#stopping) {
-        await this.#ensureTriggerPoller(
-          poller.projectId,
-          poller.workflowName,
-          poller.pollerId,
-        ).catch(() => undefined);
-      }
+      if (!this.#stopping) await this.#restoreProjectTriggerPollers(run.projectId);
     }
   }
 
@@ -609,6 +653,35 @@ export class RunApi {
     if (process !== undefined) await process.stop();
   }
 
+  async #stopProjectTriggerPollers(projectId: string, detail: string): Promise<void> {
+    const pollers = (await Effect.runPromise(this.#projects.triggerPollers)).filter(
+      (poller) => poller.projectId === projectId,
+    );
+    for (const poller of pollers) {
+      await Effect.runPromise(
+        this.#projects.observeTrigger({
+          projectId: poller.projectId,
+          workflowName: poller.workflowName,
+          state: "delayed",
+          detail,
+          observedAt: new Date(this.#now()).toISOString(),
+        }),
+      );
+      await this.#stopTriggerPoller(poller.projectId, poller.workflowName);
+    }
+  }
+
+  async #restoreProjectTriggerPollers(projectId: string): Promise<void> {
+    const pollers = (await Effect.runPromise(this.#projects.triggerPollers)).filter(
+      (poller) => poller.projectId === projectId,
+    );
+    for (const poller of pollers) {
+      await this.#ensureTriggerPoller(poller.projectId, poller.workflowName, poller.pollerId).catch(
+        () => undefined,
+      );
+    }
+  }
+
   async #ensureTriggerPoller(
     projectId: string,
     workflowName: string,
@@ -616,8 +689,8 @@ export class RunApi {
   ): Promise<void> {
     const key = this.#pollerKey(projectId, workflowName);
     if (this.#triggerProcesses.has(key)) return;
-    const idleRunner = this.#idleRunners.get(projectId);
-    if (idleRunner !== undefined) await idleRunner.stop();
+    await this.#runnerSupervisor.stop(projectId);
+    const runnerInstanceId = crypto.randomUUID();
     let stopRequested = false;
     let admittedWork = false;
     let stopAction = async (): Promise<void> => {};
@@ -651,7 +724,6 @@ export class RunApi {
         revisionId: revision.revisionId,
         packageGraphId: revision.packageGraphId,
       });
-      const runnerInstanceId = crypto.randomUUID();
       const connectionSecret = crypto.getRandomValues(new Uint8Array(32)).toHex();
       const channelRoot = join(this.#dataRoot, "runner-channels", crypto.randomUUID());
       const channel = join(channelRoot, "runner.sock");
@@ -679,18 +751,25 @@ export class RunApi {
           server?.once("error", reject);
         });
         chmodSync(channel, 0o600);
-        child = Bun.spawn([process.execPath, materialized.runner], {
-          cwd: revision.location,
-          env: runnerEnvironment(channel, {
-            daemonInstanceId: this.#instanceId,
-            runnerInstanceId,
-            projectId,
-            packageGraphId: revision.packageGraphId,
-          }),
-          stdin: new Blob([connectionSecret]),
-          stdout: "pipe",
-          stderr: "pipe",
-        });
+        child = Bun.spawn(
+          [process.execPath, "--no-install", "--no-env-file", materialized.runner],
+          {
+            cwd: revision.location,
+            env: runnerEnvironment(
+              channel,
+              {
+                daemonInstanceId: this.#instanceId,
+                runnerInstanceId,
+                projectId,
+                packageGraphId: revision.packageGraphId,
+              },
+              materialized.root,
+            ),
+            stdin: new Blob([connectionSecret]),
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        );
         socket = await Promise.race([
           accepted,
           child.exited.then((exit) =>
@@ -792,6 +871,12 @@ export class RunApi {
             observedAt: new Date(this.#now()).toISOString(),
           }),
         );
+        await this.#runnerSupervisor.attach(projectId, {
+          instanceId: runnerInstanceId,
+          packageGraphId: revision.packageGraphId,
+          purpose: "trigger",
+          stop: handle.stop,
+        });
         resolveReady?.();
         while (!stopRequested) {
           const frame = await Effect.runPromise(reader.read);
@@ -935,6 +1020,7 @@ export class RunApi {
         }
       })
       .finally(() => {
+        this.#runnerSupervisor.detach(projectId, runnerInstanceId);
         if (this.#triggerProcesses.get(key) === handle) this.#triggerProcesses.delete(key);
         if (admittedWork) void this.#pump();
         resolveDone?.();
@@ -957,8 +1043,7 @@ export class RunApi {
     authority?: RunAuthority,
   ): Promise<A> {
     if (mode === "execute") {
-      const priorIdle = this.#idleRunners.get(request.projectId);
-      if (priorIdle !== undefined) await priorIdle.stop();
+      await this.#runnerSupervisor.stop(request.projectId);
     }
     const channelRoot = join(this.#dataRoot, "runner-channels", crypto.randomUUID());
     const channel = join(channelRoot, "runner.sock");
@@ -984,14 +1069,18 @@ export class RunApi {
         server?.once("error", reject);
       });
       chmodSync(channel, 0o600);
-      child = Bun.spawn([process.execPath, runner], {
+      child = Bun.spawn([process.execPath, "--no-install", "--no-env-file", runner], {
         cwd: project,
-        env: runnerEnvironment(channel, {
-          daemonInstanceId: request.daemonInstanceId,
-          runnerInstanceId: request.runnerInstanceId,
-          projectId: request.projectId,
-          packageGraphId: request.packageGraphId,
-        }),
+        env: runnerEnvironment(
+          channel,
+          {
+            daemonInstanceId: request.daemonInstanceId,
+            runnerInstanceId: request.runnerInstanceId,
+            projectId: request.projectId,
+            packageGraphId: request.packageGraphId,
+          },
+          request.executionRoot,
+        ),
         stdin: new Blob([request.connectionSecret]),
         stdout: "pipe",
         stderr: "pipe",
@@ -1143,13 +1232,17 @@ export class RunApi {
             if (timer !== undefined) clearTimeout(timer);
             stopping = shutdown().finally(() => {
               cleanup();
-              if (this.#idleRunners.get(request.projectId) === idle)
-                this.#idleRunners.delete(request.projectId);
+              this.#runnerSupervisor.detach(request.projectId, request.runnerInstanceId);
             });
             return stopping;
           },
         };
-        this.#idleRunners.set(request.projectId, idle);
+        await this.#runnerSupervisor.attach(request.projectId, {
+          instanceId: request.runnerInstanceId,
+          packageGraphId: request.packageGraphId,
+          purpose: "execution",
+          stop: idle.stop,
+        });
         timer = setTimeout(() => void idle.stop().catch(() => undefined), this.#runnerIdleMillis);
         detached = true;
       } else {

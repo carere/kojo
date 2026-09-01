@@ -69,3 +69,39 @@ test("shows a Daemon Run and builds its initial Waterfall only from completed Ph
   await expect(page.locator('[data-phase="run-no-trigger/compile/1"]')).toBeVisible();
   await expect(page.getByText("not-yet-recorded", { exact: true })).toHaveCount(0);
 });
+
+test("shows the exact pinned-content fault and repair remedy for a held Run", async ({ page }) => {
+  await page.route("**/api/v1/runs/run-held-content", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        runId: "run-held-content",
+        projectId: "project-browser-fixture",
+        workflowName: "compile",
+        revisionId: "e".repeat(64),
+        packageGraphId: "f".repeat(64),
+        state: "held",
+        queueReason: "pinned-content",
+        executionFault: {
+          code: "RETAINED_CONTENT_CORRUPT",
+          detail: "the pinned package file does not match its retained hash",
+          remedy: "Restore the exact retained package bytes. Do not refresh this Run.",
+        },
+        admittedAt: "2026-09-01T00:00:00.000Z",
+        phases: [],
+      }),
+    });
+  });
+  await page.goto(launch());
+  await page.goto(`${origin}/runs/run-held-content`);
+
+  await expect(page.getByText("held", { exact: true })).toBeVisible();
+  await expect(page.locator('[data-stamp="execution"]')).toContainText("pinned-content");
+  await expect(page.getByText("Pinned content fault: RETAINED_CONTENT_CORRUPT")).toBeVisible();
+  await expect(
+    page.getByText("the pinned package file does not match its retained hash"),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Remedy: Restore the exact retained package bytes. Do not refresh this Run."),
+  ).toBeVisible();
+});

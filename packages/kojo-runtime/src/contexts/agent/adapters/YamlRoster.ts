@@ -1,6 +1,9 @@
-import { Effect, FileSystem, Layer, Path, type PlatformError, Schema } from "effect";
+import { dirname, join } from "node:path";
+import { Effect, Layer, Schema } from "effect";
 import { Yaml } from "effect/unstable/encoding";
 import { decodeUnknown } from "../../shared/lib/decode.ts";
+import * as RetainedFactoryAssetRepository from "../../workflow/adapters/RetainedFactoryAssetRepository.ts";
+import { FactoryAssetRepository } from "../../workflow/ports/FactoryAssetRepository.ts";
 import { AgentDefinition } from "../models/AgentDefinition.ts";
 import { rosterEntryFields } from "../models/RosterEntry.ts";
 import { RosterError } from "../models/RosterError.ts";
@@ -32,18 +35,15 @@ const promptFiles = { system: "system.md", user: "user.md" } as const;
 
 const make = (options: { readonly config: string }) =>
   Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-
-    const source = path.resolve(options.config);
-    const root = path.dirname(source);
+    const assets = yield* FactoryAssetRepository;
 
     const fail =
       (
+        source: string,
         fault: "unreadable" | "no-prompt",
         details: { readonly agent?: string; readonly target: string },
       ) =>
-      (cause: PlatformError.PlatformError): RosterError =>
+      (cause: { readonly message: string }): RosterError =>
         new RosterError({
           source,
           fault,
@@ -53,9 +53,14 @@ const make = (options: { readonly config: string }) =>
           cause,
         });
 
-    const text = yield* fileSystem
+    const source = yield* assets
+      .resolve(options.config)
+      .pipe(Effect.mapError(fail(options.config, "unreadable", { target: options.config })));
+    const root = dirname(source);
+
+    const text = yield* assets
       .readFileString(source)
-      .pipe(Effect.mapError(fail("unreadable", { target: source })));
+      .pipe(Effect.mapError(fail(source, "unreadable", { target: source })));
 
     // `Yaml.parse` throws a `SyntaxError` naming the line. It is the same class of fault as an
     // entry that does not decode — the file was read and is not a roster — so it lands on the same
@@ -88,12 +93,12 @@ const make = (options: { readonly config: string }) =>
       Object.entries(file.agents),
       ([name, entry]) =>
         Effect.gen(function* () {
-          const directory = path.resolve(root, entry.prompts ?? path.join("prompts", name));
+          const directory = join(root, entry.prompts ?? join("prompts", name));
           const read = (file: string) => {
-            const target = path.join(directory, file);
-            return fileSystem
+            const target = join(directory, file);
+            return assets
               .readFileString(target)
-              .pipe(Effect.mapError(fail("no-prompt", { agent: name, target })));
+              .pipe(Effect.mapError(fail(source, "no-prompt", { agent: name, target })));
           };
 
           return new AgentDefinition({
@@ -120,7 +125,5 @@ const make = (options: { readonly config: string }) =>
  * is decoded, and its prompts are read, while the layers are being built. A malformed roster says
  * which key is wrong before a run exists to be confused by it.
  */
-export const layer = (options: {
-  readonly config: string;
-}): Layer.Layer<Roster, RosterError, FileSystem.FileSystem | Path.Path> =>
-  Layer.effect(Roster, make(options));
+export const layer = (options: { readonly config: string }): Layer.Layer<Roster, RosterError> =>
+  Layer.effect(Roster, make(options)).pipe(Layer.provide(RetainedFactoryAssetRepository.layer()));

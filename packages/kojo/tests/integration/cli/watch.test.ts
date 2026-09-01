@@ -339,8 +339,9 @@ describe("running the factory unattended", () => {
           }
 
           // And one question waits on a person, not two.
-          const listed = yield* ran(cli, ["gate", "list", "--database", factory.database]);
-          expect(listed.split("\n").filter((line) => line.includes(runId))).toHaveLength(1);
+          expect(
+            (yield* asked(factory.database)).filter((gate) => gate.request.runId === runId),
+          ).toHaveLength(1);
         }),
       ),
     60_000,

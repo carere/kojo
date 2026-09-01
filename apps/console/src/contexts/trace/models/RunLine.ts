@@ -16,6 +16,7 @@ export interface RunLine {
     | "queued"
     | "executing"
     | "suspended"
+    | "held"
     | "succeeded"
     | "failed"
     | "cancelled";
@@ -28,7 +29,14 @@ export interface RunLine {
  * Four states from the wire's three, because an absent outcome is not a missing value — it is the
  * run still going. Naming it keeps every consumer from re-deciding what `undefined` meant.
  */
-export type RunStatus = "queued" | "executing" | "suspended" | "succeeded" | "failed" | "cancelled";
+export type RunStatus =
+  | "queued"
+  | "executing"
+  | "suspended"
+  | "held"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
 
 export const statusOf = (line: RunLine): RunStatus =>
   line.executionState ?? line.outcome ?? "executing";

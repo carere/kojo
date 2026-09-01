@@ -157,8 +157,20 @@ export interface RunDoc {
   readonly daemon?: {
     readonly projectId: string;
     readonly revisionId: string;
-    readonly state: "queued" | "executing" | "suspended" | "succeeded" | "failed" | "cancelled";
+    readonly state:
+      | "queued"
+      | "executing"
+      | "suspended"
+      | "held"
+      | "succeeded"
+      | "failed"
+      | "cancelled";
     readonly queueReason?: string;
+    readonly executionFault?: {
+      readonly code: string;
+      readonly detail: string;
+      readonly remedy: string;
+    };
   };
   readonly run: {
     readonly run: {

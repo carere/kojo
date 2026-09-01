@@ -8,6 +8,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -24,11 +25,14 @@ import {
 } from "../../../../src/contexts/daemon/adapters/DaemonOwner.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
 import { SqliteProjectRepository } from "../../../../src/contexts/project/adapters/SqliteProjectRepository.ts";
+import { SqliteRunRepository } from "../../../../src/contexts/workflow/adapters/SqliteRunRepository.ts";
 import { captureWorkflowRevision } from "../../../../src/contexts/workflow/services/captureRevision.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
+import { linkEngine } from "../../../support/linkEngine.ts";
 
 const roots: string[] = [];
 const daemons: RunningDaemon[] = [];
+const packageRoot = new URL("../../../../", import.meta.url).pathname.replace(/\/$/, "");
 
 const paths = (): DaemonPaths => {
   const root = mkdtempSync(join(process.cwd(), ".kojo-run-api-"));
@@ -168,6 +172,199 @@ export const tickets = workflow(
   return realpathSync(location);
 };
 
+const offlineProject = (
+  root: string,
+  effectJournal: string,
+  installMarker: string,
+): { readonly location: string; readonly localPackage: string } => {
+  const location = join(root, "offline-project");
+  const localPackage = join(root, "offline-package");
+  mkdirSync(join(location, ".kojo", "workflows"), { recursive: true });
+  mkdirSync(localPackage, { recursive: true });
+  linkEngine({ root: location, packageRoot });
+  symlinkSync(localPackage, join(location, "node_modules", "fixture-offline"));
+  writeFileSync(
+    join(localPackage, "package.json"),
+    JSON.stringify({
+      name: "fixture-offline",
+      version: "1.0.0",
+      exports: "./index.ts",
+      scripts: {
+        postinstall: `bun -e ${JSON.stringify(`await Bun.write(${JSON.stringify(installMarker)}, "installed")`)}`,
+      },
+    }),
+  );
+  writeFileSync(join(localPackage, "index.ts"), 'export const retainedPackage = "package-a";\n');
+  writeFileSync(
+    join(location, "package.json"),
+    JSON.stringify({ name: "offline-run-api-fixture", private: true, type: "module" }),
+  );
+  writeFileSync(join(location, ".env"), "KOJO_OFFLINE_POISON=loaded-live-env\n");
+  writeFileSync(
+    join(location, ".kojo", "factory.json"),
+    JSON.stringify({ formatVersion: 1, assets: ["prompt.md"] }),
+  );
+  writeFileSync(join(location, ".kojo", "prompt.md"), "retained prompt a\n");
+  writeFileSync(
+    join(location, ".kojo", "workflows", "version.ts"),
+    'export const retainedSource = "source-a";\n',
+  );
+  writeFileSync(
+    join(location, ".kojo", "workflows", "offline.ts"),
+    `import { appendFileSync } from "node:fs";
+import { Effect, Schema } from "effect";
+import { retainedPackage } from "fixture-offline";
+import { code } from "@carere/kojo-runtime/contexts/workflow/services/phase/code";
+import { workflow } from "@carere/kojo-runtime/contexts/workflow/services/workflow";
+import { retainedSource } from "./version.ts";
+
+export const offline = workflow(
+  {
+    name: "offline",
+    payload: Schema.Null,
+    success: Schema.Null,
+    error: Schema.Never,
+    idempotencyKey: () => "offline-retained-run",
+  },
+  () => code(
+    {
+      name: "count-effect",
+      description: "Count the exact retained effect",
+      success: Schema.Null,
+      error: Schema.Never,
+    },
+    Effect.sync(() => {
+      if (process.env.KOJO_OFFLINE_POISON !== undefined) {
+        throw new Error("the current Project environment file was loaded");
+      }
+      appendFileSync(${JSON.stringify(effectJournal)}, retainedSource + ":" + retainedPackage + "\\n");
+      return null;
+    }),
+  ),
+);
+`,
+  );
+  execFileSync("git", ["init", "--initial-branch=main", location]);
+  execFileSync("git", ["-C", location, "config", "user.email", "test@kojo.local"]);
+  execFileSync("git", ["-C", location, "config", "user.name", "Kojo Test"]);
+  execFileSync("git", ["-C", location, "add", "."]);
+  execFileSync("git", ["-C", location, "commit", "-m", "test: offline fixture"]);
+  return { location: realpathSync(location), localPackage };
+};
+
+const triggerSwitchProject = (root: string): string => {
+  const location = join(root, "trigger-switch-project");
+  mkdirSync(join(location, ".kojo", "workflows"), { recursive: true });
+  linkEngine({ root: location, packageRoot });
+  writeFileSync(
+    join(location, "package.json"),
+    JSON.stringify({ name: "trigger-switch-fixture", private: true, type: "module" }),
+  );
+  writeFileSync(
+    join(location, ".kojo", "factory.json"),
+    JSON.stringify({ formatVersion: 1, assets: [] }),
+  );
+  execFileSync("git", ["init", "--initial-branch=main", location]);
+  execFileSync("git", ["-C", location, "config", "user.email", "test@kojo.local"]);
+  execFileSync("git", ["-C", location, "config", "user.name", "Kojo Test"]);
+  return realpathSync(location);
+};
+
+const historicalTriggerSource = (
+  journal: string,
+): string => `import { appendFileSync, readFileSync } from "node:fs";
+import { Effect, Layer, Schema, Stream } from "effect";
+import { TriggerEvent } from "@carere/kojo-runtime/contexts/trigger/models/TriggerEvent";
+import { Trigger } from "@carere/kojo-runtime/contexts/trigger/ports/Trigger";
+import { code } from "@carere/kojo-runtime/contexts/workflow/services/phase/code";
+import { workflow } from "@carere/kojo-runtime/contexts/workflow/services/workflow";
+
+const priorEvents = readFileSync(${JSON.stringify(journal)}, "utf8");
+const priorPids = [...priorEvents.matchAll(/current-pid:(\\d+)/g)];
+const priorPid = Number(priorPids.at(-1)?.[1] ?? "0");
+let priorPollerAlive = priorPid > 0;
+try { process.kill(priorPid, 0); } catch { priorPollerAlive = false; }
+if (priorPollerAlive) throw new Error("historical source imported before current polling stopped");
+appendFileSync(${JSON.stringify(journal)}, "current-poller-confirmed-stopped\\n");
+appendFileSync(${JSON.stringify(journal)}, "historical-imported\\n");
+const trigger = Layer.succeed(Trigger)({
+  stream: Stream.fromEffect(Effect.sync(() => {
+    appendFileSync(${JSON.stringify(journal)}, "historical-trigger-started\\n");
+    return new TriggerEvent({ source: "historical", key: "forbidden", payload: { ticket: "forbidden" }, receivedAt: Date.now() });
+  })).pipe(Stream.concat(Stream.never)),
+  ack: () => Effect.void,
+});
+
+export const tickets = workflow(
+  {
+    name: "tickets",
+    payload: { ticket: Schema.String },
+    success: Schema.String,
+    error: Schema.Never,
+    idempotencyKey: (payload) => payload.ticket,
+    trigger,
+  },
+  (payload) => code(
+    { name: "historical-effect", description: "Run historical effect", success: Schema.String, error: Schema.Never },
+    Effect.sync(() => {
+      appendFileSync(${JSON.stringify(journal)}, "historical-executed\\n");
+      return payload.ticket;
+    }),
+  ),
+);
+`;
+
+const currentTriggerSource = (
+  journal: string,
+  checkpoint: string,
+): string => `import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { Effect, Layer, Schema, Stream } from "effect";
+import { TriggerEvent } from "@carere/kojo-runtime/contexts/trigger/models/TriggerEvent";
+import { Trigger } from "@carere/kojo-runtime/contexts/trigger/ports/Trigger";
+import { code } from "@carere/kojo-runtime/contexts/workflow/services/phase/code";
+import { workflow } from "@carere/kojo-runtime/contexts/workflow/services/workflow";
+
+appendFileSync(${JSON.stringify(journal)}, "current-pid:" + process.pid + "\\n");
+appendFileSync(${JSON.stringify(journal)}, "current-imported\\n");
+const checkpoint = () => readFileSync(${JSON.stringify(checkpoint)}, "utf8").trim();
+const event = Effect.sync(() => {
+  const at = checkpoint();
+  appendFileSync(${JSON.stringify(journal)}, "polling-started:" + at + "\\n");
+  return at;
+}).pipe(
+  Effect.flatMap((at) => Effect.sleep(500).pipe(
+    Effect.flatMap(() => at === "1"
+      ? Effect.succeed(new TriggerEvent({ source: "checkpoint", key: "ticket-1", payload: { ticket: "ticket-1" }, receivedAt: Date.now() }))
+      : Effect.never),
+  )),
+);
+const trigger = Layer.succeed(Trigger)({
+  stream: Stream.fromEffect(event).pipe(
+    Stream.concat(Stream.never),
+    Stream.ensuring(Effect.sync(() => appendFileSync(${JSON.stringify(journal)}, "polling-stopped:" + checkpoint() + "\\n"))),
+  ),
+  ack: (event) => Effect.sync(() => {
+    appendFileSync(${JSON.stringify(journal)}, "acknowledged:" + event.key + "\\n");
+    writeFileSync(${JSON.stringify(checkpoint)}, "2\\n");
+  }),
+});
+
+export const tickets = workflow(
+  {
+    name: "tickets",
+    payload: { ticket: Schema.String },
+    success: Schema.String,
+    error: Schema.Never,
+    idempotencyKey: (payload) => payload.ticket,
+    trigger,
+  },
+  (payload) => code(
+    { name: "current-effect", description: "Run current effect", success: Schema.String, error: Schema.Never },
+    Effect.succeed(payload.ticket),
+  ),
+);
+`;
+
 const call = (daemon: RunningDaemon, path: string, init: RequestInit = {}): Promise<Response> =>
   fetch(`http://localhost${path}`, {
     unix: daemon.endpoint.socketPath,
@@ -192,6 +389,207 @@ afterEach(async () => {
 });
 
 describe("Daemon no-Trigger Run API", () => {
+  it("stops current Trigger polling before historical import and resumes the durable checkpoint", async () => {
+    const hostPaths = paths();
+    const root = roots[0] ?? "";
+    const journal = join(root, "switch-events.txt");
+    const checkpoint = join(root, "trigger-checkpoint.txt");
+    writeFileSync(journal, "");
+    writeFileSync(checkpoint, "1\n");
+    const location = triggerSwitchProject(root);
+    const workflowSource = join(location, ".kojo", "workflows", "tickets.ts");
+    writeFileSync(workflowSource, historicalTriggerSource(journal));
+    mkdirSync(hostPaths.dataRoot, { recursive: true, mode: 0o700 });
+    const historical = captureWorkflowRevision({
+      project: location,
+      dataRoot: hostPaths.dataRoot,
+      workflowName: "tickets",
+    });
+    writeFileSync(workflowSource, currentTriggerSource(journal, checkpoint));
+    const current = captureWorkflowRevision({
+      project: location,
+      dataRoot: hostPaths.dataRoot,
+      workflowName: "tickets",
+    });
+    execFileSync("git", ["-C", location, "add", "."]);
+    execFileSync("git", ["-C", location, "commit", "-m", "test: trigger switch fixture"]);
+
+    const databasePath = join(hostPaths.dataRoot, "kojo.db");
+    const database = new Database(databasePath, { create: true, strict: true });
+    database.run(
+      "CREATE TABLE daemon_metadata (name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT",
+    );
+    const projects = new SqliteProjectRepository(database);
+    const registered = await Effect.runPromise(
+      projects.register({
+        requestId: "seed-historical-trigger",
+        requestBody: "seed-historical-trigger",
+        dataIdentity: "seed-data",
+        location,
+        observedAt: "2026-09-01T00:00:00.000Z",
+        factory: {
+          state: "available",
+          refreshState: "current",
+          workflows: [
+            {
+              workflowName: "tickets",
+              availability: "available",
+              source: workflowSource,
+              triggerDeclared: true,
+              revision: historical,
+            },
+          ],
+        },
+      }),
+    );
+    await Effect.runPromise(
+      projects.refresh(
+        registered.project.projectId,
+        {
+          factoryState: "available",
+          workflows: [
+            {
+              workflowName: "tickets",
+              availability: "available",
+              source: workflowSource,
+              triggerDeclared: true,
+              revision: current,
+            },
+          ],
+        },
+        "current",
+        "2026-09-01T00:00:01.000Z",
+      ),
+    );
+    await Effect.runPromise(
+      projects.startActivity({
+        dataIdentity: "seed-data",
+        requestId: "start-current-trigger",
+        projectId: registered.project.projectId,
+        workflowName: "tickets",
+        changedAt: "2026-09-01T00:00:02.000Z",
+      }),
+    );
+    const runs = new SqliteRunRepository(database);
+    const admission = await Effect.runPromise(
+      runs.admit({
+        dataIdentity: "seed-data",
+        requestId: "admit-historical-trigger-run",
+        canonicalRequest: "admit-historical-trigger-run",
+        projectId: registered.project.projectId,
+        workflowName: "tickets",
+        idempotencyKey: "historical-run",
+        payload: { ticket: "historical-run" },
+        revisionId: historical.revisionId,
+        packageGraphId: historical.packageGraphId,
+        admittedAt: "2026-09-01T00:00:03.000Z",
+      }),
+    );
+    database.close(false);
+    chmodSync(databasePath, 0o600);
+
+    const daemon = startDaemon(hostPaths, { automaticRefresh: false, runnerIdleMillis: 50 });
+    daemons.push(daemon);
+    expect((await waitForRun(daemon, admission.run.runId)).state).toBe("succeeded");
+    const deadline = Date.now() + 10_000;
+    while (readFileSync(checkpoint, "utf8").trim() !== "2" && Date.now() < deadline) {
+      await Bun.sleep(20);
+    }
+    const events = readFileSync(journal, "utf8").trim().split("\n");
+    expect(readFileSync(checkpoint, "utf8").trim(), events.join("\n")).toBe("2");
+    expect(events).not.toContain("historical-trigger-started");
+    const stopped = events.indexOf("current-poller-confirmed-stopped");
+    const imported = events.indexOf("historical-imported");
+    const executed = events.indexOf("historical-executed");
+    const resumed = events.indexOf("polling-started:1", stopped + 1);
+    const acknowledged = events.indexOf("acknowledged:ticket-1");
+    expect(stopped).toBeGreaterThanOrEqual(0);
+    expect(imported).toBeGreaterThan(stopped);
+    expect(executed).toBeGreaterThan(imported);
+    expect(resumed).toBeGreaterThan(executed);
+    expect(acknowledged).toBeGreaterThan(resumed);
+  }, 30_000);
+
+  it("executes one retained effect in a fresh offline Runner without the current Factory or packages", async () => {
+    const hostPaths = paths();
+    const root = roots[0] ?? "";
+    const effectJournal = join(root, "effects.txt");
+    const installMarker = join(root, "installed.txt");
+    const subject = offlineProject(root, effectJournal, installMarker);
+    mkdirSync(hostPaths.dataRoot, { recursive: true, mode: 0o700 });
+    const captured = captureWorkflowRevision({
+      project: subject.location,
+      dataRoot: hostPaths.dataRoot,
+      workflowName: "offline",
+    });
+    const databasePath = join(hostPaths.dataRoot, "kojo.db");
+    const database = new Database(databasePath, { create: true, strict: true });
+    database.run(
+      "CREATE TABLE daemon_metadata (name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT",
+    );
+    const projects = new SqliteProjectRepository(database);
+    const registered = await Effect.runPromise(
+      projects.register({
+        requestId: "seed-offline-project",
+        requestBody: "seed-offline-project",
+        dataIdentity: "seed-data",
+        location: subject.location,
+        observedAt: "2026-09-01T00:00:00.000Z",
+        factory: {
+          state: "available",
+          refreshState: "current",
+          workflows: [
+            {
+              workflowName: "offline",
+              availability: "available",
+              source: join(subject.location, ".kojo", "workflows", "offline.ts"),
+              revision: captured,
+            },
+          ],
+        },
+      }),
+    );
+    const runs = new SqliteRunRepository(database);
+    const admission = await Effect.runPromise(
+      runs.admit({
+        dataIdentity: "seed-data",
+        requestId: "admit-offline-run",
+        canonicalRequest: "admit-offline-run",
+        projectId: registered.project.projectId,
+        workflowName: "offline",
+        idempotencyKey: "offline-retained-run",
+        payload: null,
+        revisionId: captured.revisionId,
+        packageGraphId: captured.packageGraphId,
+        admittedAt: "2026-09-01T00:00:01.000Z",
+      }),
+    );
+    database.close(false);
+    chmodSync(databasePath, 0o600);
+
+    rmSync(join(subject.location, ".kojo"), { recursive: true, force: true });
+    rmSync(join(subject.location, "node_modules"), { recursive: true, force: true });
+    rmSync(subject.localPackage, { recursive: true, force: true });
+
+    const daemon = startDaemon(hostPaths, { automaticRefresh: false, runnerIdleMillis: 50 });
+    daemons.push(daemon);
+    const run = await waitForRun(daemon, admission.run.runId);
+    expect(run.state).toBe("succeeded");
+    expect(readFileSync(effectJournal, "utf8")).toBe("source-a:package-a\n");
+    expect(existsSync(installMarker)).toBe(false);
+    expect(existsSync(join(subject.location, ".kojo"))).toBe(false);
+    expect(existsSync(join(subject.location, "node_modules"))).toBe(false);
+
+    await Effect.runPromise(daemon.stop);
+    daemons.splice(daemons.indexOf(daemon), 1);
+    const restarted = startDaemon(hostPaths, { automaticRefresh: false, runnerIdleMillis: 50 });
+    daemons.push(restarted);
+    await Bun.sleep(250);
+    expect(readFileSync(effectJournal, "utf8")).toBe("source-a:package-a\n");
+    const restored = await waitForRun(restarted, admission.run.runId);
+    expect(restored.state).toBe("succeeded");
+  }, 30_000);
+
   it("admits an exact retained revision, reports status, and exposes a real code Phase", async () => {
     const hostPaths = paths();
     const runnerPid = join(roots[0] ?? "", "runner.pid");

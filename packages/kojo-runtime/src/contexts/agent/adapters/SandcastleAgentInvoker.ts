@@ -1,6 +1,5 @@
 import type { AgentProvider } from "@ai-hero/sandcastle";
 import { claudeCode } from "@ai-hero/sandcastle";
-import * as BunServices from "@effect/platform-bun/BunServices";
 import { Effect, Layer, Option } from "effect";
 import { Sandbox } from "../../sandbox/ports/Sandbox.ts";
 import { maySpawn } from "../guards/maySpawn.ts";
@@ -319,7 +318,5 @@ export const fromConfig = (options: {
   readonly provider?: ProviderFor | undefined;
 }): Layer.Layer<AgentInvoker, RosterError, Sandbox> =>
   layer({ provider: options.provider }).pipe(
-    Layer.provide(
-      YamlRoster.layer({ config: options.config }).pipe(Layer.provide(BunServices.layer)),
-    ),
+    Layer.provide(YamlRoster.layer({ config: options.config })),
   );

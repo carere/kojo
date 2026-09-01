@@ -13,6 +13,7 @@ interface MemoryState {
   readonly generations: Map<string, number>;
   readonly slots: Map<string, RunAuthority>;
   readonly results: Map<string, PhaseResult>;
+  readonly reservations: Map<string, string>;
   sequence: number;
   lastProjectId?: string;
   readonly continuationStreaks: Map<string, number>;
@@ -56,6 +57,22 @@ const assertAuthority = (state: MemoryState, authority: RunAuthority): void => {
   }
 };
 
+const visible = (state: MemoryState, run: DaemonRun): DaemonRun => {
+  if (run.state !== "queued") return run;
+  const projectSlot = [...state.slots.values()].find(
+    (slot) => state.runs.get(slot.runId)?.projectId === run.projectId,
+  );
+  const executing = projectSlot === undefined ? undefined : state.runs.get(projectSlot.runId);
+  if (executing !== undefined && executing.packageGraphId !== run.packageGraphId) {
+    return { ...run, queueReason: "package-switch" };
+  }
+  if (projectSlot !== undefined) return { ...run, queueReason: "project-capacity" };
+  if (state.slots.size >= DEFAULT_DAEMON_EXECUTING_RUNS) {
+    return { ...run, queueReason: "execution-capacity" };
+  }
+  return run;
+};
+
 /** In-memory adapter for Run admission and Claim use-case tests. */
 export const layer: Layer.Layer<RunRepository> = Layer.effect(
   RunRepository,
@@ -68,6 +85,7 @@ export const layer: Layer.Layer<RunRepository> = Layer.effect(
       generations: new Map(),
       slots: new Map(),
       results: new Map(),
+      reservations: new Map(),
       continuationStreaks: new Map(),
       sequence: 0,
     };
@@ -127,7 +145,11 @@ export const layer: Layer.Layer<RunRepository> = Layer.effect(
               message: `Run ${runId} was not found`,
             });
           }
-          if (run.state !== "queued" || state.slots.size >= DEFAULT_DAEMON_EXECUTING_RUNS) {
+          if (
+            run.state !== "queued" ||
+            state.reservations.has(runId) ||
+            state.slots.size >= DEFAULT_DAEMON_EXECUTING_RUNS
+          ) {
             throw new RunStoreError({
               code: "RUN_NOT_ELIGIBLE",
               message: "the Run has no execution slot",
@@ -165,8 +187,15 @@ export const layer: Layer.Layer<RunRepository> = Layer.effect(
               return projectId === undefined ? [] : [projectId];
             }),
           );
+          for (const runId of state.reservations.keys()) {
+            const projectId = state.runs.get(runId)?.projectId;
+            if (projectId !== undefined) occupied.add(projectId);
+          }
           const eligible = [...state.runs.values()].filter(
-            (run) => run.state === "queued" && !occupied.has(run.projectId),
+            (run) =>
+              run.state === "queued" &&
+              !state.reservations.has(run.runId) &&
+              !occupied.has(run.projectId),
           );
           const projects = [...new Set(eligible.map((run) => run.projectId))].sort();
           if (projects.length === 0) return undefined;
@@ -208,12 +237,115 @@ export const layer: Layer.Layer<RunRepository> = Layer.effect(
           );
           return { run, authority: claimed };
         }),
+      reserveNext: (reservationId) =>
+        attempt(() => {
+          if (state.slots.size + state.reservations.size >= DEFAULT_DAEMON_EXECUTING_RUNS) {
+            return undefined;
+          }
+          const occupied = new Set(
+            [...state.slots.values()].flatMap((slot) => {
+              const projectId = state.runs.get(slot.runId)?.projectId;
+              return projectId === undefined ? [] : [projectId];
+            }),
+          );
+          for (const runId of state.reservations.keys()) {
+            const projectId = state.runs.get(runId)?.projectId;
+            if (projectId !== undefined) occupied.add(projectId);
+          }
+          const eligible = [...state.runs.values()].filter(
+            (run) => run.state === "queued" && !occupied.has(run.projectId),
+          );
+          const projects = [...new Set(eligible.map((run) => run.projectId))].sort();
+          const projectId =
+            projects.find((candidate) => candidate > (state.lastProjectId ?? "")) ?? projects[0];
+          if (projectId === undefined) return undefined;
+          const projectRuns = eligible
+            .filter((run) => run.projectId === projectId)
+            .sort((left, right) => left.admissionSequence - right.admissionSequence);
+          const continuations = projectRuns.filter((run) => run.queueKind === "continuation");
+          const newRuns = projectRuns.filter((run) => run.queueKind !== "continuation");
+          const streak = state.continuationStreaks.get(projectId) ?? 0;
+          const selected =
+            streak >= CONTINUATION_BURST && newRuns.length > 0
+              ? newRuns[0]
+              : (continuations[0] ?? newRuns[0]);
+          if (selected === undefined) return undefined;
+          state.reservations.set(selected.runId, reservationId);
+          state.lastProjectId = projectId;
+          state.continuationStreaks.set(
+            projectId,
+            selected.queueKind === "continuation" ? streak + 1 : 0,
+          );
+          return { run: visible(state, selected), reservationId };
+        }),
+      claimReserved: (reservationId, runnerInstanceId, claimedAt) =>
+        attempt(() => {
+          const selected = [...state.reservations.entries()].find(
+            ([, candidate]) => candidate === reservationId,
+          );
+          if (selected === undefined) {
+            throw new RunStoreError({
+              code: "RUN_NOT_ELIGIBLE",
+              message: "the reservation is stale",
+            });
+          }
+          const run = state.runs.get(selected[0]);
+          if (run === undefined || run.state !== "queued") throw stale();
+          const generation = (state.generations.get(run.runId) ?? 0) + 1;
+          state.generations.set(run.runId, generation);
+          const authority = {
+            runId: run.runId,
+            runnerInstanceId,
+            generation,
+            revisionId: run.revisionId,
+          };
+          state.claims.set(run.runId, authority);
+          state.slots.set(run.runId, authority);
+          state.reservations.delete(run.runId);
+          const { queueReason: _queueReason, ...withoutQueue } = run;
+          state.runs.set(run.runId, {
+            ...withoutQueue,
+            state: "executing",
+            startedAt: run.startedAt ?? claimedAt,
+          });
+          return authority;
+        }),
+      holdReserved: (reservationId, fault) =>
+        attempt(() => {
+          const selected = [...state.reservations.entries()].find(
+            ([, candidate]) => candidate === reservationId,
+          );
+          if (selected === undefined) throw stale();
+          const run = state.runs.get(selected[0]);
+          if (run === undefined) throw stale();
+          state.reservations.delete(run.runId);
+          state.runs.set(run.runId, {
+            ...run,
+            state: "held",
+            queueReason: "pinned-content",
+            executionFault: fault,
+          });
+        }),
       suspend: (authority) =>
         attempt(() => {
           assertAuthority(state, authority);
           const run = state.runs.get(authority.runId);
           if (run === undefined) throw stale();
           state.runs.set(authority.runId, { ...run, state: "suspended" });
+          state.claims.delete(authority.runId);
+          state.slots.delete(authority.runId);
+        }),
+      hold: (authority, fault) =>
+        attempt(() => {
+          assertAuthority(state, authority);
+          const run = state.runs.get(authority.runId);
+          if (run === undefined) throw stale();
+          state.runs.set(authority.runId, {
+            ...run,
+            state: "held",
+            queueReason: "pinned-content",
+            executionFault: fault,
+          });
           state.claims.delete(authority.runId);
           state.slots.delete(authority.runId);
         }),
@@ -239,11 +371,15 @@ export const layer: Layer.Layer<RunRepository> = Layer.effect(
             queueReason: "runner-starting",
           });
         }),
-      read: (runId) => Effect.sync(() => state.runs.get(runId)),
+      read: (runId) =>
+        Effect.sync(() => {
+          const run = state.runs.get(runId);
+          return run === undefined ? undefined : visible(state, run);
+        }),
       list: Effect.sync(() =>
-        [...state.runs.values()].sort(
-          (left, right) => right.admissionSequence - left.admissionSequence,
-        ),
+        [...state.runs.values()]
+          .sort((left, right) => right.admissionSequence - left.admissionSequence)
+          .map((run) => visible(state, run)),
       ),
       readResult: (authority, phasePath, attemptNumber) =>
         attempt(() => {

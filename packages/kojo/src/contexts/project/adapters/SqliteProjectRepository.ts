@@ -184,6 +184,19 @@ export class SqliteProjectRepository {
       ) STRICT
     `);
     database.run(`
+      CREATE TABLE IF NOT EXISTS workflow_revision_registrations (
+        project_id TEXT NOT NULL,
+        workflow_name TEXT NOT NULL,
+        revision_id TEXT NOT NULL,
+        package_graph_id TEXT NOT NULL,
+        registered_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, workflow_name, revision_id, package_graph_id),
+        FOREIGN KEY (project_id, workflow_name)
+          REFERENCES project_workflows(project_id, workflow_name),
+        FOREIGN KEY (revision_id) REFERENCES workflow_revisions(revision_id)
+      ) STRICT
+    `);
+    database.run(`
       CREATE TABLE IF NOT EXISTS workflow_activity_receipts (
         data_identity TEXT NOT NULL,
         request_id TEXT NOT NULL,
@@ -289,6 +302,20 @@ export class SqliteProjectRepository {
           observedAt,
         ],
       );
+      if (revision !== undefined) {
+        this.#database.run(
+          `INSERT OR IGNORE INTO workflow_revision_registrations (
+             project_id, workflow_name, revision_id, package_graph_id, registered_at
+           ) VALUES (?, ?, ?, ?, ?)`,
+          [
+            projectId,
+            workflow.workflowName,
+            revision.revisionId,
+            revision.packageGraphId,
+            observedAt,
+          ],
+        );
+      }
     }
   }
 
@@ -880,6 +907,7 @@ export class SqliteProjectRepository {
     projectId: string,
     workflowName: string,
     revisionId: string,
+    packageGraphId: string,
   ): Effect.Effect<ExecutionRevision, ProjectStoreError> =>
     Effect.try({
       try: () => {
@@ -891,15 +919,17 @@ export class SqliteProjectRepository {
               readonly published_path: string;
               readonly manifest_json: string;
             },
-            [string, string, string]
+            [string, string, string, string]
           >(
             `SELECT p.location, r.package_graph_id, r.published_path, r.manifest_json
                FROM projects p
-               JOIN project_workflows w ON w.project_id = p.project_id
-               JOIN workflow_revisions r ON r.revision_id = ?
-              WHERE p.project_id = ? AND w.workflow_name = ?`,
+               JOIN workflow_revision_registrations g ON g.project_id = p.project_id
+               JOIN workflow_revisions r ON r.revision_id = g.revision_id
+              WHERE p.project_id = ? AND g.workflow_name = ?
+                AND g.revision_id = ? AND g.package_graph_id = ?
+                AND r.package_graph_id = g.package_graph_id`,
           )
-          .get(revisionId, projectId, workflowName);
+          .get(projectId, workflowName, revisionId, packageGraphId);
         if (row === null) throw new Error("the pinned Workflow Revision is missing");
         const manifest = JSON.parse(row.manifest_json) as { readonly entrySource?: unknown };
         if (typeof manifest.entrySource !== "string") {

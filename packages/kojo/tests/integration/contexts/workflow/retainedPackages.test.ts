@@ -1,8 +1,17 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { Effect } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
+import { materializeRevision } from "../../../../src/contexts/project/services/materializeRevision.ts";
 import { refreshFactory } from "../../../../src/contexts/workflow/services/refreshFactory.ts";
 import { linkEngine } from "../../../support/linkEngine.ts";
 
@@ -47,6 +56,42 @@ const fixture = (): {
   writeFileSync(join(localPackage, "index.ts"), 'export const retained = "retained";\n');
   writeFileSync(linkedSource, "individual linked file bytes\n");
   symlinkSync(relative(localPackage, linkedSource), join(localPackage, "linked.txt"));
+  for (const side of ["left", "right"] as const) {
+    const branch = join(parent, `fixture-${side}`);
+    const shared = join(branch, "node_modules", "fixture-shared");
+    const peer = join(branch, "node_modules", "fixture-peer");
+    mkdirSync(shared, { recursive: true });
+    mkdirSync(peer, { recursive: true });
+    writeFileSync(
+      join(branch, "package.json"),
+      `${JSON.stringify({
+        name: `fixture-${side}`,
+        version: "1.0.0",
+        exports: "./index.ts",
+        dependencies: { "fixture-shared": "1.0.0" },
+      })}\n`,
+    );
+    writeFileSync(join(branch, "index.ts"), `export const ${side} = "${side}";\n`);
+    writeFileSync(
+      join(shared, "package.json"),
+      `${JSON.stringify({
+        name: "fixture-shared",
+        version: "1.0.0",
+        exports: "./index.ts",
+        peerDependencies: { "fixture-peer": "1.0.0" },
+      })}\n`,
+    );
+    writeFileSync(join(shared, "index.ts"), 'export const shared = "same-bytes";\n');
+    writeFileSync(
+      join(peer, "package.json"),
+      `${JSON.stringify({ name: "fixture-peer", version: "1.0.0", exports: "./index.ts" })}\n`,
+    );
+    writeFileSync(join(peer, "index.ts"), 'export const peer = "same-bytes";\n');
+    symlinkSync(
+      relative(join(root, "node_modules"), branch),
+      join(root, "node_modules", `fixture-${side}`),
+    );
+  }
 
   writeFileSync(
     join(factory, "factory.json"),
@@ -67,10 +112,12 @@ const fixture = (): {
     [
       'import { writeFileSync } from "node:fs";',
       'import { Layer } from "effect";',
+      'import { left } from "fixture-left";',
       'import { retained } from "fixture-local";',
+      'import { right } from "fixture-right";',
       'import { dynamic } from "./support.ts";',
       `const marker = ${JSON.stringify(marker)};`,
-      "void retained; void dynamic;",
+      "void retained; void dynamic; void left; void right;",
       "const definition = Object.assign(function Safe() {}, {",
       '  _tag: "safe",',
       '  execute: () => writeFileSync(marker, "executed"),',
@@ -150,10 +197,81 @@ describe("real Workflow Revision capture", () => {
     expect(safe?.revision?.manifest.sharedEffect.packageId).toBe(
       safe?.revision?.manifest.packages.find((entry) => entry.name === "effect")?.packageId,
     );
+    const packages = safe?.revision?.manifest.packages ?? [];
+    const resolution = safe?.revision?.manifest.resolution ?? [];
+    const left = packages.find((entry) => entry.name === "fixture-left");
+    const right = packages.find((entry) => entry.name === "fixture-right");
+    const leftSharedId = resolution.find(
+      (edge) => edge.fromPackageId === left?.packageId && edge.specifier === "fixture-shared",
+    )?.targetPackageId;
+    const rightSharedId = resolution.find(
+      (edge) => edge.fromPackageId === right?.packageId && edge.specifier === "fixture-shared",
+    )?.targetPackageId;
+    expect(leftSharedId).toMatch(/^[a-f0-9]{64}$/);
+    expect(rightSharedId).toMatch(/^[a-f0-9]{64}$/);
+    expect(leftSharedId).not.toBe(rightSharedId);
+    const leftPeerId = resolution.find(
+      (edge) => edge.fromPackageId === leftSharedId && edge.specifier === "fixture-peer",
+    )?.targetPackageId;
+    const rightPeerId = resolution.find(
+      (edge) => edge.fromPackageId === rightSharedId && edge.specifier === "fixture-peer",
+    )?.targetPackageId;
+    expect(leftPeerId).toMatch(/^[a-f0-9]{64}$/);
+    expect(rightPeerId).toMatch(/^[a-f0-9]{64}$/);
+    expect(leftPeerId).not.toBe(rightPeerId);
     expect(
       readFileSync(join(safe?.revision?.publishedPath ?? "", "manifest.json"), "utf8"),
     ).toContain(safe?.revision?.revisionId === undefined ? "never" : '"workflowName":"safe"');
     expect(Bun.file(subject.marker).exists()).resolves.toBe(false);
+
+    const materialized = materializeRevision({
+      retainedRoot: safe?.revision?.publishedPath ?? "missing",
+      executionRoot: join(subject.dataRoot, "materialized"),
+      revisionId: safe?.revision?.revisionId ?? "missing",
+      packageGraphId: safe?.revision?.packageGraphId ?? "missing",
+    });
+    expect(readFileSync(join(materialized.root, ".kojo", "prompt.md"), "utf8")).toBe(
+      "exact prompt bytes\n",
+    );
+    expect(readFileSync(join(materialized.root, ".kojo", "factory.json"), "utf8")).toContain(
+      '"formatVersion":1',
+    );
+    expect(realpathSync(join(materialized.root, "node_modules", "fixture-local"))).toBe(
+      realpathSync(
+        join(materialized.root, ".kojo-retained", "packages", local?.packageId ?? "missing"),
+      ),
+    );
+    const runtimeRoot = join(
+      materialized.root,
+      ".kojo-retained",
+      "packages",
+      materialized.manifest.runtime.packageId,
+    );
+    expect(realpathSync(join(runtimeRoot, "node_modules", "effect"))).toBe(
+      realpathSync(join(materialized.root, "node_modules", "effect")),
+    );
+    const retainedPackages = join(materialized.root, ".kojo-retained", "packages");
+    expect(
+      realpathSync(
+        join(retainedPackages, left?.packageId ?? "missing", "node_modules", "fixture-shared"),
+      ),
+    ).toBe(realpathSync(join(retainedPackages, leftSharedId ?? "missing")));
+    expect(
+      realpathSync(
+        join(retainedPackages, right?.packageId ?? "missing", "node_modules", "fixture-shared"),
+      ),
+    ).toBe(realpathSync(join(retainedPackages, rightSharedId ?? "missing")));
+    expect(
+      realpathSync(
+        join(retainedPackages, leftSharedId ?? "missing", "node_modules", "fixture-peer"),
+      ),
+    ).toBe(realpathSync(join(retainedPackages, leftPeerId ?? "missing")));
+    expect(
+      realpathSync(
+        join(retainedPackages, rightSharedId ?? "missing", "node_modules", "fixture-peer"),
+      ),
+    ).toBe(realpathSync(join(retainedPackages, rightPeerId ?? "missing")));
+    materialized.dispose();
 
     writeFileSync(join(subject.root, ".kojo", "prompt.md"), "changed prompt bytes\n");
     const changed = await Effect.runPromise(

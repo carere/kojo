@@ -4,6 +4,7 @@ export type DaemonRunState =
   | "queued"
   | "executing"
   | "suspended"
+  | "held"
   | "succeeded"
   | "failed"
   | "cancelled";
@@ -12,7 +13,18 @@ export type RunQueueReason =
   | "execution-capacity"
   | "project-capacity"
   | "runner-starting"
-  | "package-switch";
+  | "package-switch"
+  | "pinned-content";
+
+export interface RunExecutionFault {
+  readonly code:
+    | "RETAINED_CONTENT_MISSING"
+    | "RETAINED_CONTENT_CORRUPT"
+    | "RETAINED_HOST_INCOMPATIBLE"
+    | "RETAINED_PROTOCOL_INCOMPATIBLE";
+  readonly detail: string;
+  readonly remedy: string;
+}
 
 export interface DaemonRun {
   readonly runId: string;
@@ -25,6 +37,7 @@ export interface DaemonRun {
   readonly state: DaemonRunState;
   readonly queueKind?: RunQueueKind;
   readonly queueReason?: RunQueueReason;
+  readonly executionFault?: RunExecutionFault;
   readonly admissionSequence: number;
   readonly admittedAt: string;
   readonly startedAt?: string;
@@ -34,6 +47,11 @@ export interface DaemonRun {
 export interface ClaimedRun {
   readonly run: DaemonRun;
   readonly authority: RunAuthority;
+}
+
+export interface ReservedRun {
+  readonly run: DaemonRun;
+  readonly reservationId: string;
 }
 
 export interface RunAuthority {
