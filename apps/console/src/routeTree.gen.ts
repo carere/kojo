@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root.tsx'
 import { Route as IndexRouteImport } from './routes/index.tsx'
+import { Route as DaemonRouteImport } from './routes/daemon.tsx'
 import { Route as GatesRouteImport } from './routes/gates.tsx'
 import { Route as RunsRunIdRouteImport } from './routes/runs.$runId.tsx'
 import { Route as RunsRunIdGatesGateAskingRouteImport } from './routes/runs.$runId.gates.$gate.$asking.tsx'
@@ -19,6 +20,11 @@ import { Route as RunsRunIdSandboxesNameAcquisitionRouteImport } from './routes/
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DaemonRoute = DaemonRouteImport.update({
+  id: '/daemon',
+  path: '/daemon',
   getParentRoute: () => rootRouteImport,
 } as any)
 const GatesRoute = GatesRouteImport.update({
@@ -52,6 +58,7 @@ const RunsRunIdSandboxesNameAcquisitionRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/daemon': typeof DaemonRoute
   '/gates': typeof GatesRoute
   '/runs/$runId': typeof RunsRunIdRouteWithChildren
   '/runs/$runId/gates/$gate/$asking': typeof RunsRunIdGatesGateAskingRoute
@@ -60,6 +67,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/daemon': typeof DaemonRoute
   '/gates': typeof GatesRoute
   '/runs/$runId': typeof RunsRunIdRouteWithChildren
   '/runs/$runId/gates/$gate/$asking': typeof RunsRunIdGatesGateAskingRoute
@@ -69,6 +77,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/daemon': typeof DaemonRoute
   '/gates': typeof GatesRoute
   '/runs/$runId': typeof RunsRunIdRouteWithChildren
   '/runs/$runId/gates/$gate/$asking': typeof RunsRunIdGatesGateAskingRoute
@@ -79,6 +88,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/daemon'
     | '/gates'
     | '/runs/$runId'
     | '/runs/$runId/gates/$gate/$asking'
@@ -87,6 +97,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/daemon'
     | '/gates'
     | '/runs/$runId'
     | '/runs/$runId/gates/$gate/$asking'
@@ -95,6 +106,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/daemon'
     | '/gates'
     | '/runs/$runId'
     | '/runs/$runId/gates/$gate/$asking'
@@ -104,6 +116,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  DaemonRoute: typeof DaemonRoute
   GatesRoute: typeof GatesRoute
   RunsRunIdRoute: typeof RunsRunIdRouteWithChildren
 }
@@ -115,6 +128,13 @@ declare module '@tanstack/solid-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/daemon': {
+      id: '/daemon'
+      path: '/daemon'
+      fullPath: '/daemon'
+      preLoaderRoute: typeof DaemonRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/gates': {
@@ -174,6 +194,7 @@ const RunsRunIdRouteWithChildren = RunsRunIdRoute._addFileChildren(
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  DaemonRoute: DaemonRoute,
   GatesRoute: GatesRoute,
   RunsRunIdRoute: RunsRunIdRouteWithChildren,
 }

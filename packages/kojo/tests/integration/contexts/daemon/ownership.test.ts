@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { startDaemon } from "../../../../src/contexts/daemon/adapters/DaemonOwner.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
 import { LifecycleError } from "../../../../src/contexts/daemon/models/LifecycleError.ts";
+import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
 
 const roots: Array<string> = [];
 
@@ -20,7 +21,7 @@ const paths = (): DaemonPaths => {
   const root = mkdtempSync(join(tmpdir(), "kojo-daemon-owner-"));
   roots.push(root);
   const installationRoot = join(root, "installation");
-  return {
+  const hostPaths = {
     installationRoot,
     dataRoot: join(root, "data"),
     runtimeRoot: join(root, "runtime"),
@@ -28,6 +29,8 @@ const paths = (): DaemonPaths => {
     managedCli: join(installationRoot, "bin", "kojo"),
     managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
   };
+  publishConsoleRelease(hostPaths);
+  return hostPaths;
 };
 
 afterEach(() => {
