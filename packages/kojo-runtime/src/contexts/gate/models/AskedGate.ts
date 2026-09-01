@@ -71,30 +71,3 @@ export class AskedGate extends Schema.Class<AskedGate>("AskedGate")({
     return now > this.request.deadlineAt ? "overdue" : "waiting";
   }
 }
-
-/**
- * What waits on a human, worst first.
- *
- * Overdue askings sort above waiting ones and longer waits above shorter ones, because the whole
- * reason to print this list is to find the run nobody has looked at. A list ordered by when the
- * question was asked buries the one that has been ignored the longest under everything asked since.
- */
-export const waitingFirst = (
-  gates: ReadonlyArray<AskedGate>,
-  now: number,
-): ReadonlyArray<AskedGate> =>
-  [...gates].sort((left, right) => {
-    const rank = (gate: AskedGate) => (gate.state(now) === "overdue" ? 0 : 1);
-    const byState = rank(left) - rank(right);
-    return byState === 0 ? right.waitedMillis(now) - left.waitedMillis(now) : byState;
-  });
-
-/**
- * The askings still on a human's desk — waiting or overdue, never the ones already settled.
- *
- * Settled covers both ways an asking ends: **answered**, and **expired**. An expired asking has no
- * verdict, and before the settlement was written down it sat here forever, *overdue by* a number
- * that grew without bound — a queue that lists work nobody can do is a queue people stop reading.
- */
-export const unsettled = (gates: ReadonlyArray<AskedGate>): ReadonlyArray<AskedGate> =>
-  gates.filter((gate) => gate.verdict === undefined && gate.expiredAt === undefined);

@@ -7,7 +7,8 @@ import type { GateUnreachable } from "../models/GateUnreachable.ts";
  *
  * `request` posts a review, prints a command, or sends a message — and then it *finishes*. It never
  * waits for the answer, because the answer may arrive in another process, on another machine, on
- * Tuesday. The answering half needs no port at all: it holds the token and calls `answerGate`.
+ * Tuesday. Only the Daemon records and applies a Verdict; the Project runtime receives continuation
+ * through its private Runner protocol.
  *
  * That asymmetry is the whole design. A port with a `ask(): Effect<Verdict>` method would have to
  * hold the fiber, and holding the fiber is holding the container.

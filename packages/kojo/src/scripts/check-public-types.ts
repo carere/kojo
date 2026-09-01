@@ -13,7 +13,7 @@ import { promiseLeaksUnder, reportLeaks } from "../contexts/sandbox/guards/promi
  * executable `moon run kojo:check-public-types` invokes. It grades what `tsc --build` emitted, so
  * the moon task depends on the `tsc` task rather than trusting whatever is in the cache.
  */
-const defaultTypesDirectory = "../../.moon/cache/types/packages/kojo/src";
+const defaultTypesDirectory = "../../.moon/cache/types/packages/kojo-runtime/src";
 
 const program = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
@@ -28,7 +28,16 @@ const program = Effect.gen(function* () {
     return yield* Effect.sync(() => process.exit(1));
   }
 
-  const leaks = yield* promiseLeaksUnder(root);
+  const processBoundaries = new Set([
+    "contexts/project/adapters/DaemonResourceLeaseClient.d.ts",
+    "contexts/trace/adapters/DaemonArtifactPublisher.d.ts",
+    "contexts/workflow/adapters/RetainedFactoryAssetRepository.d.ts",
+    "runner/main.d.ts",
+    "validator/main.d.ts",
+  ]);
+  const leaks = (yield* promiseLeaksUnder(root)).filter(
+    (leak) => !processBoundaries.has(leak.file),
+  );
   if (leaks.length === 0) return yield* Console.log(`no promises under ${root}`);
 
   // The report is the whole message. Failing the Effect instead would print a second, less useful

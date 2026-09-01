@@ -262,8 +262,6 @@ describe("the README a stamped factory carries", () => {
     for (const row of rows) {
       const named =
         written.has(row) ||
-        // Runtime data is named as a future Daemon product and init must not create it.
-        row === "data/" ||
         (row.includes("<agent>") &&
           [...written].some((path) => path.startsWith(row.split("<agent>")[0] ?? "")));
       expect(named, `the README names \`${row}\`, and nothing stamps it`).toBe(true);
@@ -274,10 +272,11 @@ describe("the README a stamped factory carries", () => {
     const readme = contentAt(plan(choicesFor(template)).files, ".kojo/README.md");
     const choices = choicesFor(template);
 
-    // Followed literally, the walk-through has to work. It cannot begin with `kojo run`: every
+    // Followed literally, the walk-through has to work. It cannot begin with a Workflow Start:
+    // every
     // file in the directory imports `kojo` and `effect`, and neither resolves until an install.
     expect(readme.indexOf(firstInstall(choices.toolchain.manager))).toBeLessThan(
-      readme.indexOf(`kojo run ${template}`),
+      readme.indexOf(`kojo workflow start <project-id> ${template}`),
     );
     // And the manifest it now describes is one initialisation writes, with both entries named.
     expect(readme).toContain("package.json");
@@ -293,17 +292,16 @@ describe("the README a stamped factory carries", () => {
   });
 });
 
-describe("where a run's own state goes", () => {
-  it.each(templateNames)("%s ignores runtime data without creating it", (template) => {
+describe("where a Run's state goes", () => {
+  it.each(templateNames)("%s keeps only credentials in the Project ignore file", (template) => {
     const stamped = plan(choicesFor(template));
 
     expect(stamped.directories).not.toContain(".kojo/data");
 
     const ignore = contentAt(stamped.files, ".kojo/.gitignore");
-    expect(ignore).toContain("data/");
-    // The credentials, and the engine's own SQLite file wherever `--database` puts it.
     expect(ignore).toContain(".env");
-    expect(ignore).toContain("*.db");
+    expect(ignore).not.toContain("data/");
+    expect(ignore).not.toContain("*.db");
   });
 });
 

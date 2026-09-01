@@ -61,7 +61,7 @@ export interface Compensating<Tag extends string, Failure> {
  *
  * **Once per run — on the engine Kojo ships.** A resumed run replays its body, so it registers the
  * undo again, and the count is therefore a question about instance scopes rather than about
- * registrations. `ClusterWorkflowEngine` — what `SingleNodeEngine` is — builds a fresh instance and a
+ * registrations. The Daemon Workflow engine builds a fresh instance and a
  * fresh scope for each execution, and only the last one closes, so the undo runs once however many
  * times the run suspended. `InMemoryEngine` does not: it hands the previous instance's scope to the
  * new instance (`WorkflowEngine.ts:618-622`), so one run has one scope for its whole life and every

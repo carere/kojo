@@ -17,15 +17,15 @@ export class TriggerEvent extends Schema.Class<TriggerEvent>("TriggerEvent")({
   /**
    * Which trigger produced it — `manual`, `poller/github`, `webhook/gitlab`.
    *
-   * Carried on the event rather than known by the driver, because one watcher may read several
-   * sources, and an acknowledgement has to go back to the source the event came from.
+   * Carried on the event because a Runner may read several sources, and an acknowledgement has to
+   * go back to the source the event came from.
    */
   source: Schema.String,
   /**
    * What the run is deduplicated by: the ticket revision, the commit sha, the delivery id.
    *
    * It must be the value the workflow's own `idempotencyKey` returns for this payload. That is not
-   * a convention the driver hopes for — it is checked before the run starts, because a trigger that
+   * a convention the Runner hopes for — it is checked before the Run starts, because a Trigger that
    * disagrees with its workflow about what a unit of work *is* opens a second factory silently.
    */
   key: Schema.String,

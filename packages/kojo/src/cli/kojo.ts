@@ -8,18 +8,16 @@ import { project } from "./project.ts";
 import { root } from "./root.ts";
 import { run } from "./run.ts";
 import { ui } from "./ui.ts";
-import { watch } from "./watch.ts";
 import { workflow } from "./workflow.ts";
 
 /**
  * The whole command tree.
  *
- * The root and its shared flags live in `root.ts` so a subcommand can read them without importing
- * this module — the handlers do `yield* root`, and building the tree here keeps that from being an
- * import cycle.
+ * Repository-local authoring commands do not start execution. Runtime commands are clients of the
+ * one OS-user Daemon.
  */
 export const kojo = root.pipe(
-  Command.withSubcommands([init, doctor, run, watch, gate, ui, daemon, project, workflow]),
+  Command.withSubcommands([init, doctor, run, gate, ui, daemon, project, workflow]),
 );
 
 /**

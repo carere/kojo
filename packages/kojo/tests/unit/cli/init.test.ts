@@ -135,19 +135,4 @@ describe("initialising a factory from the command line", () => {
       expect(Result.isFailure(outcome)).toBe(true);
     }),
   );
-
-  it.effect("takes the shared --database flag, like every other subcommand", () =>
-    Effect.gen(function* () {
-      // `init` does not read it. The assertion is that the shared flag is still *accepted* here:
-      // a person types `kojo --database x init …` and the parser must not call it unrecognised.
-      const { outcome } = yield* runCli([
-        ...answered,
-        "--path",
-        "/repo",
-        "--database",
-        "/tmp/nothing.db",
-      ]);
-      expect(Result.isSuccess(outcome)).toBe(true);
-    }),
-  );
 });

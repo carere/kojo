@@ -2,7 +2,7 @@
  * Where a stamped factory keeps its parts, relative to the repository root.
  *
  * One module, because two halves of this build read these paths from opposite ends: `kojo init`
- * *writes* them, and `kojo run` *loads* them back. A second copy of the string `.kojo/workflows`
+ * *writes* them, and the Daemon captures them. A second copy of the string `.kojo/workflows`
  * is exactly how a scaffolder and a loader come to disagree about where the product lives, and the
  * symptom of that disagreement is `unknown workflow` in a repository that plainly has one.
  */
@@ -13,9 +13,9 @@ export const factoryDirectory = ".kojo";
 /**
  * Where a factory's own workflows live, inside it.
  *
- * **One file, one name.** The file name is the name `kojo run` takes, and the loader proves the
+ * **One file, one name.** The file name is the Workflow name, and the loader proves the
  * module agrees — a workflow whose tag is not its file name is refused rather than run under the
- * wrong name. That is what lets `kojo run --help` list what a factory has by reading the directory,
+ * wrong name. That is what lets Workflow discovery list a Factory by reading the directory,
  * without importing a single module to find out.
  *
  * Only the top level is a name. A workflow may import anything it likes from a subdirectory, and
@@ -55,7 +55,7 @@ export const defaultTrunk = "main";
  * fails with `Cannot find module` at the first line of the first file it loads.
  *
  * **It is not the command name and it is not the branch prefix.** Those are `kojo` too and they
- * stay `kojo`: a person types `kojo run`, and a factory owns `kojo/*` branches. Only the registry
+ * stay `kojo`: a person types `kojo`, and a Factory owns `kojo/*` branches. Only the registry
  * name carries the scope. `templatesImportTheEngine.test.ts` is what keeps the stamped imports and
  * this constant from drifting.
  */

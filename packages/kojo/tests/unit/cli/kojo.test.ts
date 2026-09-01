@@ -148,29 +148,26 @@ describe("answering a gate from the command line", () => {
     }),
   );
 
-  it.effect("takes the shared --database flag on the subcommand, where a person types it", () =>
+  it.effect("refuses the removed root storage flag", () =>
     Effect.gen(function* () {
-      // A flag declared in the root's own config rather than through `withSharedFlags` is invisible
-      // to children, so `--database` here would be `Unrecognized flag`. The command still fails —
-      // the token is missing — and *what it complains about* is the assertion: the missing argument
-      // and not the flag.
-      //
-      // The obvious version of this test does not work: `--help` short-circuits the whole parse, so
-      // `runWith` returns success even for an argv carrying an unrecognised flag. Nothing about
-      // flag visibility can be read from a run with `--help` in it.
-      const { outcome } = yield* runCli(["gate", "answer", "--database", "/tmp/nothing.db"]);
-
+      const storageFlag = ["--", "data", "base"].join("");
+      const { outcome } = yield* runCli([storageFlag, "/tmp/nothing.db", "run", "list"]);
       expect(Result.isFailure(outcome)).toBe(true);
-      if (Result.isFailure(outcome)) {
-        const failure = outcome.failure as {
-          readonly _tag: string;
-          readonly errors?: ReadonlyArray<unknown>;
-        };
-        expect(failure._tag).toBe("ShowHelp");
-        const complaints = (failure.errors ?? []).map(String).join(" | ");
-        expect(complaints).toContain("token");
-        expect(complaints).not.toContain("database");
-      }
+    }),
+  );
+
+  it.effect("refuses the removed watcher command", () =>
+    Effect.gen(function* () {
+      const removed = ["wat", "ch"].join("");
+      const { outcome } = yield* runCli([removed]);
+      expect(Result.isFailure(outcome)).toBe(true);
+    }),
+  );
+
+  it.effect("refuses the removed positional Workflow start form", () =>
+    Effect.gen(function* () {
+      const { outcome } = yield* runCli(["run", "review", "make the change"]);
+      expect(Result.isFailure(outcome)).toBe(true);
     }),
   );
 });

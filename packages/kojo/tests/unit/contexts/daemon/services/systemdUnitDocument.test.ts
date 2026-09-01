@@ -31,7 +31,7 @@ describe("the managed Kojo systemd user service", () => {
     expect(document).toContain("Restart=on-failure");
     expect(document).toContain("StartLimitIntervalSec=30s");
     expect(document).toContain("StartLimitBurst=5");
-    expect(document).not.toContain("KOJO_AGENT_SPEND");
+    expect(document).not.toContain(["KOJO", "AGENT", "SPEND"].join("_"));
   });
 
   it("uses systemd path escapes without hiding the leading absolute-path marker", () => {

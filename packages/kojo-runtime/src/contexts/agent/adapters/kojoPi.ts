@@ -103,7 +103,8 @@ const quote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
  * Every flag that says who the agent is, in the order a human would read them.
  *
  * Shared by the print command and the interactive one on purpose. An identity that survived
- * `kojo run` and vanished in an interactive session would be the same bug in a second place.
+ * a Workflow execution and vanished in an interactive session would be the same bug in a second
+ * place.
  */
 const identityFlags = (options: KojoPiOptions): ReadonlyArray<readonly [string, string]> => [
   ["--model", options.model],

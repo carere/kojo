@@ -952,7 +952,7 @@ export const startDaemon = (
     };
     const gateSnapshot = async (projectId?: string): Promise<Response> =>
       noStoreJson(await Effect.runPromise(gateApi.snapshot(projectId)));
-    const answerGate = async (
+    const recordGateAnswer = async (
       request: Request,
       clientSuppliesAnswerer: boolean,
     ): Promise<Response> => {
@@ -1460,7 +1460,7 @@ export const startDaemon = (
               return gateSnapshot();
             }
             if (request.method === "POST" && url.pathname === "/api/v1/gate-answers") {
-              return answerGate(request, false);
+              return recordGateAnswer(request, false);
             }
             const cancelOneRun = url.pathname.match(
               /^\/api\/v1\/runs\/([A-Za-z0-9_-]+)\/actions\/cancel$/,
@@ -1640,7 +1640,7 @@ export const startDaemon = (
           }
           if (request.method === "POST" && url.pathname === "/api/v1/gate-answers") {
             if (!isJson(request)) return problem(415, "json-required", "Gate answer requires JSON");
-            return answerGate(request, true);
+            return recordGateAnswer(request, true);
           }
           const cancelOneRun = url.pathname.match(
             /^\/api\/v1\/runs\/([A-Za-z0-9_-]+)\/actions\/cancel$/,

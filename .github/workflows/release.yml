@@ -38,9 +38,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      # The same refusal CI states. Nothing in a release may spend, and saying so here means the
+      # A release must not contact an external agent. The real-agent suites stay disabled.
       # guard is not relying on the runner happening to have no terminal.
-      KOJO_AGENT_SPEND: refuse
     steps:
       - name: Git checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

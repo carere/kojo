@@ -18,7 +18,7 @@ import type { Verdict } from "../models/Verdict.ts";
  * written down. A `Repository` rather than a `Service` because it works with data and nothing else.
  *
  * It is observability, not correctness: resolving the suspension is a write to the *engine's*
- * storage, which `answerGate` does. Nothing here can resume a run, and a row here that says
+ * storage through the private Runner protocol. Nothing here can resume a Run, and a row here that says
  * `recorded` never means the run has moved.
  */
 export class GateRepository extends Context.Service<

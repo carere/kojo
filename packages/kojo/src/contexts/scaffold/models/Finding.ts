@@ -15,8 +15,7 @@ export type Standing = "ok" | "failed" | "skipped";
  * only way to build one — {@link failed} demands it as an argument, so a failure with nothing to do
  * about it is unrepresentable rather than merely discouraged. The criterion this ticket carries
  * ("each failure names what is wrong *and what to do about it*") is therefore a property of the
- * type, and {@link everyFaultSaysWhatToDo} grades it over a whole diagnosis rather than one message
- * at a time.
+ * type, so a diagnosis can render it without guessing.
  */
 export interface Finding {
   /** What was looked at — `runtime`, `image`, `commands`. One word, so the report is a column. */
@@ -62,12 +61,3 @@ export const faults = (findings: ReadonlyArray<Finding>): ReadonlyArray<Finding>
  * could not be answered is a `failed`, never a `skipped`.
  */
 export const isReady = (findings: ReadonlyArray<Finding>): boolean => faults(findings).length === 0;
-
-/**
- * Whether every failure in this diagnosis says what to do about it.
- *
- * True by construction, and asserted anyway: it is the criterion, and a criterion nothing grades is
- * one that survives exactly until somebody builds a `Finding` by hand.
- */
-export const everyFaultSaysWhatToDo = (findings: ReadonlyArray<Finding>): boolean =>
-  faults(findings).every((finding) => (finding.remedy ?? "").trim() !== "");

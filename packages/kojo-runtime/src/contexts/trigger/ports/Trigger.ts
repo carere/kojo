@@ -1,6 +1,5 @@
 import { Context, type Effect, type Stream } from "effect";
 import type { RunId } from "../../shared/models/RunId.ts";
-import type { RunOutcome } from "../../trace/models/RunRecord.ts";
 import type { TriggerError } from "../models/TriggerError.ts";
 import type { TriggerEvent } from "../models/TriggerEvent.ts";
 
@@ -13,11 +12,8 @@ import type { TriggerEvent } from "../models/TriggerEvent.ts";
  */
 export interface TriggerOutcome {
   readonly runId: RunId;
-  /**
-   * `admitted` means the Daemon committed the Run before it asked the source to acknowledge.
-   * The terminal values remain for the standalone driver, which waits for execution.
-   */
-  readonly outcome: "admitted" | RunOutcome;
+  /** The Daemon committed the Run before it asked the source to acknowledge. */
+  readonly outcome: "admitted";
 }
 
 /**
@@ -26,7 +22,7 @@ export interface TriggerOutcome {
  * A `Stream` rather than four interfaces, because the four shapes differ only in when the next event
  * arrives: the **manual** adapter emits one event and ends, a **poller** emits on an interval, a
  * **webhook receiver** emits on request, a **cron** emits on schedule. Every one of them is a
- * `Stream<TriggerEvent>`, so the watcher that drives runs is written once.
+ * `Stream<TriggerEvent>`, so the Daemon Runner handles them through one port.
  *
  * The port does **not** deduplicate. Every event carries the value the run is deduplicated by, and
  * the dedup itself is the workflow's own `idempotencyKey` — the engine hashes it into the execution
@@ -42,7 +38,7 @@ export interface TriggerOutcome {
 export class Trigger extends Context.Service<
   Trigger,
   {
-    /** One event per unit of work. Ends when the source has no more; a daemon's source never does. */
+    /** One event per unit of work. A live Daemon source normally does not end. */
     readonly stream: Stream.Stream<TriggerEvent, TriggerError>;
     readonly ack: (event: TriggerEvent, run: TriggerOutcome) => Effect.Effect<void, TriggerError>;
   }
