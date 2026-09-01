@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import type { JsonValue } from "@carere/kojo-runner-contracts/contexts/shared/codecs/json";
-import { Clock, Duration, Effect, Exit, Fiber, Layer, Option, Scope } from "effect";
+import { Clock, Context, Duration, Effect, Exit, Fiber, Layer, Option, Scope } from "effect";
 import { Workflow, WorkflowEngine } from "effect/unstable/workflow";
+import { ActionRecoveryPolicy } from "../models/ActionRecoveryPolicy.ts";
 import { DaemonExecutionRepository } from "../ports/DaemonExecutionRepository.ts";
 
 interface Registration {
@@ -22,6 +24,25 @@ interface ExecutionState {
   readonly instance: WorkflowEngine.WorkflowInstance["Service"];
   fiber?: Fiber.Fiber<Workflow.Result<unknown, unknown>>;
 }
+
+const canonicalJson = (value: unknown): string => {
+  if (value === null || typeof value === "string" || typeof value === "boolean")
+    return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("external action input must be finite JSON");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(",")}}`;
+  }
+  throw new Error("external action input must be JSON");
+};
 
 /** Durable encoded engine for one exact Workflow Revision in one Project Runner process. */
 export const layer = <RExecution>(
@@ -122,6 +143,50 @@ export const layer = <RExecution>(
           if (recorded !== undefined)
             return recorded as unknown as Workflow.Result<unknown, unknown>;
 
+          const recoveryPolicy = Context.get(activity.annotations, ActionRecoveryPolicy);
+          const execution = executions.get(instance.executionId);
+          if (execution === undefined)
+            return yield* Effect.die(`Execution ${instance.executionId} is not registered`);
+          const inputHash = createHash("sha256")
+            .update(
+              canonicalJson({
+                payload: execution.payload,
+                phasePath: activity.name,
+                attempt,
+              }),
+            )
+            .digest("hex");
+          const actionId = `action_${createHash("sha256")
+            .update(
+              canonicalJson({
+                runId: instance.executionId,
+                revisionId,
+                phasePath: activity.name,
+                attempt,
+                inputHash,
+              }),
+            )
+            .digest("hex")
+            .slice(0, 32)}`;
+          if (recoveryPolicy !== undefined) {
+            const intendedAt = yield* Clock.currentTimeMillis;
+            const decision = yield* repository.beginAction(
+              actionId,
+              activity.name,
+              attempt,
+              inputHash,
+              recoveryPolicy,
+              intendedAt,
+            );
+            if (decision.kind === "reuse-result")
+              return decision.result as unknown as Workflow.Result<unknown, unknown>;
+            if (decision.kind === "hold") {
+              return yield* Effect.die(
+                `External action ${decision.actionId} is unresolved and requires accepted evidence or exact retry authorization`,
+              );
+            }
+          }
+
           const activityInstance = WorkflowEngine.WorkflowInstance.initial(
             instance.workflow,
             instance.executionId,
@@ -142,6 +207,7 @@ export const layer = <RExecution>(
               attempt,
               encoded,
               { startedAt, endedAt },
+              recoveryPolicy === undefined ? undefined : actionId,
             );
           }
           return result;

@@ -5,6 +5,10 @@ import { makePhaseId } from "../../../shared/models/PhaseId.ts";
 import { InFlightPhase } from "../../../trace/models/InFlightPhase.ts";
 import { PhaseRecord } from "../../../trace/models/PhaseRecord.ts";
 import { Tracer } from "../../../trace/ports/Tracer.ts";
+import {
+  ActionRecoveryPolicy,
+  type ActionRecoveryPolicy as ActionRecoveryPolicyValue,
+} from "../../models/ActionRecoveryPolicy.ts";
 import { CurrentRun } from "../CurrentRun.ts";
 import { whereItRan } from "./whereItRan.ts";
 
@@ -25,6 +29,8 @@ export const code = <Success extends Schema.Top, Error extends Schema.Top, R>(
     readonly success: Success;
     /** A code phase's failures travel back to an agent as an envelope, so they must be typed. */
     readonly error: Error;
+    /** Evidence contract for recovery after output loss. Arbitrary shell effects stay unresolved. */
+    readonly recoveryPolicy?: ActionRecoveryPolicyValue;
   },
   body: Effect.Effect<Success["Type"], Error["Type"], R>,
 ) =>
@@ -81,4 +87,4 @@ export const code = <Success extends Schema.Top, Error extends Schema.Top, R>(
         ),
       );
     }),
-  });
+  }).annotate(ActionRecoveryPolicy, options.recoveryPolicy ?? "unresolved");

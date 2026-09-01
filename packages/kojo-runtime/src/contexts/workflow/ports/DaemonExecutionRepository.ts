@@ -6,10 +6,29 @@ export interface CommittedActivityTiming {
   readonly endedAt: number;
 }
 
+export type ActionRecoveryPolicy =
+  | "recover-result"
+  | "prove-not-performed"
+  | "safe-repetition"
+  | "unresolved";
+
+export type BeginActionDecision =
+  | { readonly kind: "perform"; readonly actionId: string }
+  | { readonly kind: "reuse-result"; readonly actionId: string; readonly result: JsonValue }
+  | { readonly kind: "hold"; readonly actionId: string };
+
 /** Project-local IPC port. The Daemon adapter fences every operation with the current Claim. */
 export class DaemonExecutionRepository extends Context.Service<
   DaemonExecutionRepository,
   {
+    readonly beginAction: (
+      actionId: string,
+      phasePath: string,
+      attempt: number,
+      inputHash: string,
+      recoveryPolicy: ActionRecoveryPolicy,
+      intendedAt: number,
+    ) => Effect.Effect<BeginActionDecision>;
     readonly readResult: (
       runId: string,
       revisionId: string,
@@ -23,6 +42,7 @@ export class DaemonExecutionRepository extends Context.Service<
       attempt: number,
       result: JsonValue,
       timing: CommittedActivityTiming,
+      actionId?: string,
     ) => Effect.Effect<void>;
     readonly readDeferred: (
       runId: string,

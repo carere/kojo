@@ -15,6 +15,7 @@ import { PhaseRecord } from "../../../trace/models/PhaseRecord.ts";
 import { Verification } from "../../../trace/models/Verification.ts";
 import { Tracer } from "../../../trace/ports/Tracer.ts";
 import { type Check, runChecks } from "../../guards/Check.ts";
+import { ActionRecoveryPolicy } from "../../models/ActionRecoveryPolicy.ts";
 import { CheckViolation } from "../../models/CheckViolation.ts";
 import { EnvelopeParseError } from "../../models/EnvelopeParseError.ts";
 import { CurrentRun } from "../CurrentRun.ts";
@@ -209,7 +210,7 @@ export const agent = <Envelope extends Schema.Top, R = never>(options: {
         ),
       );
     }),
-  });
+  }).annotate(ActionRecoveryPolicy, "unresolved");
 
 /**
  * The agent's text, read as the envelope it was asked for.

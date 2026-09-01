@@ -8,6 +8,7 @@ import {
   runStatusLine,
   runStatusRequest,
   validateRunStatusFlags,
+  validateUncertainRetry,
 } from "../../../src/cli/runStatus.ts";
 
 const run = (state: RunDocument["state"]): RunDocument => ({
@@ -131,5 +132,56 @@ describe("Daemon Run status CLI contract", () => {
       method: "GET",
       path: "/api/v1/runs/run%2Fone",
     });
+  });
+
+  it("requires the exact action ID, reason, and possible-duplication acknowledgement", () => {
+    expect(() =>
+      validateUncertainRetry({
+        actionId: "action_exact",
+        reason: "Provider status cannot resolve this publish.",
+        possibleDuplicationAcknowledged: true,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateUncertainRetry({
+        actionId: "action_exact",
+        reason: "Provider status cannot resolve this publish.",
+        possibleDuplicationAcknowledged: false,
+      }),
+    ).toThrow("acknowledge-possible-duplication");
+    expect(() =>
+      validateUncertainRetry({
+        actionId: "",
+        reason: "reason",
+        possibleDuplicationAcknowledged: true,
+      }),
+    ).toThrow("exact action ID");
+  });
+
+  it("shows uncertainty separately from execution, cancellation, and cleanup", () => {
+    const line = runStatusLine(
+      {
+        ...run("held"),
+        uncertainty: {
+          actionId: "action_exact",
+          revisionId: "a".repeat(64),
+          phasePath: "publish",
+          attempt: 1,
+          inputHash: "c".repeat(64),
+          recoveryPolicy: "unresolved",
+          state: "unresolved",
+          uncertaintyRevision: 1,
+          evidence: {
+            kind: "unresolved",
+            detail: "the process output was lost",
+            observedAt: "2026-09-01T00:00:02.000Z",
+          },
+        },
+      },
+      false,
+    );
+    expect(line).toContain("Uncertainty=unresolved:action_exact");
+    expect(line).toContain("RecoveryPolicy=unresolved");
+    expect(line).toContain("Evidence=unresolved:the process output was lost");
   });
 });

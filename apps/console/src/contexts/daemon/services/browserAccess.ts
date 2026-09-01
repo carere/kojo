@@ -16,6 +16,7 @@ import type {
 } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
 import type {
   CancelRunResult,
+  RetryUncertainActionResult,
   RunDocument,
   RunSnapshot,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
@@ -309,6 +310,25 @@ export const cancelRun = async (runId: string): Promise<CancelRunResult> => {
   return authorizedMutation<CancelRunResult>(
     `/api/v1/runs/${encodeURIComponent(runId)}/actions/cancel`,
     { requestId: crypto.randomUUID(), dataIdentity: bootstrap.dataIdentity },
+  );
+};
+
+export const retryUncertainAction = async (options: {
+  readonly runId: string;
+  readonly actionId: string;
+  readonly reason: string;
+  readonly possibleDuplicationAcknowledged: true;
+}): Promise<RetryUncertainActionResult> => {
+  const bootstrap = await compatibility();
+  return authorizedMutation<RetryUncertainActionResult>(
+    `/api/v1/runs/${encodeURIComponent(options.runId)}/actions/retry-uncertain`,
+    {
+      requestId: crypto.randomUUID(),
+      dataIdentity: bootstrap.dataIdentity,
+      actionId: options.actionId,
+      reason: options.reason,
+      possibleDuplicationAcknowledged: options.possibleDuplicationAcknowledged,
+    },
   );
 };
 

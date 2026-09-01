@@ -188,6 +188,20 @@ export interface RunDoc {
       readonly state: "not-required" | "pending" | "confirmed" | "fault";
       readonly detail?: string;
     };
+    readonly uncertainty?: {
+      readonly actionId: string;
+      readonly phasePath: string;
+      readonly attempt: number;
+      readonly inputHash: string;
+      readonly recoveryPolicy: string;
+      readonly state: string;
+      readonly uncertaintyRevision: number;
+      readonly evidence?: {
+        readonly kind: string;
+        readonly detail: string;
+        readonly observedAt: string;
+      };
+    };
   };
   readonly run: {
     readonly run: {

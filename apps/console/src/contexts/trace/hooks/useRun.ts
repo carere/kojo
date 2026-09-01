@@ -40,6 +40,7 @@ export const useRun = (runId: () => string): UseQueryResult<RunDoc, Error> =>
             ...(run.cancellation === undefined ? {} : { cancellation: run.cancellation }),
             ...(run.recovery === undefined ? {} : { recovery: run.recovery }),
             ...(run.cleanup === undefined ? {} : { cleanup: run.cleanup }),
+            ...(run.uncertainty === undefined ? {} : { uncertainty: run.uncertainty }),
           },
           run: {
             run: {

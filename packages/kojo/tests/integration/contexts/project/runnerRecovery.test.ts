@@ -100,6 +100,7 @@ export const recover = workflow(
       description: "Exit the first Project Runner, then complete in its replacement",
       success: Schema.Null,
       error: Schema.Never,
+      recoveryPolicy: "safe-repetition",
     },
     Effect.sync(() => {
       if (!existsSync(${JSON.stringify(firstCrash)})) {

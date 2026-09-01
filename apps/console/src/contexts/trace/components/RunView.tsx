@@ -1,7 +1,7 @@
 import { SoluxProvider } from "@carere/solux";
 import { Link, Outlet, useNavigate } from "@tanstack/solid-router";
 import { createSignal, type JSX, Show } from "solid-js";
-import { cancelRun } from "../../daemon/services/browserAccess.ts";
+import { cancelRun, retryUncertainAction } from "../../daemon/services/browserAccess.ts";
 import { GateCard } from "../../gate/components/GateCard.tsx";
 import { useAskings } from "../../gate/hooks/useAskings.ts";
 import { type Asking, latestAskingOf } from "../../gate/models/Asking.ts";
@@ -99,6 +99,11 @@ export const RunView = (props: {
   const [cancelAcknowledged, setCancelAcknowledged] = createSignal(false);
   const [cancelNotice, setCancelNotice] = createSignal<string>();
   const [cancelPending, setCancelPending] = createSignal(false);
+  const [retryActionId, setRetryActionId] = createSignal("");
+  const [retryReason, setRetryReason] = createSignal("");
+  const [duplicationAcknowledged, setDuplicationAcknowledged] = createSignal(false);
+  const [retryPending, setRetryPending] = createSignal(false);
+  const [retryNotice, setRetryNotice] = createSignal<string>();
 
   const doc = () => settled(run);
   const status = (): RunStatus => doc()?.daemon?.state ?? doc()?.run.outcome ?? "executing";
@@ -120,6 +125,26 @@ export const RunView = (props: {
       setCancelNotice(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setCancelPending(false);
+    }
+  };
+  const requestUncertainRetry = async (actionId: string): Promise<void> => {
+    if (retryActionId() !== actionId || retryReason().trim() === "" || !duplicationAcknowledged())
+      return;
+    setRetryPending(true);
+    try {
+      await retryUncertainAction({
+        runId: props.runId,
+        actionId,
+        reason: retryReason().trim(),
+        possibleDuplicationAcknowledged: true,
+      });
+      setRetryNotice(`Retry authorization is durable for exact Action ${actionId}.`);
+      setDuplicationAcknowledged(false);
+      await run.refetch();
+    } catch (cause) {
+      setRetryNotice(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRetryPending(false);
     }
   };
 
@@ -342,6 +367,84 @@ export const RunView = (props: {
                   title={`Resource cleanup: ${cleanup().state}`}
                 >
                   <Show when={cleanup().detail}>{(detail) => <p class="mt-1">{detail()}</p>}</Show>
+                </Notice>
+              )}
+            </Show>
+
+            <Show when={document().daemon?.uncertainty}>
+              {(uncertainty) => (
+                <Notice
+                  tone="retrying"
+                  title={`External action uncertainty: ${uncertainty().state}`}
+                >
+                  <p class="mt-1">
+                    Action <code>{uncertainty().actionId}</code> for Phase {uncertainty().phasePath}
+                    #{uncertainty().attempt} has no confirmed result.
+                  </p>
+                  <p class="mt-1 text-xs">
+                    Missing output, timeout, replacement, a new Claim, and Trace absence do not
+                    prove that this action did not occur. Recovery policy:{" "}
+                    {uncertainty().recoveryPolicy}.
+                  </p>
+                  <Show when={uncertainty().evidence}>
+                    {(evidence) => (
+                      <p class="mt-1 text-xs">
+                        Evidence: {evidence().kind} — {evidence().detail}
+                      </p>
+                    )}
+                  </Show>
+                  <Show when={uncertainty().state === "unresolved" && !isTerminal(status())}>
+                    <section class="mt-3 grid max-w-2xl gap-2" aria-label="Retry uncertain action">
+                      <label class="grid gap-1 text-sm">
+                        Exact action ID
+                        <input
+                          class="rounded border bg-background px-2 py-1 font-mono text-xs"
+                          value={retryActionId()}
+                          onInput={(event) => setRetryActionId(event.currentTarget.value)}
+                        />
+                      </label>
+                      <label class="grid gap-1 text-sm">
+                        Reason
+                        <textarea
+                          class="rounded border bg-background px-2 py-1 text-sm"
+                          value={retryReason()}
+                          onInput={(event) => setRetryReason(event.currentTarget.value)}
+                        />
+                      </label>
+                      <label class="flex items-start gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={duplicationAcknowledged()}
+                          onChange={(event) =>
+                            setDuplicationAcknowledged(event.currentTarget.checked)
+                          }
+                        />
+                        <span>
+                          I acknowledge that this retry can duplicate the external action.
+                        </span>
+                      </label>
+                      <button
+                        type="button"
+                        class="w-fit rounded border border-red-700 px-3 py-1 text-red-700 text-sm dark:text-red-300"
+                        disabled={
+                          retryPending() ||
+                          retryActionId() !== uncertainty().actionId ||
+                          retryReason().trim() === "" ||
+                          !duplicationAcknowledged()
+                        }
+                        onClick={() => void requestUncertainRetry(uncertainty().actionId)}
+                      >
+                        Retry exact action
+                      </button>
+                    </section>
+                  </Show>
+                  <Show when={retryNotice()}>
+                    {(notice) => (
+                      <p role="status" class="mt-2">
+                        {notice()}
+                      </p>
+                    )}
+                  </Show>
                 </Notice>
               )}
             </Show>

@@ -13,6 +13,7 @@ import {
   decodeFinishArtifactBody,
 } from "../contracts/artifact.ts";
 import {
+  decodeBeginActionBody,
   decodeCancelRunBody,
   decodeCommitActionResultBody,
   decodeExecuteRunBody,
@@ -95,6 +96,8 @@ export const decodeRunnerFrame = (input: unknown): DecodeResult<RunnerFrame> => 
     body = prefixIssues(decodeCancelRunBody(base.value.body), ["body"]);
   } else if (base.value.kind === "ReadResult") {
     body = prefixIssues(decodeReadResultBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "BeginAction") {
+    body = prefixIssues(decodeBeginActionBody(base.value.body), ["body"]);
   } else if (base.value.kind === "CommitActionResult") {
     body = prefixIssues(decodeCommitActionResultBody(base.value.body), ["body"]);
   } else if (base.value.kind === "Ready") {

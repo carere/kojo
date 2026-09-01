@@ -70,6 +70,38 @@ export interface RunDocument {
     readonly state: "not-required" | "pending" | "confirmed" | "fault";
     readonly detail?: string;
   };
+  readonly uncertainty?: {
+    readonly actionId: string;
+    readonly revisionId: string;
+    readonly phasePath: string;
+    readonly attempt: number;
+    readonly inputHash: string;
+    readonly recoveryPolicy:
+      | "recover-result"
+      | "prove-not-performed"
+      | "safe-repetition"
+      | "unresolved";
+    readonly state:
+      | "intended"
+      | "unresolved"
+      | "retry-authorized"
+      | "result-confirmed"
+      | "not-performed"
+      | "repetition-safe";
+    readonly uncertaintyRevision: number;
+    readonly evidence?: {
+      readonly kind: "original-result" | "not-performed" | "safe-repetition" | "unresolved";
+      readonly detail: string;
+      readonly observedAt: string;
+    };
+    readonly retryAuthorization?: {
+      readonly reason: string;
+      readonly possibleDuplicationAcknowledged: true;
+      readonly uncertaintyRevision: number;
+      readonly authorizedAt: string;
+      readonly consumedAt?: string;
+    };
+  };
   readonly admittedAt: string;
   readonly startedAt?: string;
   readonly finishedAt?: string;
@@ -81,6 +113,14 @@ export interface RunDocument {
     readonly size: number;
     readonly sha256: string;
   }>;
+}
+
+export interface RetryUncertainActionResult {
+  readonly kind: "retry-uncertain";
+  readonly runId: string;
+  readonly actionId: string;
+  readonly uncertaintyRevision: number;
+  readonly state: "retry-authorized";
 }
 
 export interface CancelRunResult {

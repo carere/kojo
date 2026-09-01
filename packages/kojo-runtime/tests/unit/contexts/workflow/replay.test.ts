@@ -4,7 +4,9 @@ import { Activity, Workflow, WorkflowEngine } from "effect/unstable/workflow";
 import { describe, expect, it } from "vitest";
 import { ResourceLeaseClient } from "../../../../src/contexts/project/ports/ResourceLeaseClient.ts";
 import { layer as daemonEngine } from "../../../../src/contexts/workflow/adapters/DaemonWorkflowEngine.ts";
+import { ActionRecoveryPolicy } from "../../../../src/contexts/workflow/models/ActionRecoveryPolicy.ts";
 import { DaemonExecutionRepository } from "../../../../src/contexts/workflow/ports/DaemonExecutionRepository.ts";
+import { code } from "../../../../src/contexts/workflow/services/phase/code.ts";
 
 describe("Daemon Workflow engine replay", () => {
   it("provides Daemon execution services inside the registered Workflow fiber", async () => {
@@ -28,6 +30,7 @@ describe("Daemon Workflow engine replay", () => {
       }),
     );
     const repository = Layer.succeed(DaemonExecutionRepository, {
+      beginAction: () => Effect.succeed({ kind: "perform", actionId: "action-fixture" }),
       readResult: () => Effect.as(Effect.void, undefined as JsonValue | undefined),
       commitResult: () => Effect.void,
       readDeferred: () => Effect.as(Effect.void, undefined as JsonValue | undefined),
@@ -79,6 +82,7 @@ describe("Daemon Workflow engine replay", () => {
         const results = new Map<string, JsonValue>();
         let effectCount = 0;
         const repository = Layer.succeed(DaemonExecutionRepository, {
+          beginAction: () => Effect.succeed({ kind: "perform", actionId: "action-fixture" }),
           readResult: (runId, revisionId, phasePath, attempt) =>
             Effect.sync(() => results.get(JSON.stringify([runId, revisionId, phasePath, attempt]))),
           commitResult: (runId, revisionId, phasePath, attempt, result) =>
@@ -134,4 +138,78 @@ describe("Daemon Workflow engine replay", () => {
         expect(results.size).toBe(1);
       }),
     ));
+
+  it("keeps Action identity stable across fresh engines and hashes the Workflow input", async () => {
+    const observed: Array<{ readonly actionId: string; readonly inputHash: string }> = [];
+    const repository = Layer.succeed(DaemonExecutionRepository, {
+      beginAction: (actionId, _phasePath, _attempt, inputHash) =>
+        Effect.sync(() => {
+          observed.push({ actionId, inputHash });
+          return { kind: "perform" as const, actionId };
+        }),
+      readResult: () => Effect.as(Effect.void, undefined as JsonValue | undefined),
+      commitResult: () => Effect.void,
+      readDeferred: () => Effect.as(Effect.void, undefined as JsonValue | undefined),
+      commitDeferred: () => Effect.void,
+      scheduleWakeup: () => Effect.void,
+    });
+    const definition = Workflow.make("identity", {
+      payload: { value: Schema.String },
+      success: Schema.String,
+      error: Schema.Never,
+      idempotencyKey: ({ value }) => value,
+    });
+    const registration = definition.toLayer(({ value }) =>
+      Activity.make({
+        name: "publish",
+        success: Schema.String,
+        error: Schema.Never,
+        execute: Effect.succeed(value),
+      }).annotate(ActionRecoveryPolicy, "unresolved"),
+    );
+    const execute = (payload: string) =>
+      Effect.gen(function* () {
+        const engine = yield* WorkflowEngine.WorkflowEngine;
+        return yield* engine.execute(definition, {
+          executionId: "daemon-assigned-run",
+          payload: { value: payload },
+          discard: false,
+        });
+      }).pipe(
+        Effect.provide(
+          registration.pipe(
+            Layer.provideMerge(daemonEngine("a".repeat(64)).pipe(Layer.provide(repository))),
+          ),
+        ),
+      );
+
+    await Effect.runPromise(execute("same"));
+    await Effect.runPromise(execute("same"));
+    await Effect.runPromise(execute("changed"));
+
+    expect(observed[0]).toEqual(observed[1]);
+    expect(observed[2]?.inputHash).not.toBe(observed[0]?.inputHash);
+    expect(observed[2]?.actionId).not.toBe(observed[0]?.actionId);
+  });
+
+  it("classifies Kojo external Phases without wrapping an ordinary Activity", () => {
+    const ordinary = Activity.make({
+      name: "calculate",
+      success: Schema.Finite,
+      error: Schema.Never,
+      execute: Effect.succeed(1),
+    });
+    const external = code(
+      {
+        name: "publish",
+        description: "Publish external bytes",
+        success: Schema.Finite,
+        error: Schema.Never,
+      },
+      Effect.succeed(1),
+    );
+
+    expect(Context.get(ordinary.annotations, ActionRecoveryPolicy)).toBeUndefined();
+    expect(Context.get(external.annotations, ActionRecoveryPolicy)).toBe("unresolved");
+  });
 });

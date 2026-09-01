@@ -33,6 +33,7 @@ import { SqliteResourceLeaseRepository } from "../../project/adapters/SqliteReso
 import { ProjectApi } from "../../project/services/ProjectApi.ts";
 import { AtomicArtifactRepository } from "../../trace/adapters/AtomicArtifactRepository.ts";
 import { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRepository.ts";
+import { SqliteExternalActionRepository } from "../../workflow/adapters/SqliteExternalActionRepository.ts";
 import { SqliteRevisionRepository } from "../../workflow/adapters/SqliteRevisionRepository.ts";
 import { SqliteRunRepository } from "../../workflow/adapters/SqliteRunRepository.ts";
 import { RevisionCaptureError } from "../../workflow/models/RevisionCaptureError.ts";
@@ -248,6 +249,7 @@ export const startDaemon = (
     const projectRepository = new SqliteProjectRepository(database);
     const projectRecoveryRepository = new SqliteProjectRecoveryRepository(database);
     const runRepository = new SqliteRunRepository(database, { enforceProjectEligibility: true });
+    const actionRepository = new SqliteExternalActionRepository(database);
     const resourceRepository = new SqliteResourceLeaseRepository(database);
     const revisionRepository = new SqliteRevisionRepository(database, paths.dataRoot);
     const triggerRepository = new SqliteTriggerRepository(database);
@@ -261,6 +263,7 @@ export const startDaemon = (
       projects: projectRepository,
       projectRecovery: projectRecoveryRepository,
       runs: runRepository,
+      actions: actionRepository,
       revisions: revisionRepository,
       triggers: triggerRepository,
       gates: gateRepository,
@@ -546,6 +549,56 @@ export const startDaemon = (
         );
       }
     };
+    const retryUncertainAction = async (request: Request, runId: string): Promise<Response> => {
+      try {
+        const input = await requestJson(request);
+        if (input === null || typeof input !== "object" || Array.isArray(input)) {
+          return problem(400, "invalid-uncertain-retry", "the retry request must be a JSON object");
+        }
+        const record = input as Record<string, unknown>;
+        if (
+          Object.keys(record).some(
+            (key) =>
+              key !== "requestId" &&
+              key !== "dataIdentity" &&
+              key !== "actionId" &&
+              key !== "reason" &&
+              key !== "possibleDuplicationAcknowledged",
+          ) ||
+          typeof record.requestId !== "string" ||
+          typeof record.dataIdentity !== "string" ||
+          typeof record.actionId !== "string" ||
+          typeof record.reason !== "string" ||
+          record.reason.trim() === "" ||
+          record.possibleDuplicationAcknowledged !== true
+        ) {
+          return problem(
+            400,
+            "invalid-uncertain-retry",
+            "retry requires the exact action ID, a reason, and possible-duplication acknowledgement",
+          );
+        }
+        return noStoreJson(
+          await Effect.runPromise(
+            runApi.retryUncertainAction({
+              runId,
+              requestId: record.requestId,
+              dataIdentity: record.dataIdentity,
+              actionId: record.actionId,
+              reason: record.reason,
+              possibleDuplicationAcknowledged: true,
+            }),
+          ),
+          202,
+        );
+      } catch (cause) {
+        return problem(
+          409,
+          "uncertain-retry-refused",
+          cause instanceof Error ? cause.message : "the uncertain retry was refused",
+        );
+      }
+    };
     const repairProjectRunner = async (projectId: string): Promise<Response> => {
       const project = (await Effect.runPromise(projectRepository.projects)).find(
         (candidate) => candidate.projectId === projectId,
@@ -817,6 +870,12 @@ export const startDaemon = (
               ),
             );
           }
+          const retryOneUncertainAction = url.pathname.match(
+            /^\/api\/v1\/runs\/([A-Za-z0-9_-]+)\/actions\/retry-uncertain$/,
+          );
+          if (request.method === "POST" && retryOneUncertainAction !== null) {
+            return retryUncertainAction(request, retryOneUncertainAction[1] ?? "invalid");
+          }
           const repairOneProject = url.pathname.match(
             /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/actions\/repair$/,
           );
@@ -985,6 +1044,14 @@ export const startDaemon = (
               await requestJson(request),
             ),
           );
+        }
+        const retryOneUncertainAction = url.pathname.match(
+          /^\/api\/v1\/runs\/([A-Za-z0-9_-]+)\/actions\/retry-uncertain$/,
+        );
+        if (request.method === "POST" && retryOneUncertainAction !== null) {
+          if (!isJson(request))
+            return problem(415, "json-required", "Uncertain action retry requires JSON");
+          return retryUncertainAction(request, retryOneUncertainAction[1] ?? "invalid");
         }
         const repairOneProject = url.pathname.match(
           /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/actions\/repair$/,
