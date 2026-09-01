@@ -25,6 +25,17 @@ interface RuntimeManifest {
   readonly hosts: ReadonlyArray<string>;
 }
 
+interface ManagedReleaseMetadata {
+  readonly formatVersion: number;
+  readonly compatibility: {
+    readonly dataFormats: ReadonlyArray<number>;
+    readonly revisionFormats: ReadonlyArray<number>;
+    readonly runnerProtocols: ReadonlyArray<number>;
+    readonly requiredFeatures: ReadonlyArray<string>;
+  };
+  readonly migration?: unknown;
+}
+
 const repository = resolve(import.meta.dir, "../../../..");
 const effectVersion = "4.0.0-beta.106";
 const bootstrapVersion: BootstrapResponse["bootstrapVersion"] = 1;
@@ -129,6 +140,20 @@ if (
   runtime.requiredFeatures.length !== 0
 ) {
   fail("runtime-manifest.json drifted from the static contract");
+}
+
+const managedRelease = readJson<ManagedReleaseMetadata>("packages/kojo/managed-release.json");
+if (
+  managedRelease.formatVersion !== 1 ||
+  !sameMembers(managedRelease.compatibility.dataFormats.map(String), ["1"]) ||
+  !sameMembers(managedRelease.compatibility.revisionFormats.map(String), ["1"]) ||
+  !sameMembers(managedRelease.compatibility.runnerProtocols.map(String), [
+    String(RUNNER_PROTOCOL_VERSION),
+  ]) ||
+  managedRelease.compatibility.requiredFeatures.length !== 0 ||
+  managedRelease.migration !== undefined
+) {
+  fail("managed-release.json drifted from the current Daemon and Runner contracts");
 }
 for (const entry of [runtime.runner, runtime.validator]) {
   const packageRoot = resolve(repository, packages.runtime);

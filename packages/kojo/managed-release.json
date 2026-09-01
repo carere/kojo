@@ -1,0 +1,9 @@
+{
+  "formatVersion": 1,
+  "compatibility": {
+    "dataFormats": [1],
+    "revisionFormats": [1],
+    "runnerProtocols": [1],
+    "requiredFeatures": []
+  }
+}

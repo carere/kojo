@@ -12,6 +12,7 @@ tasks:
       - /apps/console/package.json
       - /moon.yml
       - /packages/*/package.json
+      - /packages/kojo/managed-release.json
       - /packages/*/runtime-manifest.json
       - /tsconfig.json
     options:
