@@ -229,6 +229,78 @@ export const available = workflow(
   database.close(false);
 }
 
+if (fixture === "gates") {
+  const database = new Database(join(paths.dataRoot, "kojo.db"));
+  database.run("PRAGMA foreign_keys = OFF");
+  const revision = "c".repeat(64);
+  const graph = "d".repeat(64);
+  const createdAt = "2026-09-01T10:00:00.000Z";
+  const deadline = "2026-09-02T10:00:00.000Z";
+  const fixtures = [
+    { name: "unanswered", state: "unanswered", runState: "suspended" },
+    { name: "recorded", state: "recorded", runState: "suspended" },
+    { name: "applied", state: "applied", runState: "succeeded" },
+    { name: "expired", state: "expired", runState: "succeeded" },
+    {
+      name: "unable",
+      state: "recorded",
+      runState: "failed",
+      terminalInability: "run-failed",
+    },
+  ] as const;
+  for (const [index, gate] of fixtures.entries()) {
+    const runId = `run-${gate.name}`;
+    database.run(
+      `INSERT INTO workflow_runs (
+         run_id, project_id, workflow_name, idempotency_key, payload_json,
+         revision_id, package_graph_id, state, admission_sequence, admitted_at, started_at, finished_at
+       ) VALUES (?, 'project-gates', 'release', ?, '{}', ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        runId,
+        gate.name,
+        revision,
+        graph,
+        gate.runState,
+        index + 1,
+        createdAt,
+        createdAt,
+        gate.runState === "succeeded" || gate.runState === "failed" ? createdAt : null,
+      ],
+    );
+    const hasVerdict = gate.state === "recorded" || gate.state === "applied";
+    database.run(
+      `INSERT INTO gate_askings (
+         identity_key, token, run_id, project_id, workflow_name, gate_path,
+         asking_number, escalation_stage, description, actor, choices_json,
+         deadline, expiry_branch, internal_deferred_name, created_at, state,
+         verdict_choice, verdict_reason, answerer, recorded_at, applied_at,
+         expired_at, expiry_applied_at, terminal_inability
+       ) VALUES (?, ?, ?, 'project-gates', 'release', ?, 1, 0, ?, 'release-manager',
+                 '["approve","reject"]', ?, 'fail', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        JSON.stringify([1, runId, `release/${gate.name}`, 1, 0]),
+        `browser-token-${gate.name}`,
+        runId,
+        `release/${gate.name}`,
+        `Decide the ${gate.name} release`,
+        deadline,
+        `gate/release/${gate.name}/1`,
+        createdAt,
+        gate.state,
+        hasVerdict ? "approve" : null,
+        hasVerdict ? "verified" : null,
+        hasVerdict ? "fixture-operator" : null,
+        hasVerdict ? "2026-09-01T10:05:00.000Z" : null,
+        gate.state === "applied" ? "2026-09-01T10:06:00.000Z" : null,
+        gate.state === "expired" ? deadline : null,
+        gate.state === "expired" ? "2026-09-02T10:00:01.000Z" : null,
+        "terminalInability" in gate ? gate.terminalInability : null,
+      ],
+    );
+  }
+  database.close(false);
+}
+
 const stop = (): void => {
   void Effect.runPromise(daemon.stop).finally(() => rmSync(root, { recursive: true, force: true }));
 };

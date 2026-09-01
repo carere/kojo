@@ -10,6 +10,7 @@ export default defineConfig({
     "projectCatalogue.spec.ts",
     "runConsole.spec.ts",
     "workflowCatalogue.spec.ts",
+    "gateVerdict.spec.ts",
   ],
   fullyParallel: true,
   reporter: [["list"]],
@@ -40,6 +41,15 @@ export default defineConfig({
       command:
         "bun ../../packages/kojo/tests/support/daemon/authenticatedConsoleServer.ts /tmp/kojo-ticket-71-browser 47243 ../../packages/kojo/console workflows",
       url: "http://127.0.0.1:47243/_kojo/compat",
+      reuseExistingServer: false,
+      timeout: 30_000,
+      stdout: "pipe" as const,
+      stderr: "pipe" as const,
+    },
+    {
+      command:
+        "bun ../../packages/kojo/tests/support/daemon/authenticatedConsoleServer.ts /tmp/kojo-ticket-74-browser 47244 ../../packages/kojo/console gates",
+      url: "http://127.0.0.1:47244/_kojo/compat",
       reuseExistingServer: false,
       timeout: 30_000,
       stdout: "pipe" as const,

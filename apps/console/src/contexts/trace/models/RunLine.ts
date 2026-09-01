@@ -11,8 +11,14 @@ export interface RunLine {
     readonly startedAt: number;
   };
   /** How the run last stopped. Absent while it has never stopped, which is *executing*. */
-  readonly outcome?: "succeeded" | "failed" | "suspended";
-  readonly executionState?: "queued" | "executing" | "suspended" | "succeeded" | "failed";
+  readonly outcome?: "succeeded" | "failed" | "suspended" | "cancelled";
+  readonly executionState?:
+    | "queued"
+    | "executing"
+    | "suspended"
+    | "succeeded"
+    | "failed"
+    | "cancelled";
   readonly queueReason?: string;
 }
 
@@ -22,7 +28,7 @@ export interface RunLine {
  * Four states from the wire's three, because an absent outcome is not a missing value — it is the
  * run still going. Naming it keeps every consumer from re-deciding what `undefined` meant.
  */
-export type RunStatus = "queued" | "executing" | "suspended" | "succeeded" | "failed";
+export type RunStatus = "queued" | "executing" | "suspended" | "succeeded" | "failed" | "cancelled";
 
 export const statusOf = (line: RunLine): RunStatus =>
   line.executionState ?? line.outcome ?? "executing";
@@ -35,7 +41,7 @@ export const statusOf = (line: RunLine): RunStatus =>
  * hours ago as still waiting.
  */
 export const isTerminal = (status: RunStatus): boolean =>
-  status === "succeeded" || status === "failed";
+  status === "succeeded" || status === "failed" || status === "cancelled";
 
 /**
  * Is there nothing left to watch?

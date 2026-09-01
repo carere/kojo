@@ -21,6 +21,9 @@ describe("Daemon Workflow engine replay", () => {
                 JSON.parse(JSON.stringify(result)) as JsonValue,
               );
             }),
+          readDeferred: () => Effect.as(Effect.void, undefined as JsonValue | undefined),
+          commitDeferred: () => Effect.void,
+          scheduleWakeup: () => Effect.void,
         });
         const definition = Workflow.make("one-phase", {
           payload: { value: Schema.String },

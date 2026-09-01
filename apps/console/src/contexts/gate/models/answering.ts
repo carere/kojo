@@ -20,6 +20,8 @@ export type AnsweringState =
   | "idle"
   /** The run settled the asking without an answer: the deadline won, and it took its branch. */
   | "expired"
+  /** The Run ended before a Runner could apply the Recorded Verdict. */
+  | "unable"
   /** The run woke up and settled the asking **with an answer**. The only state that may say so. */
   | "applied";
 
@@ -64,7 +66,7 @@ const settlementOf = (
  * first, which is how a control surface ends up claiming a run resumed when it did not.
  */
 const isApplied = (asking: Asking, settled: ReadonlyArray<SettledAsking>): boolean =>
-  settlementOf(asking, settled)?.outcome === "answered";
+  asking.daemonState === "applied" || settlementOf(asking, settled)?.outcome === "answered";
 
 /**
  * Has the run settled this asking at all, either way?
@@ -73,6 +75,8 @@ const isApplied = (asking: Asking, settled: ReadonlyArray<SettledAsking>): boole
  * is finished — nothing will apply an answer to it, so there is nothing to poll a runner about.
  */
 export const isSettled = (asking: Asking, settled: ReadonlyArray<SettledAsking>): boolean =>
+  asking.daemonState === "applied" ||
+  asking.daemonState === "expired" ||
   settlementOf(asking, settled) !== undefined;
 
 /**
@@ -114,6 +118,7 @@ export const answeringState = (options: {
   readonly runner: RunnerPresence | undefined;
   readonly now: number;
 }): AnsweringState => {
+  if (options.asking.terminalInability !== undefined) return "unable";
   if (isSettled(options.asking, options.settled)) {
     return isApplied(options.asking, options.settled) ? "applied" : "expired";
   }
@@ -134,7 +139,7 @@ export const answerable = (state: AnsweringState): boolean =>
 
 /** Has somebody answered, whether or not anything has acted on it? */
 export const isRecorded = (state: AnsweringState): boolean =>
-  state === "applying" || state === "idle" || state === "applied";
+  state === "applying" || state === "idle" || state === "applied" || state === "unable";
 
 /**
  * The sentence each state puts in front of a person.
@@ -149,6 +154,7 @@ export const answeringHeadline: Record<AnsweringState, string> = {
   applied: "Applied — the run resumed",
   expired: "Expired — the run moved on without an answer",
   idle: "Recorded — nothing is running",
+  unable: "Recorded — the run cannot apply it",
 };
 
 /** The second line: what that means, and what to do about it. */
@@ -161,5 +167,7 @@ export const answeringDetail: Record<AnsweringState, string> = {
   applied: "A runner picked the answer up and the run settled this asking.",
   expired:
     "Nobody answered before the deadline, and the run has settled this asking on its expiry branch. There is nothing left to decide here; what it cost is the wait above.",
-  idle: "The verdict is written down and nothing is running, so the run has not moved. Start `kojo watch` and it applies. Nothing is lost in the meantime.",
+  idle: "The verdict is written down. The Daemon will schedule its application when the Run can continue.",
+  unable:
+    "The verdict remains in the durable record, but the run failed or was cancelled before a Runner could apply it.",
 };

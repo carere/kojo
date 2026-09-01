@@ -104,7 +104,7 @@ export class SqliteRunRepository {
         payload_json TEXT NOT NULL,
         revision_id TEXT NOT NULL,
         package_graph_id TEXT NOT NULL,
-        state TEXT NOT NULL CHECK(state IN ('queued', 'executing', 'suspended', 'succeeded', 'failed')),
+        state TEXT NOT NULL CHECK(state IN ('queued', 'executing', 'suspended', 'succeeded', 'failed', 'cancelled')),
         admission_sequence INTEGER NOT NULL UNIQUE,
         admitted_at TEXT NOT NULL,
         started_at TEXT,
@@ -540,6 +540,36 @@ export class SqliteRunRepository {
     catch: failure,
   });
 
+  /**
+   * Return Runs owned by the stopped Daemon to the queue before a replacement owner dispatches.
+   *
+   * The prior Claim stays as generation evidence. The next Claim replaces it with a higher
+   * generation, so a message from the stopped Runner cannot regain authority.
+   */
+  readonly recoverInterruptedExecutions = (queuedAt: string): Effect.Effect<void, RunStoreError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            this.#database.run(
+              `INSERT INTO workflow_queue (run_id, project_id, admission_sequence, queued_at)
+               SELECT run_id, project_id, admission_sequence, ?
+                 FROM workflow_runs
+                WHERE state = 'executing'
+               ON CONFLICT(run_id) DO NOTHING`,
+              [queuedAt],
+            );
+            this.#database.run(
+              "DELETE FROM workflow_slots WHERE run_id IN (SELECT run_id FROM workflow_runs WHERE state = 'executing')",
+            );
+            this.#database.run(
+              "UPDATE workflow_runs SET state = 'queued' WHERE state = 'executing'",
+            );
+          })
+          .immediate(),
+      catch: failure,
+    });
+
   readonly readResult = (
     authority: RunAuthority,
     phasePath: string,
@@ -607,6 +637,25 @@ export class SqliteRunRepository {
             );
             this.#database.run("DELETE FROM workflow_slots WHERE run_id = ?", [authority.runId]);
             this.#database.run("DELETE FROM workflow_claims WHERE run_id = ?", [authority.runId]);
+          })
+          .immediate(),
+      catch: failure,
+    });
+
+  /** A continuation can fail before it acquires a Claim, for example during revision materialization. */
+  readonly failQueuedRun = (
+    runId: string,
+    finishedAt: string,
+  ): Effect.Effect<void, RunStoreError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            this.#database.run(
+              "UPDATE workflow_runs SET state = 'failed', finished_at = ? WHERE run_id = ? AND state = 'queued'",
+              [finishedAt, runId],
+            );
+            this.#database.run("DELETE FROM workflow_queue WHERE run_id = ?", [runId]);
           })
           .immediate(),
       catch: failure,

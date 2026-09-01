@@ -4,6 +4,11 @@ import type {
   BrowserSessionResponse,
   DaemonDocument,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/browser";
+import type {
+  AskingSnapshot,
+  RecordVerdictRequest,
+  RecordVerdictResult,
+} from "@carere/kojo-client-contracts/contexts/client/contracts/gate";
 import type { ProjectSnapshot } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
 import type {
   RunDocument,
@@ -222,3 +227,12 @@ export const stopWorkflow = (
   projectId: string,
   workflowName: string,
 ): Promise<StopWorkflowResult> => workflowMutation(projectId, workflowName, "stop");
+
+export const readAskings = (): Promise<AskingSnapshot> =>
+  authorizedRead<AskingSnapshot>("/api/v1/askings");
+
+/** The Console omits Answerer. The Daemon records the current OS user. */
+export const recordGateVerdict = (
+  request: Omit<RecordVerdictRequest, "answerer">,
+): Promise<RecordVerdictResult> =>
+  authorizedMutation<RecordVerdictResult>("/api/v1/gate-answers", request);

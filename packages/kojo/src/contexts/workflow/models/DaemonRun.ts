@@ -1,6 +1,12 @@
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 
-export type DaemonRunState = "queued" | "executing" | "suspended" | "succeeded" | "failed";
+export type DaemonRunState =
+  | "queued"
+  | "executing"
+  | "suspended"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
 export type RunQueueKind = "new" | "continuation";
 export type RunQueueReason =
   | "execution-capacity"

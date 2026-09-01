@@ -107,22 +107,9 @@ export const factory = (
   ).pipe(Layer.provideMerge(SqliteDatabase.layer({ path: database })));
 
 /**
- * The askings alone, with no engine over them.
- *
- * `kojo gate list` reads; it must not execute. Building the engine would register this process as a
- * runner, and a runner picks up every verdict written since the last one ran — so listing what is
- * waiting would silently resume runs. Looking must never be an act of execution, which is the same
- * reason `kojo ui` does not host the engine either (adr/gate/0001).
- */
-export const askings = (
-  database: string,
-): Layer.Layer<GateRepository, SqlError.SqlError | GateStoreError> =>
-  SqliteGateRepository.layer.pipe(Layer.provide(SqliteDatabase.layer({ path: database })));
-
-/**
  * The registration table alone, with no engine over it.
  *
- * Same reasoning as `askings`, and one more: every runner registers at the same address by default,
+ * Every runner registers at the same address by default,
  * so a process that built the engine first would find its **own** row and report itself as somebody
  * else. `kojo watch` reads this before it becomes a runner, which is the only moment the answer is
  * about anybody but itself.

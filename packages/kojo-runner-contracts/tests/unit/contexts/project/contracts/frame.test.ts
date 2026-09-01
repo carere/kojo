@@ -22,7 +22,14 @@ const execution = {
   runId: "run_1",
   revisionId: sha256,
   claimGeneration: 1,
-  body: { executionVersion: 1, workflowName: "example", payload: null, recordedResults: {} },
+  body: {
+    executionVersion: 1,
+    workflowName: "example",
+    payload: null,
+    recordedResults: {},
+    deferredResults: {},
+    scheduledWakeups: {},
+  },
 } as const;
 
 describe("Runner contract golden fixtures", () => {

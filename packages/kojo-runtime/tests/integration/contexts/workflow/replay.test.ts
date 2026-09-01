@@ -127,6 +127,8 @@ const execute = async (
         workflowName: request.workflowName,
         payload: request.payload as never,
         recordedResults: request.recordedResults,
+        deferredResults: request.deferredResults,
+        scheduledWakeups: request.scheduledWakeups,
       },
     }),
   );
@@ -178,6 +180,8 @@ describe("fresh Project Runner replay", () => {
         connectionSecret: "ab".repeat(32),
         runId: "daemon-assigned-run",
         recordedResults: {},
+        deferredResults: {},
+        scheduledWakeups: {},
       };
       const first = await execute(base, counter);
       expect(first.outcome).toBe("succeeded");
@@ -191,6 +195,87 @@ describe("fresh Project Runner replay", () => {
       expect(second.outcome).toBe("succeeded");
       expect(second.runId).toBe("daemon-assigned-run");
       expect(readFileSync(counter, "utf8").trim().split("\n")).toEqual(["effect"]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("replays an Applied Deferred after owner loss before Run completion without repeating work", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "kojo-runner-gate-"));
+    const counter = join(directory, "effects.txt");
+    writeFileSync(counter, "");
+    try {
+      const base: ExecuteRegisteredRequest = {
+        registrationVersion: 1,
+        selectedProtocol: 1,
+        daemonInstanceId: "daemon-1",
+        runnerInstanceId: "runner-gate-1",
+        projectId: "project-1",
+        boundProjectId: "project-1",
+        revisionId: "c".repeat(64),
+        packageGraphId: "d".repeat(64),
+        boundPackageGraphId: "d".repeat(64),
+        executionRoot,
+        workflowName: "gated",
+        entrySource: "gated.ts",
+        payload: null,
+        connectionSecret: "cd".repeat(32),
+        runId: "daemon-assigned-gated-run",
+        recordedResults: {},
+        deferredResults: {},
+        scheduledWakeups: {},
+      };
+      const suspended = await execute(base, counter);
+      expect(suspended.outcome).toBe("suspended");
+      expect(suspended.runId).toBe(base.runId);
+      expect(suspended.askings).toHaveLength(1);
+      const asking = suspended.askings[0];
+      expect(asking).toMatchObject({
+        gatePath: "ship",
+        actor: "release-engineer",
+        choices: ["approve", "reject"],
+        internalDeferredName: "gate/ship/1",
+      });
+      expect(Object.values(suspended.scheduledWakeups)).toHaveLength(1);
+
+      const deferredKey = JSON.stringify([base.runId, asking?.internalDeferredName]);
+      const deferredResults = {
+        [deferredKey]: {
+          _id: "Exit",
+          _tag: "Success",
+          value: {
+            choice: "approve",
+            reason: "release evidence is green",
+            answerer: "operator",
+            answeredAt: (asking?.requestedAt ?? 0) + 1,
+          },
+        },
+      };
+      const applied = await execute(
+        {
+          ...base,
+          runnerInstanceId: "runner-gate-2",
+          recordedResults: suspended.recordedResults,
+          deferredResults,
+          scheduledWakeups: suspended.scheduledWakeups,
+        },
+        counter,
+      );
+      expect(applied.outcome).toBe("succeeded");
+      expect(applied.runId).toBe(base.runId);
+
+      const replayed = await execute(
+        {
+          ...base,
+          runnerInstanceId: "runner-gate-3",
+          recordedResults: applied.recordedResults,
+          deferredResults,
+          scheduledWakeups: applied.scheduledWakeups,
+        },
+        counter,
+      );
+      expect(replayed.outcome).toBe("succeeded");
+      expect(readFileSync(counter, "utf8").trim().split("\n")).toEqual(["applied"]);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

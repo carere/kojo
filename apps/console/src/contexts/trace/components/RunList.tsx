@@ -33,6 +33,7 @@ const statusTones: Record<RunStatus, BadgeTone> = {
   suspended: "waiting",
   succeeded: "good",
   failed: "danger",
+  cancelled: "danger",
 };
 
 const columns = helper.columns([

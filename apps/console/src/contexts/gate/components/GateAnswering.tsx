@@ -47,6 +47,7 @@ const tones: Record<AnsweringState, BadgeTone> = {
   // Not *good*. A gate that ran out of time is a decision the factory asked for and never got, and
   // drawing it in the colour of a success would hide the one thing worth noticing about it.
   expired: "danger",
+  unable: "danger",
   idle: "waiting",
 };
 
@@ -164,6 +165,7 @@ export const GateAnswering = (props: {
             />
           </label>
           <div class="flex flex-wrap items-center gap-2">
+            <span class="text-muted-foreground text-xs font-medium">Record Verdict</span>
             {/*
              * One button per **declared** choice. The gate says what it accepts and the API refuses
              * anything else, so a page that drew *approve* and *reject* would be inventing a

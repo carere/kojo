@@ -24,5 +24,19 @@ export class DaemonExecutionRepository extends Context.Service<
       result: JsonValue,
       timing: CommittedActivityTiming,
     ) => Effect.Effect<void>;
+    readonly readDeferred: (
+      runId: string,
+      deferredName: string,
+    ) => Effect.Effect<JsonValue | undefined>;
+    readonly commitDeferred: (
+      runId: string,
+      deferredName: string,
+      result: JsonValue,
+    ) => Effect.Effect<void>;
+    readonly scheduleWakeup: (
+      runId: string,
+      deferredName: string,
+      dueAt: number,
+    ) => Effect.Effect<void>;
   }
 >()("kojo-runtime/workflow/DaemonExecutionRepository") {}

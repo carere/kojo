@@ -1,194 +1,285 @@
-import { Clock, Console, Duration, Effect, Layer, Option } from "effect";
+import type {
+  AskingDocument,
+  AskingSnapshot,
+  RecordVerdictRequest,
+  RecordVerdictResult,
+} from "@carere/kojo-client-contracts/contexts/client/contracts/gate";
+import { Console, Data, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
-import type { DurableDeferred } from "effect/unstable/workflow";
-import { unsettled } from "../contexts/gate/models/AskedGate.ts";
-import { GateRepository } from "../contexts/gate/ports/GateRepository.ts";
-import { answerGate, parseToken } from "../contexts/gate/services/answerGate.ts";
-import type { RunId } from "../contexts/shared/models/RunId.ts";
-import { askingsSoFar, stopped } from "../contexts/workflow/services/stopped.ts";
+import type { DaemonPaths } from "../contexts/daemon/models/DaemonPaths.ts";
+import { readDaemonEndpoint } from "../contexts/daemon/services/daemonStatus.ts";
+import { linuxPaths } from "../contexts/daemon/services/linuxPaths.ts";
+import { macPaths } from "../contexts/daemon/services/macPaths.ts";
+import { clientExit } from "./ClientExit.ts";
 import { commandFailed } from "./CommandFailed.ts";
-import { ends, reachedStatus } from "./ends.ts";
-import { askings, created, factory, readyFor } from "./factory.ts";
-import { renderGateTable } from "./gateTable.ts";
-import { reportPhases } from "./reportPhases.ts";
-import { root } from "./root.ts";
-import { describeStop } from "./stopLine.ts";
-import { resolve } from "./workflows.ts";
+import { timeoutMillis } from "./workflow.ts";
 
-/**
- * Who a verdict is attributed to when nobody says.
- *
- * The OS user, exactly as adr/gate/0001 decided for the Console: v1 has no authorisation, and the
- * name of whoever ran the command is the honest thing to record. Read in the handler rather than
- * baked into the flag's default, so it is the user running the command rather than the one who
- * built it.
- */
-const osUser = Effect.sync(() => {
-  const { USER, USERNAME } = process.env;
-  return USER ?? USERNAME ?? "unknown-answerer";
-});
+class GateClientError extends Data.TaggedError("GateClientError")<{
+  readonly reason: string;
+  readonly code?: string;
+}> {}
 
-/**
- * What waits on a human, and for how long.
- *
- * **It builds no engine.** The engine would make this process a runner, and a runner applies every
- * verdict written since one last ran — so listing what is waiting would resume runs. Looking must
- * never be an act of execution.
- */
-const list = Command.make(
-  "list",
-  {
-    all: Flag.boolean("all").pipe(
-      Flag.withDescription(
-        "Include settled askings — answered ones, and ones the deadline expired",
-      ),
-    ),
-  },
-  Effect.fn(function* ({ all }) {
-    const { database } = yield* root;
-    const now = yield* Clock.currentTimeMillis;
+const productionPaths = (): DaemonPaths => {
+  if (process.platform === "darwin") return macPaths();
+  if (process.platform === "linux") return linuxPaths();
+  throw new GateClientError({ reason: "Kojo Gate access supports macOS and Linux" });
+};
 
-    const asked = yield* Effect.flatMap(GateRepository, (repository) => repository.all).pipe(
-      Effect.provide(askings(database)),
-    );
-
-    yield* Console.log(renderGateTable(all ? asked : unsettled(asked), now));
-  }),
-).pipe(Command.withDescription("Show what waits on a human, and for how long"));
-
-/**
- * The answering half, run from a process that never saw the run start.
- *
- * **One `--choice`, never `--approve` / `--reject`.** Two independent booleans parse
- * `--approve --reject` as both true and accept neither, and the framework has no exclusivity
- * combinator to forbid it — so a contradictory decision would reach a handler, and a missing one
- * would have to be invented there. A single choice flag makes both a parse error, which is the only
- * place a decision can be rejected before anything is written down.
- */
-const answer = Command.make(
-  "answer",
-  {
-    token: Argument.string("token").pipe(
-      Argument.withDescription("The gate token, printed when the run asked"),
-    ),
-    choice: Flag.choice("choice", ["approve", "reject"]).pipe(
-      Flag.withDescription("The verdict. One flag, so it is neither contradictory nor missing"),
-    ),
-    reason: Flag.string("reason").pipe(
-      Flag.withDescription(
-        "Why. A rejected run is re-prompted from it, so an empty one costs the next attempt its only clue",
-      ),
-      Flag.withDefault(""),
-    ),
-    as: Flag.string("as").pipe(
-      Flag.withDescription("Who the verdict is attributed to. Defaults to the OS user"),
-      Flag.optional,
-    ),
-    timeout: Flag.integer("timeout").pipe(
-      Flag.withDescription(
-        "Seconds to watch the run after answering. The run outlives the watching",
-      ),
-      Flag.withDefault(60),
-    ),
-  },
-  Effect.fn(function* ({ token, choice, reason, as, timeout }) {
-    const { database } = yield* root;
-    yield* readyFor(database);
-    yield* created(database);
-
-    const parsed = yield* parseToken(token).pipe(
-      Effect.catch(() => commandFailed(`that is not a gate token: ${token}`)),
-    );
-
-    // The token names its workflow, and applying an answer needs that workflow's body registered in
-    // *this* process: recording a verdict is a write to the engine's storage, but resuming the run
-    // is the runner replaying a body it must therefore have. A CLI that answered without it would
-    // record a real verdict and leave the run exactly where it was.
-    //
-    // Resolved through the same path `kojo run` uses, which is what makes a stamped factory's own
-    // gate answerable at all: the token was minted by a workflow in `.kojo/workflows/`, and only a
-    // loader that looks there can replay it.
-    const runnable = yield* resolve(parsed.workflowName);
-
-    const answerer = yield* Option.match(as, {
-      onNone: () => osUser,
-      onSome: (given: string) => Effect.succeed(given),
+const daemonEndpoint = (paths: () => DaemonPaths) => {
+  const endpoint = readDaemonEndpoint(paths());
+  if (endpoint === undefined)
+    throw new GateClientError({
+      code: "ENDPOINT_UNAVAILABLE",
+      reason: "the Daemon is not ready; run `kojo daemon start`",
     });
-    const gateToken = token as DurableDeferred.Token;
-    const runId = parsed.executionId as RunId;
+  return endpoint;
+};
 
-    yield* Effect.gen(function* () {
-      const repository = yield* GateRepository;
-      const asking = yield* repository.byToken(gateToken);
+const problemOf = async (
+  response: Response,
+): Promise<{ readonly code?: string; readonly message: string }> => {
+  const body = (await response.json().catch(() => ({}))) as {
+    readonly code?: string;
+    readonly message?: string;
+  };
+  return {
+    ...(body.code === undefined ? {} : { code: body.code }),
+    message: body.message ?? `the Daemon refused Gate access (${response.status})`,
+  };
+};
 
-      // The engine keeps the first answer — `deferredDone` refuses to overwrite a recorded result —
-      // so a second answerer is told that rather than shown a success that changed nothing.
-      const already = Option.flatMap(asking, (gate) => Option.fromUndefinedOr(gate.verdict));
-      if (Option.isSome(already)) {
+const readSnapshot = (
+  paths: () => DaemonPaths,
+  projectId?: string,
+): Effect.Effect<AskingSnapshot, GateClientError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const endpoint = daemonEndpoint(paths);
+      const path =
+        projectId === undefined
+          ? "/api/v1/askings"
+          : `/api/v1/projects/${encodeURIComponent(projectId)}/askings`;
+      const response = await fetch(`http://localhost${path}`, {
+        unix: endpoint.socketPath,
+        headers: { accept: "application/json" },
+      } as RequestInit & { readonly unix: string });
+      if (!response.ok) {
+        const problem = await problemOf(response);
+        throw new GateClientError({
+          reason: problem.message,
+          ...(problem.code === undefined ? {} : { code: problem.code }),
+        });
+      }
+      return (await response.json()) as AskingSnapshot;
+    },
+    catch: (cause) =>
+      cause instanceof GateClientError
+        ? cause
+        : new GateClientError({ reason: cause instanceof Error ? cause.message : String(cause) }),
+  });
+
+const recordVerdict = (
+  paths: () => DaemonPaths,
+  input: Omit<RecordVerdictRequest, "dataIdentity">,
+): Effect.Effect<
+  {
+    readonly endpoint: ReturnType<typeof daemonEndpoint>;
+    readonly result: RecordVerdictResult;
+  },
+  GateClientError
+> =>
+  Effect.tryPromise({
+    try: async () => {
+      const endpoint = daemonEndpoint(paths);
+      const body: RecordVerdictRequest = { ...input, dataIdentity: endpoint.dataIdentity };
+      const response = await fetch("http://localhost/api/v1/gate-answers", {
+        unix: endpoint.socketPath,
+        method: "POST",
+        headers: { accept: "application/json", "content-type": "application/json" },
+        body: JSON.stringify(body),
+      } as RequestInit & { readonly unix: string });
+      if (!response.ok) {
+        const problem = await problemOf(response);
+        throw new GateClientError({
+          reason: problem.message,
+          ...(problem.code === undefined ? {} : { code: problem.code }),
+        });
+      }
+      return { endpoint, result: (await response.json()) as RecordVerdictResult };
+    },
+    catch: (cause) =>
+      cause instanceof GateClientError
+        ? cause
+        : new GateClientError({
+            code: "OUTCOME_UNKNOWN",
+            reason: cause instanceof Error ? cause.message : String(cause),
+          }),
+  });
+
+/** Default Gate listing includes each Asking that can still change what the user must do. */
+export const visibleAskings = (
+  snapshot: AskingSnapshot,
+  all: boolean,
+): ReadonlyArray<AskingDocument> =>
+  all
+    ? snapshot.askings
+    : snapshot.askings.filter(
+        (asking) => asking.state === "unanswered" || asking.state === "recorded",
+      );
+
+export const askingLine = (asking: AskingDocument): string =>
+  [
+    asking.identity.runId,
+    asking.identity.gatePath,
+    `Asking=${asking.identity.askingNumber}`,
+    `Escalation=${asking.identity.escalationStage}`,
+    `Actor=${asking.actor}`,
+    `State=${asking.state}`,
+    `Deadline=${asking.deadline}`,
+    `Choices=${asking.choices.join(",")}`,
+    `Token=${asking.token}`,
+    ...(asking.verdict === undefined
+      ? []
+      : [`Verdict=${asking.verdict.choice}`, `Answerer=${asking.verdict.answerer}`]),
+    ...(asking.terminalInability === undefined
+      ? []
+      : [`TerminalInability=${asking.terminalInability}`]),
+  ].join("\t");
+
+export const validateGateAnswerFlags = (options: {
+  readonly wait: boolean;
+  readonly timeout?: string;
+}): number | undefined => {
+  if (!options.wait && options.timeout !== undefined)
+    throw new Error("--timeout is valid only with --wait");
+  if (!options.wait) return undefined;
+  return timeoutMillis(options.timeout ?? "60s");
+};
+
+/** A terminal inability is an unsuccessful wait, even though the Verdict remains Recorded. */
+export const gateWaitExit = (asking: AskingDocument): 0 | 1 | undefined => {
+  if (asking.terminalInability !== undefined) return 1;
+  if (asking.state === "applied") return 0;
+  return undefined;
+};
+
+const sameAsking = (left: AskingDocument, right: AskingDocument): boolean =>
+  left.identity.runId === right.identity.runId &&
+  left.identity.gatePath === right.identity.gatePath &&
+  left.identity.askingNumber === right.identity.askingNumber &&
+  left.identity.escalationStage === right.identity.escalationStage;
+
+export const makeGateCommand = (paths: () => DaemonPaths = productionPaths) => {
+  const list = Command.make(
+    "list",
+    {
+      projectId: Flag.string("project").pipe(Flag.optional),
+      all: Flag.boolean("all"),
+      limit: Flag.integer("limit").pipe(Flag.withDefault(50)),
+      cursor: Flag.integer("cursor").pipe(Flag.optional),
+      json: Flag.boolean("json"),
+    },
+    Effect.fn(function* ({ projectId, all, limit, cursor, json }) {
+      if (limit < 1) return yield* clientExit(2, "--limit must be a positive integer");
+      const offset = Option.getOrElse(cursor, () => 0);
+      if (offset < 0) return yield* clientExit(2, "--cursor must not be negative");
+      const snapshot = yield* readSnapshot(paths, Option.getOrUndefined(projectId)).pipe(
+        Effect.catch((cause) => commandFailed(cause.reason)),
+      );
+      const visible = visibleAskings(snapshot, all);
+      const selected = all ? visible : visible.slice(offset, offset + limit);
+      if (json) {
+        yield* Console.log(JSON.stringify({ formatVersion: 1, ...snapshot, askings: selected }));
+        return;
+      }
+      if (selected.length === 0) {
+        yield* Console.log("No unsettled Gate Askings are recorded.");
+        return;
+      }
+      yield* Effect.forEach(selected, (asking) => Console.log(askingLine(asking)), {
+        discard: true,
+      });
+    }),
+  ).pipe(Command.withDescription("List Daemon-owned Gate Askings without starting a Runner"));
+
+  const answer = Command.make(
+    "answer",
+    {
+      token: Argument.string("token"),
+      choice: Flag.string("choice"),
+      reason: Flag.string("reason").pipe(Flag.withDefault("")),
+      as: Flag.string("as").pipe(Flag.optional),
+      wait: Flag.boolean("wait"),
+      timeout: Flag.string("timeout").pipe(Flag.optional),
+      json: Flag.boolean("json"),
+    },
+    Effect.fn(function* ({ token, choice, reason, as, wait, timeout, json }) {
+      const timeoutText = Option.getOrUndefined(timeout);
+      const within = yield* Effect.try({
+        try: () =>
+          validateGateAnswerFlags({
+            wait,
+            ...(timeoutText === undefined ? {} : { timeout: timeoutText }),
+          }),
+        catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
+      }).pipe(Effect.catch((message) => clientExit(2, message)));
+      const answerer = Option.getOrUndefined(as);
+      const recorded = yield* recordVerdict(paths, {
+        requestId: crypto.randomUUID(),
+        token,
+        choice,
+        reason,
+        ...(answerer === undefined ? {} : { answerer }),
+      }).pipe(
+        Effect.catch((cause) => clientExit(cause.code === "OUTCOME_UNKNOWN" ? 4 : 1, cause.reason)),
+      );
+      if (!wait) {
         yield* Console.log(
-          `already answered: ${already.value.choice} by ${already.value.answerer}. ` +
-            "The first answer is the one that counts, so nothing was written.",
+          json
+            ? JSON.stringify({ formatVersion: 1, ...recorded.result })
+            : `Recorded ${choice} for Run ${recorded.result.asking.identity.runId} as ${recorded.result.asking.verdict?.answerer ?? "unknown"}.`,
         );
         return;
       }
 
-      // A gate declares the choices it accepts. Answering with one it does not accept writes a
-      // verdict the workflow reads as a rejection — a decision nobody made.
-      const declared = Option.map(asking, (gate) => gate.request.choices);
-      if (Option.isSome(declared) && !declared.value.includes(choice)) {
-        return yield* commandFailed(
-          `that gate accepts ${declared.value.join(" or ")}, not ${choice}`,
+      const deadline = within === undefined ? undefined : Date.now() + within;
+      while (deadline === undefined || Date.now() < deadline) {
+        const snapshot = yield* readSnapshot(paths, recorded.result.asking.projectId).pipe(
+          Effect.catch((cause) => commandFailed(cause.reason)),
         );
+        const asking = snapshot.askings.find((candidate) =>
+          sameAsking(candidate, recorded.result.asking),
+        );
+        if (asking !== undefined) {
+          const exit = gateWaitExit(asking);
+          if (exit === 0) {
+            yield* Console.log(
+              json
+                ? JSON.stringify({ formatVersion: 1, asking })
+                : `Applied the Verdict to Run ${asking.identity.runId}.`,
+            );
+            return;
+          }
+          if (exit === 1) {
+            return yield* clientExit(
+              1,
+              `Run ${asking.identity.runId} cannot apply the Recorded Verdict: ${asking.terminalInability}`,
+            );
+          }
+        }
+        yield* Effect.sleep("50 millis");
       }
+      return yield* clientExit(
+        3,
+        `the Verdict is Recorded but Run ${recorded.result.asking.identity.runId} continues after the client timeout`,
+      );
+    }),
+  ).pipe(Command.withDescription("Record one Gate Verdict through the Daemon and optionally wait"));
 
-      const before = yield* askingsSoFar;
-      const verdict = yield* answerGate({ token: gateToken, choice, reason, answerer });
-      yield* repository.recorded({ token: gateToken, verdict });
-      yield* Console.log(`recorded ${choice} on run ${runId}, attributed to ${answerer}`);
+  return Command.make("gate").pipe(
+    Command.withDescription("List and answer Daemon-owned Gate Askings"),
+    Command.withSubcommands([list, answer]),
+  );
+};
 
-      // Recorded is not applied. This process holds a runner, so the run does resume here — but it
-      // resumes on the engine's own poll, and until it has, saying anything else would be a lie.
-      const stop = yield* stopped({
-        runId,
-        status: runnable.status(runId),
-        known: before,
-        within: Duration.seconds(timeout),
-      });
-      yield* Console.log(describeStop(stop, yield* Clock.currentTimeMillis));
-      yield* reportPhases;
-
-      // **What the run did with the answer, in the exit code.** Answering is the moment a human
-      // hands the run back to the machine, and a resume that ends in the workflow's own typed
-      // error — the rejection this verdict just caused, an agent that could not be called, a check
-      // that did not hold — has to say so and exit non-zero. The same rule `kojo run` obeys, from
-      // the same function, because a run fails the same way whoever was watching it.
-      //
-      // A resume that stops at the *next* gate exits `0`: it suspended, which is a success.
-      yield* ends({
-        runId,
-        reached: reachedStatus(stop),
-        failure: runnable.failure(runId),
-        // No `--wait` here. `--timeout` bounds the watching, and the run outlives the watching of
-        // it, so a command that stops looking has nothing to report as a fault.
-        promisedToWait: false,
-      });
-      // One `provide`, one merged layer. The workflow body consumes the engine, the gate and the
-      // trace; the handler then reads the askings and the trace back, so both halves stay exported.
-    }).pipe(Effect.provide(runnable.layer.pipe(Layer.provideMerge(factory(database)))));
-  }),
-).pipe(
-  Command.withDescription("Answer a gate and let the run continue where it stopped"),
-  Command.withExamples([
-    {
-      command: 'kojo gate answer <token> --choice approve --reason "ships"',
-      description: "Approve a waiting gate and watch the run continue",
-    },
-  ]),
-);
-
-export const gate = Command.make("gate").pipe(
-  Command.withDescription(
-    "The reference gate adapter: what waits on a human, and how to answer it",
-  ),
-  Command.withSubcommands([list, answer]),
-);
+export const gate = makeGateCommand();

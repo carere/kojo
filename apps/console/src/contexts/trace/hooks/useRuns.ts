@@ -31,7 +31,9 @@ export const useRuns = (): UseQueryResult<ReadonlyArray<RunLine>, Error> =>
             },
             executionState: run.state,
             ...(run.queueReason === undefined ? {} : { queueReason: run.queueReason }),
-            ...(run.state === "succeeded" || run.state === "failed" ? { outcome: run.state } : {}),
+            ...(run.state === "succeeded" || run.state === "failed" || run.state === "cancelled"
+              ? { outcome: run.state }
+              : {}),
           }),
         );
       } catch {
