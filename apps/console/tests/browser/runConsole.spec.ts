@@ -174,3 +174,78 @@ test("requires acknowledgement and separates durable cancellation intent from co
   ).toBeVisible();
   await expect(page.getByText("Resource cleanup: pending")).toBeVisible();
 });
+
+test("requires the exact Action ID, reason, and possible-duplication acknowledgement", async ({
+  page,
+}) => {
+  const actionId = "action_exact_publish";
+  let authorized = false;
+  await page.route("**/api/v1/runs/run-uncertain/actions/retry-uncertain", async (route) => {
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    expect(body.actionId).toBe(actionId);
+    expect(body.reason).toBe("The provider has no result lookup.");
+    expect(body.possibleDuplicationAcknowledged).toBe(true);
+    authorized = true;
+    await route.fulfill({
+      contentType: "application/json",
+      status: 202,
+      body: JSON.stringify({
+        kind: "retry-uncertain",
+        runId: "run-uncertain",
+        actionId,
+        uncertaintyRevision: 1,
+        state: "retry-authorized",
+      }),
+    });
+  });
+  await page.route("**/api/v1/runs/run-uncertain", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        runId: "run-uncertain",
+        projectId: "project-browser-fixture",
+        workflowName: "publish",
+        revisionId: "a".repeat(64),
+        packageGraphId: "b".repeat(64),
+        state: authorized ? "queued" : "held",
+        admittedAt: "2026-09-01T00:00:00.000Z",
+        phases: [],
+        uncertainty: {
+          actionId,
+          revisionId: "a".repeat(64),
+          phasePath: "publish",
+          attempt: 1,
+          inputHash: "c".repeat(64),
+          recoveryPolicy: "unresolved",
+          state: authorized ? "retry-authorized" : "unresolved",
+          uncertaintyRevision: 1,
+          evidence: {
+            kind: "unresolved",
+            detail: "the process output was lost",
+            observedAt: "2026-09-01T00:00:02.000Z",
+          },
+        },
+      }),
+    });
+  });
+  await page.goto(launch());
+  await expect(page.getByText("Access active", { exact: true })).toBeVisible();
+  await page.goto(`${origin}/runs/run-uncertain`);
+
+  await expect(page.getByText("External action uncertainty: unresolved")).toBeVisible();
+  const retry = page.getByRole("button", { name: "Retry exact action" });
+  await expect(retry).toBeDisabled();
+  await page.getByLabel("Exact action ID").fill("action_wrong");
+  await page.getByLabel("Reason").fill("The provider has no result lookup.");
+  await page
+    .getByText("I acknowledge that this retry can duplicate the external action.", { exact: true })
+    .click();
+  await expect(retry).toBeDisabled();
+  await page.getByLabel("Exact action ID").fill(actionId);
+  await expect(retry).toBeEnabled();
+  await retry.click();
+  await expect(
+    page.getByText(`Retry authorization is durable for exact Action ${actionId}.`, { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("External action uncertainty: retry-authorized")).toBeVisible();
+});

@@ -41,7 +41,19 @@ export interface ReadResultBody {
   readonly attempt: number;
 }
 
+export interface BeginActionBody extends ReadResultBody {
+  readonly actionId: string;
+  readonly inputHash: string;
+  readonly recoveryPolicy:
+    | "recover-result"
+    | "prove-not-performed"
+    | "safe-repetition"
+    | "unresolved";
+  readonly intendedAt: string;
+}
+
 export interface CommitActionResultBody extends ReadResultBody {
+  readonly actionId: string;
   readonly kind: "actor" | "code" | "agent";
   readonly outcome: "succeeded" | "failed" | "interrupted";
   readonly description: string;
@@ -199,6 +211,46 @@ export const decodeReadResultBody = (input: unknown): DecodeResult<ReadResultBod
   return decodeSuccess({ resultVersion: 1, phasePath: phasePath.value, attempt: attempt.value });
 };
 
+export const decodeBeginActionBody = (input: unknown): DecodeResult<BeginActionBody> => {
+  const record = decodeClosedRecord(input, [
+    "resultVersion",
+    "phasePath",
+    "attempt",
+    "actionId",
+    "inputHash",
+    "recoveryPolicy",
+    "intendedAt",
+  ]);
+  if (!record.ok) return record;
+  const key = decodeReadResultBody({
+    resultVersion: record.value.resultVersion,
+    phasePath: record.value.phasePath,
+    attempt: record.value.attempt,
+  });
+  if (!key.ok) return key;
+  const actionId = decodeRunnerIdentity(record.value.actionId, ["actionId"]);
+  if (!actionId.ok) return actionId;
+  const inputHash = decodeSha256(record.value.inputHash, ["inputHash"]);
+  if (!inputHash.ok) return inputHash;
+  if (
+    record.value.recoveryPolicy !== "recover-result" &&
+    record.value.recoveryPolicy !== "prove-not-performed" &&
+    record.value.recoveryPolicy !== "safe-repetition" &&
+    record.value.recoveryPolicy !== "unresolved"
+  ) {
+    return decodeFailure(["recoveryPolicy"], "Expected a declared action recovery policy");
+  }
+  const intendedAt = instant(record.value.intendedAt, ["intendedAt"]);
+  if (!intendedAt.ok) return intendedAt;
+  return decodeSuccess({
+    ...key.value,
+    actionId: actionId.value,
+    inputHash: inputHash.value,
+    recoveryPolicy: record.value.recoveryPolicy,
+    intendedAt: intendedAt.value,
+  });
+};
+
 export const decodeCommitActionResultBody = (
   input: unknown,
 ): DecodeResult<CommitActionResultBody> => {
@@ -206,6 +258,7 @@ export const decodeCommitActionResultBody = (
     "resultVersion",
     "phasePath",
     "attempt",
+    "actionId",
     "kind",
     "outcome",
     "description",
@@ -220,6 +273,8 @@ export const decodeCommitActionResultBody = (
     attempt: record.value.attempt,
   });
   if (!key.ok) return key;
+  const actionId = decodeRunnerIdentity(record.value.actionId, ["actionId"]);
+  if (!actionId.ok) return actionId;
   if (
     record.value.kind !== "actor" &&
     record.value.kind !== "code" &&
@@ -242,6 +297,7 @@ export const decodeCommitActionResultBody = (
   if (!encodedResult.ok) return encodedResult;
   return decodeSuccess({
     ...key.value,
+    actionId: actionId.value,
     kind: record.value.kind,
     outcome: record.value.outcome,
     description: description.value,

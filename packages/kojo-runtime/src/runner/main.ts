@@ -103,6 +103,22 @@ export interface RunnerPhaseResult {
   readonly encodedResult: JsonValue;
 }
 
+export type SendActionMutation = (
+  kind: "BeginAction" | "CommitActionResult",
+  body: JsonValue,
+) => Promise<JsonValue>;
+
+class ActionMutationError extends Data.TaggedError("ActionMutationError")<{
+  readonly message: string;
+  readonly cause: unknown;
+}> {}
+
+const actionMutationError = (cause: unknown): ActionMutationError =>
+  new ActionMutationError({
+    message: cause instanceof Error ? cause.message : String(cause),
+    cause,
+  });
+
 interface LoadedBundle {
   readonly definition: {
     readonly _tag: string;
@@ -195,6 +211,7 @@ export const executeRegisteredRevision = async (
   signal: AbortSignal | undefined,
   sendResourceMutation: SendResourceMutation,
   sendArtifactMutation: SendArtifactMutation,
+  sendActionMutation: SendActionMutation,
 ): Promise<ExecuteRegisteredResult> => {
   const { bundle, payload } = await loadRegisteredRevision(request);
   const results = new Map(Object.entries(request.recordedResults));
@@ -207,14 +224,61 @@ export const executeRegisteredRevision = async (
   const keyOf = (runId: string, revisionId: string, phasePath: string, attempt: number): string =>
     JSON.stringify([runId, revisionId, phasePath, attempt]);
   const repository = Layer.succeed(DaemonExecutionRepository, {
+    beginAction: (actionId, phasePath, attempt, inputHash, recoveryPolicy, intendedAt) =>
+      Effect.tryPromise({
+        try: async () =>
+          (await sendActionMutation("BeginAction", {
+            resultVersion: 1,
+            phasePath,
+            attempt,
+            actionId,
+            inputHash,
+            recoveryPolicy,
+            intendedAt: new Date(intendedAt).toISOString(),
+          })) as unknown as {
+            readonly kind: "perform" | "reuse-result" | "hold";
+            readonly actionId: string;
+            readonly result?: JsonValue;
+          },
+        catch: actionMutationError,
+      }).pipe(
+        Effect.map((decision) =>
+          decision.kind === "reuse-result" && decision.result !== undefined
+            ? {
+                kind: "reuse-result" as const,
+                actionId: decision.actionId,
+                result: decision.result,
+              }
+            : decision.kind === "hold"
+              ? { kind: "hold" as const, actionId: decision.actionId }
+              : { kind: "perform" as const, actionId: decision.actionId },
+        ),
+        Effect.orDie,
+      ),
     readResult: (runId, revisionId, phasePath, attempt) =>
       Effect.sync(() => results.get(keyOf(runId, revisionId, phasePath, attempt))),
-    commitResult: (runId, revisionId, phasePath, attempt, result, timing) =>
-      Effect.sync(() => {
-        const key = keyOf(runId, revisionId, phasePath, attempt);
-        results.set(key, result);
-        activityTimes.set(key, timing);
-      }),
+    commitResult: (runId, revisionId, phasePath, attempt, result, timing, actionId) =>
+      Effect.tryPromise({
+        try: async () => {
+          const key = keyOf(runId, revisionId, phasePath, attempt);
+          results.set(key, result);
+          activityTimes.set(key, timing);
+          const phase = completedPhases.get(key);
+          await sendActionMutation("CommitActionResult", {
+            resultVersion: 1,
+            phasePath,
+            attempt,
+            actionId,
+            kind: phase?.kind ?? "code",
+            outcome: phase?.outcome ?? "succeeded",
+            description: phase?.description ?? "__kojo_internal_activity__",
+            startedAt: new Date(timing.startedAt).toISOString(),
+            endedAt: new Date(timing.endedAt).toISOString(),
+            encodedResult: result,
+          });
+        },
+        catch: actionMutationError,
+      }).pipe(Effect.orDie),
     readDeferred: (runId, deferredName) =>
       Effect.sync(() => deferredResults.get(JSON.stringify([runId, deferredName]))),
     commitDeferred: (runId, deferredName, result) =>
@@ -647,6 +711,8 @@ const runPrivateProtocol = async (): Promise<void> => {
         | "ConfirmResourceReleased"
         | "PreserveResource"
         | "ReportRecovery"
+        | "BeginAction"
+        | "CommitActionResult"
         | "BeginArtifact"
         | "WriteArtifactChunk"
         | "FinishArtifact",
@@ -782,6 +848,16 @@ const runPrivateProtocol = async (): Promise<void> => {
                 scheduledWakeups: execute.scheduledWakeups,
               },
               controller.signal,
+              (kind, body) =>
+                sendExecutionMutation(
+                  kind,
+                  {
+                    runId: operation.runId,
+                    revisionId: operation.revisionId,
+                    claimGeneration: operation.claimGeneration,
+                  },
+                  body,
+                ),
               (kind, body) =>
                 sendExecutionMutation(
                   kind,

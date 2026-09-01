@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import type { JsonValue } from "@carere/kojo-runner-contracts/contexts/shared/codecs/json";
-import { Clock, Duration, Effect, Exit, Fiber, Layer, Option, Scope } from "effect";
+import { Clock, Context, Duration, Effect, Exit, Fiber, Layer, Option, Scope } from "effect";
 import { Workflow, WorkflowEngine } from "effect/unstable/workflow";
+import { ActionRecoveryPolicy } from "../models/ActionRecoveryPolicy.ts";
 import { DaemonExecutionRepository } from "../ports/DaemonExecutionRepository.ts";
 
 interface Registration {
@@ -122,6 +124,39 @@ export const layer = <RExecution>(
           if (recorded !== undefined)
             return recorded as unknown as Workflow.Result<unknown, unknown>;
 
+          const inputHash = createHash("sha256")
+            .update(JSON.stringify([instance.executionId, revisionId, activity.name, attempt]))
+            .digest("hex");
+          const actionId = `action_${createHash("sha256")
+            .update(
+              JSON.stringify({
+                runId: instance.executionId,
+                revisionId,
+                phasePath: activity.name,
+                attempt,
+                inputHash,
+              }),
+            )
+            .digest("hex")
+            .slice(0, 32)}`;
+          const intendedAt = yield* Clock.currentTimeMillis;
+          const recoveryPolicy = Context.get(activity.annotations, ActionRecoveryPolicy);
+          const decision = yield* repository.beginAction(
+            actionId,
+            activity.name,
+            attempt,
+            inputHash,
+            recoveryPolicy,
+            intendedAt,
+          );
+          if (decision.kind === "reuse-result")
+            return decision.result as unknown as Workflow.Result<unknown, unknown>;
+          if (decision.kind === "hold") {
+            return yield* Effect.die(
+              `External action ${decision.actionId} is unresolved and requires accepted evidence or exact retry authorization`,
+            );
+          }
+
           const activityInstance = WorkflowEngine.WorkflowInstance.initial(
             instance.workflow,
             instance.executionId,
@@ -142,6 +177,7 @@ export const layer = <RExecution>(
               attempt,
               encoded,
               { startedAt, endedAt },
+              actionId,
             );
           }
           return result;

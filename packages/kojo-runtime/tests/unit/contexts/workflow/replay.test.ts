@@ -28,6 +28,7 @@ describe("Daemon Workflow engine replay", () => {
       }),
     );
     const repository = Layer.succeed(DaemonExecutionRepository, {
+      beginAction: () => Effect.succeed({ kind: "perform", actionId: "action-fixture" }),
       readResult: () => Effect.as(Effect.void, undefined as JsonValue | undefined),
       commitResult: () => Effect.void,
       readDeferred: () => Effect.as(Effect.void, undefined as JsonValue | undefined),
@@ -79,6 +80,7 @@ describe("Daemon Workflow engine replay", () => {
         const results = new Map<string, JsonValue>();
         let effectCount = 0;
         const repository = Layer.succeed(DaemonExecutionRepository, {
+          beginAction: () => Effect.succeed({ kind: "perform", actionId: "action-fixture" }),
           readResult: (runId, revisionId, phasePath, attempt) =>
             Effect.sync(() => results.get(JSON.stringify([runId, revisionId, phasePath, attempt]))),
           commitResult: (runId, revisionId, phasePath, attempt, result) =>

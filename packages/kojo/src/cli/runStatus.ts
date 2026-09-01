@@ -1,5 +1,6 @@
 import type {
   CancelRunResult,
+  RetryUncertainActionResult,
   RunDocument,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 import { Console, Data, Effect, Option } from "effect";
@@ -69,6 +70,16 @@ export const runStatusLine = (run: RunDocument, json: boolean, details = false):
           ? []
           : [
               `Cleanup=${run.cleanup.state}${run.cleanup.detail === undefined ? "" : `:${run.cleanup.detail}`}`,
+            ]),
+        ...(run.uncertainty === undefined
+          ? []
+          : [
+              `Uncertainty=${run.uncertainty.state}:${run.uncertainty.actionId}`,
+              `Action=${run.uncertainty.phasePath}#${run.uncertainty.attempt}:${run.uncertainty.inputHash}`,
+              `RecoveryPolicy=${run.uncertainty.recoveryPolicy}`,
+              ...(run.uncertainty.evidence === undefined
+                ? []
+                : [`Evidence=${run.uncertainty.evidence.kind}:${run.uncertainty.evidence.detail}`]),
             ]),
         `Phases=${run.phases.length}`,
         ...(details
@@ -240,4 +251,75 @@ const cancel = Command.make(
   }),
 ).pipe(Command.withDescription("Request Run cancellation without owning its execution"));
 
-export const runStatusCommands = [status, cancel] as const;
+export const validateUncertainRetry = (input: {
+  readonly actionId: string;
+  readonly reason: string;
+  readonly possibleDuplicationAcknowledged: boolean;
+}): void => {
+  if (input.actionId.trim() === "")
+    throw new Error("--retry-uncertain requires the exact action ID");
+  if (input.reason.trim() === "") throw new Error("--reason must explain this exact retry");
+  if (!input.possibleDuplicationAcknowledged)
+    throw new Error("--acknowledge-possible-duplication is required");
+};
+
+const resume = Command.make(
+  "resume",
+  {
+    runId: Argument.string("run"),
+    actionId: Flag.string("retry-uncertain"),
+    reason: Flag.string("reason"),
+    possibleDuplicationAcknowledged: Flag.boolean("acknowledge-possible-duplication"),
+    json: Flag.boolean("json"),
+  },
+  Effect.fn(function* ({ runId, actionId, reason, possibleDuplicationAcknowledged, json }) {
+    yield* Effect.try({
+      try: () => validateUncertainRetry({ actionId, reason, possibleDuplicationAcknowledged }),
+      catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
+    }).pipe(Effect.catch((message) => clientExit(2, message)));
+    const accepted = yield* Effect.tryPromise({
+      try: async () => {
+        const endpoint = readDaemonEndpoint(productionPaths());
+        if (endpoint === undefined)
+          throw new Error("the Daemon is not ready; run `kojo daemon start`");
+        const response = await fetch(
+          `http://localhost/api/v1/runs/${encodeURIComponent(runId)}/actions/retry-uncertain`,
+          {
+            unix: endpoint.socketPath,
+            method: "POST",
+            headers: { accept: "application/json", "content-type": "application/json" },
+            body: JSON.stringify({
+              requestId: crypto.randomUUID(),
+              dataIdentity: endpoint.dataIdentity,
+              actionId,
+              reason,
+              possibleDuplicationAcknowledged: true,
+            }),
+          } as RequestInit & { readonly unix: string },
+        );
+        if (!response.ok) {
+          const body = (await response.json().catch(() => ({}))) as { readonly message?: string };
+          throw new Error(
+            body.message ?? `the Daemon refused uncertain retry (${response.status})`,
+          );
+        }
+        return (await response.json()) as RetryUncertainActionResult;
+      },
+      catch: (cause) =>
+        new RunStatusClientError({
+          reason: cause instanceof Error ? cause.message : String(cause),
+        }),
+    }).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
+    yield* Console.log(
+      json
+        ? JSON.stringify({ formatVersion: 1, ...accepted })
+        : `Run ${runId} may retry exact Action ${actionId}. Possible duplication was acknowledged.`,
+    );
+  }),
+).pipe(
+  Command.withDescription(
+    "Authorize repetition of one exact unresolved action without manufacturing a result",
+  ),
+);
+
+export const runStatusCommands = [status, cancel, resume] as const;

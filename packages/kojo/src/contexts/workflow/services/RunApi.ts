@@ -46,6 +46,7 @@ import {
 } from "../../project/services/runnerChannel.ts";
 import type { AtomicArtifactRepository } from "../../trace/adapters/AtomicArtifactRepository.ts";
 import type { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRepository.ts";
+import type { SqliteExternalActionRepository } from "../adapters/SqliteExternalActionRepository.ts";
 import type { SqliteRevisionRepository } from "../adapters/SqliteRevisionRepository.ts";
 import type { SqliteRunRepository } from "../adapters/SqliteRunRepository.ts";
 import type {
@@ -55,6 +56,7 @@ import type {
   RunAuthority,
   RunExecutionFault,
 } from "../models/DaemonRun.ts";
+import type { ExternalActionIntent } from "../models/ExternalAction.ts";
 import { RetainedContentFault } from "../models/RetainedContentFault.ts";
 import { DEFAULT_RUNNER_IDLE_MILLIS } from "../models/SchedulingDefaults.ts";
 import { canonicalJson } from "./canonicalJson.ts";
@@ -143,6 +145,7 @@ const documentOf = (
   run: DaemonRun,
   phases: ReadonlyArray<PhaseResult>,
   artifacts: ReturnType<AtomicArtifactRepository["list"]>,
+  uncertainty?: ExternalActionIntent,
 ): RunDocument => ({
   runId: run.runId,
   projectId: run.projectId,
@@ -160,6 +163,32 @@ const documentOf = (
   ...(run.cancellation === undefined ? {} : { cancellation: run.cancellation }),
   ...(run.recovery === undefined ? {} : { recovery: run.recovery }),
   ...(run.cleanup === undefined ? {} : { cleanup: run.cleanup }),
+  ...(uncertainty === undefined
+    ? {}
+    : {
+        uncertainty: {
+          actionId: uncertainty.actionId,
+          revisionId: uncertainty.revisionId,
+          phasePath: uncertainty.phasePath,
+          attempt: uncertainty.attempt,
+          inputHash: uncertainty.inputHash,
+          recoveryPolicy: uncertainty.recoveryPolicy,
+          state: uncertainty.state,
+          uncertaintyRevision: uncertainty.uncertaintyRevision,
+          ...(uncertainty.evidence === undefined
+            ? {}
+            : {
+                evidence: {
+                  kind: uncertainty.evidence.kind,
+                  detail: uncertainty.evidence.detail,
+                  observedAt: uncertainty.evidence.observedAt,
+                },
+              }),
+          ...(uncertainty.retryAuthorization === undefined
+            ? {}
+            : { retryAuthorization: uncertainty.retryAuthorization }),
+        },
+      }),
   phases: phases
     .filter((phase) => phase.description !== INTERNAL_PHASE_DESCRIPTION)
     .map((phase) => ({
@@ -240,6 +269,7 @@ export class RunApi {
   readonly #projects: SqliteProjectRepository;
   readonly #projectRecovery: SqliteProjectRecoveryRepository;
   readonly #runs: SqliteRunRepository;
+  readonly #actions: SqliteExternalActionRepository;
   readonly #revisions: SqliteRevisionRepository;
   readonly #triggers: SqliteTriggerRepository;
   readonly #gates: SqliteDaemonGateRepository;
@@ -270,6 +300,7 @@ export class RunApi {
     readonly projects: SqliteProjectRepository;
     readonly projectRecovery: SqliteProjectRecoveryRepository;
     readonly runs: SqliteRunRepository;
+    readonly actions: SqliteExternalActionRepository;
     readonly revisions: SqliteRevisionRepository;
     readonly triggers: SqliteTriggerRepository;
     readonly gates: SqliteDaemonGateRepository;
@@ -289,6 +320,7 @@ export class RunApi {
     this.#projects = options.projects;
     this.#projectRecovery = options.projectRecovery;
     this.#runs = options.runs;
+    this.#actions = options.actions;
     this.#revisions = options.revisions;
     this.#triggers = options.triggers;
     this.#gates = options.gates;
@@ -845,6 +877,13 @@ export class RunApi {
         ).catch(() => undefined);
       } else if (cause instanceof ProjectRunnerConnectionLost && authority !== undefined) {
         const failedAt = new Date(this.#now()).toISOString();
+        const uncertainActions = await Effect.runPromise(
+          this.#actions.holdOpen(
+            run.runId,
+            "The external process ended without a committed action result. Missing output, process replacement, timeout, and Trace absence do not prove that the action did not occur.",
+            failedAt,
+          ),
+        ).catch(() => []);
         let recovery = await Effect.runPromise(
           this.#projectRecovery.recordFailure({
             projectId: run.projectId,
@@ -911,7 +950,7 @@ export class RunApi {
               new Date(this.#now()).toISOString(),
             ),
           );
-        } else {
+        } else if (uncertainActions.length === 0) {
           if (!(await this.#waitForRecovery(recovery.nextAttemptAt))) return;
           await Effect.runPromise(
             this.#runs.recoverProjectRunnerFailure(
@@ -962,6 +1001,7 @@ export class RunApi {
                 run,
                 await Effect.runPromise(this.#runs.phases(run.runId)),
                 this.#artifacts.list(run.runId),
+                await Effect.runPromise(this.#actions.current(run.runId)),
               ),
             ),
           ),
@@ -980,6 +1020,7 @@ export class RunApi {
               run,
               await Effect.runPromise(this.#runs.phases(runId)),
               this.#artifacts.list(runId),
+              await Effect.runPromise(this.#actions.current(runId)),
             );
       },
       catch: runApiFault,
@@ -990,6 +1031,52 @@ export class RunApi {
       try: async () => {
         const run = await Effect.runPromise(this.#runs.read(runId));
         if (run?.state === "queued") void this.#pump();
+      },
+      catch: runApiFault,
+    });
+
+  readonly retryUncertainAction = (options: {
+    readonly dataIdentity: string;
+    readonly requestId: string;
+    readonly runId: string;
+    readonly actionId: string;
+    readonly reason: string;
+    readonly possibleDuplicationAcknowledged: true;
+  }): Effect.Effect<
+    {
+      readonly kind: "retry-uncertain";
+      readonly runId: string;
+      readonly actionId: string;
+      readonly uncertaintyRevision: number;
+      readonly state: "retry-authorized";
+    },
+    RunApiFault
+  > =>
+    Effect.tryPromise({
+      try: async () => {
+        if (options.dataIdentity !== this.#dataIdentity)
+          throw new Error("the Daemon data identity changed");
+        const action = await Effect.runPromise(
+          this.#actions.authorizeRetry({
+            ...options,
+            canonicalRequest: canonicalJson({
+              operation: "retryUncertainAction",
+              runId: options.runId,
+              actionId: options.actionId,
+              reason: options.reason,
+              possibleDuplicationAcknowledged: options.possibleDuplicationAcknowledged,
+            }),
+            authorizedAt: new Date(this.#now()).toISOString(),
+          }),
+        );
+        void this.#pump();
+        return {
+          kind: "retry-uncertain",
+          runId: action.runId,
+          actionId: action.actionId,
+          uncertaintyRevision: action.uncertaintyRevision,
+          state: "retry-authorized",
+        };
       },
       catch: runApiFault,
     });
@@ -2169,6 +2256,71 @@ export class RunApi {
             typeof body.operationRequestId === "string"
               ? pending.get(body.operationRequestId)
               : undefined;
+          if (frame.kind === "BeginAction" || frame.kind === "CommitActionResult") {
+            if (
+              !("runId" in frame) ||
+              frame.runId !== authority.runId ||
+              frame.revisionId !== authority.revisionId ||
+              frame.claimGeneration !== authority.generation
+            ) {
+              throw new Error("the external action mutation escaped current Run authority");
+            }
+            const action = frame.body as unknown as Record<string, unknown>;
+            if (frame.kind === "BeginAction") {
+              const decision = await Effect.runPromise(
+                this.#actions.begin({
+                  authority,
+                  actionId: String(action.actionId),
+                  phasePath: String(action.phasePath),
+                  attempt: Number(action.attempt),
+                  inputHash: String(action.inputHash),
+                  recoveryPolicy: action.recoveryPolicy as
+                    | "recover-result"
+                    | "prove-not-performed"
+                    | "safe-repetition"
+                    | "unresolved",
+                  intendedAt: String(action.intendedAt),
+                }),
+              );
+              await replyMutation(
+                frame,
+                decision.kind === "reuse-result"
+                  ? {
+                      kind: decision.kind,
+                      actionId: decision.action.actionId,
+                      result: decision.result,
+                    }
+                  : { kind: decision.kind, actionId: decision.action.actionId },
+              );
+            } else {
+              await Effect.runPromise(
+                this.#actions.confirmResult(
+                  authority,
+                  String(action.actionId),
+                  action.encodedResult as JsonValue,
+                  "The current fenced Project Runner returned the encoded original-contract result.",
+                  String(action.endedAt),
+                ),
+              );
+              await Effect.runPromise(
+                this.#runs.completePhase(authority, {
+                  phasePath: String(action.phasePath),
+                  attempt: Number(action.attempt),
+                  kind: action.kind as "actor" | "code" | "agent",
+                  outcome: action.outcome as "succeeded" | "failed" | "interrupted",
+                  description: String(action.description),
+                  startedAt: String(action.startedAt),
+                  endedAt: String(action.endedAt),
+                  encodedResult: action.encodedResult as JsonValue,
+                }),
+              );
+              await replyMutation(frame, {
+                state: "result-confirmed",
+                actionId: String(action.actionId),
+              });
+            }
+            continue;
+          }
           if (
             frame.kind === "BeginResourceAcquisition" ||
             frame.kind === "ConfirmResourceAcquired" ||
