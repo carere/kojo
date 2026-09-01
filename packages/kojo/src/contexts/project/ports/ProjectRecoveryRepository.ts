@@ -8,6 +8,7 @@ export class ProjectRecoveryRepository extends Context.Service<
     readonly read: (
       projectId: string,
     ) => Effect.Effect<ProjectRecovery | undefined, ProjectRecoveryStoreError>;
+    readonly recoveries: Effect.Effect<ReadonlyArray<ProjectRecovery>, ProjectRecoveryStoreError>;
     readonly recordFailure: (
       failure: RunnerFailure,
     ) => Effect.Effect<ProjectRecovery, ProjectRecoveryStoreError>;

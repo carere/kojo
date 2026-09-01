@@ -76,6 +76,13 @@ describe("durable Project Runner recovery", () => {
       safety: "uncertain",
       priorRunnerInstanceId: "runner-old",
     });
+    expect(
+      await Effect.runPromise(repository.repair("project-a", "2026-09-01T00:01:00.000Z")),
+    ).toMatchObject({
+      cycle: 1,
+      state: "held",
+      safety: "uncertain",
+    });
     database.close(false);
   });
 });

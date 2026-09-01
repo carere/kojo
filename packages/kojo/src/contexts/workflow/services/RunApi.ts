@@ -41,7 +41,13 @@ import {
 import type { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRepository.ts";
 import type { SqliteRevisionRepository } from "../adapters/SqliteRevisionRepository.ts";
 import type { SqliteRunRepository } from "../adapters/SqliteRunRepository.ts";
-import type { DaemonRun, PhaseResult, ReservedRun, RunAuthority } from "../models/DaemonRun.ts";
+import type {
+  DaemonRun,
+  PhaseResult,
+  ReservedRun,
+  RunAuthority,
+  RunExecutionFault,
+} from "../models/DaemonRun.ts";
 import { RetainedContentFault } from "../models/RetainedContentFault.ts";
 import { DEFAULT_RUNNER_IDLE_MILLIS } from "../models/SchedulingDefaults.ts";
 import { canonicalJson } from "./canonicalJson.ts";
@@ -101,6 +107,13 @@ class ProjectRunnerConnectionLost extends Data.TaggedError("ProjectRunnerConnect
   readonly message: string;
   readonly cause: unknown;
 }> {}
+
+class ProjectRunnerProtocolFault extends Data.TaggedError("ProjectRunnerProtocolFault")<{
+  readonly message: string;
+}> {}
+
+const projectRunnerProtocolFault = (message: string): ProjectRunnerProtocolFault =>
+  new ProjectRunnerProtocolFault({ message });
 
 const runApiFault = (cause: unknown): RunApiFault =>
   new RunApiFault({
@@ -206,6 +219,10 @@ export class RunApi {
   readonly #triggerProcesses = new Map<string, { readonly stop: () => Promise<void> }>();
   readonly #triggerGroups = new Map<string, ProjectTriggerGroup>();
   readonly #activeExecutions = new Map<string, ActiveExecutionControl>();
+  readonly #recoveryWaits = new Set<{
+    readonly timer: ReturnType<typeof setTimeout>;
+    readonly resolve: (continueRecovery: boolean) => void;
+  }>();
   #pumping = false;
   #stopping = false;
 
@@ -432,10 +449,43 @@ export class RunApi {
   readonly restore = (): Effect.Effect<void, RunApiFault> =>
     Effect.tryPromise({
       try: async () => {
-        await Effect.runPromise(
-          this.#runs.recoverInterruptedExecutions(new Date(this.#now()).toISOString()),
+        const restoredAt = new Date(this.#now()).toISOString();
+        const recoveries = await Effect.runPromise(this.#projectRecovery.recoveries);
+        const deferredProjects = new Set(
+          recoveries
+            .filter((recovery) => recovery.state !== "healthy")
+            .map((recovery) => recovery.projectId),
         );
+        await Effect.runPromise(
+          this.#runs.recoverInterruptedExecutions(restoredAt, deferredProjects),
+        );
+        for (const recovery of recoveries) {
+          if (recovery.state === "healthy") continue;
+          if (recovery.state === "recovering" && recovery.safety === "safe") {
+            void this.#resumePersistedProjectRecovery(recovery).catch(() => undefined);
+            continue;
+          }
+          let held = recovery;
+          if (recovery.safety === "pending" && recovery.priorRunnerInstanceId !== undefined) {
+            held = await Effect.runPromise(
+              this.#projectRecovery.holdUncertain(
+                recovery.projectId,
+                recovery.priorRunnerInstanceId,
+                "The Daemon restarted before it confirmed the old Project Runner process group stopped.",
+              ),
+            );
+          }
+          await Effect.runPromise(
+            this.#runs.holdProjectRunnerAfterRestart(
+              held.projectId,
+              this.#projectRecoveryFault(held),
+              restoredAt,
+            ),
+          );
+        }
         for (const poller of await Effect.runPromise(this.#projects.triggerPollers)) {
+          const recovery = recoveries.find((candidate) => candidate.projectId === poller.projectId);
+          if (recovery !== undefined && recovery.state !== "healthy") continue;
           await this.#ensureTriggerPoller(poller.projectId, poller.workflowName, poller.pollerId);
         }
         void this.#pump();
@@ -447,6 +497,11 @@ export class RunApi {
     Effect.tryPromise({
       try: async () => {
         this.#stopping = true;
+        for (const wait of [...this.#recoveryWaits]) {
+          clearTimeout(wait.timer);
+          this.#recoveryWaits.delete(wait);
+          wait.resolve(false);
+        }
         await Promise.allSettled([
           ...Array.from(this.#triggerProcesses.values(), (process) => process.stop()),
           Effect.runPromise(this.#runnerSupervisor.shutdown()),
@@ -549,8 +604,19 @@ export class RunApi {
     try {
       while (true) {
         const reservationId = crypto.randomUUID();
+        const now = this.#now();
+        const blockedProjectIds = new Set(
+          (await Effect.runPromise(this.#projectRecovery.recoveries))
+            .filter(
+              (recovery) =>
+                recovery.state === "held" ||
+                recovery.safety !== "safe" ||
+                (recovery.nextAttemptAt !== undefined && Date.parse(recovery.nextAttemptAt) > now),
+            )
+            .map((recovery) => recovery.projectId),
+        );
         const reserved = await Effect.runPromise(
-          this.#runs.reserveNext(reservationId, new Date(this.#now()).toISOString()),
+          this.#runs.reserveNext(reservationId, new Date(now).toISOString(), blockedProjectIds),
         );
         if (reserved === undefined) break;
         void this.#dispatch(reserved).finally(() => this.#pump());
@@ -695,26 +761,14 @@ export class RunApi {
         }
         if (recovery.state === "held" || recovery.safety !== "safe") {
           await Effect.runPromise(
-            this.#runs.hold(
-              authority,
-              {
-                code: "PROJECT_RECOVERY_REQUIRED",
-                detail: recovery.lastFault ?? "Project Runner recovery needs explicit repair",
-                remedy: `Run \`kojo project repair ${run.projectId}\` after Project safety can be established.`,
-                retry: "after-repair",
-                scope: {
-                  projectId: run.projectId,
-                  workflowName: run.workflowName,
-                  revisionId: run.revisionId,
-                  packageGraphId: run.packageGraphId,
-                },
-              },
+            this.#runs.holdProjectRunnerAfterRestart(
+              run.projectId,
+              this.#projectRecoveryFault(recovery),
               new Date(this.#now()).toISOString(),
             ),
           );
         } else {
-          const delay = Math.max(0, Date.parse(recovery.nextAttemptAt ?? failedAt) - this.#now());
-          if (delay > 0) await Bun.sleep(delay);
+          if (!(await this.#waitForRecovery(recovery.nextAttemptAt))) return;
           await Effect.runPromise(
             this.#runs.recoverProjectRunnerFailure(
               authority,
@@ -793,6 +847,47 @@ export class RunApi {
   ): Effect.Effect<ProjectRecovery | undefined, RunApiFault> =>
     this.#projectRecovery.read(projectId).pipe(Effect.mapError(runApiFault));
 
+  #projectRecoveryFault(recovery: ProjectRecovery): Omit<RunExecutionFault, "scope"> {
+    return {
+      code: "PROJECT_RECOVERY_REQUIRED",
+      detail: recovery.lastFault ?? "Project Runner recovery needs explicit repair",
+      remedy: `Run \`kojo project repair ${recovery.projectId}\` after Project safety can be established.`,
+      retry: "after-repair",
+    };
+  }
+
+  #waitForRecovery(nextAttemptAt?: string): Promise<boolean> {
+    const delay = Math.max(
+      0,
+      Date.parse(nextAttemptAt ?? new Date(this.#now()).toISOString()) - this.#now(),
+    );
+    if (delay === 0) return Promise.resolve(!this.#stopping);
+    return new Promise((resolve) => {
+      let wait: {
+        readonly timer: ReturnType<typeof setTimeout>;
+        readonly resolve: (continueRecovery: boolean) => void;
+      };
+      const complete = (continueRecovery: boolean): void => {
+        this.#recoveryWaits.delete(wait);
+        resolve(continueRecovery);
+      };
+      wait = { timer: setTimeout(() => complete(!this.#stopping), delay), resolve: complete };
+      this.#recoveryWaits.add(wait);
+    });
+  }
+
+  async #resumePersistedProjectRecovery(recovery: ProjectRecovery): Promise<void> {
+    if (!(await this.#waitForRecovery(recovery.nextAttemptAt))) return;
+    await Effect.runPromise(
+      this.#runs.recoverProjectRunnerAfterRestart(
+        recovery.projectId,
+        new Date(this.#now()).toISOString(),
+      ),
+    );
+    void this.#pump();
+    await this.#restoreProjectTriggerPollers(recovery.projectId);
+  }
+
   readonly repairProject = (projectId: string): Effect.Effect<ProjectRecovery, RunApiFault> =>
     Effect.tryPromise({
       try: async () => {
@@ -800,9 +895,10 @@ export class RunApi {
         const recovery = await Effect.runPromise(
           this.#projectRecovery.repair(projectId, requestedAt),
         );
-        if (recovery.state === "recovering") {
+        if (recovery.state === "recovering" && recovery.safety === "safe") {
           await Effect.runPromise(this.#runs.repairProjectRecoveryHolds(projectId, requestedAt));
           void this.#pump();
+          await this.#restoreProjectTriggerPollers(projectId);
         }
         return recovery;
       },
@@ -1008,8 +1104,7 @@ export class RunApi {
       );
     }
     if (recovery.state === "held" || recovery.safety !== "safe" || this.#stopping) return;
-    const delay = Math.max(0, Date.parse(recovery.nextAttemptAt ?? failedAt) - this.#now());
-    if (delay > 0) await Bun.sleep(delay);
+    if (!(await this.#waitForRecovery(recovery.nextAttemptAt))) return;
     for (const poller of options.pollers) {
       await this.#ensureTriggerPoller(poller.projectId, poller.workflowName, poller.pollerId).catch(
         () => undefined,
@@ -1024,6 +1119,24 @@ export class RunApi {
   ): Promise<void> {
     const key = this.#pollerKey(projectId, workflowName);
     if (this.#triggerProcesses.has(key)) return;
+    const recovery = await Effect.runPromise(this.#projectRecovery.read(projectId));
+    if (
+      recovery !== undefined &&
+      (recovery.state === "held" ||
+        recovery.safety !== "safe" ||
+        (recovery.nextAttemptAt !== undefined && Date.parse(recovery.nextAttemptAt) > this.#now()))
+    ) {
+      await Effect.runPromise(
+        this.#projects.observeTrigger({
+          projectId,
+          workflowName,
+          state: "delayed",
+          detail: "Project Runner recovery must finish before Trigger polling can start",
+          observedAt: new Date(this.#now()).toISOString(),
+        }),
+      );
+      return;
+    }
     const revision = await Effect.runPromise(
       this.#projects.executionRevision(projectId, workflowName),
     );
@@ -1282,10 +1395,34 @@ export class RunApi {
           stdin: new Blob([connectionSecret]),
           stdout: "pipe",
           stderr: "pipe",
+          detached: true,
         },
       );
       const output = new Response(child.stdout as ReadableStream<Uint8Array>).text();
       const error = new Response(child.stderr as ReadableStream<Uint8Array>).text();
+      const processGroupExists = (): boolean => {
+        if (child === undefined) return false;
+        try {
+          process.kill(-child.pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      const forceProcessGroup = async (): Promise<void> => {
+        if (child === undefined) return;
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          if (child.exitCode === null) child.kill("SIGKILL");
+        }
+        await child.exited;
+        for (let attempt = 0; attempt < 50; attempt += 1) {
+          if (!processGroupExists()) return;
+          await Bun.sleep(10);
+        }
+        throw new Error("the owned Trigger Runner process group did not terminate");
+      };
       socket = await Promise.race([
         accepted,
         child.exited.then((exit) =>
@@ -1407,6 +1544,13 @@ export class RunApi {
           () => {
             lastHealthyAt = this.#now();
             healthPending = false;
+            void Effect.runPromise(
+              this.#projectRecovery.observeHealthy(
+                bootstrap.projectId,
+                new Date(lastHealthyAt).toISOString(),
+                false,
+              ),
+            ).catch(() => undefined);
           },
           () => {
             healthPending = false;
@@ -1420,10 +1564,14 @@ export class RunApi {
         stopping ??= (async () => {
           try {
             if (child !== undefined && child.exitCode === null) {
-              const stopped = await command("Shutdown", null).catch(() => undefined);
-              if (stopped?.kind !== "Stopped") child.kill("SIGTERM");
-              await child.exited;
+              const stopped = await Promise.race([
+                command("Shutdown", null),
+                Bun.sleep(this.#runnerCleanupMillis).then(() => undefined),
+              ]).catch(() => undefined);
+              if (stopped?.kind !== "Stopped") await forceProcessGroup();
             }
+            await child?.exited;
+            if (processGroupExists()) await forceProcessGroup();
             await readerDone?.catch(() => undefined);
             await Promise.all([output, error]);
             await Effect.runPromise(
@@ -1643,7 +1791,9 @@ export class RunApi {
         hello.body.projectId !== request.projectId ||
         hello.body.packageGraphId !== request.packageGraphId
       ) {
-        throw new Error("the Project Runner Hello does not match its private binding");
+        throw projectRunnerProtocolFault(
+          "the Project Runner Hello does not match its private binding",
+        );
       }
       await Effect.runPromise(
         writeRunnerFrame(socket, {
@@ -1701,7 +1851,9 @@ export class RunApi {
         registeredBody.state !== "committed" ||
         registeredBody.result === undefined
       ) {
-        throw new Error("the Project Runner did not commit exact revision registration");
+        throw projectRunnerProtocolFault(
+          "the Project Runner did not commit exact revision registration",
+        );
       }
       const inspectShutdown = async (): Promise<void> => {
         await Effect.runPromise(
@@ -1750,7 +1902,9 @@ export class RunApi {
             frame.daemonInstanceId !== request.daemonInstanceId ||
             frame.runnerInstanceId !== request.runnerInstanceId
           ) {
-            throw new Error("the Project Runner reply escaped its private binding");
+            throw projectRunnerProtocolFault(
+              "the Project Runner reply escaped its private binding",
+            );
           }
           const body = frame.body as unknown as {
             readonly operationRequestId?: string;
@@ -1773,6 +1927,11 @@ export class RunApi {
             continue;
           }
           if (frame.kind === "Stopped") {
+            if (selected === undefined) {
+              throw projectRunnerProtocolFault(
+                "the Project Runner stop reply has no pending command",
+              );
+            }
             stoppedRequestId = body.operationRequestId;
             if (selected !== undefined) {
               pending.delete(body.operationRequestId as string);
@@ -1780,7 +1939,7 @@ export class RunApi {
             }
             return;
           }
-          throw new Error(`the Project Runner sent unexpected ${frame.kind}`);
+          throw projectRunnerProtocolFault(`the Project Runner sent unexpected ${frame.kind}`);
         }
       })().catch((cause) => {
         for (const selected of pending.values()) selected.reject(cause);
@@ -1831,6 +1990,13 @@ export class RunApi {
           () => {
             lastHealthyAt = this.#now();
             healthPending = false;
+            void Effect.runPromise(
+              this.#projectRecovery.observeHealthy(
+                request.projectId,
+                new Date(lastHealthyAt).toISOString(),
+                false,
+              ),
+            ).catch(() => undefined);
           },
           () => {
             healthPending = false;
@@ -1996,6 +2162,7 @@ export class RunApi {
     } catch (cause) {
       if (
         cause instanceof RunnerChannelError ||
+        cause instanceof ProjectRunnerProtocolFault ||
         (cause instanceof Error &&
           (cause.message.includes("Project Runner exited") ||
             cause.message.includes("private binding timed out")))

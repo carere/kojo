@@ -88,6 +88,20 @@ export class SqliteProjectRecoveryRepository {
       catch: storeError,
     });
 
+  readonly recoveries: Effect.Effect<ReadonlyArray<ProjectRecovery>, ProjectRecoveryStoreError> =
+    Effect.try({
+      try: () =>
+        this.#database
+          .query<RecoveryRow, []>(
+            `SELECT project_id, cycle, attempts, state, safety, failed_operation_pending,
+                  healthy_since, next_attempt_at, prior_runner_instance_id, last_fault
+             FROM project_runner_recovery ORDER BY project_id`,
+          )
+          .all()
+          .map(recoveryOf),
+      catch: storeError,
+    });
+
   readonly recordFailure = (
     failure: RunnerFailure,
   ): Effect.Effect<ProjectRecovery, ProjectRecoveryStoreError> =>
@@ -208,10 +222,11 @@ export class SqliteProjectRecoveryRepository {
         }
         return this.#database
           .transaction(() => {
+            const prior = this.#required(projectId);
+            if (prior.state !== "held" || prior.safety !== "safe") return recoveryOf(prior);
             this.#database.run(
               `UPDATE project_runner_recovery
                   SET cycle = cycle + 1, attempts = 0, state = 'recovering',
-                      safety = CASE WHEN safety = 'uncertain' THEN 'pending' ELSE safety END,
                       healthy_since = NULL, next_attempt_at = NULL
                 WHERE project_id = ?`,
               [projectId],

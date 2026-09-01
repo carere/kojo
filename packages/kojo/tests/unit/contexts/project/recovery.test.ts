@@ -44,6 +44,7 @@ describe("Project Runner recovery", () => {
           operationFailed: true,
         });
         expect(exhausted).toMatchObject({ attempts: 2, state: "held", safety: "pending" });
+        yield* repository.confirmSafety("project-a", "runner-3", "2026-09-01T00:00:02.001Z");
 
         const repaired = yield* repository.repair("project-a", "2026-09-01T00:01:00.000Z");
         expect(repaired).toMatchObject({ cycle: 2, attempts: 0, state: "recovering" });
@@ -88,5 +89,22 @@ describe("Project Runner recovery", () => {
     expect(runnerFaultLocality("oversized-frame")).toBe("connection");
     expect(runnerFaultLocality("wrong-scope")).toBe("connection");
     expect(runnerFaultLocality("stale-authority")).toBe("request");
+  });
+
+  it.effect("does not let repair convert uncertain termination into safe evidence", () => {
+    const adapter = new InMemoryProjectRecoveryRepository();
+    return Effect.gen(function* () {
+      const repository = yield* ProjectRecoveryRepository;
+      yield* repository.recordFailure({
+        projectId: "project-c",
+        runnerInstanceId: "runner-uncertain",
+        failedAt: "2026-09-01T00:00:00.000Z",
+        fault: "the process group could not be inspected",
+        operationFailed: true,
+      });
+      yield* repository.holdUncertain("project-c", "runner-uncertain", "termination is uncertain");
+      const repaired = yield* repository.repair("project-c", "2026-09-01T00:01:00.000Z");
+      expect(repaired).toMatchObject({ cycle: 1, state: "held", safety: "uncertain" });
+    }).pipe(Effect.provide(adapter.layer));
   });
 });

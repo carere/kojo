@@ -14,6 +14,7 @@ import { Gate } from "../contexts/gate/ports/Gate.ts";
 import { GateRepository } from "../contexts/gate/ports/GateRepository.ts";
 import {
   makeRunnerFrameReader,
+  writeCriticalRunnerFrame,
   writeRunnerFrame,
 } from "../contexts/project/services/runnerChannel.ts";
 import { Tracer } from "../contexts/trace/ports/Tracer.ts";
@@ -553,9 +554,13 @@ const runPrivateProtocol = async (): Promise<void> => {
     >();
     const registrationKey = (revisionId: string, workflowName: string): string =>
       JSON.stringify([revisionId, workflowName]);
-    const reply = (operationRequestId: string, result: JsonValue): Promise<void> =>
+    const reply = (
+      operationRequestId: string,
+      result: JsonValue,
+      lane?: "critical",
+    ): Promise<void> =>
       Effect.runPromise(
-        writeRunnerFrame(socket, {
+        (lane === "critical" ? writeCriticalRunnerFrame : writeRunnerFrame)(socket, {
           version: 1,
           kind: "Ready",
           requestId: crypto.randomUUID(),
@@ -634,7 +639,7 @@ const runPrivateProtocol = async (): Promise<void> => {
           continue;
         }
         if (operation.kind === "Health") {
-          await reply(operation.requestId, { healthy: true });
+          await reply(operation.requestId, { healthy: true }, "critical");
           continue;
         }
         if (operation.kind === "RegisterRevision") {
@@ -752,7 +757,7 @@ const runPrivateProtocol = async (): Promise<void> => {
           }
           active.controller.abort();
           await active.running;
-          await reply(operation.requestId, { stopped: true });
+          await reply(operation.requestId, { stopped: true }, "critical");
           continue;
         }
         if (operation.kind === "StartTrigger") {

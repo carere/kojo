@@ -645,6 +645,7 @@ export class SqliteRunRepository {
   readonly reserveNext = (
     reservationId: string,
     reservedAt: string,
+    blockedProjectIds: ReadonlySet<string> = new Set(),
   ): Effect.Effect<
     { readonly run: DaemonRun; readonly reservationId: string } | undefined,
     RunStoreError
@@ -678,7 +679,8 @@ export class SqliteRunRepository {
                     )
                   ORDER BY q.project_id`,
               )
-              .all();
+              .all()
+              .filter((candidate) => !blockedProjectIds.has(candidate.project_id));
             const project =
               projects.find((candidate) =>
                 lastProject === null ? true : candidate.project_id > lastProject,
@@ -956,33 +958,141 @@ export class SqliteRunRepository {
    * The prior Claim stays as generation evidence. The next Claim replaces it with a higher
    * generation, so a message from the stopped Runner cannot regain authority.
    */
-  readonly recoverInterruptedExecutions = (queuedAt: string): Effect.Effect<void, RunStoreError> =>
+  readonly recoverInterruptedExecutions = (
+    queuedAt: string,
+    deferredProjectIds: ReadonlySet<string> = new Set(),
+  ): Effect.Effect<void, RunStoreError> =>
     Effect.try({
       try: () =>
         this.#database
           .transaction(() => {
             this.#database.run("DELETE FROM workflow_reservations");
-            this.#database.run(
-              `INSERT INTO workflow_queue (run_id, project_id, admission_sequence, queued_at)
-               SELECT run_id, project_id, admission_sequence, ?
-                 FROM workflow_runs
-                WHERE state = 'executing'
-                  AND run_id NOT IN (
-                    SELECT run_id FROM workflow_cancellations WHERE confirmed_at IS NULL
-                  )
-               ON CONFLICT(run_id) DO NOTHING`,
-              [queuedAt],
-            );
-            this.#database.run(
-              "DELETE FROM workflow_slots WHERE run_id IN (SELECT run_id FROM workflow_runs WHERE state = 'executing')",
-            );
-            this.#database.run(
-              `UPDATE workflow_runs SET state = 'queued'
-                WHERE state = 'executing'
-                  AND run_id NOT IN (
-                    SELECT run_id FROM workflow_cancellations WHERE confirmed_at IS NULL
-                  )`,
-            );
+            const interrupted = this.#database
+              .query<
+                {
+                  readonly run_id: string;
+                  readonly project_id: string;
+                  readonly admission_sequence: number;
+                },
+                []
+              >(
+                `SELECT run_id, project_id, admission_sequence
+                   FROM workflow_runs
+                  WHERE state = 'executing'
+                    AND run_id NOT IN (
+                      SELECT run_id FROM workflow_cancellations WHERE confirmed_at IS NULL
+                    )`,
+              )
+              .all();
+            for (const run of interrupted) {
+              if (deferredProjectIds.has(run.project_id)) continue;
+              this.#database.run("DELETE FROM workflow_slots WHERE run_id = ?", [run.run_id]);
+              this.#database.run("UPDATE workflow_runs SET state = 'queued' WHERE run_id = ?", [
+                run.run_id,
+              ]);
+              this.#database.run(
+                `INSERT INTO workflow_queue (
+                   run_id, project_id, admission_sequence, queued_at, queue_kind, queue_reason
+                 ) VALUES (?, ?, ?, ?, 'continuation', 'runner-starting')
+                 ON CONFLICT(run_id) DO UPDATE SET queued_at = excluded.queued_at,
+                   queue_kind = 'continuation', queue_reason = 'runner-starting'`,
+                [run.run_id, run.project_id, run.admission_sequence, queuedAt],
+              );
+            }
+          })
+          .immediate(),
+      catch: failure,
+    });
+
+  readonly recoverProjectRunnerAfterRestart = (
+    projectId: string,
+    queuedAt: string,
+  ): Effect.Effect<number, RunStoreError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            const runs = this.#database
+              .query<{ readonly run_id: string; readonly admission_sequence: number }, [string]>(
+                `SELECT run_id, admission_sequence FROM workflow_runs
+                  WHERE project_id = ? AND state = 'executing'`,
+              )
+              .all(projectId);
+            for (const run of runs) {
+              this.#database.run("DELETE FROM workflow_slots WHERE run_id = ?", [run.run_id]);
+              this.#database.run("UPDATE workflow_runs SET state = 'queued' WHERE run_id = ?", [
+                run.run_id,
+              ]);
+              this.#database.run(
+                `INSERT INTO workflow_queue (
+                   run_id, project_id, admission_sequence, queued_at, queue_kind, queue_reason
+                 ) VALUES (?, ?, ?, ?, 'continuation', 'runner-starting')
+                 ON CONFLICT(run_id) DO UPDATE SET queued_at = excluded.queued_at,
+                   queue_kind = 'continuation', queue_reason = 'runner-starting'`,
+                [run.run_id, projectId, run.admission_sequence, queuedAt],
+              );
+            }
+            return runs.length;
+          })
+          .immediate(),
+      catch: failure,
+    });
+
+  readonly holdProjectRunnerAfterRestart = (
+    projectId: string,
+    fault: Omit<RunExecutionFault, "scope">,
+    heldAt: string,
+  ): Effect.Effect<number, RunStoreError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            const runs = this.#database
+              .query<
+                {
+                  readonly run_id: string;
+                  readonly workflow_name: string;
+                  readonly revision_id: string;
+                  readonly package_graph_id: string;
+                },
+                [string]
+              >(
+                `SELECT run_id, workflow_name, revision_id, package_graph_id FROM workflow_runs
+                  WHERE project_id = ? AND state IN ('executing', 'queued')`,
+              )
+              .all(projectId);
+            for (const run of runs) {
+              const runFault: RunExecutionFault = {
+                ...fault,
+                scope: {
+                  projectId,
+                  workflowName: run.workflow_name,
+                  revisionId: run.revision_id,
+                  packageGraphId: run.package_graph_id,
+                },
+              };
+              this.#database.run("DELETE FROM workflow_slots WHERE run_id = ?", [run.run_id]);
+              this.#database.run("DELETE FROM workflow_queue WHERE run_id = ?", [run.run_id]);
+              this.#database.run("UPDATE workflow_runs SET state = 'held' WHERE run_id = ?", [
+                run.run_id,
+              ]);
+              this.#database.run(
+                `INSERT INTO workflow_run_holds (run_id, code, detail, remedy, fault_json, held_at)
+                 VALUES (?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(run_id) DO UPDATE SET code = excluded.code, detail = excluded.detail,
+                   remedy = excluded.remedy, fault_json = excluded.fault_json,
+                   held_at = excluded.held_at`,
+                [
+                  run.run_id,
+                  runFault.code,
+                  runFault.detail,
+                  runFault.remedy,
+                  JSON.stringify(runFault),
+                  heldAt,
+                ],
+              );
+            }
+            return runs.length;
           })
           .immediate(),
       catch: failure,

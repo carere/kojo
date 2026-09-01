@@ -50,7 +50,12 @@ const hostPaths = (): DaemonPaths => {
   return paths;
 };
 
-const project = (root: string, firstCrash: string, completed: string): string => {
+const project = (
+  root: string,
+  firstCrash: string,
+  descendantStarted: string,
+  completed: string,
+): string => {
   const location = join(root, "project");
   mkdirSync(join(location, ".kojo", "workflows"), { recursive: true });
   linkEngine({ root: location, packageRoot });
@@ -87,6 +92,11 @@ export const recover = workflow(
     Effect.sync(() => {
       if (!existsSync(${JSON.stringify(firstCrash)})) {
         writeFileSync(${JSON.stringify(firstCrash)}, String(process.pid));
+        const descendant = Bun.spawn(
+          [process.execPath, "-e", "setInterval(() => undefined, 1000)"],
+          { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+        );
+        writeFileSync(${JSON.stringify(descendantStarted)}, String(descendant.pid));
         process.exit(42);
       }
       writeFileSync(${JSON.stringify(completed)}, String(process.pid));
@@ -119,8 +129,9 @@ describe("real Project Runner recovery", () => {
   it("confirms the crashed group stopped and continues the same Run in one replacement", async () => {
     const paths = hostPaths();
     const firstCrash = join(roots[0] ?? "", "first-crash.txt");
+    const descendantStarted = join(roots[0] ?? "", "descendant-started.txt");
     const completed = join(roots[0] ?? "", "completed.txt");
-    const location = project(roots[0] ?? "", firstCrash, completed);
+    const location = project(roots[0] ?? "", firstCrash, descendantStarted, completed);
     mkdirSync(paths.dataRoot, { recursive: true, mode: 0o700 });
     const captured = captureWorkflowRevision({
       project: location,
@@ -181,12 +192,24 @@ describe("real Project Runner recovery", () => {
       await Bun.sleep(25);
     }
     expect(existsSync(firstCrash)).toBe(true);
+    expect(existsSync(descendantStarted)).toBe(true);
     expect(run).toMatchObject({ runId: admitted.runId, state: "succeeded" });
     expect(run?.phases).toHaveLength(1);
     const firstPid = Number(readFileSync(firstCrash, "utf8"));
     const replacementPid = Number(readFileSync(completed, "utf8"));
     expect(replacementPid).not.toBe(firstPid);
     expect(() => process.kill(firstPid, 0)).toThrow();
+    const descendantPid = Number(readFileSync(descendantStarted, "utf8"));
+    const descendantDeadline = Date.now() + 2_000;
+    while (Date.now() < descendantDeadline) {
+      try {
+        process.kill(descendantPid, 0);
+        await Bun.sleep(10);
+      } catch {
+        break;
+      }
+    }
+    expect(() => process.kill(descendantPid, 0)).toThrow();
 
     const beforeRepair = (await (
       await call(daemon, `/api/v1/projects/${registered.project.projectId}/workflows`)
@@ -201,10 +224,106 @@ describe("real Project Runner recovery", () => {
       },
     );
     expect(repair.status, await repair.clone().text()).toBe(202);
-    expect(await repair.json()).toMatchObject({ cycle: 2, attempts: 0, state: "recovering" });
+    expect(await repair.json()).toMatchObject({ cycle: 1, attempts: 1, state: "recovering" });
     const afterRepair = (await (
       await call(daemon, `/api/v1/projects/${registered.project.projectId}/workflows`)
     ).json()) as WorkflowSnapshot;
     expect(afterRepair.workflows[0]?.activity).toBe(beforeRepair.workflows[0]?.activity);
+  }, 30_000);
+
+  it("keeps the absolute replacement delay when a fresh Daemon owner restores the Run", async () => {
+    const paths = hostPaths();
+    const firstCrash = join(roots[0] ?? "", "restart-crash.txt");
+    const descendantStarted = join(roots[0] ?? "", "restart-descendant.txt");
+    const completed = join(roots[0] ?? "", "restart-completed.txt");
+    const location = project(roots[0] ?? "", firstCrash, descendantStarted, completed);
+    mkdirSync(paths.dataRoot, { recursive: true, mode: 0o700 });
+    const captured = captureWorkflowRevision({
+      project: location,
+      dataRoot: paths.dataRoot,
+      workflowName: "recover",
+    });
+    const databasePath = join(paths.dataRoot, "kojo.db");
+    const database = new Database(databasePath, { create: true, strict: true });
+    database.run(
+      "CREATE TABLE daemon_metadata (name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT",
+    );
+    const projects = new SqliteProjectRepository(database);
+    const registered = await Effect.runPromise(
+      projects.register({
+        requestId: "seed-restart-project",
+        requestBody: "seed-restart-project",
+        dataIdentity: "seed-data",
+        location,
+        observedAt: "2026-09-01T00:00:00.000Z",
+        factory: {
+          state: "available",
+          refreshState: "current",
+          workflows: [
+            {
+              workflowName: "recover",
+              availability: "available",
+              source: join(location, ".kojo", "workflows", "recover.ts"),
+              revision: captured,
+            },
+          ],
+        },
+      }),
+    );
+    database.close(false);
+    chmodSync(databasePath, 0o600);
+
+    const firstOwner = startDaemon(paths, { automaticRefresh: false, runnerIdleMillis: 50 });
+    daemons.push(firstOwner);
+    const response = await call(
+      firstOwner,
+      `/api/v1/projects/${registered.project.projectId}/workflows/recover/actions/start`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          requestId: "start-restart-recovery",
+          dataIdentity: firstOwner.endpoint.dataIdentity,
+          payload: null,
+        }),
+      },
+    );
+    const admitted = (await response.json()) as StartRunResult;
+    const failureDeadline = Date.now() + 10_000;
+    let nextAttemptAt = 0;
+    while (Date.now() < failureDeadline) {
+      if (existsSync(firstCrash)) {
+        const observer = new Database(databasePath, { readonly: true, strict: true });
+        const row = observer
+          .query<{ readonly next_attempt_at: string; readonly safety: string }, []>(
+            "SELECT next_attempt_at, safety FROM project_runner_recovery LIMIT 1",
+          )
+          .get();
+        observer.close(false);
+        if (row?.safety === "safe") {
+          nextAttemptAt = Date.parse(row.next_attempt_at);
+          break;
+        }
+      }
+      await Bun.sleep(10);
+    }
+    expect(nextAttemptAt).toBeGreaterThan(Date.now());
+    await Effect.runPromise(firstOwner.stop);
+    daemons.splice(daemons.indexOf(firstOwner), 1);
+
+    const replacementOwner = startDaemon(paths, { automaticRefresh: false, runnerIdleMillis: 50 });
+    daemons.push(replacementOwner);
+    await Bun.sleep(Math.max(1, nextAttemptAt - Date.now() - 100));
+    expect(existsSync(completed)).toBe(false);
+    const deadline = Date.now() + 10_000;
+    let run: RunDocument | undefined;
+    while (Date.now() < deadline) {
+      run = (await (
+        await call(replacementOwner, `/api/v1/runs/${admitted.runId}`)
+      ).json()) as RunDocument;
+      if (run.state === "succeeded") break;
+      await Bun.sleep(20);
+    }
+    expect(run).toMatchObject({ runId: admitted.runId, state: "succeeded" });
   }, 30_000);
 });

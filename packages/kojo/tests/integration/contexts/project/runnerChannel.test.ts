@@ -1,4 +1,5 @@
 import { connect, createServer, type Socket } from "node:net";
+import type { RunnerFrame } from "@carere/kojo-runner-contracts/contexts/project/contracts/frame";
 import { Effect } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -52,40 +53,92 @@ describe("private Runner channel limits", () => {
   });
 
   it("backpressures a real slow peer while critical control keeps separate bounded capacity", async () => {
-    const { daemon, runner } = await pair();
-    runner.pause();
-    const writer = makeRunnerFrameWriter(daemon);
-    const large = "x".repeat(900_000);
-    const ordinary = Array.from({ length: 10 }, (_, index) =>
-      Effect.runPromise(
-        writer.write({
-          version: 1,
-          kind: "Fault",
-          requestId: `ordinary-${index}`,
-          daemonInstanceId: "daemon-1",
-          runnerInstanceId: "runner-1",
-          body: { large },
-        }),
-      ),
-    );
-    await Bun.sleep(20);
-    const shutdown = Effect.runPromise(
-      writer.write({
-        version: 1,
-        kind: "Shutdown",
-        requestId: "critical-shutdown",
-        daemonInstanceId: "daemon-1",
-        runnerInstanceId: "runner-1",
-        body: null,
-      }),
-    );
     expect(MAX_ORDINARY_REQUESTS).toBe(64);
     expect(MAX_ORDINARY_BUFFER_BYTES).toBe(8 * 1024 * 1024);
     expect(MAX_CRITICAL_REQUESTS).toBe(8);
     expect(MAX_CRITICAL_BUFFER_BYTES).toBe(1024 * 1024);
-
-    runner.resume();
-    runner.on("data", () => undefined);
-    await expect(Promise.all([...ordinary, shutdown])).resolves.toHaveLength(11);
+    for (const kind of ["Health", "CancelRun", "Shutdown"] as const) {
+      const { daemon, runner } = await pair();
+      runner.pause();
+      const writer = makeRunnerFrameWriter(daemon);
+      const daemonReader = makeRunnerFrameReader(daemon);
+      const runnerReader = makeRunnerFrameReader(runner);
+      const runnerWriter = makeRunnerFrameWriter(runner);
+      const large = "x".repeat(900_000);
+      const ordinary = Array.from({ length: 10 }, (_, index) =>
+        Effect.runPromise(
+          writer.write({
+            version: 1,
+            kind: "Fault",
+            requestId: `${kind}-ordinary-${index}`,
+            daemonInstanceId: "daemon-1",
+            runnerInstanceId: "runner-1",
+            body: { large },
+          }),
+        ),
+      );
+      await Promise.resolve();
+      const request = {
+        version: 1,
+        kind,
+        requestId: `critical-${kind}`,
+        daemonInstanceId: "daemon-1",
+        runnerInstanceId: "runner-1",
+        ...(kind === "CancelRun"
+          ? {
+              runId: "run-1",
+              revisionId: "a".repeat(64),
+              claimGeneration: 1,
+              body: {
+                cancellationVersion: 1,
+                deadlineAt: "2026-09-01T00:00:30.000Z",
+              },
+            }
+          : { body: null }),
+      } as RunnerFrame;
+      const controlWrite = Effect.runPromise(writer.write(request));
+      const controlRoundTrip = (async () => {
+        const first = await Effect.runPromise(runnerReader.read);
+        const selected = await Effect.runPromise(runnerReader.read);
+        expect(first.requestId).toBe(`${kind}-ordinary-0`);
+        expect(selected.kind).toBe(kind);
+        await Effect.runPromise(
+          runnerWriter.write(
+            {
+              version: 1,
+              kind: kind === "Shutdown" ? "Stopped" : "Ready",
+              requestId: `critical-${kind}-reply`,
+              daemonInstanceId: "daemon-1",
+              runnerInstanceId: "runner-1",
+              body:
+                kind === "Shutdown"
+                  ? { operationRequestId: selected.requestId }
+                  : {
+                      replyVersion: 1,
+                      operationRequestId: selected.requestId,
+                      state: "committed",
+                      result: {},
+                    },
+            },
+            "critical",
+          ),
+        );
+        return Effect.runPromise(daemonReader.read);
+      })();
+      runner.resume();
+      const response = await Promise.race([
+        controlRoundTrip,
+        Bun.sleep(1_000).then(() => {
+          throw new Error(`reserved ${kind} did not receive a bounded response`);
+        }),
+      ]);
+      expect(response.body).toMatchObject({ operationRequestId: `critical-${kind}` });
+      for (let index = 1; index < ordinary.length; index += 1) {
+        expect((await Effect.runPromise(runnerReader.read)).requestId).toBe(
+          `${kind}-ordinary-${index}`,
+        );
+      }
+      await expect(Promise.all([...ordinary, controlWrite])).resolves.toHaveLength(11);
+    }
   }, 10_000);
 });

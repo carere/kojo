@@ -24,6 +24,7 @@ export class InMemoryProjectRecoveryRepository {
 
   readonly layer = Layer.succeed(ProjectRecoveryRepository, {
     read: (projectId) => Effect.sync(() => this.#recoveries.get(projectId)),
+    recoveries: Effect.sync(() => [...this.#recoveries.values()]),
     recordFailure: (failure) =>
       Effect.sync(() => {
         const prior = this.#recoveries.get(failure.projectId);
@@ -97,12 +98,13 @@ export class InMemoryProjectRecoveryRepository {
             failedOperationPending: false,
           };
         }
+        if (prior.state !== "held" || prior.safety !== "safe") return prior;
         const recovery: ProjectRecovery = {
           projectId,
           cycle: prior.cycle + 1,
           attempts: 0,
           state: "recovering",
-          safety: prior.safety === "uncertain" ? "pending" : prior.safety,
+          safety: prior.safety,
           failedOperationPending: prior.failedOperationPending,
           ...(prior.priorRunnerInstanceId === undefined
             ? {}

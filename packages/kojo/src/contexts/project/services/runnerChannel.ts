@@ -108,19 +108,6 @@ export const makeRunnerFrameReader = (socket: Socket): RunnerFrameReader => {
   };
 };
 
-const writeRawRunnerFrame = (
-  socket: Socket,
-  encoded: Uint8Array,
-): Effect.Effect<void, RunnerChannelError> => {
-  return Effect.tryPromise({
-    try: () =>
-      new Promise<void>((resolve, reject) => {
-        socket.write(encoded, (cause) => (cause == null ? resolve() : reject(cause)));
-      }),
-    catch: channelError,
-  });
-};
-
 export const MAX_ORDINARY_REQUESTS = 64;
 export const MAX_ORDINARY_BUFFER_BYTES = 8 * 1024 * 1024;
 export const MAX_CRITICAL_REQUESTS = 8;
@@ -188,7 +175,10 @@ class CapacityPool {
 }
 
 export interface RunnerFrameWriter {
-  readonly write: (frame: RunnerFrame) => Effect.Effect<void, RunnerChannelError>;
+  readonly write: (
+    frame: RunnerFrame,
+    lane?: "critical",
+  ) => Effect.Effect<void, RunnerChannelError>;
 }
 
 const writers = new WeakMap<Socket, RunnerFrameWriter>();
@@ -205,6 +195,18 @@ export const writeRunnerFrame = (
   return writer.write(frame);
 };
 
+export const writeCriticalRunnerFrame = (
+  socket: Socket,
+  frame: RunnerFrame,
+): Effect.Effect<void, RunnerChannelError> => {
+  let writer = writers.get(socket);
+  if (writer === undefined) {
+    writer = makeRunnerFrameWriter(socket);
+    writers.set(socket, writer);
+  }
+  return writer.write(frame, "critical");
+};
+
 /**
  * Apply backpressure to ordinary traffic without taking capacity from health, cancellation, and
  * shutdown. Capacity is released only after the socket accepts the complete frame.
@@ -212,26 +214,74 @@ export const writeRunnerFrame = (
 export const makeRunnerFrameWriter = (socket: Socket): RunnerFrameWriter => {
   const ordinary = new CapacityPool(MAX_ORDINARY_REQUESTS, MAX_ORDINARY_BUFFER_BYTES);
   const control = new CapacityPool(MAX_CRITICAL_REQUESTS, MAX_CRITICAL_BUFFER_BYTES);
+  interface QueuedWrite {
+    readonly encoded: Uint8Array;
+    readonly payloadBytes: number;
+    readonly pool: CapacityPool;
+    readonly resolve: () => void;
+    readonly reject: (cause: Error) => void;
+  }
+  const ordinaryQueue: QueuedWrite[] = [];
+  const controlQueue: QueuedWrite[] = [];
+  let current: QueuedWrite | undefined;
+  let failure: Error | undefined;
+  const drain = (): void => {
+    if (current !== undefined || failure !== undefined) return;
+    const selected = controlQueue.shift() ?? ordinaryQueue.shift();
+    if (selected === undefined) return;
+    current = selected;
+    socket.write(selected.encoded, (cause) => {
+      if (current !== selected) return;
+      current = undefined;
+      selected.pool.release(selected.payloadBytes);
+      if (cause == null) selected.resolve();
+      else selected.reject(cause);
+      drain();
+    });
+  };
   const fail = (cause: Error): void => {
+    if (failure !== undefined) return;
+    failure = cause;
     ordinary.fail(cause);
     control.fail(cause);
+    if (current !== undefined) {
+      const selected = current;
+      current = undefined;
+      selected.pool.release(selected.payloadBytes);
+      selected.reject(cause);
+    }
+    for (const selected of [...controlQueue.splice(0), ...ordinaryQueue.splice(0)]) {
+      selected.pool.release(selected.payloadBytes);
+      selected.reject(cause);
+    }
   };
   socket.once("error", fail);
   socket.once("close", () => fail(new Error("the private Runner channel closed")));
   return {
-    write: (frame) => {
+    write: (frame, lane) => {
       const encoded = encodeLengthPrefixedFrame(frame);
       if (!encoded.ok) return Effect.fail(channelError(new Error(failureText(encoded.issues))));
-      const pool = critical(frame) ? control : ordinary;
+      const useControl = lane === "critical" || critical(frame);
+      const pool = useControl ? control : ordinary;
       const payloadBytes = encoded.value.byteLength - 4;
       return Effect.tryPromise({
         try: async () => {
           await pool.acquire(payloadBytes);
-          try {
-            await Effect.runPromise(writeRawRunnerFrame(socket, encoded.value));
-          } finally {
+          if (failure !== undefined) {
             pool.release(payloadBytes);
+            throw failure;
           }
+          await new Promise<void>((resolve, reject) => {
+            const selected = {
+              encoded: encoded.value,
+              payloadBytes,
+              pool,
+              resolve,
+              reject,
+            };
+            (useControl ? controlQueue : ordinaryQueue).push(selected);
+            drain();
+          });
         },
         catch: channelError,
       });
