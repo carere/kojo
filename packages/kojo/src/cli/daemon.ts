@@ -6,6 +6,10 @@ import { FileLifecycleJournalRepository } from "../contexts/daemon/adapters/File
 import { SocketDaemonLifecycleControl } from "../contexts/daemon/adapters/LifecycleControlTransport.ts";
 import { macLaunchAgent } from "../contexts/daemon/adapters/MacLaunchAgent.ts";
 import {
+  type DaemonSupervisionStatus,
+  ManagedDaemonSupervision,
+} from "../contexts/daemon/adapters/ManagedDaemonSupervision.ts";
+import {
   readCheckedManagedRelease,
   stageManagedRelease,
 } from "../contexts/daemon/adapters/ManagedInstallation.ts";
@@ -138,6 +142,34 @@ export const configurationApplyLines = (
   line("Collected Run correctness", applied.collection.runs.join(", ") || "none"),
   line("Collected Traces", applied.collection.traces.join(", ") || "none"),
   line("Collected Artifacts", applied.collection.artifacts.join(", ") || "none"),
+];
+
+const supervisionLines = (status: DaemonSupervisionStatus): ReadonlyArray<string> => [
+  line("Daemon supervision", status.state),
+  line("Daemon restart attempts remaining", String(status.restartAttemptsRemaining)),
+  line("Daemon supervision repair required", status.repairRequired ? "yes" : "no"),
+  line("Daemon restart delays", JSON.stringify(status.policy.restartDelaysMs)),
+  line("Daemon healthy reset", `${status.policy.healthyResetMs} ms`),
+  ...(status.lastFailure === undefined
+    ? []
+    : [
+        line("Last Daemon failure", status.lastFailure.failedAt),
+        line("Last Daemon failure detail", status.lastFailure.detail),
+      ]),
+  ...(status.repairPlan === undefined
+    ? []
+    : [
+        line("Daemon repair plan", status.repairPlan.planId),
+        line("Daemon repair expected state", status.repairPlan.expectedState),
+        line("Daemon repair plan issued", status.repairPlan.issuedAt),
+        line("Daemon repair plan expires", status.repairPlan.expiresAt),
+      ]),
+  ...(status.lastRepair === undefined
+    ? []
+    : [
+        line("Last applied Daemon repair plan", status.lastRepair.planId),
+        line("Last Daemon repair applied", status.lastRepair.appliedAt),
+      ]),
 ];
 
 export const daemonStatusLines = (status: DaemonStatus): ReadonlyArray<string> => [
@@ -561,6 +593,9 @@ const status = Command.make(
     const upgrade = yield* latestUpgrade(paths).pipe(
       Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
     );
+    const supervision = yield* lifecycleTry(() =>
+      new ManagedDaemonSupervision(paths.dataRoot, { readOnly: true }).status(),
+    ).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)));
     if (json) {
       yield* Console.log(
         JSON.stringify({
@@ -569,6 +604,7 @@ const status = Command.make(
           ...(lifecycle === undefined ? {} : { lifecycle }),
           ...(configuration === undefined ? {} : { configuration }),
           ...(upgrade === undefined ? {} : { upgrade }),
+          supervision,
         }),
       );
     } else {
@@ -580,6 +616,7 @@ const status = Command.make(
         }
       }
       if (upgrade !== undefined) yield* printUpgradeStatus(upgrade);
+      for (const statusLine of supervisionLines(supervision)) yield* Console.log(statusLine);
     }
   }),
 ).pipe(Command.withDescription("Inspect the installation and service without starting work"));
@@ -667,6 +704,48 @@ const restart = Command.make(
 ).pipe(
   Command.withDescription(
     "Drain, stop, and confirm a replacement Daemon without changing automatic start",
+  ),
+);
+
+const repair = Command.make(
+  "repair",
+  {
+    check: Flag.boolean("check"),
+    apply: Flag.string("apply").pipe(Flag.optional),
+    json: Flag.boolean("json"),
+  },
+  Effect.fn(function* ({ check, apply, json }) {
+    if (check === Option.isSome(apply)) {
+      return yield* clientExit(2, "repair requires exactly one of --check or --apply PLAN_TOKEN");
+    }
+    const paths = yield* lifecycleTry(hostPaths).pipe(
+      Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+    );
+    const supervision = new ManagedDaemonSupervision(paths.dataRoot);
+    const result = yield* lifecycleTry(() =>
+      Option.isSome(apply) ? supervision.applyRepair(apply.value) : supervision.checkRepair(),
+    ).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)));
+    if (Option.isSome(apply)) {
+      const service = nativeService();
+      const observed = yield* lifecycleTry(service.inspect).pipe(
+        Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+      );
+      if (observed.process === "stopped") {
+        yield* lifecycleTry(() => service.start(paths.serviceDefinition)).pipe(
+          Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+        );
+      } else if (observed.process !== "running") {
+        return yield* commandFailed(
+          "the native manager cannot prove the faulted managed launcher is running or stopped",
+        );
+      }
+    }
+    if (json) yield* Console.log(JSON.stringify({ formatVersion: 1, supervision: result }));
+    else for (const statusLine of supervisionLines(result)) yield* Console.log(statusLine);
+  }),
+).pipe(
+  Command.withDescription(
+    "Check exhausted Daemon supervision or apply one exact plan for another bounded cycle",
   ),
 );
 
@@ -801,6 +880,7 @@ export const daemon = Command.make("daemon").pipe(
     start,
     stop,
     restart,
+    repair,
     enable,
     disable,
     configure,

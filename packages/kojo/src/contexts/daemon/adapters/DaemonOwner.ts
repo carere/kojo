@@ -115,6 +115,7 @@ const acquireLock = (path: string): LockHandle => {
 export interface RunningDaemon {
   readonly endpoint: DaemonEndpoint;
   readonly lifecycleControl: DaemonLifecycleControl;
+  readonly ready: Effect.Effect<void, LifecycleError>;
   readonly stopped: Effect.Effect<void, LifecycleError>;
   readonly stop: Effect.Effect<void, LifecycleError>;
 }
@@ -129,6 +130,18 @@ export interface StartDaemonOptions {
     | ((mutation: RunnerMutationFault) => "before-commit" | "after-commit" | undefined)
     | undefined;
   readonly resourceRecoveryBoundary?: (() => Effect.Effect<void>) | undefined;
+  readonly runRestore?: (runs: RunApi) => Effect.Effect<void, LifecycleError>;
+  readonly managedSupervision?: {
+    readonly recordReady: (policy: {
+      readonly restartDelaysMs: ReadonlyArray<number>;
+      readonly healthyResetMs: number;
+    }) => void;
+    readonly recordPlannedStop: () => void;
+    readonly activatePolicy: (policy: {
+      readonly restartDelaysMs: ReadonlyArray<number>;
+      readonly healthyResetMs: number;
+    }) => void;
+  };
 }
 
 const retainedDirectories = [
@@ -140,6 +153,7 @@ const retainedDirectories = [
   "worktrees",
   "client-requests",
   "lifecycle",
+  "launcher-supervision",
 ] as const;
 
 const currentEndpointIs = (path: string, instanceId: string): boolean => {
@@ -372,38 +386,70 @@ export const startDaemon = (
     retentionCollectionTimer = setInterval(collectRetainedEvidence, 60_000);
     collectRetainedEvidence();
     let restoreFailure: unknown;
-    const restorePromise = Effect.runPromise(runApi.restore()).catch((cause: unknown) => {
-      restoreFailure = cause;
+    const restoration =
+      options.runRestore?.(runApi) ??
+      runApi
+        .restore()
+        .pipe(
+          Effect.mapError(
+            (cause) => new LifecycleError("DAEMON_RESTORE_FAILED", cause.message, cause),
+          ),
+        );
+    const restorePromise = Effect.runPromise(restoration)
+      .then(() =>
+        options.managedSupervision?.recordReady(
+          configurationRepository.daemonConfiguration().daemon,
+        ),
+      )
+      .catch((cause: unknown) => {
+        restoreFailure = cause;
+      });
+    const ready = Effect.tryPromise({
+      try: async () => {
+        const readinessMs = configurationRepository.daemonConfiguration().daemon.readinessMs;
+        await Promise.race([
+          restorePromise,
+          Bun.sleep(readinessMs).then(() => {
+            throw new Error(`Daemon readiness exceeded ${readinessMs} milliseconds`);
+          }),
+        ]);
+        if (restoreFailure !== undefined) throw restoreFailure;
+      },
+      catch: (cause) =>
+        new LifecycleError(
+          "DAEMON_RESTORE_FAILED",
+          cause instanceof Error ? cause.message : String(cause),
+          cause,
+        ),
     });
     const lifecycleControl = new DaemonLifecycleApi({
       dataIdentity,
       runs: runApi,
       receipts: lifecycleReceipts,
-      ready: Effect.tryPromise({
-        try: async () => {
-          const readinessMs = configurationRepository.daemonConfiguration().daemon.readinessMs;
-          await Promise.race([
-            restorePromise,
-            Bun.sleep(readinessMs).then(() => {
-              throw new Error(`Daemon readiness exceeded ${readinessMs} milliseconds`);
-            }),
-          ]);
-          if (restoreFailure !== undefined) throw restoreFailure;
-        },
-        catch: (cause) =>
-          new LifecycleError(
-            "DAEMON_RESTORE_FAILED",
-            cause instanceof Error ? cause.message : String(cause),
-            cause,
-          ),
-      }),
+      ready,
       activatePendingConfiguration: configurationRepository.activatePendingDaemon().pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            options.managedSupervision?.activatePolicy(
+              configurationRepository.daemonConfiguration().daemon,
+            );
+          }),
+        ),
         Effect.asVoid,
         Effect.mapError(
           (cause) =>
             new LifecycleError("DAEMON_CONFIGURATION_ACTIVATION_FAILED", cause.message, cause),
         ),
       ),
+      recordPlannedStop: Effect.try({
+        try: () => options.managedSupervision?.recordPlannedStop(),
+        catch: (cause) =>
+          new LifecycleError(
+            "DAEMON_SUPERVISION_RECORD_FAILED",
+            cause instanceof Error ? cause.message : String(cause),
+            cause,
+          ),
+      }),
       cleanupMillis: () => configurationRepository.daemonConfiguration().daemon.cleanupMs,
     });
     const projectApi = new ProjectApi({
@@ -1472,6 +1518,7 @@ export const startDaemon = (
     return {
       endpoint,
       lifecycleControl,
+      ready,
       stopped: Effect.tryPromise({ try: () => stopped, catch: surfaceFailure }),
       stop: Effect.tryPromise({ try: stopPromise, catch: surfaceFailure }),
     };

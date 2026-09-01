@@ -23,6 +23,7 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
   readonly #receipts: DaemonLifecycleReceiptRepository;
   readonly #ready: Effect.Effect<void, LifecycleError>;
   readonly #activatePendingConfiguration: Effect.Effect<void, LifecycleError>;
+  readonly #recordPlannedStop: Effect.Effect<void, LifecycleError>;
   readonly #cleanupMillis: () => number;
 
   constructor(options: {
@@ -31,6 +32,7 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
     readonly receipts: DaemonLifecycleReceiptRepository;
     readonly ready?: Effect.Effect<void, LifecycleError>;
     readonly activatePendingConfiguration?: Effect.Effect<void, LifecycleError>;
+    readonly recordPlannedStop?: Effect.Effect<void, LifecycleError>;
     readonly cleanupMillis?: () => number;
   }) {
     this.#dataIdentity = options.dataIdentity;
@@ -38,6 +40,7 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
     this.#receipts = options.receipts;
     this.#ready = options.ready ?? Effect.void;
     this.#activatePendingConfiguration = options.activatePendingConfiguration ?? Effect.void;
+    this.#recordPlannedStop = options.recordPlannedStop ?? Effect.void;
     this.#cleanupMillis = options.cleanupMillis ?? (() => 30_000);
   }
 
@@ -237,6 +240,7 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
       const owner = yield* api.#runs
         .stopForDaemonLifecycle(api.#cleanupMillis(), forceAuthorizationId !== undefined)
         .pipe(Effect.mapError(asLifecycleError));
+      yield* api.#recordPlannedStop;
       yield* api.#receipts.advance({
         operationId,
         expectedRevision: receipt.revision,

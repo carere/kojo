@@ -29,6 +29,8 @@ Use these commands:
 kojo daemon configure --file FILE [--check]
 kojo daemon configure --confirm PLAN_TOKEN
 kojo daemon status --details
+kojo daemon repair --check
+kojo daemon repair --apply PLAN_TOKEN
 kojo project configure PROJECT --file FILE [--check]
 kojo project status PROJECT --details
 ```
@@ -59,6 +61,13 @@ or cancel admitted Runs. Duplicate admission and continuation queues keep their 
 exceptions. Runner supervision values apply to future Runner attempts. Daemon supervision values
 remain pending until an explicit Daemon lifecycle restart completes. An automatic process
 replacement does not activate pending values.
+
+The managed launcher keeps the Daemon restart budget outside SQLite and the lifecycle journal. It
+uses the active restart delay list for later automatic attempts. A planned lifecycle stop or
+replacement does not consume an attempt. Only continuous recorded readiness for the configured
+healthy-reset duration resets the budget. Exhaustion keeps the last failure evidence and requires
+an exact, unexpired `daemon repair --check` plan before `--apply` starts another bounded cycle.
+Repair does not enable automatic start and does not start a healthy, deliberately stopped Daemon.
 
 Run correctness, Trace records, Artifacts, and Workflow Revisions have separate collection rules.
 The three configurable retention paths default to `"indefinite"`. Kojo does not collect a
