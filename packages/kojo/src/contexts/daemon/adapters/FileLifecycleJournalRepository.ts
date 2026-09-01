@@ -71,6 +71,44 @@ const validDrain = (value: unknown): boolean => {
   );
 };
 
+const validBackup = (value: unknown): boolean => {
+  if (value === undefined) return true;
+  const candidate = record(value);
+  return (
+    candidate !== undefined &&
+    nonempty(candidate.backupId) &&
+    validId.test(candidate.backupId) &&
+    typeof candidate.sha256 === "string" &&
+    /^[a-f0-9]{64}$/.test(candidate.sha256) &&
+    nonempty(candidate.dataVersion) &&
+    /^[a-f0-9]{64}$/.test(candidate.dataVersion) &&
+    validTime(candidate.verifiedAt)
+  );
+};
+
+const validReadiness = (value: unknown): boolean => {
+  if (value === undefined) return true;
+  const candidate = record(value);
+  return (
+    candidate !== undefined &&
+    nonempty(candidate.daemonInstanceId) &&
+    validId.test(candidate.daemonInstanceId) &&
+    nonempty(candidate.dataIdentity) &&
+    nonempty(candidate.sourceReleaseId) &&
+    validReleaseId(candidate.sourceReleaseId) &&
+    nonempty(candidate.candidateReleaseId) &&
+    validReleaseId(candidate.candidateReleaseId) &&
+    typeof candidate.receiptDigest === "string" &&
+    /^[a-f0-9]{64}$/.test(candidate.receiptDigest) &&
+    typeof candidate.wakeupDigest === "string" &&
+    /^[a-f0-9]{64}$/.test(candidate.wakeupDigest) &&
+    candidate.integrity === "ok" &&
+    candidate.transports === "ready" &&
+    candidate.workflowExecutions === 0 &&
+    validTime(candidate.checkedAt)
+  );
+};
+
 const operationOf = (value: unknown): LifecycleOperation => {
   const candidate = record(value);
   if (
@@ -84,13 +122,24 @@ const operationOf = (value: unknown): LifecycleOperation => {
     !lifecycleOperationKinds.includes(candidate.kind as never) ||
     !nonempty(candidate.sourceReleaseId) ||
     !validReleaseId(candidate.sourceReleaseId) ||
+    (candidate.candidateReleaseId !== undefined &&
+      (!nonempty(candidate.candidateReleaseId) || !validReleaseId(candidate.candidateReleaseId))) ||
+    (candidate.checkedRetainedSetHash !== undefined &&
+      (typeof candidate.checkedRetainedSetHash !== "string" ||
+        !/^[a-f0-9]{64}$/.test(candidate.checkedRetainedSetHash))) ||
+    (candidate.kind === "upgrade" &&
+      (candidate.candidateReleaseId === undefined ||
+        candidate.checkedRetainedSetHash === undefined)) ||
     !lifecycleStages.includes(candidate.stage as never) ||
     !Number.isSafeInteger(candidate.stageRevision) ||
     Number(candidate.stageRevision) < 1 ||
     !validTime(candidate.startedAt) ||
     !validTime(candidate.updatedAt) ||
-    candidate.compatibility !== "not-applicable" ||
-    candidate.rollbackAttempted !== false ||
+    (candidate.compatibility !== "not-applicable" &&
+      candidate.compatibility !== "pending" &&
+      candidate.compatibility !== "accepted" &&
+      candidate.compatibility !== "refused") ||
+    typeof candidate.rollbackAttempted !== "boolean" ||
     !validDrain(candidate.drain) ||
     !validRecordedOwner(candidate.recordedOwner) ||
     (candidate.handoffDigest !== undefined &&
@@ -100,13 +149,27 @@ const operationOf = (value: unknown): LifecycleOperation => {
     (candidate.forceAuthorizationId !== undefined &&
       (typeof candidate.forceAuthorizationId !== "string" ||
         !validId.test(candidate.forceAuthorizationId))) ||
+    !validBackup(candidate.backup) ||
+    (candidate.migrationCheckpoint !== undefined &&
+      (typeof candidate.migrationCheckpoint !== "string" ||
+        candidate.migrationCheckpoint.length === 0)) ||
+    !validReadiness(candidate.readiness) ||
     (candidate.outcome !== undefined &&
       candidate.outcome !== "succeeded" &&
+      candidate.outcome !== "upgrade-refused" &&
+      candidate.outcome !== "activated" &&
+      candidate.outcome !== "rolled-back" &&
       candidate.outcome !== "repair-required") ||
     (candidate.detail !== undefined && typeof candidate.detail !== "string") ||
     (candidate.stage === "completed" && candidate.outcome !== "succeeded") ||
     (candidate.stage === "repair-required" && candidate.outcome !== "repair-required") ||
+    (candidate.stage === "upgrade-refused" && candidate.outcome !== "upgrade-refused") ||
+    (candidate.stage === "activated" && candidate.outcome !== "activated") ||
+    (candidate.stage === "rolled-back" && candidate.outcome !== "rolled-back") ||
     (candidate.outcome === "succeeded" && candidate.stage !== "completed") ||
+    (candidate.outcome === "upgrade-refused" && candidate.stage !== "upgrade-refused") ||
+    (candidate.outcome === "activated" && candidate.stage !== "activated") ||
+    (candidate.outcome === "rolled-back" && candidate.stage !== "rolled-back") ||
     (candidate.outcome === "repair-required" && candidate.stage !== "repair-required")
   ) {
     throw new LifecycleError(

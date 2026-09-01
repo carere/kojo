@@ -549,6 +549,35 @@ export class RunApi {
     RunApiFault
   > => Effect.tryPromise({ try: () => this.#daemonDrainProgress(), catch: runApiFault });
 
+  /** Stop current Runner processes for an explicit forced drain, but keep this Daemon reusable. */
+  readonly forceDaemonDrain = (
+    cleanupMillis: number,
+  ): Effect.Effect<ReturnType<RunApi["lifecycleOwner"]>, RunApiFault> =>
+    Effect.tryPromise({
+      try: async () => {
+        if (!Number.isSafeInteger(cleanupMillis) || cleanupMillis < 1) {
+          throw new Error("forced Daemon drain requires a positive finite interval");
+        }
+        const owner = this.lifecycleOwner();
+        this.#stopping = true;
+        const stoppedOwners = await Effect.runPromise(
+          this.#runnerSupervisor.shutdownOwnedStrict(cleanupMillis),
+        );
+        const missingOwners = owner.runnerInstanceIds.filter(
+          (runnerInstanceId) => !stoppedOwners.includes(runnerInstanceId),
+        );
+        if (missingOwners.length > 0) {
+          throw new Error(`Project Runner stop is unconfirmed for ${missingOwners.join(", ")}`);
+        }
+        await Effect.runPromise(
+          this.#runs.recoverInterruptedExecutions(new Date(this.#now()).toISOString()),
+        );
+        this.#stopping = false;
+        return owner;
+      },
+      catch: runApiFault,
+    });
+
   readonly releaseDaemonDispatch = (): Effect.Effect<void, RunApiFault> =>
     Effect.tryPromise({
       try: async () => {

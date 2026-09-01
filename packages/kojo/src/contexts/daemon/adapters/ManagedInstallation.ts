@@ -19,7 +19,9 @@ import type {
   ManagedReleaseFile,
   ManagedReleaseMigration,
 } from "../models/ManagedRelease.ts";
+import type { ManagedReleaseSelection } from "../ports/ManagedReleaseSelection.ts";
 import {
+  assertPrivateNode,
   atomicPrivateFile,
   atomicPrivateFileInOwnedDirectory,
   ensurePrivateDirectory,
@@ -566,6 +568,35 @@ export const managedInstallationIsPresent = (paths: DaemonPaths): boolean => {
   } catch {
     return false;
   }
+};
+
+export const managedReleaseSelection = (paths: DaemonPaths): ManagedReleaseSelection => {
+  const activePath = join(paths.installationRoot, "active-release");
+  const read = (): string => {
+    assertPrivateNode(activePath, "file");
+    const releaseId = readFileSync(activePath, "utf8").trim();
+    safeReleasePart(releaseId, "active managed release identity");
+    return releaseId;
+  };
+  return {
+    read,
+    select: (expectedReleaseId, nextReleaseId) => {
+      const current = read();
+      if (current === nextReleaseId) {
+        readCheckedManagedRelease(paths, nextReleaseId);
+        return current;
+      }
+      if (current !== expectedReleaseId) {
+        throw new LifecycleError(
+          "ACTIVE_RELEASE_CHANGED",
+          `the active managed release is ${current}, not expected ${expectedReleaseId}`,
+        );
+      }
+      readCheckedManagedRelease(paths, nextReleaseId);
+      atomicPrivateFile(activePath, `${nextReleaseId}\n`);
+      return read();
+    },
+  };
 };
 
 export const installManagedRelease = (

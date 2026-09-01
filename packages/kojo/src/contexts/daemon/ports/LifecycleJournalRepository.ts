@@ -11,6 +11,8 @@ export interface BeginLifecycleOperation {
   readonly originalRequestHash: string;
   readonly kind: LifecycleOperationKind;
   readonly sourceReleaseId: string;
+  readonly candidateReleaseId?: string;
+  readonly checkedRetainedSetHash?: string;
   readonly startedAt: string;
 }
 
@@ -27,6 +29,11 @@ export interface AdvanceLifecycleOperation {
       | "handoffDigest"
       | "controllerAcceptedAt"
       | "forceAuthorizationId"
+      | "compatibility"
+      | "rollbackAttempted"
+      | "backup"
+      | "migrationCheckpoint"
+      | "readiness"
       | "outcome"
       | "detail"
     >

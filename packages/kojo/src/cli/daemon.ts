@@ -3,13 +3,17 @@ import { join } from "node:path";
 import { Console, Duration, Effect, Option } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { FileLifecycleJournalRepository } from "../contexts/daemon/adapters/FileLifecycleJournalRepository.ts";
-import { SocketDaemonLifecycleControl } from "../contexts/daemon/adapters/LifecycleControlTransport.ts";
+import {
+  SocketDaemonLifecycleControl,
+  SocketDaemonUpgradeControl,
+} from "../contexts/daemon/adapters/LifecycleControlTransport.ts";
 import { macLaunchAgent } from "../contexts/daemon/adapters/MacLaunchAgent.ts";
 import {
   type DaemonSupervisionStatus,
   ManagedDaemonSupervision,
 } from "../contexts/daemon/adapters/ManagedDaemonSupervision.ts";
 import {
+  managedReleaseSelection,
   readCheckedManagedRelease,
   stageManagedRelease,
 } from "../contexts/daemon/adapters/ManagedInstallation.ts";
@@ -41,6 +45,10 @@ import { linuxPaths } from "../contexts/daemon/services/linuxPaths.ts";
 import { macPaths } from "../contexts/daemon/services/macPaths.ts";
 import { type DaemonLifecycle, manageDaemon } from "../contexts/daemon/services/manageDaemon.ts";
 import { assertPrivateNode } from "../contexts/daemon/services/secureHostPath.ts";
+import {
+  UpgradeActivationController,
+  type UpgradeActivationStatus,
+} from "../contexts/daemon/services/UpgradeActivationController.ts";
 import { clientExit } from "./ClientExit.ts";
 import { commandFailed } from "./CommandFailed.ts";
 import { timeoutMillis as parseTimeoutMillis } from "./workflow.ts";
@@ -49,6 +57,12 @@ interface ProductionController {
   readonly paths: DaemonPaths;
   readonly journal: FileLifecycleJournalRepository;
   readonly controller: LifecycleController;
+}
+
+interface ProductionUpgradeController {
+  readonly paths: DaemonPaths;
+  readonly journal: FileLifecycleJournalRepository;
+  readonly controller: UpgradeActivationController;
 }
 
 const nativeService = (): NativeService => {
@@ -71,6 +85,22 @@ const productionController = (readOnly = false): ProductionController => {
       nativeService: nativeService(),
       serviceDefinition: paths.serviceDefinition,
       observedDaemonInstanceId: () => readDaemonEndpoint(paths)?.instanceId,
+    }),
+  };
+};
+
+const productionUpgradeController = (): ProductionUpgradeController => {
+  const paths = hostPaths();
+  const journal = new FileLifecycleJournalRepository(join(paths.dataRoot, "lifecycle"));
+  return {
+    paths,
+    journal,
+    controller: new UpgradeActivationController({
+      journal,
+      control: new SocketDaemonUpgradeControl(paths.runtimeRoot, journal),
+      nativeService: nativeService(),
+      releases: managedReleaseSelection(paths),
+      serviceDefinition: paths.serviceDefinition,
     }),
   };
 };
@@ -294,6 +324,18 @@ const printUpgradeStatus = (report: UpgradeCheckReport): Effect.Effect<void> =>
   Effect.forEach(upgradeStatusLines(report), (statusLine) => Console.log(statusLine), {
     discard: true,
   });
+
+const printUpgradeActivationStatus = (status: UpgradeActivationStatus): Effect.Effect<void> =>
+  Effect.forEach(
+    [
+      line("Managed upgrade operation", status.operation.operationId),
+      line("Managed upgrade outcome", status.outcome),
+      line("Managed upgrade stage", status.operation.stage),
+      line("Managed upgrade next action", status.nextPermittedAction),
+    ],
+    (statusLine) => Console.log(statusLine),
+    { discard: true },
+  );
 
 const requestHash = (value: unknown): string =>
   new Bun.CryptoHasher("sha256").update(JSON.stringify(value)).digest("hex");
@@ -793,19 +835,155 @@ const keepRunningAfterLogout = Command.make(
   ),
 );
 
+const activateUpgrade = (
+  version: string,
+  pending: Option.Option<string>,
+  force: boolean,
+  timeoutMillis: number | undefined,
+) =>
+  Effect.gen(function* () {
+    const managed = yield* lifecycleTry(productionUpgradeController).pipe(
+      Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+    );
+    let operationId: string;
+    let activation: Effect.Effect<UpgradeActivationStatus, LifecycleError>;
+    if (force) {
+      if (Option.isNone(pending)) {
+        return yield* clientExit(2, "explicit force requires --pending REQUEST_ID");
+      }
+      operationId = pending.value;
+      const operation = yield* lifecycleTry(() => managed.journal.read(operationId)).pipe(
+        Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+      );
+      if (
+        operation === undefined ||
+        operation.kind !== "upgrade" ||
+        operation.candidateReleaseId === undefined
+      ) {
+        return yield* clientExit(2, "--pending must name a pending upgrade operation");
+      }
+      const candidate = yield* lifecycleTry(() =>
+        readCheckedManagedRelease(managed.paths, operation.candidateReleaseId as string),
+      ).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)));
+      if (candidate.kojoVersion !== version) {
+        return yield* clientExit(
+          2,
+          `the pending upgrade names Kojo ${candidate.kojoVersion}, not requested ${version}`,
+        );
+      }
+      const authorization =
+        (yield* lifecycleTry(() => managed.journal.forceAuthorizationFor(operationId))) ??
+        ({
+          formatVersion: 1,
+          authorizationId: crypto.randomUUID(),
+          pendingOperationId: operationId,
+          requestHash: requestHash({ operation: "force-upgrade", pendingOperationId: operationId }),
+          authorizedAt: new Date().toISOString(),
+        } as const);
+      activation = managed.controller.force(authorization);
+    } else {
+      const resumable = yield* lifecycleTry(() =>
+        plannedLifecycleResume(
+          managed.journal,
+          "upgrade",
+          Option.isSome(pending) ? pending.value : undefined,
+        ),
+      ).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)));
+      if (resumable !== undefined) {
+        if (resumable.candidateReleaseId === undefined) {
+          return yield* commandFailed("the pending upgrade has no candidate release");
+        }
+        const candidate = yield* lifecycleTry(() =>
+          readCheckedManagedRelease(managed.paths, resumable.candidateReleaseId as string),
+        ).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)));
+        if (candidate.kojoVersion !== version) {
+          return yield* clientExit(
+            2,
+            `the pending upgrade names Kojo ${candidate.kojoVersion}, not requested ${version}`,
+          );
+        }
+        operationId = resumable.operationId;
+        activation = managed.controller.resume(operationId);
+      } else {
+        const report = yield* latestUpgrade(managed.paths).pipe(
+          Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+        );
+        if (report === undefined || report.outcome !== "staged") {
+          return yield* commandFailed(
+            "activation requires a matching staged check; use --check for this exact release",
+          );
+        }
+        const candidate = yield* lifecycleTry(() =>
+          readCheckedManagedRelease(managed.paths, report.candidateReleaseId),
+        ).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)));
+        if (candidate.kojoVersion !== version) {
+          return yield* commandFailed(
+            `the staged check names Kojo ${candidate.kojoVersion}, not requested ${version}`,
+          );
+        }
+        const activeReleaseId = yield* lifecycleTry(() =>
+          managedReleaseSelection(managed.paths).read(),
+        ).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)));
+        if (activeReleaseId !== report.sourceReleaseId) {
+          return yield* commandFailed(
+            "the active release changed after the staged check; repeat --check",
+          );
+        }
+        operationId = crypto.randomUUID();
+        activation = managed.controller.request({
+          operationId,
+          dataIdentity: report.dataIdentity,
+          originalRequestHash: requestHash({
+            operation: "upgrade",
+            sourceReleaseId: report.sourceReleaseId,
+            candidateReleaseId: report.candidateReleaseId,
+            checkedRetainedSetHash: report.retainedSetHash,
+          }),
+          kind: "upgrade",
+          sourceReleaseId: report.sourceReleaseId,
+          candidateReleaseId: report.candidateReleaseId,
+          checkedRetainedSetHash: report.retainedSetHash,
+          startedAt: new Date().toISOString(),
+        });
+      }
+    }
+    const observed = yield* (
+      timeoutMillis === undefined
+        ? activation.pipe(Effect.map(Option.some))
+        : activation.pipe(Effect.timeoutOption(Duration.millis(timeoutMillis)))
+    ).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)));
+    if (Option.isNone(observed)) {
+      return yield* clientExit(
+        3,
+        `managed upgrade ${operationId} is still pending; timeout did not force or cancel it`,
+      );
+    }
+    yield* printUpgradeActivationStatus(observed.value);
+    if (observed.value.outcome !== "activated") {
+      return yield* clientExit(1, `managed upgrade outcome: ${observed.value.outcome}`);
+    }
+  });
+
 const upgrade = Command.make(
   "upgrade",
   {
     version: Flag.string("version"),
     check: Flag.boolean("check"),
     approveNoRollback: Flag.string("approve-no-rollback").pipe(Flag.optional),
+    force: Flag.boolean("force"),
+    pending: Flag.string("pending").pipe(Flag.optional),
+    timeout: Flag.string("timeout").pipe(Flag.withDefault("60s")),
   },
-  Effect.fn(function* ({ version, check, approveNoRollback }) {
+  Effect.fn(function* ({ version, check, approveNoRollback, force, pending, timeout }) {
     if (!check) {
-      return yield* clientExit(
-        2,
-        "managed release activation is separate; use --check before a later activation request",
-      );
+      if (Option.isSome(approveNoRollback)) {
+        return yield* clientExit(2, "--approve-no-rollback requires --check");
+      }
+      const milliseconds = yield* parsedTimeout(timeout);
+      return yield* activateUpgrade(version, pending, force, milliseconds);
+    }
+    if (force || Option.isSome(pending)) {
+      return yield* clientExit(2, "--force and --pending apply to activation, not --check");
     }
     const paths = yield* lifecycleTry(hostPaths).pipe(
       Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
