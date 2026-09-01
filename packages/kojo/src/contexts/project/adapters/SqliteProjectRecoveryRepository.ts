@@ -51,19 +51,30 @@ const storeError = (cause: unknown): ProjectRecoveryStoreError =>
 /** SQLite adapter for Project recovery. The table is Daemon-owned and survives its process. */
 export class SqliteProjectRecoveryRepository {
   readonly #database: Database;
-  readonly #delays: ReadonlyArray<number>;
-  readonly #healthyResetMillis: number;
+  readonly #settings: () => {
+    readonly replacementDelaysMillis: ReadonlyArray<number>;
+    readonly healthyResetMillis: number;
+  };
 
   constructor(
     database: Database,
     options: {
       readonly replacementDelaysMillis?: ReadonlyArray<number>;
       readonly healthyResetMillis?: number;
+      readonly settings?: () => {
+        readonly replacementDelaysMillis: ReadonlyArray<number>;
+        readonly healthyResetMillis: number;
+      };
     } = {},
   ) {
     this.#database = database;
-    this.#delays = options.replacementDelaysMillis ?? DEFAULT_RUNNER_REPLACEMENT_DELAYS_MILLIS;
-    this.#healthyResetMillis = options.healthyResetMillis ?? DEFAULT_RUNNER_HEALTHY_RESET_MILLIS;
+    this.#settings =
+      options.settings ??
+      (() => ({
+        replacementDelaysMillis:
+          options.replacementDelaysMillis ?? DEFAULT_RUNNER_REPLACEMENT_DELAYS_MILLIS,
+        healthyResetMillis: options.healthyResetMillis ?? DEFAULT_RUNNER_HEALTHY_RESET_MILLIS,
+      }));
     database.run(`
       CREATE TABLE IF NOT EXISTS project_runner_recovery (
         project_id TEXT PRIMARY KEY NOT NULL,
@@ -123,9 +134,10 @@ export class SqliteProjectRecoveryRepository {
           .transaction(() => {
             const prior = this.#row(failure.projectId);
             const attempted = (prior?.attempts ?? 0) + 1;
-            const exhausted = attempted > this.#delays.length;
-            const attempts = Math.min(attempted, this.#delays.length);
-            const delay = this.#delays[Math.min(attempted, this.#delays.length) - 1] ?? 0;
+            const delays = this.#settings().replacementDelaysMillis;
+            const exhausted = attempted > delays.length;
+            const attempts = Math.min(attempted, delays.length);
+            const delay = delays[Math.min(attempted, delays.length) - 1] ?? 0;
             this.#database.run(
               `INSERT INTO project_runner_recovery (
                  project_id, cycle, attempts, state, safety, failed_operation_pending,
@@ -223,7 +235,7 @@ export class SqliteProjectRecoveryRepository {
       const healthySince = prior.healthy_since ?? observedAt;
       const failedOperationPending = operationSucceeded ? 0 : prior.failed_operation_pending;
       if (
-        Date.parse(observedAt) - Date.parse(healthySince) >= this.#healthyResetMillis &&
+        Date.parse(observedAt) - Date.parse(healthySince) >= this.#settings().healthyResetMillis &&
         failedOperationPending === 0
       ) {
         this.#database.run(

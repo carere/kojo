@@ -70,6 +70,8 @@ export class DaemonUpgradeApi implements DaemonUpgradeControl {
   readonly #preflight: ManagedUpgradePreflight;
   readonly #transportsReady: () => boolean;
   readonly #restricted: boolean;
+  readonly #recordRestrictedReady: () => void;
+  readonly #resume: Effect.Effect<void, LifecycleError>;
   readonly #activate: Effect.Effect<void, LifecycleError>;
   readonly #migration: UpgradeMigration | undefined;
   readonly #now: () => number;
@@ -85,6 +87,8 @@ export class DaemonUpgradeApi implements DaemonUpgradeControl {
     readonly preflight: ManagedUpgradePreflight;
     readonly transportsReady: () => boolean;
     readonly restricted: boolean;
+    readonly recordRestrictedReady: () => void;
+    readonly resume: Effect.Effect<void, LifecycleError>;
     readonly activate: Effect.Effect<void, LifecycleError>;
     readonly migration?: UpgradeMigration;
     readonly now?: () => number;
@@ -99,6 +103,8 @@ export class DaemonUpgradeApi implements DaemonUpgradeControl {
     this.#preflight = options.preflight;
     this.#transportsReady = options.transportsReady;
     this.#restricted = options.restricted;
+    this.#recordRestrictedReady = options.recordRestrictedReady;
+    this.#resume = options.resume;
     this.#activate = options.activate;
     this.#migration = options.migration;
     this.#now = options.now ?? Date.now;
@@ -487,7 +493,7 @@ export class DaemonUpgradeApi implements DaemonUpgradeControl {
       if (receipt.stage === "upgrade-refused" && !receipt.dispatchHeld && !receipt.mutationsHeld) {
         return;
       }
-      yield* api.#activate;
+      yield* api.#resume;
       yield* api.#mutations.release(operationId);
       yield* api.#runs.releaseDaemonDispatch().pipe(Effect.mapError(error));
       if (receipt.stage === "final-preflight-refused") {
@@ -735,6 +741,7 @@ export class DaemonUpgradeApi implements DaemonUpgradeControl {
           receipt.readiness.daemonInstanceId === owner.daemonInstanceId
         ) {
           this.#verifyBackup(receipt);
+          this.#recordRestrictedReady();
           return receipt.readiness;
         }
         if (
@@ -789,6 +796,7 @@ export class DaemonUpgradeApi implements DaemonUpgradeControl {
             },
           }),
         );
+        this.#recordRestrictedReady();
         return evidence;
       },
       catch: error,

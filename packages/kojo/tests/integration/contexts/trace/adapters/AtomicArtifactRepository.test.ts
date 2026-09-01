@@ -122,4 +122,41 @@ describe("atomic Artifact publication", () => {
     expect(restarted.finish("interrupted-transfer", "2026-09-01T10:00:01.000Z")).toEqual(published);
     database.close();
   });
+
+  it("migrates a retained Artifact away from Run correctness ownership", () => {
+    const root = mkdtempSync(join(tmpdir(), "kojo-artifact-separate-retention-"));
+    roots.push(root);
+    const database = new Database(":memory:", { strict: true });
+    database.run("PRAGMA foreign_keys = ON");
+    database.run("CREATE TABLE workflow_runs (run_id TEXT PRIMARY KEY NOT NULL) STRICT");
+    database.run("INSERT INTO workflow_runs VALUES ('run-retained')");
+    database.run(`
+      CREATE TABLE retained_artifacts (
+        artifact_id TEXT PRIMARY KEY NOT NULL,
+        transfer_id TEXT NOT NULL UNIQUE,
+        run_id TEXT NOT NULL,
+        artifact_name TEXT NOT NULL,
+        media_type TEXT NOT NULL,
+        byte_size INTEGER NOT NULL,
+        sha256 TEXT NOT NULL,
+        retained_path TEXT NOT NULL,
+        published_at TEXT NOT NULL,
+        UNIQUE(run_id, artifact_name),
+        FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
+      ) STRICT
+    `);
+    database.run(
+      "INSERT INTO retained_artifacts VALUES ('artifact-1', 'transfer-1', 'run-retained', 'result.txt', 'text/plain', 1, ?, ?, ?)",
+      ["a".repeat(64), join(root, "artifacts", "result.txt"), "2026-09-01T10:00:00.000Z"],
+    );
+    new AtomicArtifactRepository(database, root);
+    database.run("DELETE FROM workflow_runs WHERE run_id = 'run-retained'");
+    expect(database.query("SELECT * FROM retained_artifacts").all()).toHaveLength(1);
+    expect(
+      database
+        .query<{ readonly table: string }, []>("PRAGMA foreign_key_list(retained_artifacts)")
+        .all(),
+    ).not.toContainEqual(expect.objectContaining({ table: "workflow_runs" }));
+    database.close();
+  });
 });

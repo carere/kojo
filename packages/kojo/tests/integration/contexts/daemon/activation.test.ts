@@ -186,8 +186,21 @@ describe("recoverable managed upgrade activation", () => {
       expect(managedReleaseSelection(paths).select("kojo-test", candidate.releaseId)).toBe(
         candidate.releaseId,
       );
+      let candidateRestoreCalls = 0;
+      let candidateReadyCalls = 0;
       candidateDaemon = startDaemon(paths, {
         automaticRefresh: false,
+        runRestore: () =>
+          Effect.sync(() => {
+            candidateRestoreCalls += 1;
+          }),
+        managedSupervision: {
+          recordReady: () => {
+            candidateReadyCalls += 1;
+          },
+          recordPlannedStop: () => undefined,
+          activatePolicy: () => undefined,
+        },
         upgradeMigration: ({ database, operationId: migrationOperationId }) => {
           database.run(
             "CREATE TABLE upgrade_activation_fixture (operation_id TEXT PRIMARY KEY NOT NULL)",
@@ -196,6 +209,19 @@ describe("recoverable managed upgrade activation", () => {
           return { checkpoint: "fixture-migration-committed" };
         },
       });
+      await Effect.runPromise(candidateDaemon.ready);
+      expect(candidateRestoreCalls).toBe(0);
+      expect(candidateReadyCalls).toBe(0);
+      await expect(
+        Effect.runPromise(
+          candidateDaemon.upgradeControl.readCandidateReadiness(
+            operationId,
+            candidateDaemon.endpoint.instanceId,
+          ),
+        ),
+      ).rejects.toThrow(/new Daemon owner/);
+      expect(candidateRestoreCalls).toBe(0);
+      expect(candidateReadyCalls).toBe(0);
       const candidateReadiness = await Effect.runPromise(
         candidateDaemon.upgradeControl.readCandidateReadiness(
           operationId,
@@ -210,6 +236,8 @@ describe("recoverable managed upgrade activation", () => {
         transports: "ready",
         workflowExecutions: 0,
       });
+      expect(candidateRestoreCalls).toBe(0);
+      expect(candidateReadyCalls).toBe(1);
       expect(
         await Effect.runPromise(
           candidateDaemon.upgradeControl.readCandidateReadiness(
@@ -221,6 +249,7 @@ describe("recoverable managed upgrade activation", () => {
       await Effect.runPromise(
         candidateDaemon.upgradeControl.authorizeActivation(operationId, candidateReadiness),
       );
+      expect(candidateRestoreCalls).toBe(1);
       await Effect.runPromise(
         candidateDaemon.upgradeControl.authorizeActivation(operationId, candidateReadiness),
       );

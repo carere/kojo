@@ -94,10 +94,56 @@ export class AtomicArtifactRepository {
         sha256 TEXT NOT NULL,
         retained_path TEXT NOT NULL,
         published_at TEXT NOT NULL,
-        UNIQUE(run_id, artifact_name),
-        FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
+        UNIQUE(run_id, artifact_name)
       ) STRICT
     `);
+    const retainedArtifactForeignKeys = database
+      .query<{ readonly table: string }, []>("PRAGMA foreign_key_list(retained_artifacts)")
+      .all();
+    if (retainedArtifactForeignKeys.some((foreignKey) => foreignKey.table === "workflow_runs")) {
+      const foreignKeys =
+        database.query<{ readonly foreign_keys: number }, []>("PRAGMA foreign_keys").get()
+          ?.foreign_keys ?? 0;
+      database.run("PRAGMA foreign_keys = OFF");
+      try {
+        database.transaction(() => {
+          database.run(
+            "ALTER TABLE retained_artifacts RENAME TO retained_artifacts_with_run_owner",
+          );
+          database.run(`
+            CREATE TABLE retained_artifacts (
+              artifact_id TEXT PRIMARY KEY NOT NULL,
+              transfer_id TEXT NOT NULL UNIQUE,
+              run_id TEXT NOT NULL,
+              artifact_name TEXT NOT NULL,
+              media_type TEXT NOT NULL,
+              byte_size INTEGER NOT NULL,
+              sha256 TEXT NOT NULL,
+              retained_path TEXT NOT NULL,
+              published_at TEXT NOT NULL,
+              UNIQUE(run_id, artifact_name)
+            ) STRICT
+          `);
+          database.run(`
+            INSERT INTO retained_artifacts (
+              artifact_id, transfer_id, run_id, artifact_name, media_type, byte_size,
+              sha256, retained_path, published_at
+            )
+            SELECT artifact_id, transfer_id, run_id, artifact_name, media_type, byte_size,
+                   sha256, retained_path, published_at
+              FROM retained_artifacts_with_run_owner
+          `);
+          database.run("DROP TABLE retained_artifacts_with_run_owner");
+        })();
+      } finally {
+        if (foreignKeys === 1) database.run("PRAGMA foreign_keys = ON");
+      }
+      if (
+        database.query<Record<string, unknown>, []>("PRAGMA foreign_key_check").all().length > 0
+      ) {
+        throw new Error("Kojo cannot separate retained Artifact and Run correctness ownership");
+      }
+    }
     database.run(`
       CREATE TABLE IF NOT EXISTS artifact_transfer_chunks (
         transfer_id TEXT NOT NULL,
