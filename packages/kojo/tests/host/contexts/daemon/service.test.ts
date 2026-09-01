@@ -1,12 +1,4 @@
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -15,6 +7,7 @@ import { systemdUserService } from "../../../../src/contexts/daemon/adapters/Sys
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
 import { launchAgentDocument } from "../../../../src/contexts/daemon/services/launchAgentDocument.ts";
 import { systemdUnitDocument } from "../../../../src/contexts/daemon/services/systemdUnitDocument.ts";
+import { writeNativeManagedRelease } from "../../../support/daemon/nativeManagedRelease.ts";
 
 const waitFor = async (predicate: () => boolean, timeout = 10_000): Promise<void> => {
   const deadline = Date.now() + timeout;
@@ -39,14 +32,8 @@ describe.skipIf(process.platform !== "darwin")("the native macOS Daemon lifecycl
       managedCli: join(installationRoot, "bin", "kojo"),
       managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
     };
-    mkdirSync(join(installationRoot, "bin"), { recursive: true, mode: 0o700 });
     const daemonMain = new URL("../../../../src/daemon/main.ts", import.meta.url).pathname;
-    writeFileSync(
-      paths.managedLauncher,
-      `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(daemonMain)}\n`,
-      { mode: 0o700 },
-    );
-    chmodSync(paths.managedLauncher, 0o700);
+    writeNativeManagedRelease(paths, daemonMain);
     writeFileSync(paths.serviceDefinition, launchAgentDocument(paths, { label, home: root }), {
       mode: 0o600,
     });
@@ -103,6 +90,33 @@ const processExists = (processId: number): boolean => {
   }
 };
 
+const systemdFailure = (unit: string, observation: unknown, cause: unknown): Error => {
+  const output = (command: ReadonlyArray<string>): string => {
+    const result = Bun.spawnSync([...command]);
+    return [new TextDecoder().decode(result.stdout), new TextDecoder().decode(result.stderr)]
+      .filter((part) => part.trim().length > 0)
+      .join("\n");
+  };
+  return new Error(
+    [
+      cause instanceof Error ? cause.message : String(cause),
+      `Observation: ${JSON.stringify(observation)}`,
+      output([
+        "/usr/bin/systemctl",
+        "--user",
+        "show",
+        unit,
+        "--property=LoadState,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus",
+        "--no-pager",
+      ]),
+      output(["/usr/bin/systemctl", "--user", "status", unit, "--full", "--no-pager"]),
+      output(["/usr/bin/journalctl", "--user-unit", unit, "--no-pager", "--lines=100"]),
+    ]
+      .filter((part) => part.trim().length > 0)
+      .join("\n\n"),
+  );
+};
+
 const systemdUserManagerAvailable =
   process.platform === "linux" &&
   Bun.spawnSync(["/usr/bin/systemctl", "--user", "show-environment"]).exitCode === 0;
@@ -125,15 +139,9 @@ describe.skipIf(!systemdUserManagerAvailable)("the native systemd user Daemon li
       managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
     };
     const childProcessIdPath = join(root, "child.pid");
-    mkdirSync(join(installationRoot, "bin"), { recursive: true, mode: 0o700 });
     mkdirSync(unitDirectory, { recursive: true, mode: 0o700 });
     const daemonMain = new URL("../../../../src/daemon/main.ts", import.meta.url).pathname;
-    writeFileSync(
-      paths.managedLauncher,
-      `#!/bin/sh\nsleep 300 &\nprintf '%s\\n' "$!" > ${JSON.stringify(childProcessIdPath)}\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(daemonMain)}\n`,
-      { mode: 0o700 },
-    );
-    chmodSync(paths.managedLauncher, 0o700);
+    writeNativeManagedRelease(paths, daemonMain, { childProcessIdPath });
     writeFileSync(
       paths.serviceDefinition,
       systemdUnitDocument(paths, {
@@ -146,7 +154,11 @@ describe.skipIf(!systemdUserManagerAvailable)("the native systemd user Daemon li
 
     try {
       service.installAndStart(paths.serviceDefinition);
-      await waitFor(() => service.inspect().process === "running");
+      try {
+        await waitFor(() => service.inspect().process === "running");
+      } catch (cause) {
+        throw systemdFailure(unit, service.inspect(), cause);
+      }
       await waitFor(() => existsSync(join(paths.runtimeRoot, "endpoint.json")));
       await waitFor(() => existsSync(childProcessIdPath));
       const childProcessId = Number(readFileSync(childProcessIdPath, "utf8").trim());

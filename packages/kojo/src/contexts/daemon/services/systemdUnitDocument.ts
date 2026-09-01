@@ -6,6 +6,18 @@ const unitValue = (value: string): string =>
 const environment = (name: string, value: string): string =>
   `Environment=${unitValue(`${name}=${value}`)}`;
 
+const pathValue = (value: string): string =>
+  [...value]
+    .map((character) => {
+      if (character === "%") return "%%";
+      const code = character.codePointAt(0) ?? 0;
+      if (code <= 0x20 || code === 0x22 || code === 0x27 || code === 0x5c || code === 0x7f) {
+        return `\\x${code.toString(16).padStart(2, "0")}`;
+      }
+      return character;
+    })
+    .join("");
+
 export const systemdUnitDocument = (
   paths: DaemonPaths,
   options: { readonly home?: string; readonly managedDirectoryName?: string } = {},
@@ -20,7 +32,7 @@ StartLimitBurst=5
 [Service]
 Type=exec
 ExecStart=${unitValue(paths.managedLauncher)}
-WorkingDirectory=${unitValue(paths.installationRoot)}
+WorkingDirectory=${pathValue(paths.installationRoot)}
 ${environment("HOME", options.home ?? process.env.HOME ?? "")}
 ${environment("PATH", "/usr/local/bin:/usr/bin:/bin")}
 ${environment("KOJO_MANAGED_INSTALLATION", paths.installationRoot)}

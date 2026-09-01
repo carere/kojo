@@ -109,3 +109,48 @@ jobs:
       # daemon is missing, so a runner without one says so rather than passing quietly.
       - name: Container tests
         run: moon run kojo:test-integration
+
+  native-systemd-host:
+    name: Native systemd host evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      KOJO_AGENT_SPEND: refuse
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup toolchain
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        with:
+          auto-install: true
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install native Host prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes dbus-user-session jq openssh-server policykit-1
+          bun_binary=$(find "$HOME/.proto/tools/bun" -mindepth 2 -maxdepth 2 -type f -name bun -perm /111 -print -quit)
+          moon_binary=$(find "$HOME/.proto/tools/moon" -mindepth 2 -maxdepth 2 -type f -name moon -perm /111 -print -quit)
+          test -n "$bun_binary"
+          test -n "$moon_binary"
+          echo "Installing Bun from $bun_binary"
+          echo "Installing Moon from $moon_binary"
+          sudo install -m 0755 "$bun_binary" /usr/local/bin/bun
+          sudo install -m 0755 "$moon_binary" /usr/local/bin/moon
+
+      - name: Run native systemd Host evidence
+        run: sudo bash .github/scripts/systemd-native-evidence.sh "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/native-host-evidence"
+
+      - name: Upload native Host evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-systemd-host-evidence
+          path: native-host-evidence
+          if-no-files-found: error
