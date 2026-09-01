@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { Effect } from "effect";
+import { rebuildSqliteTableWithoutForeignKey } from "../../shared/adapters/rebuildSqliteTableWithoutForeignKey.ts";
 import type { RunAuthority } from "../../workflow/models/DaemonRun.ts";
 import type {
   CreateAsking,
@@ -154,8 +155,7 @@ export class SqliteDaemonGateRepository {
         canonical_request TEXT NOT NULL,
         token TEXT NOT NULL,
         committed_at TEXT NOT NULL,
-        PRIMARY KEY (data_identity, request_id),
-        FOREIGN KEY (token) REFERENCES gate_askings(token)
+        PRIMARY KEY (data_identity, request_id)
       ) STRICT
     `);
     database.run(`
@@ -176,6 +176,20 @@ export class SqliteDaemonGateRepository {
     database.run(
       "CREATE INDEX IF NOT EXISTS workflow_wakeups_due ON workflow_wakeups(state, due_at)",
     );
+    rebuildSqliteTableWithoutForeignKey(database, {
+      table: "gate_answer_receipts",
+      temporary: "gate_answer_receipts_retention",
+      referencedTable: "gate_askings",
+      createTemporary: `CREATE TABLE gate_answer_receipts_retention (
+        data_identity TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        canonical_request TEXT NOT NULL,
+        token TEXT NOT NULL,
+        committed_at TEXT NOT NULL,
+        PRIMARY KEY (data_identity, request_id)
+      ) STRICT`,
+      columns: "data_identity, request_id, canonical_request, token, committed_at",
+    });
   }
 
   readonly createAskingAndSuspend = (

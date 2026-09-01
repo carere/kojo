@@ -45,6 +45,7 @@ import { LifecycleError } from "../models/LifecycleError.ts";
 import type { DaemonLifecycleControl } from "../ports/DaemonLifecycleControl.ts";
 import { activeConsoleRelease } from "../services/activeConsoleRelease.ts";
 import { browserAuthority } from "../services/browserAuthority.ts";
+import { ConfigurationApi } from "../services/ConfigurationApi.ts";
 import { DaemonLifecycleApi } from "../services/DaemonLifecycleApi.ts";
 import { ManagedUpgradePreflight } from "../services/ManagedUpgradePreflight.ts";
 import {
@@ -61,7 +62,9 @@ import {
   startLifecycleControlServer,
 } from "./LifecycleControlTransport.ts";
 import { readCheckedManagedRelease } from "./ManagedInstallation.ts";
+import { SqliteConfigurationRepository } from "./SqliteConfigurationRepository.ts";
 import { SqliteDaemonLifecycleReceiptRepository } from "./SqliteDaemonLifecycleReceiptRepository.ts";
+import { SqliteRetentionRepository } from "./SqliteRetentionRepository.ts";
 import { SqliteUpgradePreflightRepository } from "./SqliteUpgradePreflightRepository.ts";
 
 interface LockHandle {
@@ -112,6 +115,7 @@ const acquireLock = (path: string): LockHandle => {
 export interface RunningDaemon {
   readonly endpoint: DaemonEndpoint;
   readonly lifecycleControl: DaemonLifecycleControl;
+  readonly ready: Effect.Effect<void, LifecycleError>;
   readonly stopped: Effect.Effect<void, LifecycleError>;
   readonly stop: Effect.Effect<void, LifecycleError>;
 }
@@ -126,6 +130,18 @@ export interface StartDaemonOptions {
     | ((mutation: RunnerMutationFault) => "before-commit" | "after-commit" | undefined)
     | undefined;
   readonly resourceRecoveryBoundary?: (() => Effect.Effect<void>) | undefined;
+  readonly runRestore?: (runs: RunApi) => Effect.Effect<void, LifecycleError>;
+  readonly managedSupervision?: {
+    readonly recordReady: (policy: {
+      readonly restartDelaysMs: ReadonlyArray<number>;
+      readonly healthyResetMs: number;
+    }) => void;
+    readonly recordPlannedStop: () => void;
+    readonly activatePolicy: (policy: {
+      readonly restartDelaysMs: ReadonlyArray<number>;
+      readonly healthyResetMs: number;
+    }) => void;
+  };
 }
 
 const retainedDirectories = [
@@ -137,6 +153,7 @@ const retainedDirectories = [
   "worktrees",
   "client-requests",
   "lifecycle",
+  "launcher-supervision",
 ] as const;
 
 const currentEndpointIs = (path: string, instanceId: string): boolean => {
@@ -238,6 +255,7 @@ export const startDaemon = (
   let socketServer: Bun.Server<unknown> | undefined;
   let consoleServer: Bun.Server<unknown> | undefined;
   let lifecycleServer: LifecycleControlServer | undefined;
+  let retentionCollectionTimer: ReturnType<typeof setInterval> | undefined;
 
   try {
     if (existsSync(databasePath)) assertPrivateNode(databasePath, "file");
@@ -280,9 +298,32 @@ export const startDaemon = (
 
     const instanceId = crypto.randomUUID();
     const authority = browserAuthority({ now });
+    const configurationRepository = new SqliteConfigurationRepository(database);
+    const retentionRepository = new SqliteRetentionRepository(database, paths.dataRoot);
+    retentionRepository.finishFileCleanup();
+    const configurationApi = new ConfigurationApi({
+      dataIdentity,
+      now,
+      configuration: configurationRepository,
+      retention: retentionRepository,
+    });
     const projectRepository = new SqliteProjectRepository(database);
-    const projectRecoveryRepository = new SqliteProjectRecoveryRepository(database);
-    const runRepository = new SqliteRunRepository(database, { enforceProjectEligibility: true });
+    const projectRecoveryRepository = new SqliteProjectRecoveryRepository(database, {
+      settings: () => {
+        const runner = configurationRepository.daemonConfiguration().runner;
+        return {
+          replacementDelaysMillis: runner.restartDelaysMs,
+          healthyResetMillis: runner.healthyResetMs,
+        };
+      },
+    });
+    const runRepository = new SqliteRunRepository(database, {
+      enforceProjectEligibility: true,
+      limits: {
+        daemon: () => configurationRepository.daemonConfiguration().limits,
+        project: (projectId) => configurationRepository.projectConfiguration(projectId).limits,
+      },
+    });
     const actionRepository = new SqliteExternalActionRepository(database);
     const resourceRepository = new SqliteResourceLeaseRepository(database);
     const revisionRepository = new SqliteRevisionRepository(database, paths.dataRoot);
@@ -308,6 +349,7 @@ export const startDaemon = (
       gates: gateRepository,
       resources: resourceRepository,
       artifacts: artifactRepository,
+      runnerSettings: () => configurationRepository.daemonConfiguration().runner,
       ...(options.runnerIdleMillis === undefined
         ? {}
         : { runnerIdleMillis: options.runnerIdleMillis }),
@@ -322,26 +364,93 @@ export const startDaemon = (
         : { resourceRecoveryBoundary: options.resourceRecoveryBoundary }),
       daemonDispatchHeld: lifecycleReceipts.activeDrainHeld(),
     });
+    let retentionCollection: Promise<void> | undefined;
+    const collectRetainedEvidence = (): void => {
+      if (retentionCollection !== undefined) return;
+      const retention = configurationRepository.daemonConfiguration().retention;
+      if (Object.values(retention).every((duration) => duration === "indefinite")) return;
+      const observedAt = new Date(now()).toISOString();
+      retentionCollection = Effect.runPromise(
+        retentionRepository
+          .inspect(retention, observedAt)
+          .pipe(
+            Effect.flatMap((impact) => retentionRepository.collect(impact, retention, observedAt)),
+          ),
+      )
+        .then(() => retentionRepository.finishFileCleanup())
+        .catch(() => undefined)
+        .finally(() => {
+          retentionCollection = undefined;
+        });
+    };
+    retentionCollectionTimer = setInterval(collectRetainedEvidence, 60_000);
+    collectRetainedEvidence();
     let restoreFailure: unknown;
-    const restorePromise = Effect.runPromise(runApi.restore()).catch((cause: unknown) => {
-      restoreFailure = cause;
+    const restoration =
+      options.runRestore?.(runApi) ??
+      runApi
+        .restore()
+        .pipe(
+          Effect.mapError(
+            (cause) => new LifecycleError("DAEMON_RESTORE_FAILED", cause.message, cause),
+          ),
+        );
+    const restorePromise = Effect.runPromise(restoration)
+      .then(() =>
+        options.managedSupervision?.recordReady(
+          configurationRepository.daemonConfiguration().daemon,
+        ),
+      )
+      .catch((cause: unknown) => {
+        restoreFailure = cause;
+      });
+    const ready = Effect.tryPromise({
+      try: async () => {
+        const readinessMs = configurationRepository.daemonConfiguration().daemon.readinessMs;
+        await Promise.race([
+          restorePromise,
+          Bun.sleep(readinessMs).then(() => {
+            throw new Error(`Daemon readiness exceeded ${readinessMs} milliseconds`);
+          }),
+        ]);
+        if (restoreFailure !== undefined) throw restoreFailure;
+      },
+      catch: (cause) =>
+        new LifecycleError(
+          "DAEMON_RESTORE_FAILED",
+          cause instanceof Error ? cause.message : String(cause),
+          cause,
+        ),
     });
     const lifecycleControl = new DaemonLifecycleApi({
       dataIdentity,
       runs: runApi,
       receipts: lifecycleReceipts,
-      ready: Effect.tryPromise({
-        try: async () => {
-          await restorePromise;
-          if (restoreFailure !== undefined) throw restoreFailure;
-        },
+      ready,
+      activatePendingConfiguration: configurationRepository.activatePendingDaemon().pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            options.managedSupervision?.activatePolicy(
+              configurationRepository.daemonConfiguration().daemon,
+            );
+          }),
+        ),
+        Effect.asVoid,
+        Effect.mapError(
+          (cause) =>
+            new LifecycleError("DAEMON_CONFIGURATION_ACTIVATION_FAILED", cause.message, cause),
+        ),
+      ),
+      recordPlannedStop: Effect.try({
+        try: () => options.managedSupervision?.recordPlannedStop(),
         catch: (cause) =>
           new LifecycleError(
-            "DAEMON_RESTORE_FAILED",
+            "DAEMON_SUPERVISION_RECORD_FAILED",
             cause instanceof Error ? cause.message : String(cause),
             cause,
           ),
       }),
+      cleanupMillis: () => configurationRepository.daemonConfiguration().daemon.cleanupMs,
     });
     const projectApi = new ProjectApi({
       dataIdentity,
@@ -360,6 +469,104 @@ export const startDaemon = (
       runs: runApi,
     });
     const ownerDatabase = database;
+    const configurationResponse = async (
+      request: Request,
+      url: URL,
+      allowMaintenance: boolean,
+    ): Promise<Response | undefined> => {
+      const daemonStatus = url.pathname === "/api/v1/daemon/configuration";
+      const daemonAction = url.pathname === "/api/v1/daemon/actions/configure";
+      const projectStatus = url.pathname.match(
+        /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/configuration$/,
+      );
+      const projectAction = url.pathname.match(
+        /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/actions\/configure$/,
+      );
+      if (!daemonStatus && !daemonAction && projectStatus === null && projectAction === null) {
+        return undefined;
+      }
+      if (!allowMaintenance) {
+        return problem(
+          405,
+          "cli-maintenance-required",
+          "configuration and retention status and changes are available only through the private CLI",
+        );
+      }
+      const projectId = projectStatus?.[1] ?? projectAction?.[1];
+      if (
+        projectId !== undefined &&
+        ownerDatabase
+          .query<{ readonly found: number }, [string]>(
+            "SELECT 1 AS found FROM projects WHERE project_id = ?",
+          )
+          .get(projectId) === null
+      ) {
+        return problem(404, "project-not-found", "the selected Project was not found");
+      }
+      const target =
+        projectId === undefined
+          ? ({ scope: "daemon" } as const)
+          : ({ scope: "project", projectId } as const);
+      const isAction = daemonAction || projectAction !== null;
+      if (request.method === "GET" && !isAction) {
+        return noStoreJson(await Effect.runPromise(configurationApi.status(target)));
+      }
+      if (request.method !== "POST" || !isAction) {
+        return problem(405, "method-not-allowed", "the configuration action requires POST");
+      }
+      if (!isJson(request)) {
+        return problem(415, "json-required", "the configuration action requires JSON");
+      }
+      try {
+        const body = await requestJson(request);
+        if (body === null || typeof body !== "object" || Array.isArray(body)) {
+          return problem(
+            400,
+            "invalid-configuration",
+            "the configuration request must be an object",
+          );
+        }
+        const record = body as Record<string, unknown>;
+        if (typeof record.confirm === "string") {
+          if (
+            target.scope !== "daemon" ||
+            Object.keys(record).length !== 1 ||
+            record.confirm.length === 0
+          ) {
+            return problem(
+              400,
+              "invalid-configuration-confirmation",
+              "confirmation must name one exact Daemon retention plan",
+            );
+          }
+          return noStoreJson(await Effect.runPromise(configurationApi.confirm(record.confirm)));
+        }
+        if (
+          Object.keys(record).some((key) => key !== "patch" && key !== "check") ||
+          !("patch" in record) ||
+          (record.check !== undefined && typeof record.check !== "boolean")
+        ) {
+          return problem(
+            400,
+            "invalid-configuration",
+            "configure accepts only patch and optional check",
+          );
+        }
+        const result =
+          record.check === true
+            ? await Effect.runPromise(configurationApi.check(target, record.patch))
+            : await Effect.runPromise(configurationApi.apply(target, record.patch));
+        return noStoreJson(result, record.check === true ? 200 : 202);
+      } catch (cause) {
+        const configuration = cause as { readonly code?: string; readonly message?: string };
+        const invalid = configuration.code === "INVALID_CONFIGURATION_PATCH";
+        return problem(
+          invalid ? 400 : 409,
+          configuration.code ?? "configuration-refused",
+          configuration.message ?? "the configuration change was refused",
+        );
+      }
+    };
     const upgradeResponse = async (request: Request, url: URL): Promise<Response | undefined> => {
       if (url.pathname !== "/api/v1/daemon/upgrade-check") return undefined;
       try {
@@ -965,6 +1172,8 @@ export const startDaemon = (
           }
           const revision = await revisionResponse(request, url, false);
           if (revision !== undefined) return revision;
+          const configuration = await configurationResponse(request, url, false);
+          if (configuration !== undefined) return configuration;
           if (request.method === "GET" && url.pathname === "/api/v1/projects") {
             return Effect.runPromise(projectApi.snapshot());
           }
@@ -1136,6 +1345,8 @@ export const startDaemon = (
         }
         const revision = await revisionResponse(request, url, true);
         if (revision !== undefined) return revision;
+        const configuration = await configurationResponse(request, url, true);
+        if (configuration !== undefined) return configuration;
         const upgrade = await upgradeResponse(request, url);
         if (upgrade !== undefined) return upgrade;
         if (request.method === "GET" && url.pathname === "/api/v1/projects") {
@@ -1277,10 +1488,14 @@ export const startDaemon = (
         refreshCoordinatorStopped = true;
         clearInterval(refreshInventoryTimer);
         clearInterval(gateDeadlineTimer);
+        if (retentionCollectionTimer !== undefined) clearInterval(retentionCollectionTimer);
         socketServer?.stop(true);
         consoleServer?.stop(true);
         lifecycleServer?.stop();
-        await Promise.allSettled([...projectRefreshes.values()]);
+        await Promise.allSettled([
+          ...projectRefreshes.values(),
+          ...(retentionCollection === undefined ? [] : [retentionCollection]),
+        ]);
         await Effect.runPromise(runApi.shutdown());
         database?.close(false);
         if (currentEndpointIs(runtimeEndpoint, endpoint.instanceId)) {
@@ -1303,6 +1518,7 @@ export const startDaemon = (
     return {
       endpoint,
       lifecycleControl,
+      ready,
       stopped: Effect.tryPromise({ try: () => stopped, catch: surfaceFailure }),
       stop: Effect.tryPromise({ try: stopPromise, catch: surfaceFailure }),
     };
@@ -1310,6 +1526,7 @@ export const startDaemon = (
     socketServer?.stop(true);
     consoleServer?.stop(true);
     lifecycleServer?.stop();
+    if (retentionCollectionTimer !== undefined) clearInterval(retentionCollectionTimer);
     database?.close(false);
     lock.unlock();
     if (cause instanceof LifecycleError) throw cause;

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import type { OperationReceipt } from "@carere/kojo-client-contracts/contexts/client/contracts/operation";
 import type {
@@ -7,13 +8,24 @@ import type {
 } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
 import { Console, Data, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
+import type {
+  ConfigurationApplyResult,
+  ConfigurationCheck,
+  ConfigurationStatus,
+} from "../contexts/daemon/models/Configuration.ts";
 import type { DaemonPaths } from "../contexts/daemon/models/DaemonPaths.ts";
 import { readDaemonEndpoint } from "../contexts/daemon/services/daemonStatus.ts";
 import { linuxPaths } from "../contexts/daemon/services/linuxPaths.ts";
 import { macPaths } from "../contexts/daemon/services/macPaths.ts";
 import { exactGitWorkingTree } from "../contexts/project/services/gitWorkingTree.ts";
 import type { RevisionDetails } from "../contexts/workflow/models/RevisionMaintenance.ts";
+import { clientExit } from "./ClientExit.ts";
 import { commandFailed } from "./CommandFailed.ts";
+import {
+  configurationApplyLines,
+  configurationCheckLines,
+  configurationStatusLines,
+} from "./daemon.ts";
 
 class ProjectClientError extends Data.TaggedError("ProjectClientError")<{
   readonly reason: string;
@@ -294,7 +306,7 @@ const status = Command.make(
   "status",
   {
     project: projectArgument,
-    revision: revisionFlag,
+    revision: revisionFlag.pipe(Flag.optional),
     details: Flag.boolean("details").pipe(
       Flag.withDescription("Show the complete retained manifest and protections"),
     ),
@@ -302,10 +314,23 @@ const status = Command.make(
   },
   Effect.fn(function* ({ project, revision, details, json }) {
     if (!details) {
-      return yield* commandFailed("revision status requires --details");
+      return yield* commandFailed("Project status details require --details");
+    }
+    if (Option.isNone(revision)) {
+      const configuration = yield* daemonRequest<ConfigurationStatus>(
+        `/api/v1/projects/${encodeURIComponent(project)}/configuration`,
+      ).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
+      if (json) {
+        yield* Console.log(JSON.stringify({ formatVersion: 1, configuration }));
+        return;
+      }
+      for (const statusLine of configurationStatusLines(configuration)) {
+        yield* Console.log(statusLine);
+      }
+      return;
     }
     const document = yield* daemonRequest<RevisionDetails>(
-      `/api/v1/projects/${encodeURIComponent(project)}/revisions/${encodeURIComponent(revision)}`,
+      `/api/v1/projects/${encodeURIComponent(project)}/revisions/${encodeURIComponent(revision.value)}`,
     ).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
     if (json) {
       yield* Console.log(JSON.stringify({ formatVersion: 1, revision: document }));
@@ -314,6 +339,34 @@ const status = Command.make(
     for (const line of revisionLines(document)) yield* Console.log(line);
   }),
 ).pipe(Command.withDescription("Inspect one exact retained Workflow Revision"));
+
+const configure = Command.make(
+  "configure",
+  {
+    project: projectArgument,
+    file: Flag.string("file"),
+    check: Flag.boolean("check"),
+    json: Flag.boolean("json"),
+  },
+  Effect.fn(function* ({ project, file, check, json }) {
+    const patch = yield* Effect.tryPromise({
+      try: async () =>
+        JSON.parse(file === "-" ? await Bun.stdin.text() : readFileSync(file, "utf8")) as unknown,
+      catch: (cause) =>
+        `configuration file is not valid JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
+    }).pipe(Effect.catch((message) => clientExit(2, message)));
+    const result = yield* daemonRequest<ConfigurationCheck | ConfigurationApplyResult>(
+      `/api/v1/projects/${encodeURIComponent(project)}/actions/configure`,
+      { method: "POST", body: { patch, ...(check ? { check: true } : {}) } },
+    ).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
+    if (json) yield* Console.log(JSON.stringify(result));
+    else {
+      const lines =
+        "proposed" in result ? configurationCheckLines(result) : configurationApplyLines(result);
+      for (const statusLine of lines) yield* Console.log(statusLine);
+    }
+  }),
+).pipe(Command.withDescription("Check or apply one atomic Project limit patch"));
 
 const repair = Command.make(
   "repair",
@@ -372,6 +425,7 @@ export const project = Command.make("project").pipe(
     archive,
     restore,
     status,
+    configure,
     repair,
     lookup,
     retry,

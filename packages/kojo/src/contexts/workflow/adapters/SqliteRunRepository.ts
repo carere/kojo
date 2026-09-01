@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Effect } from "effect";
+import { rebuildSqliteTableWithoutForeignKey } from "../../shared/adapters/rebuildSqliteTableWithoutForeignKey.ts";
 import type {
   ClaimedRun,
   DaemonRun,
@@ -13,6 +14,7 @@ import {
   CONTINUATION_BURST,
   DEFAULT_DAEMON_EXECUTING_RUNS,
   DEFAULT_DAEMON_NEW_START_QUEUE,
+  DEFAULT_PROJECT_EXECUTING_RUNS,
   DEFAULT_PROJECT_NEW_START_QUEUE,
 } from "../models/SchedulingDefaults.ts";
 import type { Admission, AdmitRunRequest } from "../ports/RunRepository.ts";
@@ -217,10 +219,41 @@ const rebuildTableCheck = (
 export class SqliteRunRepository {
   readonly #database: Database;
   readonly #enforceProjectEligibility: boolean;
+  readonly #limits: {
+    readonly daemon: () => { readonly executingRuns: number; readonly newStartQueue: number };
+    readonly project: (projectId: string) => {
+      readonly executingRuns: number;
+      readonly newStartQueue: number;
+    };
+  };
 
-  constructor(database: Database, options: { readonly enforceProjectEligibility?: boolean } = {}) {
+  constructor(
+    database: Database,
+    options: {
+      readonly enforceProjectEligibility?: boolean;
+      readonly limits?: {
+        readonly daemon: () => { readonly executingRuns: number; readonly newStartQueue: number };
+        readonly project: (projectId: string) => {
+          readonly executingRuns: number;
+          readonly newStartQueue: number;
+        };
+      };
+    } = {},
+  ) {
     this.#database = database;
     this.#enforceProjectEligibility = options.enforceProjectEligibility ?? true;
+    this.#limits =
+      options.limits ??
+      ({
+        daemon: () => ({
+          executingRuns: DEFAULT_DAEMON_EXECUTING_RUNS,
+          newStartQueue: DEFAULT_DAEMON_NEW_START_QUEUE,
+        }),
+        project: () => ({
+          executingRuns: DEFAULT_PROJECT_EXECUTING_RUNS,
+          newStartQueue: DEFAULT_PROJECT_NEW_START_QUEUE,
+        }),
+      } as const);
     database.run("PRAGMA foreign_keys = ON");
     database.run(`
       CREATE TABLE IF NOT EXISTS workflow_runs (
@@ -341,8 +374,7 @@ export class SqliteRunRepository {
         run_id TEXT NOT NULL,
         duplicate INTEGER NOT NULL CHECK(duplicate IN (0, 1)),
         committed_at TEXT NOT NULL,
-        PRIMARY KEY (data_identity, request_id),
-        FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
+        PRIMARY KEY (data_identity, request_id)
       ) STRICT
     `);
     database.run(`
@@ -401,8 +433,7 @@ export class SqliteRunRepository {
       CREATE TABLE IF NOT EXISTS workflow_cancellation_receipts (
         request_id TEXT PRIMARY KEY NOT NULL,
         run_id TEXT NOT NULL,
-        committed_at TEXT NOT NULL,
-        FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
+        committed_at TEXT NOT NULL
       ) STRICT
     `);
     database.run(`
@@ -422,8 +453,7 @@ export class SqliteRunRepository {
         target_set_id TEXT NOT NULL,
         run_id TEXT NOT NULL,
         PRIMARY KEY (target_set_id, run_id),
-        FOREIGN KEY (target_set_id) REFERENCES workflow_forced_stop_sets(target_set_id),
-        FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
+        FOREIGN KEY (target_set_id) REFERENCES workflow_forced_stop_sets(target_set_id)
       ) STRICT
     `);
     database.run(`
@@ -443,6 +473,44 @@ export class SqliteRunRepository {
         FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
       ) STRICT
     `);
+    rebuildSqliteTableWithoutForeignKey(database, {
+      table: "workflow_admission_receipts",
+      temporary: "workflow_admission_receipts_retention",
+      referencedTable: "workflow_runs",
+      createTemporary: `CREATE TABLE workflow_admission_receipts_retention (
+        data_identity TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        canonical_request TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        duplicate INTEGER NOT NULL CHECK(duplicate IN (0, 1)),
+        committed_at TEXT NOT NULL,
+        PRIMARY KEY (data_identity, request_id)
+      ) STRICT`,
+      columns: "data_identity, request_id, canonical_request, run_id, duplicate, committed_at",
+    });
+    rebuildSqliteTableWithoutForeignKey(database, {
+      table: "workflow_cancellation_receipts",
+      temporary: "workflow_cancellation_receipts_retention",
+      referencedTable: "workflow_runs",
+      createTemporary: `CREATE TABLE workflow_cancellation_receipts_retention (
+        request_id TEXT PRIMARY KEY NOT NULL,
+        run_id TEXT NOT NULL,
+        committed_at TEXT NOT NULL
+      ) STRICT`,
+      columns: "request_id, run_id, committed_at",
+    });
+    rebuildSqliteTableWithoutForeignKey(database, {
+      table: "workflow_forced_stop_targets",
+      temporary: "workflow_forced_stop_targets_retention",
+      referencedTable: "workflow_runs",
+      createTemporary: `CREATE TABLE workflow_forced_stop_targets_retention (
+        target_set_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        PRIMARY KEY (target_set_id, run_id),
+        FOREIGN KEY (target_set_id) REFERENCES workflow_forced_stop_sets(target_set_id)
+      ) STRICT`,
+      columns: "target_set_id, run_id",
+    });
   }
 
   readonly admit = (request: AdmitRunRequest): Effect.Effect<Admission, RunStoreError> =>
@@ -530,8 +598,9 @@ export class SqliteRunRepository {
                 )
                 .get(request.projectId);
               if (
-                (capacity?.global_count ?? 0) >= DEFAULT_DAEMON_NEW_START_QUEUE ||
-                (capacity?.project_count ?? 0) >= DEFAULT_PROJECT_NEW_START_QUEUE
+                (capacity?.global_count ?? 0) >= this.#limits.daemon().newStartQueue ||
+                (capacity?.project_count ?? 0) >=
+                  this.#limits.project(request.projectId).newStartQueue
               ) {
                 throw new RunStoreError({
                   code: "QUEUE_FULL",
@@ -621,7 +690,25 @@ export class SqliteRunRepository {
                   "SELECT COUNT(*) AS count FROM workflow_slots",
                 )
                 .get()?.count ?? 0;
-            if (globalSlots >= DEFAULT_DAEMON_EXECUTING_RUNS) {
+            const projectSlots =
+              this.#database
+                .query<{ readonly count: number }, [string]>(
+                  "SELECT COUNT(*) AS count FROM workflow_slots WHERE project_id = ?",
+                )
+                .get(run.project_id)?.count ?? 0;
+            const incompatiblePackageGraph =
+              this.#database
+                .query<{ readonly found: number }, [string, string]>(
+                  `SELECT 1 AS found FROM workflow_slots slot
+                    JOIN workflow_runs active ON active.run_id = slot.run_id
+                   WHERE slot.project_id = ? AND active.package_graph_id <> ? LIMIT 1`,
+                )
+                .get(run.project_id, run.package_graph_id) !== null;
+            if (
+              globalSlots >= this.#limits.daemon().executingRuns ||
+              projectSlots >= this.#limits.project(run.project_id).executingRuns ||
+              incompatiblePackageGraph
+            ) {
               throw new RunStoreError({
                 code: "RUN_NOT_ELIGIBLE",
                 message: "global execution capacity is full",
@@ -672,7 +759,7 @@ export class SqliteRunRepository {
                   "SELECT COUNT(*) AS count FROM workflow_slots",
                 )
                 .get()?.count ?? 0;
-            if (globalSlots >= DEFAULT_DAEMON_EXECUTING_RUNS) return undefined;
+            if (globalSlots >= this.#limits.daemon().executingRuns) return undefined;
             const lastProject =
               this.#database
                 .query<{ readonly last_project_id: string | null }, []>(
@@ -683,17 +770,18 @@ export class SqliteRunRepository {
               .query<{ readonly project_id: string }, []>(
                 `SELECT DISTINCT q.project_id
                    FROM workflow_queue q
-                  WHERE NOT EXISTS (
-                    SELECT 1 FROM workflow_slots s WHERE s.project_id = q.project_id
-                  )
-                    AND NOT EXISTS (
-                      SELECT 1 FROM workflow_reservations z
-                      JOIN workflow_runs zr ON zr.run_id = z.run_id
-                      WHERE zr.project_id = q.project_id
-                    )
                   ORDER BY q.project_id`,
               )
-              .all();
+              .all()
+              .filter((candidate) => {
+                const used =
+                  this.#database
+                    .query<{ readonly count: number }, [string]>(
+                      "SELECT COUNT(*) AS count FROM workflow_slots WHERE project_id = ?",
+                    )
+                    .get(candidate.project_id)?.count ?? 0;
+                return used < this.#limits.project(candidate.project_id).executingRuns;
+              });
             const project =
               projects.find((candidate) =>
                 lastProject === null ? true : candidate.project_id > lastProject,
@@ -713,6 +801,18 @@ export class SqliteRunRepository {
                      JOIN workflow_runs r ON r.run_id = q.run_id
                     WHERE q.project_id = ? AND q.queue_kind = ?
                       AND NOT EXISTS (SELECT 1 FROM workflow_reservations z WHERE z.run_id = r.run_id)
+                      AND NOT EXISTS (
+                        SELECT 1 FROM workflow_slots slot
+                        JOIN workflow_runs active ON active.run_id = slot.run_id
+                        WHERE slot.project_id = q.project_id
+                          AND active.package_graph_id <> r.package_graph_id
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM workflow_reservations reservation
+                        JOIN workflow_runs active ON active.run_id = reservation.run_id
+                        WHERE active.project_id = q.project_id
+                          AND active.package_graph_id <> r.package_graph_id
+                      )
                     ORDER BY q.admission_sequence LIMIT 1`,
                 )
                 .get(project.project_id, kind);
@@ -790,7 +890,7 @@ export class SqliteRunRepository {
                   "SELECT (SELECT COUNT(*) FROM workflow_slots) + (SELECT COUNT(*) FROM workflow_reservations) AS count",
                 )
                 .get()?.count ?? 0;
-            if (used >= DEFAULT_DAEMON_EXECUTING_RUNS) return undefined;
+            if (used >= this.#limits.daemon().executingRuns) return undefined;
             const lastProject =
               this.#database
                 .query<{ readonly last_project_id: string | null }, []>(
@@ -801,16 +901,22 @@ export class SqliteRunRepository {
               .query<{ readonly project_id: string }, []>(
                 `SELECT DISTINCT q.project_id
                    FROM workflow_queue q
-                  WHERE NOT EXISTS (SELECT 1 FROM workflow_slots s WHERE s.project_id = q.project_id)
-                    AND NOT EXISTS (
-                      SELECT 1 FROM workflow_reservations z
-                      JOIN workflow_runs zr ON zr.run_id = z.run_id
-                      WHERE zr.project_id = q.project_id
-                    )
                   ORDER BY q.project_id`,
               )
               .all()
-              .filter((candidate) => !blockedProjectIds.has(candidate.project_id));
+              .filter((candidate) => !blockedProjectIds.has(candidate.project_id))
+              .filter((candidate) => {
+                const projectUsed =
+                  this.#database
+                    .query<{ readonly count: number }, [string, string]>(
+                      `SELECT (SELECT COUNT(*) FROM workflow_slots WHERE project_id = ?)
+                              + (SELECT COUNT(*) FROM workflow_reservations z
+                                  JOIN workflow_runs zr ON zr.run_id = z.run_id
+                                 WHERE zr.project_id = ?) AS count`,
+                    )
+                    .get(candidate.project_id, candidate.project_id)?.count ?? 0;
+                return projectUsed < this.#limits.project(candidate.project_id).executingRuns;
+              });
             const project =
               projects.find((candidate) =>
                 lastProject === null ? true : candidate.project_id > lastProject,
@@ -829,6 +935,18 @@ export class SqliteRunRepository {
                      FROM workflow_queue q JOIN workflow_runs r ON r.run_id = q.run_id
                     WHERE q.project_id = ? AND q.queue_kind = ?
                       AND NOT EXISTS (SELECT 1 FROM workflow_reservations z WHERE z.run_id = r.run_id)
+                      AND NOT EXISTS (
+                        SELECT 1 FROM workflow_slots slot
+                        JOIN workflow_runs active ON active.run_id = slot.run_id
+                        WHERE slot.project_id = q.project_id
+                          AND active.package_graph_id <> r.package_graph_id
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM workflow_reservations reservation
+                        JOIN workflow_runs active ON active.run_id = reservation.run_id
+                        WHERE active.project_id = q.project_id
+                          AND active.package_graph_id <> r.package_graph_id
+                      )
                     ORDER BY q.admission_sequence LIMIT 1`,
                 )
                 .get(project.project_id, kind);
@@ -880,6 +998,36 @@ export class SqliteRunRepository {
                 message: "the reservation is stale",
               });
             }
+            const globalSlots =
+              this.#database
+                .query<{ readonly count: number }, []>(
+                  "SELECT COUNT(*) AS count FROM workflow_slots",
+                )
+                .get()?.count ?? 0;
+            const projectSlots =
+              this.#database
+                .query<{ readonly count: number }, [string]>(
+                  "SELECT COUNT(*) AS count FROM workflow_slots WHERE project_id = ?",
+                )
+                .get(run.project_id)?.count ?? 0;
+            const incompatiblePackageGraph =
+              this.#database
+                .query<{ readonly found: number }, [string, string]>(
+                  `SELECT 1 AS found FROM workflow_slots slot
+                    JOIN workflow_runs active ON active.run_id = slot.run_id
+                   WHERE slot.project_id = ? AND active.package_graph_id <> ? LIMIT 1`,
+                )
+                .get(run.project_id, run.package_graph_id) !== null;
+            if (
+              globalSlots >= this.#limits.daemon().executingRuns ||
+              projectSlots >= this.#limits.project(run.project_id).executingRuns ||
+              incompatiblePackageGraph
+            ) {
+              throw new RunStoreError({
+                code: "RUN_NOT_ELIGIBLE",
+                message: "the current execution limits or package graph hold this reservation",
+              });
+            }
             const generation =
               (this.#database
                 .query<{ readonly generation: number }, [string]>(
@@ -907,6 +1055,16 @@ export class SqliteRunRepository {
             return { runId: run.run_id, runnerInstanceId, generation, revisionId: run.revision_id };
           })
           .immediate(),
+      catch: failure,
+    });
+
+  readonly releaseReservation = (reservationId: string): Effect.Effect<void, RunStoreError> =>
+    Effect.try({
+      try: () => {
+        this.#database.run("DELETE FROM workflow_reservations WHERE reservation_id = ?", [
+          reservationId,
+        ]);
+      },
       catch: failure,
     });
 
@@ -1814,9 +1972,14 @@ export class SqliteRunRepository {
       queueReason:
         projectSlot !== null && projectSlot.package_graph_id !== run.packageGraphId
           ? "package-switch"
-          : globalSlots >= DEFAULT_DAEMON_EXECUTING_RUNS
+          : globalSlots >= this.#limits.daemon().executingRuns
             ? "execution-capacity"
-            : projectSlot !== null
+            : (this.#database
+                  .query<{ readonly count: number }, [string]>(
+                    "SELECT COUNT(*) AS count FROM workflow_slots WHERE project_id = ?",
+                  )
+                  .get(run.projectId)?.count ?? 0) >=
+                this.#limits.project(run.projectId).executingRuns
               ? "project-capacity"
               : (run.queueReason ?? "runner-starting"),
     };

@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Effect } from "effect";
+import { rebuildSqliteTableWithoutForeignKey } from "../../shared/adapters/rebuildSqliteTableWithoutForeignKey.ts";
 import type { PhaseResult, RunAuthority } from "../models/DaemonRun.ts";
 import type {
   AuthorizeUncertainRetryRequest,
@@ -130,10 +131,25 @@ export class SqliteExternalActionRepository {
         action_id TEXT NOT NULL,
         uncertainty_revision INTEGER NOT NULL,
         committed_at TEXT NOT NULL,
-        PRIMARY KEY (data_identity, request_id),
-        FOREIGN KEY (action_id) REFERENCES workflow_external_actions(action_id)
+        PRIMARY KEY (data_identity, request_id)
       ) STRICT
     `);
+    rebuildSqliteTableWithoutForeignKey(database, {
+      table: "workflow_uncertain_retry_receipts",
+      temporary: "workflow_uncertain_retry_receipts_retention",
+      referencedTable: "workflow_external_actions",
+      createTemporary: `CREATE TABLE workflow_uncertain_retry_receipts_retention (
+        data_identity TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        canonical_request TEXT NOT NULL,
+        action_id TEXT NOT NULL,
+        uncertainty_revision INTEGER NOT NULL,
+        committed_at TEXT NOT NULL,
+        PRIMARY KEY (data_identity, request_id)
+      ) STRICT`,
+      columns:
+        "data_identity, request_id, canonical_request, action_id, uncertainty_revision, committed_at",
+    });
   }
 
   readonly #row = (actionId: string): ActionRow => {

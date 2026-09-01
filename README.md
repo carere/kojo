@@ -151,6 +151,9 @@ of the four you are in.
 
 Everything above is Kojo in use. What follows is this repository.
 
+The operator configuration patch, setting paths, activation rules, and retention confirmation flow
+are documented in [docs/configuration.md](docs/configuration.md).
+
 ## Getting started
 
 ```bash    # installs bun, node, and moon from .prototools

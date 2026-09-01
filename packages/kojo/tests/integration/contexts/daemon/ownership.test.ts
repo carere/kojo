@@ -76,9 +76,46 @@ describe("one idle Daemon owns one data root", () => {
     expect(readFileSync(target, "utf8")).toBe("evidence");
   });
 
+  it("does not record actual readiness when required startup recovery fails", async () => {
+    const hostPaths = paths();
+    let recordedReady = 0;
+    const daemon = startDaemon(hostPaths, {
+      runRestore: () =>
+        Effect.fail(
+          new LifecycleError("DAEMON_RESTORE_TEST_FAILED", "retained Run recovery failed"),
+        ),
+      managedSupervision: {
+        recordReady: () => {
+          recordedReady += 1;
+        },
+        recordPlannedStop: () => undefined,
+        activatePolicy: () => undefined,
+      },
+    });
+
+    try {
+      expect(
+        await fetch("http://localhost/ready", { unix: daemon.endpoint.socketPath }),
+      ).toMatchObject({ status: 200 });
+      await expect(Effect.runPromise(daemon.ready)).rejects.toThrow("retained Run recovery failed");
+      expect(recordedReady).toBe(0);
+    } finally {
+      await Effect.runPromise(daemon.stop);
+    }
+  });
+
   it("serves the durable handoff and owned cleanup through the production lifecycle socket", async () => {
     const hostPaths = paths();
-    const daemon = startDaemon(hostPaths);
+    let plannedStops = 0;
+    const daemon = startDaemon(hostPaths, {
+      managedSupervision: {
+        recordReady: () => undefined,
+        recordPlannedStop: () => {
+          plannedStops += 1;
+        },
+        activatePolicy: () => undefined,
+      },
+    });
     const journal = new FileLifecycleJournalRepository(join(hostPaths.dataRoot, "lifecycle"));
     const operation = journal.begin({
       operationId: "production-lifecycle-1",
@@ -118,6 +155,51 @@ describe("one idle Daemon owns one data root", () => {
         (await Effect.runPromise(control.stopOwnedProcesses(operation.operationId, 30_000, false)))
           .daemonInstanceId,
       ).toBe(daemon.endpoint.instanceId);
+      expect(plannedStops).toBe(1);
+    } finally {
+      await Effect.runPromise(daemon.stop);
+    }
+  });
+
+  it("serves atomic configuration only through the private Daemon socket", async () => {
+    const hostPaths = paths();
+    const daemon = startDaemon(hostPaths);
+    const request = (path: string, init: RequestInit = {}) =>
+      fetch(`http://localhost${path}`, {
+        ...init,
+        unix: daemon.endpoint.socketPath,
+      } as RequestInit & { readonly unix: string });
+
+    try {
+      const before = await request("/api/v1/daemon/configuration");
+      expect(before.status).toBe(200);
+      expect(await before.json()).toMatchObject({
+        formatVersion: 1,
+        scope: "daemon",
+        restartRequired: false,
+      });
+      const invalid = await request("/api/v1/daemon/actions/configure", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ patch: { set: { secret: "not-allowed" } } }),
+      });
+      expect(invalid.status).toBe(400);
+      expect(await invalid.json()).toMatchObject({ code: "INVALID_CONFIGURATION_PATCH" });
+
+      const applied = await request("/api/v1/daemon/actions/configure", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ patch: { set: { limits: { executingRuns: 2 } } } }),
+      });
+      expect(applied.status).toBe(202);
+      const result = (await applied.json()) as {
+        readonly status: {
+          readonly fields: ReadonlyArray<{ readonly path: string; readonly effective: unknown }>;
+        };
+      };
+      expect(
+        result.status.fields.find((field) => field.path === "limits.executingRuns")?.effective,
+      ).toBe(2);
     } finally {
       await Effect.runPromise(daemon.stop);
     }

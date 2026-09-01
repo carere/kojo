@@ -6,10 +6,19 @@ import { FileLifecycleJournalRepository } from "../contexts/daemon/adapters/File
 import { SocketDaemonLifecycleControl } from "../contexts/daemon/adapters/LifecycleControlTransport.ts";
 import { macLaunchAgent } from "../contexts/daemon/adapters/MacLaunchAgent.ts";
 import {
+  type DaemonSupervisionStatus,
+  ManagedDaemonSupervision,
+} from "../contexts/daemon/adapters/ManagedDaemonSupervision.ts";
+import {
   readCheckedManagedRelease,
   stageManagedRelease,
 } from "../contexts/daemon/adapters/ManagedInstallation.ts";
 import { systemdUserService } from "../contexts/daemon/adapters/SystemdUserService.ts";
+import type {
+  ConfigurationApplyResult,
+  ConfigurationCheck,
+  ConfigurationStatus,
+} from "../contexts/daemon/models/Configuration.ts";
 import type { DaemonPaths } from "../contexts/daemon/models/DaemonPaths.ts";
 import type { DaemonStatus } from "../contexts/daemon/models/DaemonStatus.ts";
 import { LifecycleError } from "../contexts/daemon/models/LifecycleError.ts";
@@ -82,6 +91,86 @@ const productionLifecycle = (): DaemonLifecycle => {
 };
 
 const line = (name: string, value: string): string => `${name}: ${value}.`;
+
+export const configurationStatusLines = (status: ConfigurationStatus): ReadonlyArray<string> => [
+  line("Configuration scope", status.scope),
+  ...(status.projectId === undefined ? [] : [line("Project", status.projectId)]),
+  line("Configuration state version", String(status.stateVersion)),
+  line("Explicit lifecycle restart required", status.restartRequired ? "yes" : "no"),
+  ...status.fields.map((field) =>
+    line(
+      field.path,
+      `effective=${JSON.stringify(field.effective)} default=${JSON.stringify(field.default)} scope=${field.scope} activation=${field.activation}${field.pending === undefined ? "" : ` pending=${JSON.stringify(field.pending)}`}`,
+    ),
+  ),
+];
+
+export const configurationCheckLines = (check: ConfigurationCheck): ReadonlyArray<string> => [
+  ...configurationStatusLines(check.proposed),
+  ...(check.plan === undefined
+    ? [line("Retention plan", "not required")]
+    : [
+        line("Retention plan", check.plan.planId),
+        line("Plan data identity", check.plan.dataIdentity),
+        line("Plan request hash", check.plan.requestHash),
+        line("Plan scope", check.plan.affectedScope),
+        line("Plan configuration state", String(check.plan.expectedStateVersion)),
+        line("Plan retained-data state", check.plan.expectedDataState),
+        line("Plan issued at", check.plan.issuedAt),
+        line("Plan expires at", check.plan.expiresAt),
+        line("Plan changes", JSON.stringify(check.plan.changes)),
+        line(
+          "Runs selected for correctness collection",
+          check.plan.impact.runIds.join(", ") || "none",
+        ),
+        line(
+          "Runs selected for Trace collection",
+          check.plan.impact.traceRunIds.join(", ") || "none",
+        ),
+        line(
+          "Artifacts selected for collection",
+          check.plan.impact.artifactIds.join(", ") || "none",
+        ),
+        line("Protected Runs", check.plan.impact.protectedRunIds.join(", ") || "none"),
+      ]),
+];
+
+export const configurationApplyLines = (
+  applied: ConfigurationApplyResult,
+): ReadonlyArray<string> => [
+  ...configurationStatusLines(applied.status),
+  line("Collected Run correctness", applied.collection.runs.join(", ") || "none"),
+  line("Collected Traces", applied.collection.traces.join(", ") || "none"),
+  line("Collected Artifacts", applied.collection.artifacts.join(", ") || "none"),
+];
+
+const supervisionLines = (status: DaemonSupervisionStatus): ReadonlyArray<string> => [
+  line("Daemon supervision", status.state),
+  line("Daemon restart attempts remaining", String(status.restartAttemptsRemaining)),
+  line("Daemon supervision repair required", status.repairRequired ? "yes" : "no"),
+  line("Daemon restart delays", JSON.stringify(status.policy.restartDelaysMs)),
+  line("Daemon healthy reset", `${status.policy.healthyResetMs} ms`),
+  ...(status.lastFailure === undefined
+    ? []
+    : [
+        line("Last Daemon failure", status.lastFailure.failedAt),
+        line("Last Daemon failure detail", status.lastFailure.detail),
+      ]),
+  ...(status.repairPlan === undefined
+    ? []
+    : [
+        line("Daemon repair plan", status.repairPlan.planId),
+        line("Daemon repair expected state", status.repairPlan.expectedState),
+        line("Daemon repair plan issued", status.repairPlan.issuedAt),
+        line("Daemon repair plan expires", status.repairPlan.expiresAt),
+      ]),
+  ...(status.lastRepair === undefined
+    ? []
+    : [
+        line("Last applied Daemon repair plan", status.lastRepair.planId),
+        line("Last Daemon repair applied", status.lastRepair.appliedAt),
+      ]),
+];
 
 export const daemonStatusLines = (status: DaemonStatus): ReadonlyArray<string> => [
   line("Installed", status.installed ? "yes" : "no"),
@@ -159,6 +248,46 @@ const printStatus = (status: DaemonStatus): Effect.Effect<void> =>
 const printLifecycleStatus = (status: LifecycleOperationStatus): Effect.Effect<void> =>
   Effect.forEach(lifecycleStatusLines(status), (statusLine) => Console.log(statusLine), {
     discard: true,
+  });
+
+const privateDaemonRequest = <A>(
+  path: string,
+  options: { readonly method?: string; readonly body?: unknown } = {},
+): Effect.Effect<A, string> =>
+  Effect.tryPromise({
+    try: async () => {
+      const paths = hostPaths();
+      const endpoint = readDaemonEndpoint(paths);
+      if (endpoint === undefined)
+        throw new Error("the Daemon is not ready; run `kojo daemon status`");
+      const response = await fetch(`http://localhost${path}`, {
+        unix: endpoint.socketPath,
+        method: options.method,
+        headers: {
+          accept: "application/json",
+          ...(options.body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+      } as RequestInit & { readonly unix: string });
+      const value = (await response.json()) as {
+        readonly code?: string;
+        readonly message?: string;
+      };
+      if (!response.ok)
+        throw new Error(
+          `${value.code ?? "configuration-refused"}: ${value.message ?? `Daemon answered ${response.status}`}`,
+        );
+      return value as A;
+    },
+    catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
+  });
+
+const readConfigurationPatch = (file: string): Effect.Effect<unknown, string> =>
+  Effect.tryPromise({
+    try: async () =>
+      JSON.parse(file === "-" ? await Bun.stdin.text() : readFileSync(file, "utf8")) as unknown,
+    catch: (cause) =>
+      `configuration file is not valid JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
   });
 
 const printUpgradeStatus = (report: UpgradeCheckReport): Effect.Effect<void> =>
@@ -434,12 +563,16 @@ const install = Command.make(
 
 const status = Command.make(
   "status",
-  {},
-  Effect.fn(function* () {
-    yield* printStatus(yield* useLifecycleEffect((lifecycle) => lifecycle.status));
+  {
+    details: Flag.boolean("details"),
+    json: Flag.boolean("json"),
+  },
+  Effect.fn(function* ({ details, json }) {
+    const daemon = yield* useLifecycleEffect((lifecycle) => lifecycle.status);
     const paths = yield* lifecycleTry(hostPaths).pipe(
       Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
     );
+    let lifecycle: LifecycleOperationStatus | undefined;
     if (existsSync(join(paths.dataRoot, "lifecycle"))) {
       const managed = yield* lifecycleTry(() => productionController(true)).pipe(
         Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
@@ -448,15 +581,89 @@ const status = Command.make(
         Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
       );
       if (current !== undefined) {
-        yield* printLifecycleStatus(yield* managed.controller.status(current.operationId));
+        lifecycle = yield* managed.controller.status(current.operationId);
       }
+    }
+    let configuration: ConfigurationStatus | undefined;
+    if (details) {
+      configuration = yield* privateDaemonRequest<ConfigurationStatus>(
+        "/api/v1/daemon/configuration",
+      ).pipe(Effect.catch((message) => commandFailed(message)));
     }
     const upgrade = yield* latestUpgrade(paths).pipe(
       Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
     );
-    if (upgrade !== undefined) yield* printUpgradeStatus(upgrade);
+    const supervision = yield* lifecycleTry(() =>
+      new ManagedDaemonSupervision(paths.dataRoot, { readOnly: true }).status(),
+    ).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)));
+    if (json) {
+      yield* Console.log(
+        JSON.stringify({
+          formatVersion: 1,
+          daemon,
+          ...(lifecycle === undefined ? {} : { lifecycle }),
+          ...(configuration === undefined ? {} : { configuration }),
+          ...(upgrade === undefined ? {} : { upgrade }),
+          supervision,
+        }),
+      );
+    } else {
+      yield* printStatus(daemon);
+      if (lifecycle !== undefined) yield* printLifecycleStatus(lifecycle);
+      if (configuration !== undefined) {
+        for (const statusLine of configurationStatusLines(configuration)) {
+          yield* Console.log(statusLine);
+        }
+      }
+      if (upgrade !== undefined) yield* printUpgradeStatus(upgrade);
+      for (const statusLine of supervisionLines(supervision)) yield* Console.log(statusLine);
+    }
   }),
 ).pipe(Command.withDescription("Inspect the installation and service without starting work"));
+
+const configure = Command.make(
+  "configure",
+  {
+    file: Flag.string("file").pipe(Flag.optional),
+    check: Flag.boolean("check"),
+    confirm: Flag.string("confirm").pipe(Flag.optional),
+    json: Flag.boolean("json"),
+  },
+  Effect.fn(function* ({ file, check, confirm, json }) {
+    if (Option.isSome(confirm)) {
+      if (Option.isSome(file) || check) {
+        return yield* clientExit(2, "--confirm cannot be combined with --file or --check");
+      }
+      const applied = yield* privateDaemonRequest<ConfigurationApplyResult>(
+        "/api/v1/daemon/actions/configure",
+        { method: "POST", body: { confirm: confirm.value } },
+      ).pipe(Effect.catch((message) => commandFailed(message)));
+      if (json) yield* Console.log(JSON.stringify(applied));
+      else
+        for (const statusLine of configurationApplyLines(applied)) yield* Console.log(statusLine);
+      return;
+    }
+    if (Option.isNone(file))
+      return yield* clientExit(2, "configure requires --file FILE or --confirm PLAN_TOKEN");
+    const patch = yield* readConfigurationPatch(file.value).pipe(
+      Effect.catch((message) => clientExit(2, message)),
+    );
+    const result = yield* privateDaemonRequest<ConfigurationCheck | ConfigurationApplyResult>(
+      "/api/v1/daemon/actions/configure",
+      { method: "POST", body: { patch, ...(check ? { check: true } : {}) } },
+    ).pipe(Effect.catch((message) => commandFailed(message)));
+    if (json) yield* Console.log(JSON.stringify(result));
+    else {
+      const lines =
+        "proposed" in result ? configurationCheckLines(result) : configurationApplyLines(result);
+      for (const statusLine of lines) yield* Console.log(statusLine);
+    }
+  }),
+).pipe(
+  Command.withDescription(
+    "Check or apply one atomic JSON configuration patch; retention confirmation names an exact plan",
+  ),
+);
 
 const start = Command.make(
   "start",
@@ -497,6 +704,48 @@ const restart = Command.make(
 ).pipe(
   Command.withDescription(
     "Drain, stop, and confirm a replacement Daemon without changing automatic start",
+  ),
+);
+
+const repair = Command.make(
+  "repair",
+  {
+    check: Flag.boolean("check"),
+    apply: Flag.string("apply").pipe(Flag.optional),
+    json: Flag.boolean("json"),
+  },
+  Effect.fn(function* ({ check, apply, json }) {
+    if (check === Option.isSome(apply)) {
+      return yield* clientExit(2, "repair requires exactly one of --check or --apply PLAN_TOKEN");
+    }
+    const paths = yield* lifecycleTry(hostPaths).pipe(
+      Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+    );
+    const supervision = new ManagedDaemonSupervision(paths.dataRoot);
+    const result = yield* lifecycleTry(() =>
+      Option.isSome(apply) ? supervision.applyRepair(apply.value) : supervision.checkRepair(),
+    ).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)));
+    if (Option.isSome(apply)) {
+      const service = nativeService();
+      const observed = yield* lifecycleTry(service.inspect).pipe(
+        Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+      );
+      if (observed.process === "stopped") {
+        yield* lifecycleTry(() => service.start(paths.serviceDefinition)).pipe(
+          Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+        );
+      } else if (observed.process !== "running") {
+        return yield* commandFailed(
+          "the native manager cannot prove the faulted managed launcher is running or stopped",
+        );
+      }
+    }
+    if (json) yield* Console.log(JSON.stringify({ formatVersion: 1, supervision: result }));
+    else for (const statusLine of supervisionLines(result)) yield* Console.log(statusLine);
+  }),
+).pipe(
+  Command.withDescription(
+    "Check exhausted Daemon supervision or apply one exact plan for another bounded cycle",
   ),
 );
 
@@ -631,8 +880,10 @@ export const daemon = Command.make("daemon").pipe(
     start,
     stop,
     restart,
+    repair,
     enable,
     disable,
+    configure,
     keepRunningAfterLogout,
     upgrade,
   ]),
