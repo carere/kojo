@@ -4,6 +4,7 @@ import { daemon } from "./daemon.ts";
 import { doctor } from "./doctor.ts";
 import { gate } from "./gate.ts";
 import { init } from "./init.ts";
+import { project } from "./project.ts";
 import { root } from "./root.ts";
 import { run } from "./run.ts";
 import { ui } from "./ui.ts";
@@ -17,7 +18,7 @@ import { watch } from "./watch.ts";
  * import cycle.
  */
 export const kojo = root.pipe(
-  Command.withSubcommands([init, doctor, run, watch, gate, ui, daemon]),
+  Command.withSubcommands([init, doctor, run, watch, gate, ui, daemon, project]),
 );
 
 /**

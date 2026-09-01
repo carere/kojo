@@ -25,6 +25,7 @@
     "./contexts/client/contracts/observation": "./src/contexts/client/contracts/observation.ts",
     "./contexts/client/contracts/operation": "./src/contexts/client/contracts/operation.ts",
     "./contexts/client/contracts/pagination": "./src/contexts/client/contracts/pagination.ts",
+    "./contexts/client/contracts/project": "./src/contexts/client/contracts/project.ts",
     "./contexts/shared/codecs/json": "./src/contexts/shared/codecs/json.ts",
     "./contexts/shared/models/identity": "./src/contexts/shared/models/identity.ts"
   },

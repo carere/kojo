@@ -18,6 +18,8 @@ import type {
   DaemonDocument,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/browser";
 import { Effect } from "effect";
+import { SqliteProjectRepository } from "../../project/adapters/SqliteProjectRepository.ts";
+import { ProjectApi } from "../../project/services/ProjectApi.ts";
 import type { DaemonPaths } from "../models/DaemonPaths.ts";
 import type { DaemonEndpoint } from "../models/Endpoint.ts";
 import { LifecycleError } from "../models/LifecycleError.ts";
@@ -30,6 +32,7 @@ import {
   removeOwnedPlainFile,
   removeOwnedSocket,
 } from "../services/secureHostPath.ts";
+import { HostClientRequestJournal } from "./HostClientRequestJournal.ts";
 
 interface LockHandle {
   readonly unlock: () => void;
@@ -123,6 +126,14 @@ const isJson = (request: Request): boolean =>
   request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ===
   "application/json";
 
+const requestJson = async (request: Request): Promise<unknown> => {
+  const bytes = new Uint8Array(await request.arrayBuffer());
+  if (bytes.byteLength > 1_048_576) {
+    throw new LifecycleError("REQUEST_TOO_LARGE", "the request body is too large");
+  }
+  return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+};
+
 const contentType = (path: string): string => {
   switch (extname(path)) {
     case ".css":
@@ -206,6 +217,15 @@ export const startDaemon = (
 
     const instanceId = crypto.randomUUID();
     const authority = browserAuthority({ now });
+    const projectRepository = new SqliteProjectRepository(database);
+    const projectApi = new ProjectApi({
+      dataIdentity,
+      instanceId,
+      journal: new HostClientRequestJournal(join(paths.dataRoot, "client-requests")),
+      now,
+      repository: projectRepository,
+      dataRoot: paths.dataRoot,
+    });
     consoleServer = Bun.serve({
       hostname: "127.0.0.1",
       port: options.consolePort ?? 0,
@@ -223,7 +243,7 @@ export const startDaemon = (
             instanceId,
             dataIdentity,
             clientApiVersions: [1],
-            features: ["browser-session", "empty-daemon"],
+            features: ["browser-session", "project-catalogue", "client-request-journal"],
             packageVersion: release.packageVersion,
           };
           return noStoreJson(body);
@@ -300,6 +320,7 @@ export const startDaemon = (
             return problem(401, "session-refused", "Console access is invalid or expired");
           }
           if (request.method === "GET" && url.pathname === "/api/v1/daemon") {
+            const projects = await Effect.runPromise(projectRepository.projects);
             const body: DaemonDocument = {
               formatVersion: 1,
               instanceId,
@@ -311,9 +332,31 @@ export const startDaemon = (
               architecture: process.arch,
               startedAt,
               accessExpiresAt: new Date(session.expiresAt).toISOString(),
-              projectCount: 0,
+              projectCount: projects.length,
             };
             return noStoreJson(body);
+          }
+          if (request.method === "GET" && url.pathname === "/api/v1/projects") {
+            return Effect.runPromise(projectApi.snapshot());
+          }
+          const clientRequest = url.pathname.match(
+            /^\/api\/v1\/client-requests\/([A-Za-z0-9_-]+)(\/retry)?$/,
+          );
+          if (clientRequest !== null) {
+            const requestId = clientRequest[1] ?? "invalid";
+            if (request.method === "GET" && clientRequest[2] === undefined) {
+              return Effect.runPromise(projectApi.lookup(requestId));
+            }
+            if (request.method === "PUT" && clientRequest[2] === undefined) {
+              try {
+                return Effect.runPromise(projectApi.prepare(requestId, await requestJson(request)));
+              } catch {
+                return problem(400, "invalid-json", "the mutation body is invalid");
+              }
+            }
+            if (request.method === "POST" && clientRequest[2] === "/retry") {
+              return Effect.runPromise(projectApi.retry(requestId));
+            }
           }
           return problem(404, "not-found", "the requested API resource was not found");
         }
@@ -335,7 +378,7 @@ export const startDaemon = (
     };
     socketServer = Bun.serve({
       unix: socketPath,
-      fetch(request) {
+      async fetch(request) {
         const url = new URL(request.url);
         if (request.method === "GET" && url.pathname === "/ready") {
           return Response.json(endpoint);
@@ -346,6 +389,29 @@ export const startDaemon = (
             expiresAt: new Date(grant.expiresAt).toISOString(),
             launchUrl: `${consoleOrigin}/daemon#grant=${encodeURIComponent(grant.secret)}`,
           });
+        }
+        if (request.method === "GET" && url.pathname === "/api/v1/projects") {
+          return Effect.runPromise(projectApi.snapshot());
+        }
+        const clientRequest = url.pathname.match(
+          /^\/api\/v1\/client-requests\/([A-Za-z0-9_-]+)(\/retry)?$/,
+        );
+        if (clientRequest !== null) {
+          const requestId = clientRequest[1] ?? "invalid";
+          if (request.method === "GET" && clientRequest[2] === undefined) {
+            return Effect.runPromise(projectApi.lookup(requestId));
+          }
+          if (request.method === "PUT" && clientRequest[2] === undefined) {
+            if (!isJson(request)) return problem(415, "json-required", "the request requires JSON");
+            try {
+              return Effect.runPromise(projectApi.prepare(requestId, await requestJson(request)));
+            } catch {
+              return problem(400, "invalid-json", "the mutation body is invalid");
+            }
+          }
+          if (request.method === "POST" && clientRequest[2] === "/retry") {
+            return Effect.runPromise(projectApi.retry(requestId));
+          }
         }
         return new Response("not found", { status: 404 });
       },

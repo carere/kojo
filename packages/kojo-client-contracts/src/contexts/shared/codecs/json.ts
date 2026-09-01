@@ -99,6 +99,17 @@ const decodeJsonValueAt = (
 export const decodeJsonValue = (input: unknown): DecodeResult<JsonValue> =>
   decodeJsonValueAt(input, [], new Set());
 
+/** Encode one JSON value with deterministic object-key order. */
+export const encodeCanonicalJson = (value: JsonValue): string => {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(encodeCanonicalJson).join(",")}]`;
+  const record = value as JsonObject;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${encodeCanonicalJson(record[key] ?? null)}`)
+    .join(",")}}`;
+};
+
 export const decodeClosedRecord = (
   input: unknown,
   allowedKeys: ReadonlyArray<string>,
