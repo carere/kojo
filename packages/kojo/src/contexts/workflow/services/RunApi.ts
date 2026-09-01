@@ -26,9 +26,13 @@ import {
   type MaterializedRevision,
   materializeRevision,
 } from "../../project/services/materializeRevision.ts";
-import { ProjectRunnerSupervisor } from "../../project/services/ProjectRunnerSupervisor.ts";
+import {
+  ProjectRunnerError,
+  ProjectRunnerSupervisor,
+} from "../../project/services/ProjectRunnerSupervisor.ts";
 import { makeRunnerFrameReader, writeRunnerFrame } from "../../project/services/runnerChannel.ts";
 import type { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRepository.ts";
+import type { SqliteRevisionRepository } from "../adapters/SqliteRevisionRepository.ts";
 import type { SqliteRunRepository } from "../adapters/SqliteRunRepository.ts";
 import type { DaemonRun, PhaseResult, ReservedRun, RunAuthority } from "../models/DaemonRun.ts";
 import { RetainedContentFault } from "../models/RetainedContentFault.ts";
@@ -91,6 +95,14 @@ const runApiFault = (cause: unknown): RunApiFault =>
     message: cause instanceof Error ? cause.message : String(cause),
     cause,
   });
+
+const runnerError = (cause: unknown): ProjectRunnerError =>
+  cause instanceof ProjectRunnerError
+    ? cause
+    : new ProjectRunnerError({
+        message: cause instanceof Error ? cause.message : String(cause),
+        cause,
+      });
 
 const terminal = (run: DaemonRun): boolean =>
   run.state === "succeeded" || run.state === "failed" || run.state === "cancelled";
@@ -160,6 +172,7 @@ export class RunApi {
   readonly #now: () => number;
   readonly #projects: SqliteProjectRepository;
   readonly #runs: SqliteRunRepository;
+  readonly #revisions: SqliteRevisionRepository;
   readonly #triggers: SqliteTriggerRepository;
   readonly #gates: SqliteDaemonGateRepository;
   readonly #runnerIdleMillis: number;
@@ -176,6 +189,7 @@ export class RunApi {
     readonly now: () => number;
     readonly projects: SqliteProjectRepository;
     readonly runs: SqliteRunRepository;
+    readonly revisions: SqliteRevisionRepository;
     readonly triggers: SqliteTriggerRepository;
     readonly gates: SqliteDaemonGateRepository;
     readonly runnerIdleMillis?: number;
@@ -186,6 +200,7 @@ export class RunApi {
     this.#now = options.now;
     this.#projects = options.projects;
     this.#runs = options.runs;
+    this.#revisions = options.revisions;
     this.#triggers = options.triggers;
     this.#gates = options.gates;
     this.#runnerIdleMillis = options.runnerIdleMillis ?? DEFAULT_RUNNER_IDLE_MILLIS;
@@ -299,7 +314,7 @@ export class RunApi {
         this.#stopping = true;
         await Promise.allSettled([
           ...Array.from(this.#triggerProcesses.values(), (process) => process.stop()),
-          this.#runnerSupervisor.shutdown(),
+          Effect.runPromise(this.#runnerSupervisor.shutdown()),
         ]);
       },
       catch: runApiFault,
@@ -417,46 +432,54 @@ export class RunApi {
       const current = await Effect.runPromise(
         this.#projects.workflow(run.projectId, run.workflowName),
       );
-      const { revision, materialized } = await this.#runnerSupervisor.prepare({
-        projectId: run.projectId,
-        packageGraphId: run.packageGraphId,
-        stopCurrentPolling: () =>
-          this.#stopProjectTriggerPollers(
-            run.projectId,
-            current?.currentRevisionId !== run.revisionId
-              ? `Historical polling delay: pinned revision ${run.revisionId} is executing`
-              : `Trigger polling waits for execution turn ${run.runId}`,
-          ),
-        load: async () => {
-          const revision = await Effect.runPromise(
-            this.#projects.retainedExecutionRevision(
-              run.projectId,
-              run.workflowName,
-              run.revisionId,
-              run.packageGraphId,
-            ),
-          ).catch((cause) => {
-            throw new RetainedContentFault({
-              code: "RETAINED_CONTENT_MISSING",
-              message: `the pinned Workflow Revision ${run.revisionId} is not registered`,
-              remedy:
-                "Restore the exact retained revision metadata and bytes. Do not refresh this Run.",
-              cause,
-            });
-          });
-          const executionRoot = join(this.#dataRoot, "runner-materialized");
-          mkdirSync(executionRoot, { recursive: true, mode: 0o700 });
-          return {
-            revision,
-            materialized: materializeRevision({
-              retainedRoot: revision.publishedPath,
-              executionRoot,
-              revisionId: revision.revisionId,
-              packageGraphId: revision.packageGraphId,
-            }),
-          };
-        },
-      });
+      const { revision, materialized } = await Effect.runPromise(
+        this.#runnerSupervisor.prepare({
+          projectId: run.projectId,
+          packageGraphId: run.packageGraphId,
+          stopCurrentPolling: Effect.tryPromise({
+            try: () =>
+              this.#stopProjectTriggerPollers(
+                run.projectId,
+                current?.currentRevisionId !== run.revisionId
+                  ? `Historical polling delay: pinned revision ${run.revisionId} is executing`
+                  : `Trigger polling waits for execution turn ${run.runId}`,
+              ),
+            catch: runnerError,
+          }),
+          load: Effect.tryPromise({
+            try: async () => {
+              const revision = await Effect.runPromise(
+                this.#projects.retainedExecutionRevision(
+                  run.projectId,
+                  run.workflowName,
+                  run.revisionId,
+                  run.packageGraphId,
+                ),
+              ).catch((cause) => {
+                throw new RetainedContentFault({
+                  code: "RETAINED_CONTENT_MISSING",
+                  message: `the pinned Workflow Revision ${run.revisionId} is not registered`,
+                  remedy:
+                    "Restore the exact retained revision metadata and bytes. Do not refresh this Run.",
+                  cause,
+                });
+              });
+              const executionRoot = join(this.#dataRoot, "runner-materialized");
+              mkdirSync(executionRoot, { recursive: true, mode: 0o700 });
+              return {
+                revision,
+                materialized: materializeRevision({
+                  retainedRoot: revision.publishedPath,
+                  executionRoot,
+                  revisionId: revision.revisionId,
+                  packageGraphId: revision.packageGraphId,
+                }),
+              };
+            },
+            catch: runnerError,
+          }),
+        }),
+      );
       authority = await Effect.runPromise(
         this.#runs.claimReserved(
           reserved.reservationId,
@@ -727,7 +750,7 @@ export class RunApi {
     );
     let group = this.#triggerGroups.get(projectId);
     if (group !== undefined && group.packageGraphId !== revision.packageGraphId) {
-      await this.#runnerSupervisor.stop(projectId);
+      await Effect.runPromise(this.#runnerSupervisor.stop(projectId));
       group = undefined;
     }
     const executionRoot = join(this.#dataRoot, "runner-materialized");
@@ -764,7 +787,7 @@ export class RunApi {
     bootstrap: ExecutionRevision,
     bootstrapMaterialized: MaterializedRevision,
   ): Promise<ProjectTriggerGroup> {
-    await this.#runnerSupervisor.stop(bootstrap.projectId);
+    await Effect.runPromise(this.#runnerSupervisor.stop(bootstrap.projectId));
     const runnerInstanceId = crypto.randomUUID();
     const connectionSecret = crypto.getRandomValues(new Uint8Array(32)).toHex();
     const channelRoot = join(this.#dataRoot, "runner-channels", crypto.randomUUID());
@@ -1084,6 +1107,12 @@ export class RunApi {
             }
             await readerDone?.catch(() => undefined);
             await Promise.all([output, error]);
+            await Effect.runPromise(
+              this.#revisions.confirmProcessExit(
+                runnerInstanceId,
+                new Date(this.#now()).toISOString(),
+              ),
+            );
           } finally {
             for (const registered of registrations.values()) registered.materialized.dispose();
             registrations.clear();
@@ -1132,6 +1161,20 @@ export class RunApi {
           ) {
             throw new Error("the Project Runner did not register one authored Trigger");
           }
+          await Effect.runPromise(
+            this.#revisions.acquireReader({
+              readerId: JSON.stringify([
+                "runner-registration",
+                runnerInstanceId,
+                revision.revisionId,
+                revision.workflowName,
+              ]),
+              revisionId: revision.revisionId,
+              kind: "loaded",
+              runnerInstanceId,
+              acquiredAt: new Date(this.#now()).toISOString(),
+            }),
+          );
           registrations.set(key, { revision, materialized, pollerId });
           const started = await command("StartTrigger", {
             pollerId,
@@ -1158,6 +1201,12 @@ export class RunApi {
           if (registered === undefined) return;
           await command("StopTrigger", { revisionId, workflowName });
           await command("DisposeRevision", { revisionId, workflowName });
+          await Effect.runPromise(
+            this.#revisions.releaseReader(
+              JSON.stringify(["runner-registration", runnerInstanceId, revisionId, workflowName]),
+              { kind: "disposed", confirmedAt: new Date(this.#now()).toISOString() },
+            ),
+          );
           registrations.delete(key);
           registered.materialized.dispose();
           if (registrations.size === 0) await stop();
@@ -1165,16 +1214,21 @@ export class RunApi {
         stop,
       };
       this.#triggerGroups.set(bootstrap.projectId, group);
-      await this.#runnerSupervisor.attach(bootstrap.projectId, {
-        instanceId: runnerInstanceId,
-        packageGraphId: bootstrap.packageGraphId,
-        purpose: "trigger",
-        stop,
-      });
+      await Effect.runPromise(
+        this.#runnerSupervisor.attach(bootstrap.projectId, {
+          instanceId: runnerInstanceId,
+          packageGraphId: bootstrap.packageGraphId,
+          purpose: "trigger",
+          stop: Effect.tryPromise({ try: stop, catch: runnerError }),
+        }),
+      );
       return group;
     } catch (cause) {
       child?.kill();
       await child?.exited.catch(() => undefined);
+      await Effect.runPromise(
+        this.#revisions.confirmProcessExit(runnerInstanceId, new Date(this.#now()).toISOString()),
+      ).catch(() => undefined);
       cleanup();
       throw cause;
     }
@@ -1195,7 +1249,7 @@ export class RunApi {
     authority?: RunAuthority,
   ): Promise<A> {
     if (mode === "execute") {
-      await this.#runnerSupervisor.stop(request.projectId);
+      await Effect.runPromise(this.#runnerSupervisor.stop(request.projectId));
     }
     const channelRoot = join(this.#dataRoot, "runner-channels", crypto.randomUUID());
     const channel = join(channelRoot, "runner.sock");
@@ -1204,6 +1258,13 @@ export class RunApi {
     let socket: Socket | undefined;
     let child: ReturnType<typeof Bun.spawn> | undefined;
     let detached = false;
+    const revisionReaderId = JSON.stringify([
+      "runner-registration",
+      request.runnerInstanceId,
+      request.revisionId,
+      request.workflowName,
+    ]);
+    let revisionReaderAcquired = false;
     const cleanup = (): void => {
       socket?.destroy();
       server?.close();
@@ -1309,6 +1370,16 @@ export class RunApi {
       ) {
         throw new Error("the Project Runner did not commit exact revision registration");
       }
+      await Effect.runPromise(
+        this.#revisions.acquireReader({
+          readerId: revisionReaderId,
+          revisionId: request.revisionId,
+          kind: "loaded",
+          runnerInstanceId: request.runnerInstanceId,
+          acquiredAt: new Date(this.#now()).toISOString(),
+        }),
+      );
+      revisionReaderAcquired = true;
       let result = registeredBody.result;
       if (mode === "execute") {
         if (authority === undefined || !("runId" in request))
@@ -1382,23 +1453,43 @@ export class RunApi {
           stop: (): Promise<void> => {
             if (stopping !== undefined) return stopping;
             if (timer !== undefined) clearTimeout(timer);
-            stopping = shutdown().finally(() => {
+            stopping = shutdown().finally(async () => {
+              if (revisionReaderAcquired) {
+                await Effect.runPromise(
+                  this.#revisions.releaseReader(revisionReaderId, {
+                    kind: "process-exit",
+                    runnerInstanceId: request.runnerInstanceId,
+                    confirmedAt: new Date(this.#now()).toISOString(),
+                  }),
+                ).catch(() => undefined);
+                revisionReaderAcquired = false;
+              }
               cleanup();
               this.#runnerSupervisor.detach(request.projectId, request.runnerInstanceId);
             });
             return stopping;
           },
         };
-        await this.#runnerSupervisor.attach(request.projectId, {
-          instanceId: request.runnerInstanceId,
-          packageGraphId: request.packageGraphId,
-          purpose: "execution",
-          stop: idle.stop,
-        });
+        await Effect.runPromise(
+          this.#runnerSupervisor.attach(request.projectId, {
+            instanceId: request.runnerInstanceId,
+            packageGraphId: request.packageGraphId,
+            purpose: "execution",
+            stop: Effect.tryPromise({ try: idle.stop, catch: runnerError }),
+          }),
+        );
         timer = setTimeout(() => void idle.stop().catch(() => undefined), this.#runnerIdleMillis);
         detached = true;
       } else {
         await shutdown();
+        await Effect.runPromise(
+          this.#revisions.releaseReader(revisionReaderId, {
+            kind: "process-exit",
+            runnerInstanceId: request.runnerInstanceId,
+            confirmedAt: new Date(this.#now()).toISOString(),
+          }),
+        );
+        revisionReaderAcquired = false;
       }
       return result as A;
     } finally {

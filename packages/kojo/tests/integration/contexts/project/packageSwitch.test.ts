@@ -2,7 +2,9 @@ import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "@effect/vitest";
+import { Effect } from "effect";
 import {
+  ProjectRunnerError,
   type ProjectRunnerHandle,
   ProjectRunnerSupervisor,
 } from "../../../../src/contexts/project/services/ProjectRunnerSupervisor.ts";
@@ -39,14 +41,21 @@ const processHandle = async (
     packageGraphId: graph,
     purpose: "execution",
     pid: child.pid,
-    stop: () => {
-      stopping ??= (async () => {
-        child.kill("SIGTERM");
-        const exit = await child.exited;
-        if (exit !== 0) throw new Error(`controlled Project Runner exited ${exit}`);
-      })();
-      return stopping;
-    },
+    stop: Effect.tryPromise({
+      try: () => {
+        stopping ??= (async () => {
+          child.kill("SIGTERM");
+          const exit = await child.exited;
+          if (exit !== 0) throw new Error(`controlled Project Runner exited ${exit}`);
+        })();
+        return stopping;
+      },
+      catch: (cause) =>
+        new ProjectRunnerError({
+          message: cause instanceof Error ? cause.message : String(cause),
+          cause,
+        }),
+    }),
   };
 };
 
@@ -62,18 +71,20 @@ describe("Project Runner package switching", () => {
     appendFileSync(journal, "");
     const supervisor = new ProjectRunnerSupervisor();
     const first = await processHandle("graph-a", journal);
-    await supervisor.attach("project-a", first);
+    await Effect.runPromise(supervisor.attach("project-a", first));
 
-    const loaded = await supervisor.prepare({
-      projectId: "project-a",
-      packageGraphId: "graph-b",
-      stopCurrentPolling: async () => appendFileSync(journal, "polling-stopped\n"),
-      load: async () => {
-        expect(() => process.kill(first.pid, 0)).toThrow();
-        appendFileSync(journal, "loaded:graph-b\n");
-        return "prepared-b";
-      },
-    });
+    const loaded = await Effect.runPromise(
+      supervisor.prepare({
+        projectId: "project-a",
+        packageGraphId: "graph-b",
+        stopCurrentPolling: Effect.sync(() => appendFileSync(journal, "polling-stopped\n")),
+        load: Effect.sync(() => {
+          expect(() => process.kill(first.pid, 0)).toThrow();
+          appendFileSync(journal, "loaded:graph-b\n");
+          return "prepared-b";
+        }),
+      }),
+    );
     expect(loaded).toBe("prepared-b");
     expect(readFileSync(journal, "utf8").trim().split("\n")).toEqual([
       "started:graph-a",
@@ -83,9 +94,9 @@ describe("Project Runner package switching", () => {
     ]);
 
     const second = await processHandle("graph-b", journal);
-    await supervisor.attach("project-a", second);
+    await Effect.runPromise(supervisor.attach("project-a", second));
     expect(supervisor.currentGraph("project-a")).toBe("graph-b");
-    await supervisor.shutdown();
+    await Effect.runPromise(supervisor.shutdown());
     expect(() => process.kill(second.pid, 0)).toThrow();
   });
 });
