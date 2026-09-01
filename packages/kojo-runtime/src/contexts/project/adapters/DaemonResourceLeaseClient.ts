@@ -25,10 +25,16 @@ const committed = (
   Effect.tryPromise({
     try: () => send(kind, body),
     catch: (cause) => new ResourceMutationError({ cause }),
-  }).pipe(Effect.orDie, Effect.asVoid);
+  }).pipe(Effect.timeout("250 millis"), Effect.retry({ times: 2 }), Effect.orDie);
+
+const confirmed = (
+  send: SendResourceMutation,
+  kind: Parameters<SendResourceMutation>[0],
+  body: JsonValue,
+) => committed(send, kind, body).pipe(Effect.asVoid);
 
 /** Resource lease client over the authenticated private Runner channel. */
-export const layer = (send: SendResourceMutation): Layer.Layer<never> =>
+export const layer = (send: SendResourceMutation): Layer.Layer<ResourceLeaseClient> =>
   Layer.succeedContext(
     Context.make(ResourceLeaseClient, {
       beginAcquisition: (resource) =>
@@ -39,9 +45,28 @@ export const layer = (send: SendResourceMutation): Layer.Layer<never> =>
           acquisitionKey: resource.acquisitionKey,
           requestedAt: new Date().toISOString(),
           detail: resource.detail,
-        }),
+        }).pipe(
+          Effect.map((result) => {
+            if (
+              result.acquisitionKey !== resource.acquisitionKey ||
+              typeof result.providerIdentity !== "string" ||
+              typeof result.inspectionLocator !== "string"
+            ) {
+              throw new Error("the Daemon did not return the exact committed Resource identity");
+            }
+            return {
+              acquisitionKey: resource.acquisitionKey,
+              providerIdentity: result.providerIdentity,
+              inspectionLocator: result.inspectionLocator,
+              ...(typeof result.providerLocator === "string"
+                ? { providerLocator: result.providerLocator }
+                : {}),
+            };
+          }),
+          Effect.orDie,
+        ),
       confirmAcquired: (leaseId, evidence) =>
-        committed(send, "ConfirmResourceAcquired", {
+        confirmed(send, "ConfirmResourceAcquired", {
           resourceVersion: 1,
           leaseId,
           acquiredAt: new Date().toISOString(),
@@ -49,27 +74,27 @@ export const layer = (send: SendResourceMutation): Layer.Layer<never> =>
           locator: evidence.locator,
         }),
       beginRelease: (leaseId) =>
-        committed(send, "BeginResourceRelease", {
+        confirmed(send, "BeginResourceRelease", {
           resourceVersion: 1,
           leaseId,
           requestedAt: new Date().toISOString(),
         }),
       confirmReleased: (leaseId, evidence) =>
-        committed(send, "ConfirmResourceReleased", {
+        confirmed(send, "ConfirmResourceReleased", {
           resourceVersion: 1,
           leaseId,
           releasedAt: new Date().toISOString(),
           evidence,
         }),
       preserve: (leaseId, reason) =>
-        committed(send, "PreserveResource", {
+        confirmed(send, "PreserveResource", {
           resourceVersion: 1,
           leaseId,
           observedAt: new Date().toISOString(),
           reason,
         }),
       unresolved: (leaseId, reason) =>
-        committed(send, "ReportRecovery", {
+        confirmed(send, "ReportRecovery", {
           resourceVersion: 1,
           leaseId,
           observedAt: new Date().toISOString(),

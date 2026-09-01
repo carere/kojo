@@ -195,18 +195,6 @@ export const writeRunnerFrame = (
   return writer.write(frame);
 };
 
-export const writeCriticalRunnerFrame = (
-  socket: Socket,
-  frame: RunnerFrame,
-): Effect.Effect<void, RunnerChannelError> => {
-  let writer = writers.get(socket);
-  if (writer === undefined) {
-    writer = makeRunnerFrameWriter(socket);
-    writers.set(socket, writer);
-  }
-  return writer.write(frame, "critical");
-};
-
 /**
  * Apply backpressure to ordinary traffic without taking capacity from health, cancellation, and
  * shutdown. Capacity is released only after the socket accepts the complete frame.

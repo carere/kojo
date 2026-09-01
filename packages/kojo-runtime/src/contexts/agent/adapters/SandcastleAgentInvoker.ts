@@ -1,6 +1,12 @@
 import type { AgentProvider } from "@ai-hero/sandcastle";
 import { claudeCode } from "@ai-hero/sandcastle";
 import { Effect, Layer, Option } from "effect";
+import {
+  inspectProviderState,
+  providerResourceEnvironment,
+  recordProviderState,
+  resourceLeaseId,
+} from "../../project/adapters/ProviderResourceRegistry.ts";
 import { ResourceLeaseClient } from "../../project/ports/ResourceLeaseClient.ts";
 import { Sandbox } from "../../sandbox/ports/Sandbox.ts";
 import { ArtifactPublisher } from "../../trace/ports/ArtifactPublisher.ts";
@@ -97,6 +103,23 @@ export interface SandcastleAgentOptions {
  */
 const carriesSessions = (provider: AgentProvider): boolean => provider.sessionStorage !== undefined;
 
+const shellValue = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
+
+/** Sandcastle's pre-created Sandbox ignores AgentProvider.env, so bind it to the real command. */
+const withProcessEnvironment = (
+  provider: AgentProvider,
+  environment: Record<string, string>,
+): AgentProvider => ({
+  ...provider,
+  buildPrintCommand: (options) => {
+    const command = provider.buildPrintCommand(options);
+    const assignments = Object.entries(environment)
+      .map(([name, value]) => `${name}=${shellValue(value)}`)
+      .join(" ");
+    return { ...command, command: `env ${assignments} ${command.command}` };
+  },
+});
+
 const make = (options: SandcastleAgentOptions) =>
   Effect.gen(function* () {
     const sandbox = yield* Sandbox;
@@ -104,6 +127,7 @@ const make = (options: SandcastleAgentOptions) =>
     const resources = yield* ResourceLeaseClient;
     const artifacts = yield* ArtifactPublisher;
     const providerFor = options.provider ?? claude;
+    let invocationSequence = 0;
 
     // Built from the first roster entry rather than per call, because capabilities are a claim
     // about *this invoker* and the port serves them as a value. Every agent in one roster runs
@@ -157,12 +181,14 @@ const make = (options: SandcastleAgentOptions) =>
         const definition = yield* define(call.agent);
         const resumed = Option.isSome(call.session);
         const provider = providerFor(definition);
+        invocationSequence += 1;
 
-        const leaseId = crypto.randomUUID();
-        yield* resources.beginAcquisition({
+        const acquisitionKey = `${sandbox.id}/agent/${call.agent}/${invocationSequence}`;
+        const leaseId = resourceLeaseId(acquisitionKey);
+        const resource = yield* resources.beginAcquisition({
           leaseId,
           kind: "agent",
-          acquisitionKey: `${sandbox.id}/agent/${leaseId}`,
+          acquisitionKey,
           detail: {
             agent: call.agent,
             model: definition.model,
@@ -170,10 +196,15 @@ const make = (options: SandcastleAgentOptions) =>
             sandbox: sandbox.id,
           },
         });
+        const controlledProvider = withProcessEnvironment(
+          provider,
+          providerResourceEnvironment(resource),
+        );
+        yield* recordProviderState(resource, "agent", "creating").pipe(Effect.orDie);
 
         const run = yield* sandbox
           .agent({
-            provider,
+            provider: controlledProvider,
             // A cold turn carries the identity, the task template and the contract the phase
             // appended. A correction carries only itself — see `renderPrompt`.
             prompt: resumed ? call.prompt : renderPrompt({ agent: definition, task: call.prompt }),
@@ -182,15 +213,34 @@ const make = (options: SandcastleAgentOptions) =>
           .pipe(
             Effect.tap((answer) =>
               Effect.gen(function* () {
+                const locator = answer.session ?? `${sandbox.id}/${call.agent}`;
+                const providerEvidence = yield* inspectProviderState(resource, "agent").pipe(
+                  Effect.orDie,
+                );
+                if (providerEvidence?.state !== "released") {
+                  yield* recordProviderState(resource, "agent", "acquired", locator).pipe(
+                    Effect.orDie,
+                  );
+                }
                 yield* resources.confirmAcquired(leaseId, {
-                  providerIdentity: provider.name,
-                  locator: answer.session ?? `${sandbox.id}/${call.agent}`,
+                  providerIdentity: resource.providerIdentity,
+                  locator,
                 });
                 yield* resources.beginRelease(leaseId);
-                yield* resources.confirmReleased(
-                  leaseId,
-                  "the controlled agent process returned and its provider call completed",
-                );
+                if (providerEvidence?.state === "released") {
+                  yield* resources.confirmReleased(
+                    leaseId,
+                    "the provider registry confirms exact-key release",
+                  );
+                } else {
+                  yield* recordProviderState(resource, "agent", "release-intent", locator).pipe(
+                    Effect.orDie,
+                  );
+                  yield* resources.preserve(
+                    leaseId,
+                    "the agent process returned without exact provider release evidence",
+                  );
+                }
                 yield* artifacts.publishText({
                   name: `agent-${leaseId}.txt`,
                   mediaType: "text/plain; charset=utf-8",
@@ -259,7 +309,7 @@ const make = (options: SandcastleAgentOptions) =>
  */
 export const layer = (
   options?: SandcastleAgentOptions,
-): Layer.Layer<AgentInvoker, never, Sandbox | Roster> =>
+): Layer.Layer<AgentInvoker, never, Sandbox | Roster | ResourceLeaseClient | ArtifactPublisher> =>
   Layer.effect(AgentInvoker, make(options ?? {}));
 
 /**
@@ -284,7 +334,7 @@ export const layer = (
 export const fromConfig = (options: {
   readonly config: string;
   readonly provider?: ProviderFor | undefined;
-}): Layer.Layer<AgentInvoker, RosterError, Sandbox> =>
+}): Layer.Layer<AgentInvoker, RosterError, Sandbox | ResourceLeaseClient | ArtifactPublisher> =>
   layer({ provider: options.provider }).pipe(
     Layer.provide(YamlRoster.layer({ config: options.config })),
   );

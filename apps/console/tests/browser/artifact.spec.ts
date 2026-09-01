@@ -22,6 +22,17 @@ test("serves an Artifact only through authenticated bounded display and download
 
   await page.goto(launchUrl());
   await expect(page.getByText("Access active", { exact: true })).toBeVisible();
+  await page.goto(new URL("/runs/run-applied", page.url()).href);
+  const displayButton = page.locator(`[data-published-artifact-display="${artifactId}"]`);
+  await expect(displayButton).toBeVisible();
+  await displayButton.click();
+  const displayed = page.locator(`[data-published-artifact-content="${artifactId}"]`);
+  await expect(displayed).toHaveText("<script>window.__artifactExecuted = true</script>\n");
+  expect(await page.evaluate(() => "__artifactExecuted" in window)).toBe(false);
+
+  const download = page.waitForEvent("download");
+  await page.locator(`[data-published-artifact-download="${artifactId}"]`).click();
+  expect((await download).suggestedFilename()).toBe("agent__output_.txt");
 
   const responses = await page.evaluate(async (artifactPath) => {
     const stored = window.sessionStorage.getItem("kojo.browser-session.v1");

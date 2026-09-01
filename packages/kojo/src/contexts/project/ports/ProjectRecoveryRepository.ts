@@ -17,6 +17,11 @@ export class ProjectRecoveryRepository extends Context.Service<
       runnerInstanceId: string,
       confirmedAt: string,
     ) => Effect.Effect<ProjectRecovery, ProjectRecoveryStoreError>;
+    readonly confirmTermination: (
+      projectId: string,
+      runnerInstanceId: string,
+      confirmedAt: string,
+    ) => Effect.Effect<ProjectRecovery, ProjectRecoveryStoreError>;
     readonly holdUncertain: (
       projectId: string,
       runnerInstanceId: string,

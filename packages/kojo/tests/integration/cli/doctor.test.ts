@@ -364,8 +364,8 @@ describe("kojo doctor building a payload rather than only loading a workflow", (
 /** A workflow that loads and whose payload one typed word cannot fill. */
 const countedWorkflow = [
   'import { Effect, Schema } from "effect";',
-  'import { code } from "@carere/kojo/contexts/workflow/services/phase/code";',
-  'import { workflow } from "@carere/kojo/contexts/workflow/services/workflow";',
+  'import { code } from "@carere/kojo-runtime/contexts/workflow/services/phase/code";',
+  'import { workflow } from "@carere/kojo-runtime/contexts/workflow/services/workflow";',
   "",
   "export const counted = workflow(",
   "  {",

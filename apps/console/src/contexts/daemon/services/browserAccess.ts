@@ -195,6 +195,46 @@ export const readRuns = (): Promise<RunSnapshot> => authorizedRead<RunSnapshot>(
 export const readRun = (runId: string): Promise<RunDocument> =>
   authorizedRead<RunDocument>(`/api/v1/runs/${encodeURIComponent(runId)}`);
 
+export interface PublishedArtifactContent {
+  readonly artifactId: string;
+  readonly name: string;
+  readonly mediaType: string;
+  readonly content: string;
+}
+
+export const readPublishedArtifact = (
+  runId: string,
+  artifactId: string,
+): Promise<PublishedArtifactContent> =>
+  authorizedRead<PublishedArtifactContent>(
+    `/api/v1/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}`,
+  );
+
+export const downloadPublishedArtifact = async (
+  runId: string,
+  artifactId: string,
+  name: string,
+): Promise<void> => {
+  const session = await currentAccess();
+  const response = await fetch(
+    `/api/v1/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}?download=1`,
+    {
+      headers: { authorization: `Bearer ${session.credential}` },
+      cache: "no-store",
+    },
+  );
+  if (!response.ok) throw new ConsoleAccessError("api-refused", "The Artifact download failed.");
+  const url = URL.createObjectURL(await response.blob());
+  try {
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name.replace(/[^A-Za-z0-9._-]/g, "_") || "artifact.txt";
+    link.click();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+};
+
 const workflowMutation = async <A>(
   projectId: string,
   workflowName: string,

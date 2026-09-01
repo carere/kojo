@@ -1,24 +1,17 @@
-import { Context, Effect } from "effect";
-
-export interface ArtifactPublisher {
-  readonly publishText: (input: {
-    readonly name: string;
-    readonly mediaType: string;
-    readonly content: string;
-  }) => Effect.Effect<{ readonly artifactId: string }>;
-}
+import { Context, type Effect } from "effect";
 
 /**
  * Publishes bounded retained Artifact content through the private Runner channel.
  *
- * The default keeps the retired single-process CLI compatible. A Daemon Project Runner replaces
- * it with atomic retained publication before it executes authored work.
+ * Execution has no default. A Project Runner needs the private Daemon publication channel.
  */
-export const ArtifactPublisher = Context.Reference<ArtifactPublisher>(
-  "kojo/trace/ArtifactPublisher",
+export class ArtifactPublisher extends Context.Service<
+  ArtifactPublisher,
   {
-    defaultValue: () => ({
-      publishText: () => Effect.succeed({ artifactId: crypto.randomUUID() }),
-    }),
-  },
-);
+    readonly publishText: (input: {
+      readonly name: string;
+      readonly mediaType: string;
+      readonly content: string;
+    }) => Effect.Effect<{ readonly artifactId: string }>;
+  }
+>()("kojo/trace/ArtifactPublisher") {}

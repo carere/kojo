@@ -11,9 +11,14 @@ describe("Daemon Workflow engine replay", () => {
     let acquisitionCount = 0;
     const resources = Layer.succeedContext(
       Context.make(ResourceLeaseClient, {
-        beginAcquisition: () =>
+        beginAcquisition: (resource) =>
           Effect.sync(() => {
             acquisitionCount += 1;
+            return {
+              acquisitionKey: resource.acquisitionKey,
+              providerIdentity: `kojo-resource:${resource.leaseId}`,
+              inspectionLocator: `/fixture/${resource.leaseId}.json`,
+            };
           }),
         confirmAcquired: () => Effect.void,
         beginRelease: () => Effect.void,
@@ -57,6 +62,7 @@ describe("Daemon Workflow engine replay", () => {
       }).pipe(
         Effect.provide(
           registration.pipe(
+            Layer.provide(resources),
             Layer.provideMerge(
               daemonEngine("a".repeat(64), resources).pipe(Layer.provide(repository)),
             ),

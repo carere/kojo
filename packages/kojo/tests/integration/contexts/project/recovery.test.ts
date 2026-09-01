@@ -45,6 +45,19 @@ describe("durable Project Runner recovery", () => {
         replacementDaemon.confirmSafety("project-a", "wrong-runner", "2026-09-01T00:00:01.000Z"),
       ),
     ).rejects.toThrow("does not name");
+    await Effect.runPromise(
+      replacementDaemon.confirmTermination("project-a", "runner-old", "2026-09-01T00:00:01.000Z"),
+    );
+    await expect(
+      Effect.runPromise(
+        replacementDaemon.confirmSafety("project-a", "runner-old", "2026-09-01T00:00:02.000Z"),
+      ),
+    ).rejects.toThrow("exact durable");
+    await expect(
+      Effect.runPromise(
+        replacementDaemon.confirmTermination("project-a", "runner-old", "2026-09-01T00:00:02.000Z"),
+      ),
+    ).rejects.toThrow("conflicts");
     const safe = await Effect.runPromise(
       replacementDaemon.confirmSafety("project-a", "runner-old", "2026-09-01T00:00:01.000Z"),
     );

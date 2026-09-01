@@ -2,16 +2,30 @@ import type { Database } from "bun:sqlite";
 import {
   appendFileSync,
   chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
   statSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 
 export const MAX_PUBLISHED_ARTIFACT_BYTES = 16 * 1024 * 1024;
+
+const syncPath = (path: string): void => {
+  const descriptor = openSync(path, "r");
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+};
 
 interface TransferRow {
   readonly transfer_id: string;
@@ -97,6 +111,31 @@ export class AtomicArtifactRepository {
     `);
   }
 
+  #artifactId(transferId: string): string {
+    return new Bun.CryptoHasher("sha256").update(transferId).digest("hex");
+  }
+
+  #stagedPath(transferId: string): string {
+    return join(this.#staging, this.#artifactId(transferId));
+  }
+
+  #committedSize(transferId: string): number {
+    return (
+      this.#database
+        .query<{ readonly size: number }, [string]>(
+          "SELECT COALESCE(SUM(byte_size), 0) AS size FROM artifact_transfer_chunks WHERE transfer_id = ?",
+        )
+        .get(transferId)?.size ?? 0
+    );
+  }
+
+  #repairStagedFile(transfer: TransferRow): void {
+    const committed = this.#committedSize(transfer.transfer_id);
+    const actual = statSync(transfer.staged_path).size;
+    if (actual < committed) throw new Error("Artifact staged bytes are behind committed chunks");
+    if (actual > committed) truncateSync(transfer.staged_path, committed);
+  }
+
   begin(input: {
     readonly transferId: string;
     readonly runId: string;
@@ -108,9 +147,21 @@ export class AtomicArtifactRepository {
     if (input.totalSize < 0 || input.totalSize > MAX_PUBLISHED_ARTIFACT_BYTES) {
       throw new Error(`Artifact size exceeds ${MAX_PUBLISHED_ARTIFACT_BYTES} bytes`);
     }
-    const path = join(this.#staging, input.transferId);
+    const path = this.#stagedPath(input.transferId);
     this.#database.transaction(() => {
-      if (this.#publishedTransfer(input.transferId) !== undefined) return;
+      const published = this.#publishedTransfer(input.transferId);
+      if (published !== undefined) {
+        if (
+          published.runId !== input.runId ||
+          published.name !== input.name ||
+          published.mediaType !== input.mediaType ||
+          published.size !== input.totalSize ||
+          published.sha256 !== input.sha256
+        ) {
+          throw new Error("Artifact transfer identity names different published content");
+        }
+        return;
+      }
       const prior = this.#database
         .query<TransferRow, [string]>(
           `SELECT transfer_id, run_id, artifact_name, media_type, total_size, sha256,
@@ -132,6 +183,8 @@ export class AtomicArtifactRepository {
       }
       writeFileSync(path, new Uint8Array(), { mode: 0o600 });
       chmodSync(path, 0o600);
+      syncPath(path);
+      syncPath(this.#staging);
       this.#database.run(
         `INSERT INTO artifact_transfers (
           transfer_id, run_id, artifact_name, media_type, total_size, sha256, staged_path
@@ -157,6 +210,7 @@ export class AtomicArtifactRepository {
   ): void {
     this.#database.transaction(() => {
       const transfer = this.#transfer(transferId);
+      this.#repairStagedFile(transfer);
       if (
         declaration !== undefined &&
         (declaration.totalSize !== transfer.total_size || declaration.sha256 !== transfer.sha256)
@@ -182,6 +236,7 @@ export class AtomicArtifactRepository {
         throw new Error("Artifact chunks exceed the declared bound");
       }
       appendFileSync(transfer.staged_path, data);
+      syncPath(transfer.staged_path);
       this.#database.run(
         `INSERT INTO artifact_transfer_chunks (transfer_id, ordinal, byte_offset, byte_size, sha256)
          VALUES (?, ?, ?, ?, ?)`,
@@ -199,17 +254,25 @@ export class AtomicArtifactRepository {
       const prior = this.#publishedTransfer(transferId);
       if (prior !== undefined) return prior;
       const transfer = this.#transfer(transferId);
-      const content = readFileSync(transfer.staged_path);
+      const artifactId = this.#artifactId(transferId);
+      const directory = join(this.#root, transfer.run_id);
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const retainedPath = join(directory, artifactId);
+      const source = existsSync(transfer.staged_path) ? transfer.staged_path : retainedPath;
+      const content = readFileSync(source);
       const digest = new Bun.CryptoHasher("sha256").update(content).digest("hex");
       if (content.byteLength !== transfer.total_size || digest !== transfer.sha256) {
         throw new Error("Artifact content does not match its declared size and digest");
       }
-      const artifactId = crypto.randomUUID();
-      const directory = join(this.#root, transfer.run_id);
-      mkdirSync(directory, { recursive: true, mode: 0o700 });
-      const retainedPath = join(directory, artifactId);
-      renameSync(transfer.staged_path, retainedPath);
+      syncPath(source);
+      if (source === transfer.staged_path) {
+        renameSync(transfer.staged_path, retainedPath);
+        syncPath(this.#staging);
+      }
       chmodSync(retainedPath, 0o600);
+      syncPath(retainedPath);
+      syncPath(directory);
+      syncPath(this.#root);
       this.#database.run(
         `INSERT INTO retained_artifacts (
           artifact_id, transfer_id, run_id, artifact_name, media_type, byte_size, sha256,
@@ -257,6 +320,17 @@ export class AtomicArtifactRepository {
       )
       .get(runId, artifactId);
     return row === null ? undefined : this.#publishedOf(row);
+  }
+
+  list(runId: string): ReadonlyArray<PublishedArtifact> {
+    return this.#database
+      .query<PublishedRow, [string]>(
+        `SELECT artifact_id, transfer_id, run_id, artifact_name, media_type, byte_size, sha256,
+                retained_path
+           FROM retained_artifacts WHERE run_id = ? ORDER BY artifact_name, artifact_id`,
+      )
+      .all(runId)
+      .map((row) => this.#publishedOf(row));
   }
 
   #publishedTransfer(transferId: string): PublishedArtifact | undefined {

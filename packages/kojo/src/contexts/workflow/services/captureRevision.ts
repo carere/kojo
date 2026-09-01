@@ -322,6 +322,13 @@ const packageGraph = (
     if (typeof manifest.name !== "string" || typeof manifest.version !== "string") {
       throw new Error(`${join(root, "package.json")} has no package name or version`);
     }
+    if (manifest.name === "@carere/kojo") {
+      throw captureError(
+        "WORKFLOW_INVALID",
+        `the retained package graph includes the legacy @carere/kojo execution package through ${specifier}`,
+        "Import all retained Workflow models and execution services from @carere/kojo-runtime. Keep @carere/kojo only in the host CLI installation.",
+      );
+    }
     const required = new Set([
       ...Object.keys(manifest.dependencies ?? {}),
       ...Object.keys(manifest.peerDependencies ?? {}).filter(
@@ -364,6 +371,7 @@ const packageGraph = (
         });
       } catch (cause) {
         if (dependency.optional) continue;
+        if (cause instanceof RevisionCaptureError) throw cause;
         throw new Error(
           `${metadata.name} cannot resolve required package ${dependency.name}: ${String(cause)}`,
         );

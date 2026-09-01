@@ -74,6 +74,13 @@ export interface RunDocument {
   readonly startedAt?: string;
   readonly finishedAt?: string;
   readonly phases: ReadonlyArray<RunPhaseDocument>;
+  readonly artifacts?: ReadonlyArray<{
+    readonly artifactId: string;
+    readonly name: string;
+    readonly mediaType: string;
+    readonly size: number;
+    readonly sha256: string;
+  }>;
 }
 
 export interface CancelRunResult {

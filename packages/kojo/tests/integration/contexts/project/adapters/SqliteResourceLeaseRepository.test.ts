@@ -11,6 +11,11 @@ const authority = {
   claimGeneration: 2,
 } as const;
 
+const allocation = (leaseId: string) => ({
+  providerIdentity: `kojo-resource:${leaseId}`,
+  inspectionLocator: `/fixture/inspection/${leaseId}.json`,
+});
+
 const database = (): Database => {
   const db = new Database(":memory:", { strict: true });
   db.run("PRAGMA foreign_keys = ON");
@@ -34,8 +39,8 @@ describe("SQLite Resource leases", () => {
       detail: { branch: "kojo/run-resource" },
     };
 
-    await Effect.runPromise(firstProcess.beginAcquisition(intent));
-    await Effect.runPromise(firstProcess.beginAcquisition(intent));
+    await Effect.runPromise(firstProcess.beginAcquisition(intent, allocation(intent.leaseId)));
+    await Effect.runPromise(firstProcess.beginAcquisition(intent, allocation(intent.leaseId)));
     expect(await Effect.runPromise(firstProcess.byRun(authority.runId))).toHaveLength(1);
 
     const afterLostReply = new SqliteResourceLeaseRepository(db);
@@ -45,13 +50,35 @@ describe("SQLite Resource leases", () => {
 
     await Effect.runPromise(
       afterLostReply.confirmAcquired(authority, intent.leaseId, "2026-09-01T10:00:01.000Z", {
-        providerIdentity: "fixture-sandbox-1",
+        providerIdentity: allocation(intent.leaseId).providerIdentity,
         locator: "/fixture/worktree",
       }),
     );
     await Effect.runPromise(
+      afterLostReply.confirmAcquired(authority, intent.leaseId, "2026-09-01T10:00:01.000Z", {
+        providerIdentity: allocation(intent.leaseId).providerIdentity,
+        locator: "/fixture/worktree",
+      }),
+    );
+    await expect(
+      Effect.runPromise(
+        afterLostReply.confirmAcquired(authority, intent.leaseId, "2026-09-01T10:00:09.000Z", {
+          providerIdentity: allocation(intent.leaseId).providerIdentity,
+          locator: "/fixture/forged",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
+    await Effect.runPromise(
       afterLostReply.beginRelease(authority, intent.leaseId, "2026-09-01T10:00:02.000Z"),
     );
+    await Effect.runPromise(
+      afterLostReply.beginRelease(authority, intent.leaseId, "2026-09-01T10:00:02.000Z"),
+    );
+    await expect(
+      Effect.runPromise(
+        afterLostReply.beginRelease(authority, intent.leaseId, "2026-09-01T10:00:09.000Z"),
+      ),
+    ).rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
     expect((await Effect.runPromise(afterLostReply.byRun(authority.runId)))[0]?.state).toBe(
       "release-intent",
     );
@@ -63,6 +90,24 @@ describe("SQLite Resource leases", () => {
         "fixture provider counted one release",
       ),
     );
+    await Effect.runPromise(
+      afterLostReply.confirmReleased(
+        authority,
+        intent.leaseId,
+        "2026-09-01T10:00:03.000Z",
+        "fixture provider counted one release",
+      ),
+    );
+    await expect(
+      Effect.runPromise(
+        afterLostReply.confirmReleased(
+          authority,
+          intent.leaseId,
+          "2026-09-01T10:00:09.000Z",
+          "forged evidence",
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
     expect((await Effect.runPromise(afterLostReply.byRun(authority.runId)))[0]?.state).toBe(
       "released",
     );
@@ -77,18 +122,21 @@ describe("SQLite Resource leases", () => {
       ["lease-agent", "agent"],
     ] as const) {
       await Effect.runPromise(
-        repository.beginAcquisition({
-          ...authority,
-          leaseId,
-          kind,
-          acquisitionKey: `${authority.runId}/${kind}`,
-          requestedAt: "2026-09-01T10:00:00.000Z",
-          detail: {},
-        }),
+        repository.beginAcquisition(
+          {
+            ...authority,
+            leaseId,
+            kind,
+            acquisitionKey: `${authority.runId}/${kind}`,
+            requestedAt: "2026-09-01T10:00:00.000Z",
+            detail: {},
+          },
+          allocation(leaseId),
+        ),
       );
       await Effect.runPromise(
         repository.confirmAcquired(authority, leaseId, "2026-09-01T10:00:01.000Z", {
-          providerIdentity: `fixture-${kind}`,
+          providerIdentity: allocation(leaseId).providerIdentity,
           locator: `/fixture/${kind}`,
         }),
       );
@@ -112,6 +160,24 @@ describe("SQLite Resource leases", () => {
       ),
     );
     await Effect.runPromise(
+      repository.preserve(
+        authority,
+        "lease-worktree",
+        "2026-09-01T10:00:02.000Z",
+        "fixture git reported dirty",
+      ),
+    );
+    await expect(
+      Effect.runPromise(
+        repository.preserve(
+          authority,
+          "lease-worktree",
+          "2026-09-01T10:00:09.000Z",
+          "forged preservation",
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
+    await Effect.runPromise(
       repository.unresolved(
         authority,
         "lease-agent",
@@ -119,6 +185,24 @@ describe("SQLite Resource leases", () => {
         "the provider reply was lost",
       ),
     );
+    await Effect.runPromise(
+      repository.unresolved(
+        authority,
+        "lease-agent",
+        "2026-09-01T10:00:02.000Z",
+        "the provider reply was lost",
+      ),
+    );
+    await expect(
+      Effect.runPromise(
+        repository.unresolved(
+          authority,
+          "lease-agent",
+          "2026-09-01T10:00:09.000Z",
+          "forged observation",
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "RESOURCE_STATE_CONFLICT" });
     expect(
       Object.fromEntries(
         (await Effect.runPromise(repository.byRun(authority.runId))).map((lease) => [
@@ -127,6 +211,71 @@ describe("SQLite Resource leases", () => {
         ]),
       ),
     ).toEqual({ agent: "unresolved", worktree: "preserved" });
+    expect(await Effect.runPromise(repository.byRun(authority.runId))).toEqual(
+      expect.arrayContaining([expect.objectContaining({ observedAt: "2026-09-01T10:00:02.000Z" })]),
+    );
+    db.close();
+  });
+
+  it("requires the exact durable termination proof before bounded recovery", async () => {
+    const db = database();
+    const repository = new SqliteResourceLeaseRepository(db);
+    const intent = {
+      ...authority,
+      leaseId: "lease-recovery",
+      kind: "worktree" as const,
+      acquisitionKey: "run-resource/recovery/worktree",
+      requestedAt: "2026-09-01T10:00:00.000Z",
+      detail: { branch: "kojo/run-resource" },
+    };
+    const committed = {
+      ...allocation(intent.leaseId),
+      providerLocator: "/fixture/worktree-recovery",
+    };
+    await Effect.runPromise(repository.beginAcquisition(intent, committed));
+    await Effect.runPromise(
+      repository.confirmAcquired(authority, intent.leaseId, "2026-09-01T10:00:01.000Z", {
+        providerIdentity: committed.providerIdentity,
+        locator: committed.providerLocator,
+      }),
+    );
+    const proof = {
+      projectId: authority.projectId,
+      priorRunnerInstanceId: authority.runnerInstanceId,
+      terminationConfirmedAt: "2026-09-01T10:00:02.000Z",
+    } as const;
+
+    await expect(
+      Effect.runPromise(repository.pendingForTerminatedRunner(proof, 10)),
+    ).rejects.toMatchObject({ code: "RESOURCE_AUTHORITY_LOST" });
+    await Effect.runPromise(repository.confirmRunnerTermination(proof));
+    await expect(
+      Effect.runPromise(
+        repository.pendingForTerminatedRunner(
+          { ...proof, terminationConfirmedAt: "2026-09-01T10:00:03.000Z" },
+          10,
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "RESOURCE_AUTHORITY_LOST" });
+
+    const before = (await Effect.runPromise(repository.byRun(authority.runId)))[0];
+    await Effect.runPromise(
+      repository.reconcileTerminatedRunner(proof, [
+        {
+          leaseId: intent.leaseId,
+          outcome: "preserved",
+          reason: "the exact worktree is dirty",
+        },
+      ]),
+    );
+    const after = (await Effect.runPromise(repository.byRun(authority.runId)))[0];
+    expect(after).toMatchObject({
+      state: "preserved",
+      acquisitionKey: before?.acquisitionKey,
+      providerIdentity: before?.providerIdentity,
+      providerLocator: before?.providerLocator,
+      detail: before?.detail,
+    });
     db.close();
   });
 });

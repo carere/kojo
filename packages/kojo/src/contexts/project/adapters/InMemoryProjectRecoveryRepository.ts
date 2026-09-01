@@ -46,14 +46,36 @@ export class InMemoryProjectRecoveryRepository {
         this.#recoveries.set(failure.projectId, recovery);
         return recovery;
       }),
-    confirmSafety: (projectId, runnerInstanceId) =>
+    confirmSafety: (projectId, runnerInstanceId, confirmedAt) =>
       this.#update(projectId, (prior) => {
         if (prior.priorRunnerInstanceId !== runnerInstanceId) {
           throw new ProjectRecoveryStoreError({
             message: "termination evidence does not name the failed Project Runner instance",
           });
         }
+        if (prior.terminationConfirmedAt !== confirmedAt) {
+          throw new ProjectRecoveryStoreError({
+            message: "Project safety needs the exact durable process-group termination proof",
+          });
+        }
         return { ...prior, safety: "safe" };
+      }),
+    confirmTermination: (projectId, runnerInstanceId, confirmedAt) =>
+      this.#update(projectId, (prior) => {
+        if (prior.priorRunnerInstanceId !== runnerInstanceId) {
+          throw new ProjectRecoveryStoreError({
+            message: "termination evidence does not name the failed Project Runner instance",
+          });
+        }
+        if (
+          prior.terminationConfirmedAt !== undefined &&
+          prior.terminationConfirmedAt !== confirmedAt
+        ) {
+          throw new ProjectRecoveryStoreError({
+            message: "termination evidence conflicts with the durable process-group proof",
+          });
+        }
+        return { ...prior, terminationConfirmedAt: confirmedAt };
       }),
     holdUncertain: (projectId, runnerInstanceId, detail) =>
       this.#update(projectId, (prior) => {

@@ -3,6 +3,8 @@ import type {
   ResourceAcquisitionIntent,
   ResourceLease,
   ResourceLeaseAuthority,
+  ResourceRecoveryAuthority,
+  ResourceRecoveryObservation,
 } from "../models/ResourceLease.ts";
 import type { ResourceStoreError } from "../models/ResourceStoreError.ts";
 
@@ -11,6 +13,11 @@ export class ResourceLeaseRepository extends Context.Service<
   {
     readonly beginAcquisition: (
       intent: ResourceAcquisitionIntent,
+      allocation: {
+        readonly providerIdentity: string;
+        readonly inspectionLocator: string;
+        readonly providerLocator?: string;
+      },
     ) => Effect.Effect<ResourceLease, ResourceStoreError>;
     readonly confirmAcquired: (
       authority: ResourceLeaseAuthority,
@@ -46,6 +53,22 @@ export class ResourceLeaseRepository extends Context.Service<
     ) => Effect.Effect<ReadonlyArray<ResourceLease>, ResourceStoreError>;
     readonly byProject: (
       projectId: string,
+    ) => Effect.Effect<ReadonlyArray<ResourceLease>, ResourceStoreError>;
+    readonly inspectAcquisition: (
+      projectId: string,
+      runId: string,
+      acquisitionKey: string,
+    ) => Effect.Effect<ResourceLease | undefined, ResourceStoreError>;
+    readonly confirmRunnerTermination: (
+      authority: ResourceRecoveryAuthority,
+    ) => Effect.Effect<void, ResourceStoreError>;
+    readonly pendingForTerminatedRunner: (
+      authority: ResourceRecoveryAuthority,
+      limit: number,
+    ) => Effect.Effect<ReadonlyArray<ResourceLease>, ResourceStoreError>;
+    readonly reconcileTerminatedRunner: (
+      authority: ResourceRecoveryAuthority,
+      observations: ReadonlyArray<ResourceRecoveryObservation>,
     ) => Effect.Effect<ReadonlyArray<ResourceLease>, ResourceStoreError>;
   }
 >()("kojo/project/ResourceLeaseRepository") {}

@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, posix } from "node:path";
+import { basename, dirname, join, posix, relative, resolve } from "node:path";
 import {
   type AgentProvider,
   type BindMountSandboxHandle,
@@ -20,6 +20,8 @@ import {
   rewritePiSessionCwd,
   sandboxPiSessionsRoot,
 } from "../../agent/services/piSession.ts";
+import { recordProviderState } from "../../project/adapters/ProviderResourceRegistry.ts";
+import type { CommittedResourceIdentity } from "../../project/ports/ResourceLeaseClient.ts";
 import { ExecResult } from "../models/ExecResult.ts";
 import { SandboxError } from "../models/SandboxError.ts";
 import type {
@@ -56,6 +58,10 @@ export interface AcquireSandboxOptions {
   readonly hooks?: SandboxHooks;
   /** Paths, relative to the host repo root, copied into the worktree before the sandbox starts. */
   readonly copyToWorktree?: ReadonlyArray<string>;
+  readonly resources: {
+    readonly sandbox: CommittedResourceIdentity;
+    readonly worktree: CommittedResourceIdentity;
+  };
 }
 
 const reasonOf = (cause: unknown): string =>
@@ -65,14 +71,48 @@ const reasonOf = (cause: unknown): string =>
  * `exactOptionalPropertyTypes` is on, so an absent option is absent rather than present-and-
  * undefined. `copyToWorktree` is copied because Sandcastle asks for a mutable array.
  */
-const createOptions = (options: AcquireSandboxOptions): CreateSandboxOptions => ({
+const createOptions = (options: AcquireSandboxOptions, cwd: string): CreateSandboxOptions => ({
   branch: options.branch,
   sandbox: options.provider.sandcastle,
   ...(options.baseBranch === undefined ? {} : { baseBranch: options.baseBranch }),
-  ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+  cwd,
   ...(options.hooks === undefined ? {} : { hooks: options.hooks }),
   ...(options.copyToWorktree === undefined ? {} : { copyToWorktree: [...options.copyToWorktree] }),
 });
+
+/** Build a Git anchor whose managed Sandcastle worktree is under the Daemon allocation. */
+const prepareWorktreeAnchor = async (options: AcquireSandboxOptions): Promise<string> => {
+  const planned = options.resources.worktree.providerLocator;
+  if (planned === undefined) throw new Error("the Daemon did not allocate a disposable worktree");
+  const anchor = dirname(dirname(dirname(planned)));
+  const source = resolve(options.cwd ?? process.cwd());
+  const gitDirectory = spawnSync("git", ["rev-parse", "--absolute-git-dir"], {
+    cwd: source,
+    encoding: "utf8",
+  });
+  if (gitDirectory.status !== 0 || gitDirectory.stdout.trim() === "") {
+    throw new Error("the Daemon worktree allocation has no source Git directory");
+  }
+  await mkdir(join(anchor, ".sandcastle", "worktrees"), { recursive: true, mode: 0o700 });
+  await writeFile(join(anchor, ".git"), `gitdir: ${gitDirectory.stdout.trim()}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  for (const path of options.copyToWorktree ?? []) {
+    const sourcePath = resolve(source, path);
+    if (relative(source, sourcePath).startsWith("..")) {
+      throw new Error(`copy path escaped the source repository: ${path}`);
+    }
+    const destination = resolve(anchor, path);
+    await mkdir(dirname(destination), { recursive: true });
+    await cp(sourcePath, destination, { recursive: true, force: true });
+  }
+  const environmentFile = join(source, ".sandcastle", ".env");
+  if (existsSync(environmentFile)) {
+    await cp(environmentFile, join(anchor, ".sandcastle", ".env"), { force: true });
+  }
+  return anchor;
+};
 
 /**
  * What one iteration cost, read off whichever half of Sandcastle reported it.
@@ -214,19 +254,109 @@ export const acquireSandbox = (
   observer?: SandboxResourceObserver,
 ): Effect.Effect<AcquiredSandbox, SandboxError, Scope.Scope> =>
   Effect.acquireRelease(
-    Effect.tryPromise({
-      try: () => createSandbox(createOptions(options)),
-      catch: (cause) =>
-        new SandboxError({
+    Effect.gen(function* () {
+      yield* Effect.all([
+        recordProviderState(options.resources.sandbox, "sandbox", "creating"),
+        recordProviderState(options.resources.worktree, "worktree", "creating"),
+      ]).pipe(Effect.orDie);
+      const worktreeAnchor = yield* Effect.tryPromise({
+        try: () => prepareWorktreeAnchor(options),
+        catch: (cause) =>
+          new SandboxError({
+            operation: "create",
+            target: options.branch,
+            reason: reasonOf(cause),
+            cause,
+          }),
+      });
+      const sandbox = yield* Effect.tryPromise({
+        try: () => createSandbox(createOptions(options, worktreeAnchor)),
+        catch: (cause) =>
+          new SandboxError({
+            operation: "create",
+            target: options.branch,
+            reason: reasonOf(cause),
+            cause,
+          }),
+      });
+      if (
+        realpathSync(sandbox.worktreePath) !==
+        realpathSync(options.resources.worktree.providerLocator as string)
+      ) {
+        yield* Effect.all([
+          recordProviderState(
+            options.resources.sandbox,
+            "sandbox",
+            "acquired",
+            sandbox.worktreePath,
+          ),
+          recordProviderState(
+            options.resources.worktree,
+            "worktree",
+            "acquired",
+            sandbox.worktreePath,
+          ),
+        ]).pipe(Effect.orDie);
+        const disposition = worktreeDisposition(sandbox.worktreePath);
+        if (disposition !== "unreadable") {
+          const closed = yield* Effect.promise(() =>
+            sandbox.close().then(
+              (result) => result,
+              () => undefined,
+            ),
+          );
+          if (closed !== undefined) {
+            yield* recordProviderState(
+              options.resources.sandbox,
+              "sandbox",
+              "released",
+              sandbox.worktreePath,
+            ).pipe(Effect.orDie);
+            if (disposition !== "dirty") {
+              yield* recordProviderState(
+                options.resources.worktree,
+                "worktree",
+                "released",
+                sandbox.worktreePath,
+              ).pipe(Effect.orDie);
+            }
+          }
+        }
+        return yield* new SandboxError({
           operation: "create",
           target: options.branch,
-          reason: reasonOf(cause),
-          cause,
-        }),
+          reason: "Sandcastle did not use the exact Daemon-owned worktree allocation",
+          cause: undefined,
+        });
+      }
+      yield* Effect.all([
+        recordProviderState(options.resources.sandbox, "sandbox", "acquired", sandbox.worktreePath),
+        recordProviderState(
+          options.resources.worktree,
+          "worktree",
+          "acquired",
+          sandbox.worktreePath,
+        ),
+      ]).pipe(Effect.orDie);
+      return sandbox;
     }),
     (sandbox) =>
       Effect.gen(function* () {
         yield* observer?.releaseIntent ?? Effect.void;
+        yield* Effect.all([
+          recordProviderState(
+            options.resources.sandbox,
+            "sandbox",
+            "release-intent",
+            sandbox.worktreePath,
+          ),
+          recordProviderState(
+            options.resources.worktree,
+            "worktree",
+            "release-intent",
+            sandbox.worktreePath,
+          ),
+        ]).pipe(Effect.orDie);
         const disposition = worktreeDisposition(sandbox.worktreePath);
         if (disposition === "unreadable") {
           yield* observer?.preserved(
@@ -266,6 +396,12 @@ export const acquireSandbox = (
           ) ?? Effect.void;
           return yield* Effect.die(closed.failure);
         }
+        yield* recordProviderState(
+          options.resources.sandbox,
+          "sandbox",
+          "released",
+          sandbox.worktreePath,
+        ).pipe(Effect.orDie);
         yield* observer?.released("sandbox", "the provider close operation completed") ??
           Effect.void;
         if (disposition === "dirty") {
@@ -274,6 +410,12 @@ export const acquireSandbox = (
             "host git reported uncommitted work, so the provider preserved the worktree",
           ) ?? Effect.void;
         } else {
+          yield* recordProviderState(
+            options.resources.worktree,
+            "worktree",
+            "released",
+            sandbox.worktreePath,
+          ).pipe(Effect.orDie);
           yield* observer?.released(
             "worktree",
             disposition === "absent"

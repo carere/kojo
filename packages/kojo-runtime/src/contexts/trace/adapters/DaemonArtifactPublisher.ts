@@ -23,9 +23,12 @@ const send = (
   Effect.tryPromise({
     try: () => mutate(kind, body),
     catch: (cause) => new ArtifactMutationError({ cause }),
-  }).pipe(Effect.orDie);
+  }).pipe(Effect.timeout("250 millis"), Effect.retry({ times: 2 }), Effect.orDie);
 
-export const layer = (mutate: SendArtifactMutation): Layer.Layer<never> =>
+export const layer = (
+  runId: string,
+  mutate: SendArtifactMutation,
+): Layer.Layer<ArtifactPublisher> =>
   Layer.succeedContext(
     Context.make(ArtifactPublisher, {
       publishText: (input) =>
@@ -36,8 +39,10 @@ export const layer = (mutate: SendArtifactMutation): Layer.Layer<never> =>
               new Error(`Artifact content exceeds ${MAX_ARTIFACT_BYTES} bytes`),
             );
           }
-          const transferId = crypto.randomUUID();
           const sha256 = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+          const transferId = `artifact_${new Bun.CryptoHasher("sha256")
+            .update(JSON.stringify([runId, input.name, input.mediaType, bytes.byteLength, sha256]))
+            .digest("hex")}`;
           yield* send(mutate, "BeginArtifact", {
             artifactVersion: 1,
             transferId,

@@ -1,3 +1,4 @@
+import type { CommittedResourceIdentity } from "../../project/ports/ResourceLeaseClient.ts";
 import type { SandboxId } from "../../shared/models/SandboxId.ts";
 import type { WorktreePolicy } from "../guards/worktreeIsUsable.ts";
 import type { SandboxHooks } from "./SandboxHooks.ts";
@@ -62,4 +63,8 @@ export interface SandboxRequest extends SandboxConfig {
   /** Merged over whatever the provider already carries, at the moment the container is built. */
   readonly environment: Record<string, string>;
   readonly hidden: ReadonlyArray<string>;
+  readonly resources: {
+    readonly sandbox: CommittedResourceIdentity;
+    readonly worktree: CommittedResourceIdentity;
+  };
 }

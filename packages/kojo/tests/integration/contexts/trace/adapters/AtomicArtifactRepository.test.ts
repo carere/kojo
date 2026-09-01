@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -79,6 +79,47 @@ describe("atomic Artifact publication", () => {
     expect(() => repository.finish("corrupt", "2026-09-01T10:00:00.000Z")).toThrow(
       "does not match",
     );
+    database.close();
+  });
+
+  it("repairs an interrupted chunk append and an interrupted final rename", () => {
+    const { database, repository } = fixture();
+    const content = new TextEncoder().encode("durable artifact\n");
+    const first = content.slice(0, 8);
+    const second = content.slice(8);
+    const sha256 = new Bun.CryptoHasher("sha256").update(content).digest("hex");
+    repository.begin({
+      transferId: "interrupted-transfer",
+      runId: "run-artifact",
+      name: "durable.txt",
+      mediaType: "text/plain",
+      totalSize: content.byteLength,
+      sha256,
+    });
+    repository.write("interrupted-transfer", 0, first);
+    const transfer = database
+      .query<{ readonly staged_path: string }, []>(
+        "SELECT staged_path FROM artifact_transfers WHERE transfer_id = 'interrupted-transfer'",
+      )
+      .get();
+    expect(transfer).not.toBeNull();
+    appendFileSync(transfer?.staged_path ?? "", second);
+
+    const restarted = new AtomicArtifactRepository(
+      database,
+      join(transfer?.staged_path ?? "", "..", "..", ".."),
+    );
+    restarted.write("interrupted-transfer", 1, second);
+
+    const artifactId = new Bun.CryptoHasher("sha256").update("interrupted-transfer").digest("hex");
+    const retained = join(transfer?.staged_path ?? "", "..", "..", "run-artifact", artifactId);
+    mkdirSync(join(retained, ".."), { recursive: true });
+    renameSync(transfer?.staged_path ?? "", retained);
+
+    const published = restarted.finish("interrupted-transfer", "2026-09-01T10:00:00.000Z");
+    expect(published.path).toBe(retained);
+    expect(readFileSync(retained)).toEqual(Buffer.from(content));
+    expect(restarted.finish("interrupted-transfer", "2026-09-01T10:00:01.000Z")).toEqual(published);
     database.close();
   });
 });

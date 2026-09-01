@@ -17,7 +17,16 @@ describe("controlled Resource lifecycle", () => {
     let providerAcquisitions = 0;
     let providerReleases = 0;
     const resources = Layer.succeed(ResourceLeaseClient, {
-      beginAcquisition: (resource) => Effect.sync(() => events.push(`intent:${resource.kind}`)),
+      beginAcquisition: (resource) =>
+        Effect.sync(() => {
+          events.push(`intent:${resource.kind}`);
+          return {
+            acquisitionKey: resource.acquisitionKey,
+            providerIdentity: `kojo-resource:${resource.leaseId}`,
+            inspectionLocator: `/fixture/${resource.leaseId}.json`,
+            ...(resource.kind === "worktree" ? { providerLocator: "/fixture/worktree" } : {}),
+          };
+        }),
       confirmAcquired: (leaseId) => Effect.sync(() => events.push(`acquired:${leaseId}`)),
       beginRelease: (leaseId) => Effect.sync(() => events.push(`release-intent:${leaseId}`)),
       confirmReleased: (leaseId) => Effect.sync(() => events.push(`released:${leaseId}`)),

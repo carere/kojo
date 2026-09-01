@@ -17,7 +17,6 @@ import {
   layer as daemonResources,
   type SendResourceMutation,
 } from "../contexts/project/adapters/DaemonResourceLeaseClient.ts";
-import { ResourceLeaseClient } from "../contexts/project/ports/ResourceLeaseClient.ts";
 import {
   makeRunnerFrameReader,
   writeCriticalRunnerFrame,
@@ -29,7 +28,6 @@ import {
   layer as daemonArtifacts,
   type SendArtifactMutation,
 } from "../contexts/trace/adapters/DaemonArtifactPublisher.ts";
-import { ArtifactPublisher } from "../contexts/trace/ports/ArtifactPublisher.ts";
 import { Tracer } from "../contexts/trace/ports/Tracer.ts";
 import { Trigger } from "../contexts/trigger/ports/Trigger.ts";
 import { layer as daemonEngine } from "../contexts/workflow/adapters/DaemonWorkflowEngine.ts";
@@ -194,9 +192,9 @@ export const inspectRegisteredRevision = async (
 /** Execute under the Daemon-assigned Run identity and return committed encoded Phase results. */
 export const executeRegisteredRevision = async (
   request: ExecuteRegisteredRequest,
-  signal?: AbortSignal,
-  sendResourceMutation?: SendResourceMutation,
-  sendArtifactMutation?: SendArtifactMutation,
+  signal: AbortSignal | undefined,
+  sendResourceMutation: SendResourceMutation,
+  sendArtifactMutation: SendArtifactMutation,
 ): Promise<ExecuteRegisteredResult> => {
   const { bundle, payload } = await loadRegisteredRevision(request);
   const results = new Map(Object.entries(request.recordedResults));
@@ -279,26 +277,12 @@ export const executeRegisteredRevision = async (
   const hostWorkspace = BindMountWorkspace.layer({ root: process.cwd() }).pipe(
     Layer.provide(BunServices.layer),
   );
-  const localResources = Layer.succeed(ResourceLeaseClient, {
-    beginAcquisition: () => Effect.void,
-    confirmAcquired: () => Effect.void,
-    beginRelease: () => Effect.void,
-    confirmReleased: () => Effect.void,
-    preserve: () => Effect.void,
-    unresolved: () => Effect.void,
-  });
-  const localArtifacts = Layer.succeed(ArtifactPublisher, {
-    publishText: () => Effect.succeed({ artifactId: crypto.randomUUID() }),
-  });
-  const executionServices =
-    sendResourceMutation === undefined || sendArtifactMutation === undefined
-      ? Layer.mergeAll(localResources, localArtifacts, sandboxSource, hostWorkspace)
-      : Layer.mergeAll(
-          daemonResources(sendResourceMutation),
-          daemonArtifacts(sendArtifactMutation),
-          sandboxSource,
-          hostWorkspace,
-        );
+  const executionServices = Layer.mergeAll(
+    daemonResources(sendResourceMutation),
+    daemonArtifacts(request.runId, sendArtifactMutation),
+    sandboxSource,
+    hostWorkspace,
+  );
   const engineLayer = daemonEngine(request.revisionId, executionServices).pipe(
     Layer.provide(repository),
   );
@@ -787,7 +771,7 @@ const runPrivateProtocol = async (): Promise<void> => {
             throw new Error("the Run already has an executing fiber in this Project Runner");
           }
           const controller = new AbortController();
-          const running = withRetainedFactoryRoot(registration.executionRoot, () =>
+          const running = withRetainedFactoryRoot(join(registration.executionRoot, ".kojo"), () =>
             executeRegisteredRevision(
               {
                 ...registration,
@@ -887,7 +871,7 @@ const runPrivateProtocol = async (): Promise<void> => {
           await reply(operation.requestId, { polling: true });
           const running = Promise.resolve()
             .then(() =>
-              withRetainedFactoryRoot(registration.executionRoot, () =>
+              withRetainedFactoryRoot(join(registration.executionRoot, ".kojo"), () =>
                 runRegisteredTrigger({
                   registration,
                   pollerId: start.pollerId as string,

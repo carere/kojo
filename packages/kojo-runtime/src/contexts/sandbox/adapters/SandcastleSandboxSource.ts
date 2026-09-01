@@ -287,6 +287,7 @@ const make = Effect.gen(function* () {
             // The provider is rebuilt with this acquisition's environment rather than used as the
             // author wrote it. `CreateSandboxOptions` has no `env`, so this is the only door.
             provider: withEnvironment(request.provider, request.environment),
+            resources: request.resources,
             ...(request.baseBranch === undefined ? {} : { baseBranch: request.baseBranch }),
             ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
             ...(request.hooks === undefined ? {} : { hooks: request.hooks }),

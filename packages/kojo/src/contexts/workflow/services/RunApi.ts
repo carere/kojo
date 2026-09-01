@@ -1,6 +1,7 @@
-import { chmodSync, mkdirSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type {
   CancelRunResult,
   RunDocument,
@@ -24,8 +25,8 @@ import type {
   ExecutionRevision,
   SqliteProjectRepository,
 } from "../../project/adapters/SqliteProjectRepository.ts";
-import type { ProjectRecovery } from "../../project/models/ProjectRecovery.ts";
 import type { SqliteResourceLeaseRepository } from "../../project/adapters/SqliteResourceLeaseRepository.ts";
+import type { ProjectRecovery } from "../../project/models/ProjectRecovery.ts";
 import {
   type MaterializedRevision,
   materializeRevision,
@@ -34,6 +35,10 @@ import {
   ProjectRunnerError,
   ProjectRunnerSupervisor,
 } from "../../project/services/ProjectRunnerSupervisor.ts";
+import {
+  RESOURCE_RECOVERY_LIMIT,
+  terminatedResourceObservations,
+} from "../../project/services/reconcileTerminatedResources.ts";
 import {
   makeRunnerFrameReader,
   RunnerChannelError,
@@ -134,7 +139,11 @@ const runnerError = (cause: unknown): ProjectRunnerError =>
 const terminal = (run: DaemonRun): boolean =>
   run.state === "succeeded" || run.state === "failed" || run.state === "cancelled";
 
-const documentOf = (run: DaemonRun, phases: ReadonlyArray<PhaseResult>): RunDocument => ({
+const documentOf = (
+  run: DaemonRun,
+  phases: ReadonlyArray<PhaseResult>,
+  artifacts: ReturnType<AtomicArtifactRepository["list"]>,
+): RunDocument => ({
   runId: run.runId,
   projectId: run.projectId,
   workflowName: run.workflowName,
@@ -163,6 +172,13 @@ const documentOf = (run: DaemonRun, phases: ReadonlyArray<PhaseResult>): RunDocu
       endedAt: phase.endedAt,
       result: phase.encodedResult,
     })),
+  artifacts: artifacts.map(({ artifactId, name, mediaType, size, sha256 }) => ({
+    artifactId,
+    name,
+    mediaType,
+    size,
+    sha256,
+  })),
 });
 
 const runnerEnvironment = (
@@ -203,6 +219,18 @@ interface ActiveExecutionControl {
   readonly settleCommit: () => void;
 }
 
+export interface RunnerMutationFault {
+  readonly kind:
+    | "BeginResourceAcquisition"
+    | "ConfirmResourceAcquired"
+    | "BeginResourceRelease"
+    | "ConfirmResourceReleased"
+    | "PreserveResource"
+    | "ReportRecovery";
+  readonly runId: string;
+  readonly leaseId: string;
+}
+
 /** Daemon-owned no-Trigger admission, dispatch, and observation service. */
 export class RunApi {
   readonly #dataIdentity: string;
@@ -219,6 +247,10 @@ export class RunApi {
   readonly #artifacts: AtomicArtifactRepository;
   readonly #runnerIdleMillis: number;
   readonly #runnerCleanupMillis: number;
+  readonly #resourceMutationFault?:
+    | ((mutation: RunnerMutationFault) => "before-commit" | "after-commit" | undefined)
+    | undefined;
+  readonly #resourceRecoveryBoundary?: (() => Effect.Effect<void>) | undefined;
   readonly #runnerSupervisor = new ProjectRunnerSupervisor();
   readonly #triggerProcesses = new Map<string, { readonly stop: () => Promise<void> }>();
   readonly #triggerGroups = new Map<string, ProjectTriggerGroup>();
@@ -245,6 +277,10 @@ export class RunApi {
     readonly artifacts: AtomicArtifactRepository;
     readonly runnerIdleMillis?: number;
     readonly runnerCleanupMillis?: number;
+    readonly resourceMutationFault?:
+      | ((mutation: RunnerMutationFault) => "before-commit" | "after-commit" | undefined)
+      | undefined;
+    readonly resourceRecoveryBoundary?: (() => Effect.Effect<void>) | undefined;
   }) {
     this.#dataIdentity = options.dataIdentity;
     this.#instanceId = options.instanceId;
@@ -260,6 +296,8 @@ export class RunApi {
     this.#artifacts = options.artifacts;
     this.#runnerIdleMillis = options.runnerIdleMillis ?? DEFAULT_RUNNER_IDLE_MILLIS;
     this.#runnerCleanupMillis = options.runnerCleanupMillis ?? 30_000;
+    this.#resourceMutationFault = options.resourceMutationFault;
+    this.#resourceRecoveryBoundary = options.resourceRecoveryBoundary;
   }
 
   readonly start = (options: {
@@ -440,6 +478,29 @@ export class RunApi {
     try {
       const remainingMillis = Math.max(1, deadline - Date.now());
       await Promise.all(controls.map((control) => control.cancelAndStop(remainingMillis)));
+      const confirmedAt = new Date(this.#now()).toISOString();
+      const safe = await Promise.all(
+        controls.map((control) =>
+          Effect.runPromise(
+            this.#resources.confirmRunnerTermination({
+              projectId,
+              priorRunnerInstanceId: control.authority.runnerInstanceId,
+              terminationConfirmedAt: confirmedAt,
+            }),
+          ).then(() =>
+            this.#reconcileTerminatedRunnerResources(
+              projectId,
+              control.authority.runnerInstanceId,
+              confirmedAt,
+            ),
+          ),
+        ),
+      );
+      if (safe.some((value) => !value)) {
+        throw new Error(
+          "Project Runner stopped, but Resource cleanup remains preserved or unresolved",
+        );
+      }
     } catch (cause) {
       const detail = `Project Runner termination is not confirmed: ${cause instanceof Error ? cause.message : String(cause)}`;
       await Effect.runPromise(this.#runs.recordCleanupFault(targetRunIds, detail));
@@ -475,13 +536,57 @@ export class RunApi {
           }
           let held = recovery;
           if (recovery.safety === "pending" && recovery.priorRunnerInstanceId !== undefined) {
-            held = await Effect.runPromise(
-              this.#projectRecovery.holdUncertain(
-                recovery.projectId,
-                recovery.priorRunnerInstanceId,
-                "The Daemon restarted before it confirmed the old Project Runner process group stopped.",
-              ),
-            );
+            if (recovery.terminationConfirmedAt === undefined) {
+              held = await Effect.runPromise(
+                this.#projectRecovery.holdUncertain(
+                  recovery.projectId,
+                  recovery.priorRunnerInstanceId,
+                  "The Daemon restarted before it confirmed the old Project Runner process group stopped.",
+                ),
+              );
+            } else {
+              try {
+                await Effect.runPromise(
+                  this.#resources.confirmRunnerTermination({
+                    projectId: recovery.projectId,
+                    priorRunnerInstanceId: recovery.priorRunnerInstanceId,
+                    terminationConfirmedAt: recovery.terminationConfirmedAt,
+                  }),
+                );
+                const safe = await this.#reconcileTerminatedRunnerResources(
+                  recovery.projectId,
+                  recovery.priorRunnerInstanceId,
+                  recovery.terminationConfirmedAt,
+                );
+                held = safe
+                  ? await Effect.runPromise(
+                      this.#projectRecovery.confirmSafety(
+                        recovery.projectId,
+                        recovery.priorRunnerInstanceId,
+                        recovery.terminationConfirmedAt,
+                      ),
+                    )
+                  : await Effect.runPromise(
+                      this.#projectRecovery.holdUncertain(
+                        recovery.projectId,
+                        recovery.priorRunnerInstanceId,
+                        "The old Runner stopped, but provider cleanup is preserved or unresolved.",
+                      ),
+                    );
+              } catch (cause) {
+                held = await Effect.runPromise(
+                  this.#projectRecovery.holdUncertain(
+                    recovery.projectId,
+                    recovery.priorRunnerInstanceId,
+                    `Resource recovery could not complete its bounded inspection: ${cause instanceof Error ? cause.message : String(cause)}`,
+                  ),
+                );
+              }
+              if (held.safety === "safe") {
+                void this.#resumePersistedProjectRecovery(held).catch(() => undefined);
+                continue;
+              }
+            }
           }
           await Effect.runPromise(
             this.#runs.holdProjectRunnerAfterRestart(
@@ -751,13 +856,44 @@ export class RunApi {
         );
         try {
           await Effect.runPromise(this.#runnerSupervisor.stop(run.projectId));
-          recovery = await Effect.runPromise(
-            this.#projectRecovery.confirmSafety(
+          const confirmedAt = new Date(this.#now()).toISOString();
+          await Effect.runPromise(
+            this.#projectRecovery.confirmTermination(
               run.projectId,
               authority.runnerInstanceId,
-              new Date(this.#now()).toISOString(),
+              confirmedAt,
             ),
           );
+          if (this.#resourceRecoveryBoundary !== undefined) {
+            await Effect.runPromise(this.#resourceRecoveryBoundary());
+          }
+          await Effect.runPromise(
+            this.#resources.confirmRunnerTermination({
+              projectId: run.projectId,
+              priorRunnerInstanceId: authority.runnerInstanceId,
+              terminationConfirmedAt: confirmedAt,
+            }),
+          );
+          const resourcesSafe = await this.#reconcileTerminatedRunnerResources(
+            run.projectId,
+            authority.runnerInstanceId,
+            confirmedAt,
+          );
+          recovery = resourcesSafe
+            ? await Effect.runPromise(
+                this.#projectRecovery.confirmSafety(
+                  run.projectId,
+                  authority.runnerInstanceId,
+                  confirmedAt,
+                ),
+              )
+            : await Effect.runPromise(
+                this.#projectRecovery.holdUncertain(
+                  run.projectId,
+                  authority.runnerInstanceId,
+                  "The old Runner stopped, but provider cleanup is preserved or unresolved.",
+                ),
+              );
         } catch (terminationCause) {
           recovery = await Effect.runPromise(
             this.#projectRecovery.holdUncertain(
@@ -822,7 +958,11 @@ export class RunApi {
           refreshAfterMillis: 1_000,
           runs: await Promise.all(
             selected.map(async (run) =>
-              documentOf(run, await Effect.runPromise(this.#runs.phases(run.runId))),
+              documentOf(
+                run,
+                await Effect.runPromise(this.#runs.phases(run.runId)),
+                this.#artifacts.list(run.runId),
+              ),
             ),
           ),
         };
@@ -836,7 +976,11 @@ export class RunApi {
         const run = await Effect.runPromise(this.#runs.read(runId));
         return run === undefined
           ? undefined
-          : documentOf(run, await Effect.runPromise(this.#runs.phases(runId)));
+          : documentOf(
+              run,
+              await Effect.runPromise(this.#runs.phases(runId)),
+              this.#artifacts.list(runId),
+            );
       },
       catch: runApiFault,
     });
@@ -862,6 +1006,60 @@ export class RunApi {
       remedy: `Run \`kojo project repair ${recovery.projectId}\` after Project safety can be established.`,
       retry: "after-repair",
     };
+  }
+
+  async #reconcileTerminatedRunnerResources(
+    projectId: string,
+    priorRunnerInstanceId: string,
+    terminationConfirmedAt: string,
+  ): Promise<boolean> {
+    const authority = { projectId, priorRunnerInstanceId, terminationConfirmedAt };
+    const pending = await Effect.runPromise(
+      this.#resources.pendingForTerminatedRunner(authority, RESOURCE_RECOVERY_LIMIT),
+    );
+    const observations = terminatedResourceObservations(
+      pending,
+      (lease) => {
+        try {
+          const record = JSON.parse(readFileSync(lease.inspectionLocator, "utf8")) as Record<
+            string,
+            unknown
+          >;
+          if (
+            record.registryVersion !== 1 ||
+            record.acquisitionKey !== lease.acquisitionKey ||
+            record.providerIdentity !== lease.providerIdentity ||
+            record.kind !== lease.kind ||
+            (record.state !== "creating" &&
+              record.state !== "acquired" &&
+              record.state !== "release-intent" &&
+              record.state !== "released")
+          ) {
+            return undefined;
+          }
+          return {
+            state: record.state,
+            ...(typeof record.locator === "string" ? { locator: record.locator } : {}),
+          };
+        } catch {
+          return undefined;
+        }
+      },
+      (locator) => {
+        if (!existsSync(locator)) return "absent";
+        const status = spawnSync("git", ["status", "--porcelain"], {
+          cwd: locator,
+          encoding: "utf8",
+          env: { ...process.env, GIT_CEILING_DIRECTORIES: dirname(locator) },
+        });
+        if (status.status !== 0) return "unreadable";
+        return status.stdout.trim() === "" ? "clean" : "dirty";
+      },
+    );
+    const reconciled = await Effect.runPromise(
+      this.#resources.reconcileTerminatedRunner(authority, observations),
+    );
+    return reconciled.every((lease) => lease.state === "released");
   }
 
   #waitForRecovery(nextAttemptAt?: string): Promise<boolean> {
@@ -1095,13 +1293,44 @@ export class RunApi {
     );
     try {
       await options.stop();
-      recovery = await Effect.runPromise(
-        this.#projectRecovery.confirmSafety(
+      const confirmedAt = new Date(this.#now()).toISOString();
+      await Effect.runPromise(
+        this.#projectRecovery.confirmTermination(
           options.projectId,
           options.runnerInstanceId,
-          new Date(this.#now()).toISOString(),
+          confirmedAt,
         ),
       );
+      if (this.#resourceRecoveryBoundary !== undefined) {
+        await Effect.runPromise(this.#resourceRecoveryBoundary());
+      }
+      await Effect.runPromise(
+        this.#resources.confirmRunnerTermination({
+          projectId: options.projectId,
+          priorRunnerInstanceId: options.runnerInstanceId,
+          terminationConfirmedAt: confirmedAt,
+        }),
+      );
+      const resourcesSafe = await this.#reconcileTerminatedRunnerResources(
+        options.projectId,
+        options.runnerInstanceId,
+        confirmedAt,
+      );
+      recovery = resourcesSafe
+        ? await Effect.runPromise(
+            this.#projectRecovery.confirmSafety(
+              options.projectId,
+              options.runnerInstanceId,
+              confirmedAt,
+            ),
+          )
+        : await Effect.runPromise(
+            this.#projectRecovery.holdUncertain(
+              options.projectId,
+              options.runnerInstanceId,
+              "The old Runner stopped, but provider cleanup is preserved or unresolved.",
+            ),
+          );
     } catch (terminationCause) {
       recovery = await Effect.runPromise(
         this.#projectRecovery.holdUncertain(
@@ -1965,17 +2194,90 @@ export class RunApi {
             };
             const resource = frame.body as unknown as Record<string, unknown>;
             const leaseId = String(resource.leaseId ?? "");
+            const injectedFault = this.#resourceMutationFault?.({
+              kind: frame.kind,
+              runId: authority.runId,
+              leaseId,
+            });
+            if (injectedFault === "before-commit") {
+              throw new Error("the test transport dropped the Resource mutation before commit");
+            }
             if (frame.kind === "BeginResourceAcquisition") {
-              await Effect.runPromise(
-                this.#resources.beginAcquisition({
-                  ...resourceAuthority,
-                  leaseId,
-                  kind: resource.kind as "agent" | "sandbox" | "worktree",
-                  acquisitionKey: String(resource.acquisitionKey),
-                  requestedAt: String(resource.requestedAt),
-                  detail: resource.detail as Readonly<Record<string, string>>,
-                }),
+              const acquisitionKey = String(resource.acquisitionKey);
+              const prior = await Effect.runPromise(
+                this.#resources.inspectAcquisition(
+                  request.projectId,
+                  authority.runId,
+                  acquisitionKey,
+                ),
               );
+              const providerIdentity =
+                prior?.providerIdentity ?? `kojo-resource:${crypto.randomUUID()}`;
+              const inspectionRoot = join(this.#dataRoot, "resource-inspections");
+              mkdirSync(inspectionRoot, { recursive: true, mode: 0o700 });
+              const inspectionLocator =
+                prior?.inspectionLocator ??
+                join(inspectionRoot, `${providerIdentity.slice("kojo-resource:".length)}.json`);
+              const providerLocator =
+                prior?.providerLocator ??
+                (resource.kind === "worktree"
+                  ? join(
+                      this.#dataRoot,
+                      "worktrees",
+                      providerIdentity.slice("kojo-resource:".length),
+                      ".sandcastle",
+                      "worktrees",
+                      String((resource.detail as Record<string, unknown>).branch).replaceAll(
+                        "/",
+                        "-",
+                      ),
+                    )
+                  : undefined);
+              const lease = await Effect.runPromise(
+                this.#resources.beginAcquisition(
+                  {
+                    ...resourceAuthority,
+                    leaseId,
+                    kind: resource.kind as "agent" | "sandbox" | "worktree",
+                    acquisitionKey,
+                    requestedAt: String(resource.requestedAt),
+                    detail: resource.detail as Readonly<Record<string, string>>,
+                  },
+                  {
+                    providerIdentity,
+                    inspectionLocator,
+                    ...(providerLocator === undefined ? {} : { providerLocator }),
+                  },
+                ),
+              );
+              const inspected = await Effect.runPromise(
+                this.#resources.inspectAcquisition(
+                  request.projectId,
+                  authority.runId,
+                  acquisitionKey,
+                ),
+              );
+              if (
+                inspected?.leaseId !== leaseId ||
+                inspected.providerIdentity !== lease.providerIdentity
+              ) {
+                throw new Error(
+                  "the exact Resource acquisition could not be inspected after commit",
+                );
+              }
+              if (injectedFault === "after-commit") {
+                continue;
+              }
+              await replyMutation(frame, {
+                state: "committed",
+                acquisitionKey: inspected.acquisitionKey,
+                providerIdentity: inspected.providerIdentity,
+                inspectionLocator: inspected.inspectionLocator,
+                ...(inspected.providerLocator === undefined
+                  ? {}
+                  : { providerLocator: inspected.providerLocator }),
+              });
+              continue;
             } else if (frame.kind === "ConfirmResourceAcquired") {
               await Effect.runPromise(
                 this.#resources.confirmAcquired(
@@ -2041,6 +2343,9 @@ export class RunApi {
                   String(resource.reason),
                 ),
               );
+            }
+            if (injectedFault === "after-commit") {
+              continue;
             }
             await replyMutation(frame, { state: "committed" });
             continue;

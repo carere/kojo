@@ -69,6 +69,7 @@ export const useRun = (runId: () => string): UseQueryResult<RunDoc, Error> =>
           })),
           gates: [],
           sandboxes: [],
+          artifacts: run.artifacts ?? [],
         } satisfies RunDoc;
       } catch {
         return fetchJson<RunDoc>(`/api/runs/${encodeURIComponent(runId())}`);

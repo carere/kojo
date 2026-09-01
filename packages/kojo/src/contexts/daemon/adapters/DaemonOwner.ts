@@ -36,7 +36,7 @@ import { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRep
 import { SqliteRevisionRepository } from "../../workflow/adapters/SqliteRevisionRepository.ts";
 import { SqliteRunRepository } from "../../workflow/adapters/SqliteRunRepository.ts";
 import { RevisionCaptureError } from "../../workflow/models/RevisionCaptureError.ts";
-import { RunApi } from "../../workflow/services/RunApi.ts";
+import { RunApi, type RunnerMutationFault } from "../../workflow/services/RunApi.ts";
 import { refreshFactory } from "../../workflow/services/refreshFactory.ts";
 import type { DaemonPaths } from "../models/DaemonPaths.ts";
 import type { DaemonEndpoint } from "../models/Endpoint.ts";
@@ -109,6 +109,10 @@ export interface StartDaemonOptions {
   readonly automaticRefresh?: boolean;
   readonly runnerIdleMillis?: number;
   readonly runnerCleanupMillis?: number;
+  readonly resourceMutationFault?:
+    | ((mutation: RunnerMutationFault) => "before-commit" | "after-commit" | undefined)
+    | undefined;
+  readonly resourceRecoveryBoundary?: (() => Effect.Effect<void>) | undefined;
 }
 
 const retainedDirectories = [
@@ -276,6 +280,12 @@ export const startDaemon = (
       ...(options.runnerCleanupMillis === undefined
         ? {}
         : { runnerCleanupMillis: options.runnerCleanupMillis }),
+      ...(options.resourceMutationFault === undefined
+        ? {}
+        : { resourceMutationFault: options.resourceMutationFault }),
+      ...(options.resourceRecoveryBoundary === undefined
+        ? {}
+        : { resourceRecoveryBoundary: options.resourceRecoveryBoundary }),
     });
     void Effect.runPromise(runApi.restore()).catch(() => undefined);
     const gateApi = new GateApi({

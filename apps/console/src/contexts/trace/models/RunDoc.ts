@@ -216,4 +216,11 @@ export interface RunDoc {
   readonly phases: ReadonlyArray<PhaseLine>;
   readonly gates: ReadonlyArray<GateLine>;
   readonly sandboxes: ReadonlyArray<SandboxLine>;
+  readonly artifacts?: ReadonlyArray<{
+    readonly artifactId: string;
+    readonly name: string;
+    readonly mediaType: string;
+    readonly size: number;
+    readonly sha256: string;
+  }>;
 }
