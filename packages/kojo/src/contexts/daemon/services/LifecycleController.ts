@@ -58,6 +58,19 @@ const nextAction = (operation: LifecycleOperation): LifecycleNextAction => {
       return "delete-daemon-data";
     case "replacement-started":
       return "inspect-result";
+    case "mutations-held":
+    case "final-preflight-accepted":
+    case "backup-verified":
+    case "candidate-selected":
+    case "candidate-ready":
+    case "activation-authorized":
+    case "rollback-selected":
+    case "rollback-ready":
+      return "inspect-result";
+    case "upgrade-refused":
+    case "activated":
+    case "rolled-back":
+      return "none";
     case "completed":
       return "none";
     case "repair-required":
@@ -155,6 +168,14 @@ export class LifecycleController {
       }
       let operation: LifecycleOperation = found;
       if (operation.outcome !== undefined) return yield* controller.status(operationId);
+      if (operation.kind === "upgrade") {
+        return yield* Effect.fail(
+          new LifecycleError(
+            "LIFECYCLE_CONTROLLER_MISMATCH",
+            "managed upgrade activation needs the upgrade lifecycle controller",
+          ),
+        );
+      }
 
       if (operation.kind === "enable") {
         yield* controller.#sync(controller.#nativeService.enable);

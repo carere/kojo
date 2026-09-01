@@ -43,10 +43,13 @@ import type { DaemonPaths } from "../models/DaemonPaths.ts";
 import type { DaemonEndpoint } from "../models/Endpoint.ts";
 import { LifecycleError } from "../models/LifecycleError.ts";
 import type { DaemonLifecycleControl } from "../ports/DaemonLifecycleControl.ts";
+import type { DaemonUpgradeControl } from "../ports/DaemonUpgradeControl.ts";
 import { activeConsoleRelease } from "../services/activeConsoleRelease.ts";
 import { browserAuthority } from "../services/browserAuthority.ts";
 import { ConfigurationApi } from "../services/ConfigurationApi.ts";
 import { DaemonLifecycleApi } from "../services/DaemonLifecycleApi.ts";
+import { DaemonMutationGate } from "../services/DaemonMutationGate.ts";
+import { DaemonUpgradeApi, type UpgradeMigration } from "../services/DaemonUpgradeApi.ts";
 import { ManagedUpgradePreflight } from "../services/ManagedUpgradePreflight.ts";
 import {
   assertPrivateNode,
@@ -68,6 +71,7 @@ import { SqliteConfigurationRepository } from "./SqliteConfigurationRepository.t
 import { SqliteDaemonLifecycleReceiptRepository } from "./SqliteDaemonLifecycleReceiptRepository.ts";
 import { SqlitePurgeSafetyRepository } from "./SqlitePurgeSafetyRepository.ts";
 import { SqliteRetentionRepository } from "./SqliteRetentionRepository.ts";
+import { SqliteUpgradeActivationReceiptRepository } from "./SqliteUpgradeActivationReceiptRepository.ts";
 import { SqliteUpgradePreflightRepository } from "./SqliteUpgradePreflightRepository.ts";
 
 interface LockHandle {
@@ -118,6 +122,7 @@ const acquireLock = (path: string): LockHandle => {
 export interface RunningDaemon {
   readonly endpoint: DaemonEndpoint;
   readonly lifecycleControl: DaemonLifecycleControl;
+  readonly upgradeControl: DaemonUpgradeControl;
   readonly ready: Effect.Effect<void, LifecycleError>;
   readonly stopped: Effect.Effect<void, LifecycleError>;
   readonly stop: Effect.Effect<void, LifecycleError>;
@@ -133,6 +138,7 @@ export interface StartDaemonOptions {
     | ((mutation: RunnerMutationFault) => "before-commit" | "after-commit" | undefined)
     | undefined;
   readonly resourceRecoveryBoundary?: (() => Effect.Effect<void>) | undefined;
+  readonly upgradeMigration?: UpgradeMigration;
   readonly runRestore?: (runs: RunApi) => Effect.Effect<void, LifecycleError>;
   readonly managedSupervision?: {
     readonly recordReady: (policy: {
@@ -273,6 +279,27 @@ const requestJson = async (request: Request): Promise<unknown> => {
     throw new LifecycleError("REQUEST_TOO_LARGE", "the request body is too large");
   }
   return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+};
+
+const withOrdinaryMutation = async (
+  gate: DaemonMutationGate,
+  request: Request,
+  body: () => Promise<Response>,
+): Promise<Response> => {
+  if (request.method === "GET" || request.method === "HEAD") return body();
+  const release = gate.enter();
+  if (release === undefined) {
+    return problem(
+      409,
+      "daemon-mutations-held",
+      "ordinary mutations are held by the current Daemon lifecycle operation",
+    );
+  }
+  try {
+    return await body();
+  } finally {
+    release();
+  }
 };
 
 const contentType = (path: string): string => {
@@ -423,6 +450,27 @@ export const startDaemon = (
     const triggerRepository = new SqliteTriggerRepository(database);
     const gateRepository = new SqliteDaemonGateRepository(database);
     const lifecycleReceipts = new SqliteDaemonLifecycleReceiptRepository(database);
+    const upgradeReceipts = new SqliteUpgradeActivationReceiptRepository(database);
+    const retainedUpgrade = Effect.runSync(upgradeReceipts.active);
+    const restrictedUpgrade =
+      retainedUpgrade?.dispatchHeld === true &&
+      [
+        "mutations-held",
+        "final-preflight-refused",
+        "final-preflight-accepted",
+        "handoff-prepared",
+        "controller-accepted",
+        "backup-verified",
+        "source-execution-stopped",
+        "candidate-ready",
+        "activation-authorized",
+        "rollback-ready",
+        "rolled-back",
+      ].includes(retainedUpgrade.stage);
+    const mutationGate = new DaemonMutationGate(
+      retainedUpgrade?.mutationsHeld === true ? retainedUpgrade.operationId : undefined,
+    );
+    const backgroundWriterActivators: Array<() => void> = [];
     const upgradePreflight = new ManagedUpgradePreflight(
       new SqliteUpgradePreflightRepository(database, dataIdentity, revisionRepository),
       now,
@@ -455,13 +503,18 @@ export const startDaemon = (
       ...(options.resourceRecoveryBoundary === undefined
         ? {}
         : { resourceRecoveryBoundary: options.resourceRecoveryBoundary }),
-      daemonDispatchHeld: lifecycleReceipts.activeDrainHeld(),
+      daemonDispatchHeld: lifecycleReceipts.activeDrainHeld() || upgradeReceipts.activeHold(),
     });
     let retentionCollection: Promise<void> | undefined;
     const collectRetainedEvidence = (): void => {
       if (retentionCollection !== undefined) return;
+      const leave = mutationGate.enter();
+      if (leave === undefined) return;
       const retention = configurationRepository.daemonConfiguration().retention;
-      if (Object.values(retention).every((duration) => duration === "indefinite")) return;
+      if (Object.values(retention).every((duration) => duration === "indefinite")) {
+        leave();
+        return;
+      }
       const observedAt = new Date(now()).toISOString();
       retentionCollection = Effect.runPromise(
         retentionRepository
@@ -474,34 +527,46 @@ export const startDaemon = (
         .catch(() => undefined)
         .finally(() => {
           retentionCollection = undefined;
+          leave();
         });
     };
-    retentionCollectionTimer = setInterval(collectRetainedEvidence, 60_000);
-    collectRetainedEvidence();
+    const startRetentionCollectionTimer = (): void => {
+      if (retentionCollectionTimer !== undefined) return;
+      collectRetainedEvidence();
+      retentionCollectionTimer = setInterval(collectRetainedEvidence, 60_000);
+    };
+    backgroundWriterActivators.push(startRetentionCollectionTimer);
+    if (!restrictedUpgrade) startRetentionCollectionTimer();
     let restoreFailure: unknown;
-    const restoration =
-      options.runRestore?.(runApi) ??
-      runApi
-        .restore()
-        .pipe(
-          Effect.mapError(
-            (cause) => new LifecycleError("DAEMON_RESTORE_FAILED", cause.message, cause),
+    let restorePromise: Promise<void> | undefined;
+    const restore = (): Promise<void> => {
+      const restoration =
+        options.runRestore?.(runApi) ??
+        runApi
+          .restore()
+          .pipe(
+            Effect.mapError(
+              (cause) => new LifecycleError("DAEMON_RESTORE_FAILED", cause.message, cause),
+            ),
+          );
+      restorePromise ??= Effect.runPromise(restoration)
+        .then(() =>
+          options.managedSupervision?.recordReady(
+            configurationRepository.daemonConfiguration().daemon,
           ),
-        );
-    const restorePromise = Effect.runPromise(restoration)
-      .then(() =>
-        options.managedSupervision?.recordReady(
-          configurationRepository.daemonConfiguration().daemon,
-        ),
-      )
-      .catch((cause: unknown) => {
-        restoreFailure = cause;
-      });
+        )
+        .catch((cause: unknown) => {
+          restoreFailure = cause;
+        });
+      return restorePromise;
+    };
+    if (!restrictedUpgrade) void restore();
     const ready = Effect.tryPromise({
       try: async () => {
+        if (restrictedUpgrade) return;
         const readinessMs = configurationRepository.daemonConfiguration().daemon.readinessMs;
         await Promise.race([
-          restorePromise,
+          restore(),
           Bun.sleep(readinessMs).then(() => {
             throw new Error(`Daemon readiness exceeded ${readinessMs} milliseconds`);
           }),
@@ -515,25 +580,39 @@ export const startDaemon = (
           cause,
         ),
     });
+    const activatePendingConfiguration = configurationRepository.activatePendingDaemon().pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          options.managedSupervision?.activatePolicy(
+            configurationRepository.daemonConfiguration().daemon,
+          );
+        }),
+      ),
+      Effect.asVoid,
+      Effect.mapError(
+        (cause) =>
+          new LifecycleError("DAEMON_CONFIGURATION_ACTIVATION_FAILED", cause.message, cause),
+      ),
+    );
+    const resumeRuntime = Effect.tryPromise({
+      try: async () => {
+        await restore();
+        if (restoreFailure !== undefined) throw restoreFailure;
+        for (const activateWriters of backgroundWriterActivators) activateWriters();
+      },
+      catch: (cause) =>
+        new LifecycleError(
+          "DAEMON_RESTORE_FAILED",
+          cause instanceof Error ? cause.message : String(cause),
+          cause,
+        ),
+    });
     const lifecycleControl = new DaemonLifecycleApi({
       dataIdentity,
       runs: runApi,
       receipts: lifecycleReceipts,
       ready,
-      activatePendingConfiguration: configurationRepository.activatePendingDaemon().pipe(
-        Effect.tap(() =>
-          Effect.sync(() => {
-            options.managedSupervision?.activatePolicy(
-              configurationRepository.daemonConfiguration().daemon,
-            );
-          }),
-        ),
-        Effect.asVoid,
-        Effect.mapError(
-          (cause) =>
-            new LifecycleError("DAEMON_CONFIGURATION_ACTIVATION_FAILED", cause.message, cause),
-        ),
-      ),
+      activatePendingConfiguration,
       recordPlannedStop: Effect.try({
         try: () => options.managedSupervision?.recordPlannedStop(),
         catch: (cause) =>
@@ -551,6 +630,27 @@ export const startDaemon = (
         paths.configurationRoot,
         () => ensurePurgeRecoveryCapsule(paths, dataIdentity, release.releaseId),
       ),
+      now,
+    });
+    const upgradeControl = new DaemonUpgradeApi({
+      database,
+      paths,
+      dataIdentity,
+      activeReleaseId: () => activeConsoleRelease(paths).releaseId,
+      runs: runApi,
+      receipts: upgradeReceipts,
+      mutations: mutationGate,
+      preflight: upgradePreflight,
+      transportsReady: () =>
+        socketServer !== undefined && consoleServer !== undefined && lifecycleServer !== undefined,
+      restricted: restrictedUpgrade,
+      recordRestrictedReady: () =>
+        options.managedSupervision?.recordReady(
+          configurationRepository.daemonConfiguration().daemon,
+        ),
+      resume: resumeRuntime,
+      activate: resumeRuntime.pipe(Effect.andThen(activatePendingConfiguration)),
+      ...(options.upgradeMigration === undefined ? {} : { migration: options.upgradeMigration }),
       now,
     });
     const projectApi = new ProjectApi({
@@ -862,10 +962,25 @@ export const startDaemon = (
         return problem(404, "asking-not-found", "the Gate token was not found");
       return problem(409, "verdict-refused", failure?.message ?? Cause.pretty(result.cause));
     };
-    void Effect.runPromise(gateApi.expireDue()).catch(() => undefined);
-    const gateDeadlineTimer = setInterval(() => {
-      void Effect.runPromise(gateApi.expireDue()).catch(() => undefined);
-    }, 100);
+    const expireDue = async (): Promise<void> => {
+      const leave = mutationGate.enter();
+      if (leave === undefined) return;
+      try {
+        await Effect.runPromise(gateApi.expireDue());
+      } finally {
+        leave();
+      }
+    };
+    let gateDeadlineTimer: ReturnType<typeof setInterval> | undefined;
+    const startGateDeadlineTimer = (): void => {
+      if (gateDeadlineTimer !== undefined) return;
+      void expireDue().catch(() => undefined);
+      gateDeadlineTimer = setInterval(() => {
+        void expireDue().catch(() => undefined);
+      }, 100);
+    };
+    backgroundWriterActivators.push(startGateDeadlineTimer);
+    if (!restrictedUpgrade) startGateDeadlineTimer();
     const startRun = async (
       request: Request,
       projectId: string,
@@ -1085,48 +1200,56 @@ export const startDaemon = (
       const current = projectRefreshes.get(project.projectId);
       if (current !== undefined) return current;
       const running = (async () => {
-        await Effect.runPromise(projectRepository.markRefreshPending(project.projectId));
-        await new Promise((resolve) => setTimeout(resolve, 250));
-        if (refreshCoordinatorStopped) return;
+        const leave = mutationGate.enter();
+        if (leave === undefined) return;
         try {
-          const refreshed = await Effect.runPromise(
-            refreshFactory({
-              project: project.location,
-              dataRoot: paths.dataRoot,
-            }),
-          );
-          await Effect.runPromise(
-            projectRepository.refresh(
-              project.projectId,
-              refreshed,
-              "current",
-              new Date(now()).toISOString(),
-            ),
-          );
-          refreshFingerprints.set(project.projectId, inventoryFingerprint(project.location));
-        } catch (cause) {
-          const error =
-            cause instanceof RevisionCaptureError
-              ? cause
-              : new RevisionCaptureError({
-                  code: "CAPTURE_FAILED",
-                  message: cause instanceof Error ? cause.message : String(cause),
-                  remedy: "Repair the operational fault, then retry Factory Refresh.",
-                  cause,
-                });
-          await Effect.runPromise(
-            projectRepository.refresh(
-              project.projectId,
-              {
-                factoryState: existsSync(join(project.location, ".kojo")) ? "available" : "missing",
-                workflows: [],
-                fault: error.message,
-                remedy: error.remedy,
-              },
-              error.code === "REFRESH_UNSTABLE" ? "pending" : "failed",
-              new Date(now()).toISOString(),
-            ),
-          );
+          await Effect.runPromise(projectRepository.markRefreshPending(project.projectId));
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          if (refreshCoordinatorStopped) return;
+          try {
+            const refreshed = await Effect.runPromise(
+              refreshFactory({
+                project: project.location,
+                dataRoot: paths.dataRoot,
+              }),
+            );
+            await Effect.runPromise(
+              projectRepository.refresh(
+                project.projectId,
+                refreshed,
+                "current",
+                new Date(now()).toISOString(),
+              ),
+            );
+            refreshFingerprints.set(project.projectId, inventoryFingerprint(project.location));
+          } catch (cause) {
+            const error =
+              cause instanceof RevisionCaptureError
+                ? cause
+                : new RevisionCaptureError({
+                    code: "CAPTURE_FAILED",
+                    message: cause instanceof Error ? cause.message : String(cause),
+                    remedy: "Repair the operational fault, then retry Factory Refresh.",
+                    cause,
+                  });
+            await Effect.runPromise(
+              projectRepository.refresh(
+                project.projectId,
+                {
+                  factoryState: existsSync(join(project.location, ".kojo"))
+                    ? "available"
+                    : "missing",
+                  workflows: [],
+                  fault: error.message,
+                  remedy: error.remedy,
+                },
+                error.code === "REFRESH_UNSTABLE" ? "pending" : "failed",
+                new Date(now()).toISOString(),
+              ),
+            );
+          }
+        } finally {
+          leave();
         }
       })().finally(() => projectRefreshes.delete(project.projectId));
       projectRefreshes.set(project.projectId, running);
@@ -1148,132 +1271,317 @@ export const startDaemon = (
         }),
       );
     };
-    if (options.automaticRefresh !== false) void inspectProjectInventories(true);
-    const refreshInventoryTimer = setInterval(() => {
-      if (!refreshCoordinatorStopped && options.automaticRefresh !== false)
-        void inspectProjectInventories(false);
-    }, 5_000);
+    let refreshInventoryTimer: ReturnType<typeof setInterval> | undefined;
+    const startRefreshInventoryTimer = (): void => {
+      if (refreshInventoryTimer !== undefined || options.automaticRefresh === false) return;
+      void inspectProjectInventories(true);
+      refreshInventoryTimer = setInterval(() => {
+        if (!refreshCoordinatorStopped) void inspectProjectInventories(false);
+      }, 5_000);
+    };
+    backgroundWriterActivators.push(startRefreshInventoryTimer);
+    if (!restrictedUpgrade) startRefreshInventoryTimer();
     consoleServer = Bun.serve({
       hostname: "127.0.0.1",
       port: options.consolePort ?? 0,
       async fetch(request) {
-        const expectedHost = `127.0.0.1:${consoleServer?.port ?? 0}`;
-        const origin = `http://${expectedHost}`;
-        if (request.headers.get("host") !== expectedHost) {
-          return problem(421, "wrong-host", "the request Host does not match this Console");
-        }
+        return withOrdinaryMutation(mutationGate, request, async () => {
+          const expectedHost = `127.0.0.1:${consoleServer?.port ?? 0}`;
+          const origin = `http://${expectedHost}`;
+          if (request.headers.get("host") !== expectedHost) {
+            return problem(421, "wrong-host", "the request Host does not match this Console");
+          }
 
-        const url = new URL(request.url);
-        if (request.method === "GET" && url.pathname === "/_kojo/compat") {
-          const body: BootstrapResponse = {
-            bootstrapVersion: 1,
-            instanceId,
-            dataIdentity,
-            clientApiVersions: [1],
-            features: [
-              "browser-session",
-              "project-catalogue",
-              "workflow-revisions",
-              "no-trigger-runs",
-              "trigger-scheduling",
-              "gate-verdicts",
-              "client-request-journal",
-            ],
-            packageVersion: release.packageVersion,
-          };
-          return noStoreJson(body);
-        }
-
-        if (url.pathname === "/_kojo/session") {
-          if (request.method !== "POST") {
-            return problem(405, "method-not-allowed", "the session exchange requires POST");
-          }
-          if (request.headers.get("origin") !== origin) {
-            return problem(403, "wrong-origin", "the request Origin does not match this Console");
-          }
-          if (!isJson(request)) {
-            return problem(415, "json-required", "the session exchange requires JSON");
-          }
-          let body: BrowserSessionRequest;
-          try {
-            const bytes = new Uint8Array(await request.arrayBuffer());
-            if (bytes.byteLength > 4_096) {
-              return problem(413, "request-too-large", "the session exchange is too large");
-            }
-            const input = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
-            if (
-              Object.keys(input).length !== 1 ||
-              typeof input.grant !== "string" ||
-              input.grant.length === 0
-            ) {
-              throw new Error("invalid grant request");
-            }
-            body = { grant: input.grant };
-          } catch {
-            return problem(400, "invalid-json", "the session exchange body is invalid");
-          }
-          const session = authority.exchange(body.grant, origin);
-          if (session === undefined) {
-            return problem(401, "grant-refused", "the launch grant is invalid or expired");
-          }
-          const response: BrowserSessionResponse = {
-            formatVersion: 1,
-            credential: session.secret,
-            expiresAt: new Date(session.expiresAt).toISOString(),
-            instanceId,
-          };
-          return noStoreJson(response);
-        }
-
-        if (url.pathname.startsWith("/api/v1/")) {
-          const requestOrigin = request.headers.get("origin");
-          if (requestOrigin !== null && requestOrigin !== origin) {
-            return problem(403, "wrong-origin", "the request Origin does not match this Console");
-          }
-          if (request.method !== "GET" && request.method !== "HEAD") {
-            if (requestOrigin !== origin) {
-              return problem(403, "origin-required", "a mutation requires this Console Origin");
-            }
-            if (!isJson(request)) {
-              return problem(415, "json-required", "a mutation requires JSON");
-            }
-            if (Number(request.headers.get("content-length") ?? "0") > 1_048_576) {
-              return problem(413, "request-too-large", "the mutation body is too large");
-            }
-            try {
-              const bytes = new Uint8Array(await request.clone().arrayBuffer());
-              if (bytes.byteLength > 1_048_576) {
-                return problem(413, "request-too-large", "the mutation body is too large");
-              }
-              JSON.parse(new TextDecoder().decode(bytes));
-            } catch {
-              return problem(400, "invalid-json", "the mutation body is invalid");
-            }
-          }
-          const session = authority.authenticate(request.headers.get("authorization"));
-          if (session === undefined) {
-            return problem(401, "session-refused", "Console access is invalid or expired");
-          }
-          if (request.method === "GET" && url.pathname === "/api/v1/daemon") {
-            const projects = await Effect.runPromise(projectRepository.projects);
-            const body: DaemonDocument = {
-              formatVersion: 1,
+          const url = new URL(request.url);
+          if (request.method === "GET" && url.pathname === "/_kojo/compat") {
+            const body: BootstrapResponse = {
+              bootstrapVersion: 1,
               instanceId,
               dataIdentity,
-              releaseId: release.releaseId,
+              clientApiVersions: [1],
+              features: [
+                "browser-session",
+                "project-catalogue",
+                "workflow-revisions",
+                "no-trigger-runs",
+                "trigger-scheduling",
+                "gate-verdicts",
+                "client-request-journal",
+              ],
               packageVersion: release.packageVersion,
-              bunVersion: release.bunVersion,
-              platform: process.platform,
-              architecture: process.arch,
-              startedAt,
-              accessExpiresAt: new Date(session.expiresAt).toISOString(),
-              projectCount: projects.length,
             };
             return noStoreJson(body);
           }
-          const revision = await revisionResponse(request, url, false);
+
+          if (url.pathname === "/_kojo/session") {
+            if (request.method !== "POST") {
+              return problem(405, "method-not-allowed", "the session exchange requires POST");
+            }
+            if (request.headers.get("origin") !== origin) {
+              return problem(403, "wrong-origin", "the request Origin does not match this Console");
+            }
+            if (!isJson(request)) {
+              return problem(415, "json-required", "the session exchange requires JSON");
+            }
+            let body: BrowserSessionRequest;
+            try {
+              const bytes = new Uint8Array(await request.arrayBuffer());
+              if (bytes.byteLength > 4_096) {
+                return problem(413, "request-too-large", "the session exchange is too large");
+              }
+              const input = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
+              if (
+                Object.keys(input).length !== 1 ||
+                typeof input.grant !== "string" ||
+                input.grant.length === 0
+              ) {
+                throw new Error("invalid grant request");
+              }
+              body = { grant: input.grant };
+            } catch {
+              return problem(400, "invalid-json", "the session exchange body is invalid");
+            }
+            const session = authority.exchange(body.grant, origin);
+            if (session === undefined) {
+              return problem(401, "grant-refused", "the launch grant is invalid or expired");
+            }
+            const response: BrowserSessionResponse = {
+              formatVersion: 1,
+              credential: session.secret,
+              expiresAt: new Date(session.expiresAt).toISOString(),
+              instanceId,
+            };
+            return noStoreJson(response);
+          }
+
+          if (url.pathname.startsWith("/api/v1/")) {
+            const requestOrigin = request.headers.get("origin");
+            if (requestOrigin !== null && requestOrigin !== origin) {
+              return problem(403, "wrong-origin", "the request Origin does not match this Console");
+            }
+            if (request.method !== "GET" && request.method !== "HEAD") {
+              if (requestOrigin !== origin) {
+                return problem(403, "origin-required", "a mutation requires this Console Origin");
+              }
+              if (!isJson(request)) {
+                return problem(415, "json-required", "a mutation requires JSON");
+              }
+              if (Number(request.headers.get("content-length") ?? "0") > 1_048_576) {
+                return problem(413, "request-too-large", "the mutation body is too large");
+              }
+              try {
+                const bytes = new Uint8Array(await request.clone().arrayBuffer());
+                if (bytes.byteLength > 1_048_576) {
+                  return problem(413, "request-too-large", "the mutation body is too large");
+                }
+                JSON.parse(new TextDecoder().decode(bytes));
+              } catch {
+                return problem(400, "invalid-json", "the mutation body is invalid");
+              }
+            }
+            const session = authority.authenticate(request.headers.get("authorization"));
+            if (session === undefined) {
+              return problem(401, "session-refused", "Console access is invalid or expired");
+            }
+            if (request.method === "GET" && url.pathname === "/api/v1/daemon") {
+              const projects = await Effect.runPromise(projectRepository.projects);
+              const body: DaemonDocument = {
+                formatVersion: 1,
+                instanceId,
+                dataIdentity,
+                releaseId: release.releaseId,
+                packageVersion: release.packageVersion,
+                bunVersion: release.bunVersion,
+                platform: process.platform,
+                architecture: process.arch,
+                startedAt,
+                accessExpiresAt: new Date(session.expiresAt).toISOString(),
+                projectCount: projects.length,
+              };
+              return noStoreJson(body);
+            }
+            const revision = await revisionResponse(request, url, false);
+            if (revision !== undefined) return revision;
+            const configuration = await configurationResponse(request, url, false);
+            if (configuration !== undefined) return configuration;
+            if (request.method === "GET" && url.pathname === "/api/v1/projects") {
+              return Effect.runPromise(projectApi.snapshot());
+            }
+            if (request.method === "GET" && url.pathname === "/api/v1/workflows") {
+              return Effect.runPromise(projectApi.workflowSnapshot());
+            }
+            if (request.method === "GET" && url.pathname === "/api/v1/runs") {
+              return noStoreJson(await Effect.runPromise(runApi.snapshot()));
+            }
+            if (request.method === "GET" && url.pathname === "/api/v1/askings") {
+              return gateSnapshot();
+            }
+            if (request.method === "POST" && url.pathname === "/api/v1/gate-answers") {
+              return answerGate(request, false);
+            }
+            const cancelOneRun = url.pathname.match(
+              /^\/api\/v1\/runs\/([A-Za-z0-9_-]+)\/actions\/cancel$/,
+            );
+            if (request.method === "POST" && cancelOneRun !== null) {
+              return cancelRun(request, cancelOneRun[1] ?? "invalid");
+            }
+            const changeProjectLocation = url.pathname.match(
+              /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/actions\/(relocate|archive|restore)$/,
+            );
+            if (request.method === "POST" && changeProjectLocation !== null) {
+              return Effect.runPromise(
+                projectApi.locationChange(
+                  changeProjectLocation[1] ?? "invalid",
+                  changeProjectLocation[2] as "relocate" | "archive" | "restore",
+                  await requestJson(request),
+                ),
+              );
+            }
+            const retryOneUncertainAction = url.pathname.match(
+              /^\/api\/v1\/runs\/([A-Za-z0-9_-]+)\/actions\/retry-uncertain$/,
+            );
+            if (request.method === "POST" && retryOneUncertainAction !== null) {
+              return retryUncertainAction(request, retryOneUncertainAction[1] ?? "invalid");
+            }
+            const repairOneProject = url.pathname.match(
+              /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/actions\/repair$/,
+            );
+            if (request.method === "POST" && repairOneProject !== null) {
+              return repairProjectRunner(repairOneProject[1] ?? "invalid");
+            }
+            const projectAskings = url.pathname.match(
+              /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/askings$/,
+            );
+            if (request.method === "GET" && projectAskings !== null) {
+              return gateSnapshot(projectAskings[1]);
+            }
+            const oneRun = url.pathname.match(/^\/api\/v1\/runs\/([A-Za-z0-9_-]+)$/);
+            if (request.method === "GET" && oneRun !== null) {
+              const run = await Effect.runPromise(runApi.run(oneRun[1] ?? "invalid"));
+              return run === undefined
+                ? problem(404, "run-not-found", "the selected Run was not found")
+                : noStoreJson(run);
+            }
+            const oneArtifact = url.pathname.match(
+              /^\/api\/v1\/runs\/([A-Za-z0-9_-]+)\/artifacts\/([A-Za-z0-9_-]+)$/,
+            );
+            if (request.method === "GET" && oneArtifact !== null) {
+              const artifact = artifactRepository.read(
+                oneArtifact[1] ?? "invalid",
+                oneArtifact[2] ?? "invalid",
+              );
+              if (artifact === undefined)
+                return problem(404, "artifact-not-found", "the selected Artifact was not found");
+              const content = readFileSync(artifact.path);
+              if (url.searchParams.get("download") !== "1") {
+                return noStoreJson({
+                  artifactId: artifact.artifactId,
+                  name: artifact.name,
+                  mediaType: artifact.mediaType,
+                  content: new TextDecoder().decode(content),
+                });
+              }
+              const safeName = artifact.name.replace(/[^A-Za-z0-9._-]/g, "_") || "artifact.txt";
+              return new Response(content, {
+                headers: {
+                  "cache-control": "no-store",
+                  "content-disposition": `attachment; filename="${safeName}"`,
+                  "content-security-policy": "sandbox; default-src 'none'",
+                  "content-type": "application/octet-stream",
+                  "x-content-type-options": "nosniff",
+                },
+              });
+            }
+            const projectRuns = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/runs$/);
+            if (request.method === "GET" && projectRuns !== null) {
+              return noStoreJson(await Effect.runPromise(runApi.snapshot(projectRuns[1])));
+            }
+            const workflowStart = url.pathname.match(
+              /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/workflows\/([^/]+)\/actions\/start$/,
+            );
+            if (request.method === "POST" && workflowStart !== null) {
+              return startRun(
+                request,
+                workflowStart[1] ?? "invalid",
+                decodeURIComponent(workflowStart[2] ?? "invalid"),
+              );
+            }
+            const workflowStop = url.pathname.match(
+              /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/workflows\/([^/]+)\/actions\/stop$/,
+            );
+            if (request.method === "POST" && workflowStop !== null) {
+              return stopWorkflow(
+                request,
+                workflowStop[1] ?? "invalid",
+                decodeURIComponent(workflowStop[2] ?? "invalid"),
+              );
+            }
+            const projectWorkflows = url.pathname.match(
+              /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/workflows$/,
+            );
+            if (request.method === "GET" && projectWorkflows !== null) {
+              return Effect.runPromise(projectApi.workflowSnapshot(projectWorkflows[1]));
+            }
+            const clientRequest = url.pathname.match(
+              /^\/api\/v1\/client-requests\/([A-Za-z0-9_-]+)(\/retry)?$/,
+            );
+            if (clientRequest !== null) {
+              const requestId = clientRequest[1] ?? "invalid";
+              if (request.method === "GET" && clientRequest[2] === undefined) {
+                return Effect.runPromise(projectApi.lookup(requestId));
+              }
+              if (request.method === "PUT" && clientRequest[2] === undefined) {
+                try {
+                  return Effect.runPromise(
+                    projectApi.prepare(requestId, await requestJson(request)),
+                  );
+                } catch {
+                  return problem(400, "invalid-json", "the mutation body is invalid");
+                }
+              }
+              if (request.method === "POST" && clientRequest[2] === "/retry") {
+                return Effect.runPromise(projectApi.retry(requestId));
+              }
+            }
+            return problem(404, "not-found", "the requested API resource was not found");
+          }
+
+          if (request.method !== "GET" && request.method !== "HEAD") {
+            return problem(405, "method-not-allowed", "static Console content is read-only");
+          }
+          return consoleAsset(release.assets, url.pathname);
+        });
+      },
+    });
+    const consoleOrigin = `http://127.0.0.1:${consoleServer.port}`;
+    const endpoint: DaemonEndpoint = {
+      formatVersion: 1,
+      consoleOrigin,
+      dataIdentity,
+      instanceId,
+      socketPath,
+      ready: true,
+    };
+    socketServer = Bun.serve({
+      unix: socketPath,
+      async fetch(request) {
+        return withOrdinaryMutation(mutationGate, request, async () => {
+          const url = new URL(request.url);
+          if (request.method === "GET" && url.pathname === "/ready") {
+            return Response.json(endpoint);
+          }
+          if (request.method === "POST" && url.pathname === "/ui-grants") {
+            const grant = authority.issue(consoleOrigin);
+            return noStoreJson({
+              expiresAt: new Date(grant.expiresAt).toISOString(),
+              launchUrl: `${consoleOrigin}/daemon#grant=${encodeURIComponent(grant.secret)}`,
+            });
+          }
+          const revision = await revisionResponse(request, url, true);
           if (revision !== undefined) return revision;
-          const configuration = await configurationResponse(request, url, false);
+          const upgrade = await upgradeResponse(request, url);
+          if (upgrade !== undefined) return upgrade;
+          const configuration = await configurationResponse(request, url, true);
           if (configuration !== undefined) return configuration;
           if (request.method === "GET" && url.pathname === "/api/v1/projects") {
             return Effect.runPromise(projectApi.snapshot());
@@ -1288,18 +1596,22 @@ export const startDaemon = (
             return gateSnapshot();
           }
           if (request.method === "POST" && url.pathname === "/api/v1/gate-answers") {
-            return answerGate(request, false);
+            if (!isJson(request)) return problem(415, "json-required", "Gate answer requires JSON");
+            return answerGate(request, true);
           }
           const cancelOneRun = url.pathname.match(
             /^\/api\/v1\/runs\/([A-Za-z0-9_-]+)\/actions\/cancel$/,
           );
           if (request.method === "POST" && cancelOneRun !== null) {
+            if (!isJson(request)) return problem(415, "json-required", "Cancel requires JSON");
             return cancelRun(request, cancelOneRun[1] ?? "invalid");
           }
           const changeProjectLocation = url.pathname.match(
             /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/actions\/(relocate|archive|restore)$/,
           );
           if (request.method === "POST" && changeProjectLocation !== null) {
+            if (!isJson(request))
+              return problem(415, "json-required", "Project location change requires JSON");
             return Effect.runPromise(
               projectApi.locationChange(
                 changeProjectLocation[1] ?? "invalid",
@@ -1312,12 +1624,15 @@ export const startDaemon = (
             /^\/api\/v1\/runs\/([A-Za-z0-9_-]+)\/actions\/retry-uncertain$/,
           );
           if (request.method === "POST" && retryOneUncertainAction !== null) {
+            if (!isJson(request))
+              return problem(415, "json-required", "Uncertain action retry requires JSON");
             return retryUncertainAction(request, retryOneUncertainAction[1] ?? "invalid");
           }
           const repairOneProject = url.pathname.match(
             /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/actions\/repair$/,
           );
           if (request.method === "POST" && repairOneProject !== null) {
+            if (!isJson(request)) return problem(415, "json-required", "Repair requires JSON");
             return repairProjectRunner(repairOneProject[1] ?? "invalid");
           }
           const projectAskings = url.pathname.match(
@@ -1333,36 +1648,6 @@ export const startDaemon = (
               ? problem(404, "run-not-found", "the selected Run was not found")
               : noStoreJson(run);
           }
-          const oneArtifact = url.pathname.match(
-            /^\/api\/v1\/runs\/([A-Za-z0-9_-]+)\/artifacts\/([A-Za-z0-9_-]+)$/,
-          );
-          if (request.method === "GET" && oneArtifact !== null) {
-            const artifact = artifactRepository.read(
-              oneArtifact[1] ?? "invalid",
-              oneArtifact[2] ?? "invalid",
-            );
-            if (artifact === undefined)
-              return problem(404, "artifact-not-found", "the selected Artifact was not found");
-            const content = readFileSync(artifact.path);
-            if (url.searchParams.get("download") !== "1") {
-              return noStoreJson({
-                artifactId: artifact.artifactId,
-                name: artifact.name,
-                mediaType: artifact.mediaType,
-                content: new TextDecoder().decode(content),
-              });
-            }
-            const safeName = artifact.name.replace(/[^A-Za-z0-9._-]/g, "_") || "artifact.txt";
-            return new Response(content, {
-              headers: {
-                "cache-control": "no-store",
-                "content-disposition": `attachment; filename="${safeName}"`,
-                "content-security-policy": "sandbox; default-src 'none'",
-                "content-type": "application/octet-stream",
-                "x-content-type-options": "nosniff",
-              },
-            });
-          }
           const projectRuns = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/runs$/);
           if (request.method === "GET" && projectRuns !== null) {
             return noStoreJson(await Effect.runPromise(runApi.snapshot(projectRuns[1])));
@@ -1371,6 +1656,7 @@ export const startDaemon = (
             /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/workflows\/([^/]+)\/actions\/start$/,
           );
           if (request.method === "POST" && workflowStart !== null) {
+            if (!isJson(request)) return problem(415, "json-required", "Start requires JSON");
             return startRun(
               request,
               workflowStart[1] ?? "invalid",
@@ -1381,6 +1667,7 @@ export const startDaemon = (
             /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/workflows\/([^/]+)\/actions\/stop$/,
           );
           if (request.method === "POST" && workflowStop !== null) {
+            if (!isJson(request)) return problem(415, "json-required", "Stop requires JSON");
             return stopWorkflow(
               request,
               workflowStop[1] ?? "invalid",
@@ -1402,6 +1689,8 @@ export const startDaemon = (
               return Effect.runPromise(projectApi.lookup(requestId));
             }
             if (request.method === "PUT" && clientRequest[2] === undefined) {
+              if (!isJson(request))
+                return problem(415, "json-required", "the request requires JSON");
               try {
                 return Effect.runPromise(projectApi.prepare(requestId, await requestJson(request)));
               } catch {
@@ -1412,162 +1701,8 @@ export const startDaemon = (
               return Effect.runPromise(projectApi.retry(requestId));
             }
           }
-          return problem(404, "not-found", "the requested API resource was not found");
-        }
-
-        if (request.method !== "GET" && request.method !== "HEAD") {
-          return problem(405, "method-not-allowed", "static Console content is read-only");
-        }
-        return consoleAsset(release.assets, url.pathname);
-      },
-    });
-    const consoleOrigin = `http://127.0.0.1:${consoleServer.port}`;
-    const endpoint: DaemonEndpoint = {
-      formatVersion: 1,
-      consoleOrigin,
-      dataIdentity,
-      instanceId,
-      socketPath,
-      ready: true,
-    };
-    socketServer = Bun.serve({
-      unix: socketPath,
-      async fetch(request) {
-        const url = new URL(request.url);
-        if (request.method === "GET" && url.pathname === "/ready") {
-          return Response.json(endpoint);
-        }
-        if (request.method === "POST" && url.pathname === "/ui-grants") {
-          const grant = authority.issue(consoleOrigin);
-          return noStoreJson({
-            expiresAt: new Date(grant.expiresAt).toISOString(),
-            launchUrl: `${consoleOrigin}/daemon#grant=${encodeURIComponent(grant.secret)}`,
-          });
-        }
-        const revision = await revisionResponse(request, url, true);
-        if (revision !== undefined) return revision;
-        const configuration = await configurationResponse(request, url, true);
-        if (configuration !== undefined) return configuration;
-        const upgrade = await upgradeResponse(request, url);
-        if (upgrade !== undefined) return upgrade;
-        if (request.method === "GET" && url.pathname === "/api/v1/projects") {
-          return Effect.runPromise(projectApi.snapshot());
-        }
-        if (request.method === "GET" && url.pathname === "/api/v1/workflows") {
-          return Effect.runPromise(projectApi.workflowSnapshot());
-        }
-        if (request.method === "GET" && url.pathname === "/api/v1/runs") {
-          return noStoreJson(await Effect.runPromise(runApi.snapshot()));
-        }
-        if (request.method === "GET" && url.pathname === "/api/v1/askings") {
-          return gateSnapshot();
-        }
-        if (request.method === "POST" && url.pathname === "/api/v1/gate-answers") {
-          if (!isJson(request)) return problem(415, "json-required", "Gate answer requires JSON");
-          return answerGate(request, true);
-        }
-        const cancelOneRun = url.pathname.match(
-          /^\/api\/v1\/runs\/([A-Za-z0-9_-]+)\/actions\/cancel$/,
-        );
-        if (request.method === "POST" && cancelOneRun !== null) {
-          if (!isJson(request)) return problem(415, "json-required", "Cancel requires JSON");
-          return cancelRun(request, cancelOneRun[1] ?? "invalid");
-        }
-        const changeProjectLocation = url.pathname.match(
-          /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/actions\/(relocate|archive|restore)$/,
-        );
-        if (request.method === "POST" && changeProjectLocation !== null) {
-          if (!isJson(request))
-            return problem(415, "json-required", "Project location change requires JSON");
-          return Effect.runPromise(
-            projectApi.locationChange(
-              changeProjectLocation[1] ?? "invalid",
-              changeProjectLocation[2] as "relocate" | "archive" | "restore",
-              await requestJson(request),
-            ),
-          );
-        }
-        const retryOneUncertainAction = url.pathname.match(
-          /^\/api\/v1\/runs\/([A-Za-z0-9_-]+)\/actions\/retry-uncertain$/,
-        );
-        if (request.method === "POST" && retryOneUncertainAction !== null) {
-          if (!isJson(request))
-            return problem(415, "json-required", "Uncertain action retry requires JSON");
-          return retryUncertainAction(request, retryOneUncertainAction[1] ?? "invalid");
-        }
-        const repairOneProject = url.pathname.match(
-          /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/actions\/repair$/,
-        );
-        if (request.method === "POST" && repairOneProject !== null) {
-          if (!isJson(request)) return problem(415, "json-required", "Repair requires JSON");
-          return repairProjectRunner(repairOneProject[1] ?? "invalid");
-        }
-        const projectAskings = url.pathname.match(
-          /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/askings$/,
-        );
-        if (request.method === "GET" && projectAskings !== null) {
-          return gateSnapshot(projectAskings[1]);
-        }
-        const oneRun = url.pathname.match(/^\/api\/v1\/runs\/([A-Za-z0-9_-]+)$/);
-        if (request.method === "GET" && oneRun !== null) {
-          const run = await Effect.runPromise(runApi.run(oneRun[1] ?? "invalid"));
-          return run === undefined
-            ? problem(404, "run-not-found", "the selected Run was not found")
-            : noStoreJson(run);
-        }
-        const projectRuns = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/runs$/);
-        if (request.method === "GET" && projectRuns !== null) {
-          return noStoreJson(await Effect.runPromise(runApi.snapshot(projectRuns[1])));
-        }
-        const workflowStart = url.pathname.match(
-          /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/workflows\/([^/]+)\/actions\/start$/,
-        );
-        if (request.method === "POST" && workflowStart !== null) {
-          if (!isJson(request)) return problem(415, "json-required", "Start requires JSON");
-          return startRun(
-            request,
-            workflowStart[1] ?? "invalid",
-            decodeURIComponent(workflowStart[2] ?? "invalid"),
-          );
-        }
-        const workflowStop = url.pathname.match(
-          /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/workflows\/([^/]+)\/actions\/stop$/,
-        );
-        if (request.method === "POST" && workflowStop !== null) {
-          if (!isJson(request)) return problem(415, "json-required", "Stop requires JSON");
-          return stopWorkflow(
-            request,
-            workflowStop[1] ?? "invalid",
-            decodeURIComponent(workflowStop[2] ?? "invalid"),
-          );
-        }
-        const projectWorkflows = url.pathname.match(
-          /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/workflows$/,
-        );
-        if (request.method === "GET" && projectWorkflows !== null) {
-          return Effect.runPromise(projectApi.workflowSnapshot(projectWorkflows[1]));
-        }
-        const clientRequest = url.pathname.match(
-          /^\/api\/v1\/client-requests\/([A-Za-z0-9_-]+)(\/retry)?$/,
-        );
-        if (clientRequest !== null) {
-          const requestId = clientRequest[1] ?? "invalid";
-          if (request.method === "GET" && clientRequest[2] === undefined) {
-            return Effect.runPromise(projectApi.lookup(requestId));
-          }
-          if (request.method === "PUT" && clientRequest[2] === undefined) {
-            if (!isJson(request)) return problem(415, "json-required", "the request requires JSON");
-            try {
-              return Effect.runPromise(projectApi.prepare(requestId, await requestJson(request)));
-            } catch {
-              return problem(400, "invalid-json", "the mutation body is invalid");
-            }
-          }
-          if (request.method === "POST" && clientRequest[2] === "/retry") {
-            return Effect.runPromise(projectApi.retry(requestId));
-          }
-        }
-        return new Response("not found", { status: 404 });
+          return new Response("not found", { status: 404 });
+        });
       },
     });
     chmodSync(socketPath, 0o600);
@@ -1575,6 +1710,7 @@ export const startDaemon = (
     lifecycleServer = startLifecycleControlServer({
       socketPath: lifecycleSocketPath,
       control: lifecycleControl,
+      upgradeControl,
       journal: new FileLifecycleJournalRepository(join(paths.dataRoot, "lifecycle")),
     });
 
@@ -1587,8 +1723,8 @@ export const startDaemon = (
       if (stopping !== undefined) return stopping;
       stopping = Promise.resolve().then(async () => {
         refreshCoordinatorStopped = true;
-        clearInterval(refreshInventoryTimer);
-        clearInterval(gateDeadlineTimer);
+        if (refreshInventoryTimer !== undefined) clearInterval(refreshInventoryTimer);
+        if (gateDeadlineTimer !== undefined) clearInterval(gateDeadlineTimer);
         if (retentionCollectionTimer !== undefined) clearInterval(retentionCollectionTimer);
         socketServer?.stop(true);
         consoleServer?.stop(true);
@@ -1620,6 +1756,7 @@ export const startDaemon = (
     return {
       endpoint,
       lifecycleControl,
+      upgradeControl,
       ready,
       stopped: Effect.tryPromise({ try: () => stopped, catch: surfaceFailure }),
       stop: Effect.tryPromise({ try: stopPromise, catch: surfaceFailure }),
