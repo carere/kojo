@@ -19,6 +19,7 @@ describe("the managed Kojo systemd user service", () => {
 
     expect(document).toContain("Type=exec");
     expect(document).toContain(`ExecStart="${paths.managedLauncher}"`);
+    expect(document).toContain(`WorkingDirectory=${paths.installationRoot}`);
     expect(document).toContain('Environment="PATH=/usr/local/bin:/usr/bin:/bin"');
     expect(document).toContain("RuntimeDirectoryMode=0700");
     expect(document).toContain("StateDirectoryMode=0700");
@@ -31,5 +32,17 @@ describe("the managed Kojo systemd user service", () => {
     expect(document).toContain("StartLimitIntervalSec=30s");
     expect(document).toContain("StartLimitBurst=5");
     expect(document).not.toContain("KOJO_AGENT_SPEND");
+  });
+
+  it("uses systemd path escapes without hiding the leading absolute-path marker", () => {
+    const document = systemdUnitDocument({
+      ...paths,
+      installationRoot: "/home/example/Kojo Factory/%ready\\release",
+    });
+
+    expect(document).toContain(
+      "WorkingDirectory=/home/example/Kojo\\x20Factory/%%ready\\x5crelease",
+    );
+    expect(document).not.toContain('WorkingDirectory="');
   });
 });
