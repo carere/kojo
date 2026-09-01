@@ -100,6 +100,9 @@ const operationOf = (value: unknown): LifecycleOperation => {
     (candidate.forceAuthorizationId !== undefined &&
       (typeof candidate.forceAuthorizationId !== "string" ||
         !validId.test(candidate.forceAuthorizationId))) ||
+    (candidate.purgeSafetyEvidenceId !== undefined &&
+      (typeof candidate.purgeSafetyEvidenceId !== "string" ||
+        !validId.test(candidate.purgeSafetyEvidenceId))) ||
     (candidate.outcome !== undefined &&
       candidate.outcome !== "succeeded" &&
       candidate.outcome !== "repair-required") ||

@@ -1,3 +1,6 @@
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   type SystemdCommand,
@@ -120,5 +123,38 @@ describe("the systemd user service adapter", () => {
     expect(() => service.start("/ignored/kojo-test.service")).toThrow(
       "Log in through a systemd user session",
     );
+  });
+
+  it("removes native registration without changing Linux linger", () => {
+    const root = mkdtempSync(join(tmpdir(), "kojo-systemd-remove-"));
+    chmodSync(root, 0o700);
+    const definition = join(root, "kojo.service");
+    writeFileSync(definition, "service\n", { mode: 0o600 });
+    const calls: Array<ReadonlyArray<string>> = [];
+    const loginCalls: Array<ReadonlyArray<string>> = [];
+    const service = systemdUserService({
+      unit: "kojo-test.service",
+      uid: 1200,
+      systemctl: (arguments_) => {
+        calls.push(arguments_);
+        return result();
+      },
+      loginctl: (arguments_) => {
+        loginCalls.push(arguments_);
+        return result("yes\n");
+      },
+    });
+    try {
+      service.removeRegistration?.(definition);
+
+      expect(existsSync(definition)).toBe(false);
+      expect(calls.filter((call) => !call.includes("show-environment"))).toEqual([
+        ["--user", "disable", "kojo-test.service"],
+        ["--user", "daemon-reload"],
+      ]);
+      expect(loginCalls).toEqual([]);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
   });
 });

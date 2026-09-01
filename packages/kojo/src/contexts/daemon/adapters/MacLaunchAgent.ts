@@ -1,7 +1,9 @@
 import { spawnSync } from "node:child_process";
+import { existsSync, unlinkSync } from "node:fs";
 import { LifecycleError } from "../models/LifecycleError.ts";
 import type { NativeService, NativeServiceObservation } from "../ports/NativeService.ts";
 import { launchAgentDocument } from "../services/launchAgentDocument.ts";
+import { assertPrivateNode } from "../services/secureHostPath.ts";
 
 interface CommandResult {
   readonly exitCode: number;
@@ -111,6 +113,15 @@ export const macLaunchAgent = (
       run("disable automatic start", ["disable", target]);
       if (stopNow && inspect().manager === "loaded") {
         run("stop the disabled LaunchAgent", ["bootout", target]);
+      }
+    },
+    removeRegistration: (launchAgent) => {
+      const current = inspect();
+      if (current.manager === "loaded") run("stop the LaunchAgent", ["bootout", target]);
+      run("disable automatic start", ["disable", target]);
+      if (existsSync(launchAgent)) {
+        assertPrivateNode(launchAgent, "file");
+        unlinkSync(launchAgent);
       }
     },
     keepRunningAfterLogout: () => {

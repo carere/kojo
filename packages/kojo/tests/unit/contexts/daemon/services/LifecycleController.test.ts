@@ -19,7 +19,9 @@ const owner = (daemonInstanceId: string) => ({
   recordedAt: "2026-09-01T10:00:00.000Z",
 });
 
-const request = (kind: "stop" | "restart" | "enable" | "disable" | "disable-now" = "stop") => ({
+const request = (
+  kind: "stop" | "restart" | "enable" | "disable" | "disable-now" | "remove" = "stop",
+) => ({
   operationId: `operation-${kind}`,
   dataIdentity: "data-1",
   originalRequestHash: "a".repeat(64),
@@ -53,6 +55,7 @@ const fixture = (progresses: Array<LifecycleDrainProgress>) => {
     },
     enable: () => events.push("native:enable"),
     disable: () => events.push("native:disable"),
+    removeRegistration: () => events.push("native:remove-registration"),
     keepRunningAfterLogout: () => {},
   };
   let progressIndex = 0;
@@ -68,6 +71,32 @@ const fixture = (progresses: Array<LifecycleDrainProgress>) => {
         progressIndex += 1;
         return progress as LifecycleDrainProgress;
       }),
+    sealPurgeSafety: (operationId) => {
+      events.push("daemon:seal-purge-safety");
+      return Effect.succeed({
+        formatVersion: 1,
+        evidenceId: "evidence-1",
+        operationId,
+        dataIdentity: "data-1",
+        stateVersion: "state-1",
+        correctnessFingerprint: "d".repeat(64),
+        correctness: {
+          projects: 0,
+          runs: 0,
+          clientRequests: 0,
+          askings: 0,
+          artifacts: 0,
+          recordsByTable: {},
+        },
+        resourceRisks: [],
+        ownedScope: [],
+        owner: owner("daemon-old"),
+        ownerProcessState: { daemon: "sole-owner-finalizing", runners: "stopped" },
+        issuedAt: "2026-09-01T10:00:00.000Z",
+        expiresAt: "2026-09-01T10:10:00.000Z",
+        seal: "signed",
+      });
+    },
     prepareHandoff: () => {
       events.push("daemon:handoff");
       return Effect.succeed({ digest: "b".repeat(64), owner: owner("daemon-old") });
@@ -96,6 +125,7 @@ const fixture = (progresses: Array<LifecycleDrainProgress>) => {
       nativeService: native,
       serviceDefinition: "/managed/service",
       pollIntervalMillis: 1,
+      removeManagedInstallation: () => events.push("managed:remove-installation"),
     }),
   };
 };
@@ -307,5 +337,133 @@ describe("the Daemon lifecycle controller", () => {
 
     expect(enabled.events).toEqual(["native:enable"]);
     expect(disabled.events).toEqual(["native:disable"]);
+  });
+
+  it("seals final Daemon state, then removes registration and installation without purge", async () => {
+    const drained = {
+      held: true as const,
+      executingRunIds: [],
+      observedAt: "2026-09-01T10:00:01.000Z",
+    };
+    const test = fixture([drained]);
+
+    const status = await Effect.runPromise(test.controller.request(request("remove")));
+
+    expect(status.outcome).toBe("succeeded");
+    expect(status.operation.purgeSafetyEvidenceId).toBe("evidence-1");
+    expect(test.events).toEqual([
+      "daemon:hold",
+      "daemon:handoff",
+      "daemon:accept-controller",
+      `daemon:cleanup:${DAEMON_CLEANUP_MILLIS}:false:planned`,
+      "daemon:seal-purge-safety",
+      "native:stop",
+      "native:remove-registration",
+      "managed:remove-installation",
+    ]);
+  });
+
+  it("preserves a stopped installation until restricted recovery provides fresh safety", async () => {
+    const drained = {
+      held: true as const,
+      executingRunIds: [],
+      observedAt: "2026-09-01T10:00:01.000Z",
+    };
+    const test = fixture([drained]);
+    test.native.stop();
+    let recovered = false;
+    const controller = new LifecycleController({
+      journal: test.journal,
+      control: test.control,
+      nativeService: test.native,
+      serviceDefinition: "/managed/service",
+      pollIntervalMillis: 1,
+      assertRemovalSafetyEvidence: () => {
+        if (!recovered) {
+          throw new LifecycleError(
+            "PURGE_RESTRICTED_RECOVERY_REQUIRED",
+            "restricted recovery is required",
+          );
+        }
+        return "recovered-evidence";
+      },
+      removeManagedInstallation: () => test.events.push("managed:remove-installation"),
+    });
+
+    await expect(Effect.runPromise(controller.request(request("remove")))).rejects.toThrow(
+      "restricted recovery is required",
+    );
+    expect(test.journal.current()?.stage).toBe("prepared");
+    expect(test.events).not.toContain("native:remove-registration");
+    expect(test.events).not.toContain("managed:remove-installation");
+
+    recovered = true;
+    const resumed = await Effect.runPromise(controller.resume(request("remove").operationId));
+    expect(resumed.outcome).toBe("succeeded");
+    expect(resumed.operation.purgeSafetyEvidenceId).toBe("recovered-evidence");
+    expect(test.events).toContain("native:remove-registration");
+    expect(test.events).toContain("managed:remove-installation");
+  });
+
+  it("resumes interrupted removal after native registration was removed", async () => {
+    const drained = {
+      held: true as const,
+      executingRunIds: [],
+      observedAt: "2026-09-01T10:00:01.000Z",
+    };
+    const test = fixture([drained]);
+    let failed = true;
+    const controller = new LifecycleController({
+      journal: test.journal,
+      control: test.control,
+      nativeService: test.native,
+      serviceDefinition: "/managed/service",
+      pollIntervalMillis: 1,
+      removeManagedInstallation: () => {
+        if (failed) {
+          failed = false;
+          throw new Error("interrupted installation cleanup");
+        }
+        test.events.push("managed:remove-installation");
+      },
+    });
+
+    await expect(Effect.runPromise(controller.request(request("remove")))).rejects.toThrow(
+      "interrupted installation cleanup",
+    );
+    expect(test.journal.current()?.stage).toBe("service-unregistered");
+
+    const resumed = await Effect.runPromise(controller.resume(request("remove").operationId));
+    expect(resumed.outcome).toBe("succeeded");
+    expect(test.events.filter((event) => event === "native:remove-registration")).toHaveLength(1);
+  });
+
+  it("preserves managed content when a manual start wins the stop-to-remove race", async () => {
+    const drained = {
+      held: true as const,
+      executingRunIds: [],
+      observedAt: "2026-09-01T10:00:01.000Z",
+    };
+    const test = fixture([drained]);
+    const controller = new LifecycleController({
+      journal: test.journal,
+      control: test.control,
+      nativeService: test.native,
+      serviceDefinition: "/managed/service",
+      pollIntervalMillis: 1,
+      acquireRemovalGate: () => {
+        test.native.start("/managed/service");
+        return { release: () => undefined };
+      },
+      removeManagedInstallation: () => test.events.push("managed:remove-installation"),
+    });
+
+    await expect(Effect.runPromise(controller.request(request("remove")))).rejects.toThrow(
+      "start won the stop-to-remove race",
+    );
+
+    expect(test.journal.current()?.stage).toBe("process-stopped");
+    expect(test.events).not.toContain("native:remove-registration");
+    expect(test.events).not.toContain("managed:remove-installation");
   });
 });

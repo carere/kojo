@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { join } from "node:path";
 import { Effect } from "effect";
-import { startDaemon } from "../contexts/daemon/adapters/DaemonOwner.ts";
+import { recoverPurgeSafety, startDaemon } from "../contexts/daemon/adapters/DaemonOwner.ts";
 import { ManagedDaemonSupervision } from "../contexts/daemon/adapters/ManagedDaemonSupervision.ts";
 import { hostPaths } from "../contexts/daemon/services/hostPaths.ts";
 
@@ -25,6 +25,11 @@ export const runDaemon = async (): Promise<void> => {
       : {},
   );
   const managedAttemptId = process.env.KOJO_DAEMON_ATTEMPT_ID;
+  const purgeRecoveryOperation = process.env.KOJO_PURGE_SAFETY_RECOVERY_OPERATION;
+  if (purgeRecoveryOperation !== undefined) {
+    await recoverPurgeSafety(paths, purgeRecoveryOperation);
+    return;
+  }
   const supervision =
     managedAttemptId === undefined ? undefined : new ManagedDaemonSupervision(paths.dataRoot);
   const daemon = startDaemon(paths, {

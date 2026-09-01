@@ -2,15 +2,18 @@ import {
   chmodSync,
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
+import { removeManagedInstallation } from "../../../../src/contexts/daemon/adapters/ManagedInstallation.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
 import type {
   NativeService,
@@ -103,7 +106,6 @@ describe("the managed Daemon installation", () => {
     expect(readFileSync(join(release, "console", "index.html"), "utf8")).toContain("<html");
     for (const privateDirectory of [
       paths.installationRoot,
-      paths.dataRoot,
       paths.configurationRoot,
       paths.cacheRoot,
       paths.runtimeRoot,
@@ -157,5 +159,53 @@ describe("the managed Daemon installation", () => {
       "unsupported Host",
     );
     expect(existsSync(installationRoot)).toBe(false);
+  });
+
+  it("removes only managed installation nodes and preserves Daemon data and configuration", () => {
+    const root = mkdtempSync(join(tmpdir(), "kojo-managed-remove-"));
+    roots.push(root);
+    chmodSync(root, 0o700);
+    const installationRoot = join(root, "installation");
+    const paths: DaemonPaths = {
+      installationRoot,
+      dataRoot: join(installationRoot, "data"),
+      configurationRoot: join(installationRoot, "config"),
+      cacheRoot: join(root, "cache"),
+      runtimeRoot: join(root, "runtime"),
+      serviceDefinition: join(root, "LaunchAgents", "dev.kojo.test.plist"),
+      managedCli: join(installationRoot, "bin", "kojo"),
+      managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
+    };
+    for (const directory of [
+      join(installationRoot, "bin"),
+      join(installationRoot, "releases", "release-1"),
+      paths.dataRoot,
+      paths.configurationRoot,
+      paths.cacheRoot,
+    ]) {
+      mkdirSync(directory, { mode: 0o700, recursive: true });
+      chmodSync(directory, 0o700);
+    }
+    for (const [path, content, mode] of [
+      [paths.managedCli, "cli\n", 0o700],
+      [paths.managedLauncher, "launcher\n", 0o700],
+      [join(installationRoot, "active-release"), "release-1\n", 0o600],
+      [join(installationRoot, "releases", "release-1", "release.json"), "{}\n", 0o600],
+      [join(paths.dataRoot, "kojo.db"), "correctness\n", 0o600],
+      [join(paths.configurationRoot, "credential"), "secret\n", 0o600],
+      [join(paths.cacheRoot, "observation"), "cache\n", 0o600],
+    ] as const) {
+      writeFileSync(path, content, { mode });
+    }
+
+    removeManagedInstallation(paths);
+
+    expect(existsSync(paths.managedCli)).toBe(false);
+    expect(existsSync(paths.managedLauncher)).toBe(false);
+    expect(existsSync(join(installationRoot, "active-release"))).toBe(false);
+    expect(existsSync(join(installationRoot, "releases"))).toBe(false);
+    expect(readFileSync(join(paths.dataRoot, "kojo.db"), "utf8")).toBe("correctness\n");
+    expect(readFileSync(join(paths.configurationRoot, "credential"), "utf8")).toBe("secret\n");
+    expect(readFileSync(join(paths.cacheRoot, "observation"), "utf8")).toBe("cache\n");
   });
 });

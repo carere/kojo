@@ -27,6 +27,7 @@ export interface AdvanceLifecycleOperation {
       | "handoffDigest"
       | "controllerAcceptedAt"
       | "forceAuthorizationId"
+      | "purgeSafetyEvidenceId"
       | "outcome"
       | "detail"
     >

@@ -55,6 +55,7 @@ import {
   removeOwnedPlainFile,
   removeOwnedSocket,
 } from "../services/secureHostPath.ts";
+import { acquireDaemonStartGate } from "./DaemonDataPurger.ts";
 import { FileLifecycleJournalRepository } from "./FileLifecycleJournalRepository.ts";
 import { HostClientRequestJournal } from "./HostClientRequestJournal.ts";
 import {
@@ -62,8 +63,10 @@ import {
   startLifecycleControlServer,
 } from "./LifecycleControlTransport.ts";
 import { readCheckedManagedRelease } from "./ManagedInstallation.ts";
+import { ensurePurgeRecoveryCapsule, readPurgeRecoveryCapsule } from "./PurgeRecoveryCapsule.ts";
 import { SqliteConfigurationRepository } from "./SqliteConfigurationRepository.ts";
 import { SqliteDaemonLifecycleReceiptRepository } from "./SqliteDaemonLifecycleReceiptRepository.ts";
+import { SqlitePurgeSafetyRepository } from "./SqlitePurgeSafetyRepository.ts";
 import { SqliteRetentionRepository } from "./SqliteRetentionRepository.ts";
 import { SqliteUpgradePreflightRepository } from "./SqliteUpgradePreflightRepository.ts";
 
@@ -143,6 +146,89 @@ export interface StartDaemonOptions {
     }) => void;
   };
 }
+
+/**
+ * Run only the sole-owner purge safety seal. This surface starts no Run restoration,
+ * background work, ordinary transport, or Project Runner.
+ */
+export const recoverPurgeSafety = async (
+  paths: DaemonPaths,
+  operationId: string,
+  now: () => number = Date.now,
+): Promise<void> => {
+  if (!/^[A-Za-z0-9_-]+$/.test(operationId)) {
+    throw new LifecycleError(
+      "PURGE_RECOVERY_OPERATION_INVALID",
+      "the restricted purge recovery operation identity is invalid",
+    );
+  }
+  assertPrivateNode(paths.dataRoot, "directory");
+  const gate = acquireDaemonStartGate(paths);
+  let lock: LockHandle | undefined;
+  let database: Database | undefined;
+  try {
+    lock = acquireLock(join(paths.dataRoot, "daemon.lock"));
+    const databasePath = join(paths.dataRoot, "kojo.db");
+    assertPrivateNode(databasePath, "file");
+    database = new Database(databasePath, { create: false, strict: true });
+    database.run("PRAGMA foreign_keys = ON");
+    database.run("PRAGMA synchronous = FULL");
+    const dataIdentity = database
+      .query<{ readonly value: string }, []>(
+        "SELECT value FROM daemon_metadata WHERE name = 'data_identity'",
+      )
+      .get()?.value;
+    if (dataIdentity === undefined || dataIdentity.length === 0) {
+      throw new LifecycleError(
+        "DAEMON_DATA_IDENTITY_DAMAGED",
+        "the retained database has no Daemon data identity",
+      );
+    }
+    try {
+      const source = activeConsoleRelease(paths);
+      readCheckedManagedRelease(paths, source.releaseId);
+      ensurePurgeRecoveryCapsule(paths, dataIdentity, source.releaseId);
+    } catch (cause) {
+      try {
+        readPurgeRecoveryCapsule(paths, dataIdentity);
+      } catch {
+        throw cause;
+      }
+    }
+    const identityPath = join(paths.dataRoot, "lifecycle", "data-identity");
+    assertPrivateNode(identityPath, "file");
+    if (readFileSync(identityPath, "utf8").trim() !== dataIdentity) {
+      throw new LifecycleError(
+        "DAEMON_DATA_IDENTITY_CONFLICT",
+        "the retained offline identity does not match the sole-owner database",
+      );
+    }
+    const issuedAt = new Date(now()).toISOString();
+    await Effect.runPromise(
+      new SqlitePurgeSafetyRepository(
+        database,
+        dataIdentity,
+        paths.dataRoot,
+        paths.configurationRoot,
+      ).seal(
+        operationId,
+        {
+          daemonInstanceId: `purge-recovery-${crypto.randomUUID()}`,
+          runnerInstanceIds: [],
+          recordedAt: issuedAt,
+        },
+        issuedAt,
+        new Date(now() + 10 * 60_000).toISOString(),
+      ),
+    );
+    database.close(false);
+    database = undefined;
+  } finally {
+    database?.close(false);
+    lock?.unlock();
+    gate.release();
+  }
+};
 
 const retainedDirectories = [
   "revisions",
@@ -243,10 +329,17 @@ export const startDaemon = (
   const sourceManifest = readFileSync(sourceManifestPath, "utf8");
   const now = options.now ?? Date.now;
   const startedAt = new Date(now()).toISOString();
-  ensurePrivateDirectory(paths.dataRoot);
-  for (const directory of retainedDirectories)
-    ensurePrivateDirectory(join(paths.dataRoot, directory));
-  const lock = acquireLock(join(paths.dataRoot, "daemon.lock"));
+  const startGate = acquireDaemonStartGate(paths);
+  let lock: LockHandle;
+  try {
+    ensurePrivateDirectory(paths.dataRoot);
+    for (const directory of retainedDirectories)
+      ensurePrivateDirectory(join(paths.dataRoot, directory));
+    lock = acquireLock(join(paths.dataRoot, "daemon.lock"));
+  } catch (cause) {
+    startGate.release();
+    throw cause;
+  }
   const databasePath = join(paths.dataRoot, "kojo.db");
   const runtimeEndpoint = join(paths.runtimeRoot, "endpoint.json");
   const socketPath = join(paths.runtimeRoot, "daemon.sock");
@@ -451,6 +544,14 @@ export const startDaemon = (
           ),
       }),
       cleanupMillis: () => configurationRepository.daemonConfiguration().daemon.cleanupMs,
+      purgeSafety: new SqlitePurgeSafetyRepository(
+        database,
+        dataIdentity,
+        paths.dataRoot,
+        paths.configurationRoot,
+        () => ensurePurgeRecoveryCapsule(paths, dataIdentity, release.releaseId),
+      ),
+      now,
     });
     const projectApi = new ProjectApi({
       dataIdentity,
@@ -1503,6 +1604,7 @@ export const startDaemon = (
           removeOwnedSocket(socketPath);
         }
         lock.unlock();
+        startGate.release();
         resolveStopped?.();
       });
       return stopping;
@@ -1529,6 +1631,7 @@ export const startDaemon = (
     if (retentionCollectionTimer !== undefined) clearInterval(retentionCollectionTimer);
     database?.close(false);
     lock.unlock();
+    startGate.release();
     if (cause instanceof LifecycleError) throw cause;
     throw new LifecycleError("DAEMON_START_FAILED", "the Daemon could not become ready", cause);
   }

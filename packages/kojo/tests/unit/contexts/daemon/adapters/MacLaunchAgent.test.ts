@@ -1,3 +1,6 @@
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   type Launchctl,
@@ -72,5 +75,34 @@ describe("the macOS LaunchAgent adapter", () => {
       ["bootstrap", "gui/501", "/private/test.plist"],
       ["disable", "gui/501/dev.kojo.test"],
     ]);
+  });
+
+  it("unloads, disables, and removes one private LaunchAgent registration", () => {
+    const root = mkdtempSync(join(tmpdir(), "kojo-launch-agent-remove-"));
+    chmodSync(root, 0o700);
+    const definition = join(root, "dev.kojo.test.plist");
+    writeFileSync(definition, "plist\n", { mode: 0o600 });
+    const calls: Array<ReadonlyArray<string>> = [];
+    const launchctl: Launchctl = (arguments_) => {
+      calls.push(arguments_);
+      if (arguments_[0] === "print") return result("state = running");
+      if (arguments_[0] === "print-disabled") return result("{}");
+      return result();
+    };
+    try {
+      macLaunchAgent({ label: "dev.kojo.test", uid: 501, launchctl }).removeRegistration?.(
+        definition,
+      );
+
+      expect(existsSync(definition)).toBe(false);
+      expect(calls).toEqual([
+        ["print", "gui/501/dev.kojo.test"],
+        ["print-disabled", "gui/501"],
+        ["bootout", "gui/501/dev.kojo.test"],
+        ["disable", "gui/501/dev.kojo.test"],
+      ]);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
   });
 });

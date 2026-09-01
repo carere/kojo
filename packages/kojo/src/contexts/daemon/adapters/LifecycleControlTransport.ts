@@ -6,6 +6,7 @@ import type {
   LifecycleDrainProgress,
   LifecycleRecordedOwner,
 } from "../models/LifecycleOperation.ts";
+import type { PurgeSafetyEvidence } from "../models/Purge.ts";
 import type { DaemonLifecycleControl, LifecycleHandoff } from "../ports/DaemonLifecycleControl.ts";
 import type { LifecycleJournalRepository } from "../ports/LifecycleJournalRepository.ts";
 import { removeOwnedSocket } from "../services/secureHostPath.ts";
@@ -14,6 +15,7 @@ type ControlAction =
   | "inspect-preflight"
   | "begin-drain"
   | "read-drain"
+  | "seal-purge-safety"
   | "prepare-handoff"
   | "confirm-controller-ready"
   | "stop-owned-processes"
@@ -98,6 +100,32 @@ const drainOf = (value: unknown): LifecycleDrainProgress => {
   return drain as unknown as LifecycleDrainProgress;
 };
 
+const purgeEvidenceOf = (value: unknown): PurgeSafetyEvidence => {
+  const evidence = record(value);
+  if (
+    evidence === undefined ||
+    evidence.formatVersion !== 1 ||
+    typeof evidence.evidenceId !== "string" ||
+    !/^[A-Za-z0-9_-]+$/.test(evidence.evidenceId) ||
+    typeof evidence.operationId !== "string" ||
+    typeof evidence.dataIdentity !== "string" ||
+    typeof evidence.stateVersion !== "string" ||
+    typeof evidence.correctnessFingerprint !== "string" ||
+    !Array.isArray(evidence.resourceRisks) ||
+    !Array.isArray(evidence.ownedScope) ||
+    typeof evidence.issuedAt !== "string" ||
+    typeof evidence.expiresAt !== "string" ||
+    typeof evidence.seal !== "string" ||
+    !/^[a-f0-9]{64}$/.test(evidence.seal)
+  ) {
+    throw new LifecycleError(
+      "LIFECYCLE_CONTROL_UNAVAILABLE",
+      "the lifecycle purge-safety response is invalid",
+    );
+  }
+  return value as PurgeSafetyEvidence;
+};
+
 const controlResponseValue = (value: unknown, action: ControlAction): unknown => {
   const response = record(value);
   if (response === undefined || response.formatVersion !== 1 || typeof response.ok !== "boolean") {
@@ -135,6 +163,8 @@ const controlResponseValue = (value: unknown, action: ControlAction): unknown =>
     case "begin-drain":
     case "read-drain":
       return drainOf(response.value);
+    case "seal-purge-safety":
+      return purgeEvidenceOf(response.value);
     case "prepare-handoff": {
       const handoff = record(response.value);
       if (
@@ -170,6 +200,7 @@ const requestOf = (value: unknown): ControlRequest => {
     "inspect-preflight",
     "begin-drain",
     "read-drain",
+    "seal-purge-safety",
     "prepare-handoff",
     "confirm-controller-ready",
     "stop-owned-processes",
@@ -195,6 +226,7 @@ const requestOf = (value: unknown): ControlRequest => {
     "inspect-preflight": ["dataIdentity", "requestHash"],
     "begin-drain": ["dataIdentity", "requestHash"],
     "read-drain": [],
+    "seal-purge-safety": [],
     "prepare-handoff": [],
     "confirm-controller-ready": ["handoffDigest"],
     "stop-owned-processes": ["cleanupMillis", "replacementExpected", "forceAuthorizationId"],
@@ -317,6 +349,15 @@ export const startLifecycleControlServer = (options: {
             break;
           case "read-drain":
             value = await Effect.runPromise(options.control.readDrain(message.operationId));
+            break;
+          case "seal-purge-safety":
+            if (options.control.sealPurgeSafety === undefined) {
+              throw new LifecycleError(
+                "PURGE_SAFETY_UNAVAILABLE",
+                "the Daemon has no purge safety owner",
+              );
+            }
+            value = await Effect.runPromise(options.control.sealPurgeSafety(message.operationId));
             break;
           case "prepare-handoff":
             value = await Effect.runPromise(options.control.prepareHandoff(message.operationId));
@@ -453,6 +494,9 @@ export class SocketDaemonLifecycleControl implements DaemonLifecycleControl {
 
   readonly readDrain = (operationId: string) =>
     this.#call<LifecycleDrainProgress>(operationId, "read-drain");
+
+  readonly sealPurgeSafety = (operationId: string) =>
+    this.#call<PurgeSafetyEvidence>(operationId, "seal-purge-safety");
 
   readonly prepareHandoff = (operationId: string) =>
     this.#call<LifecycleHandoff>(operationId, "prepare-handoff");

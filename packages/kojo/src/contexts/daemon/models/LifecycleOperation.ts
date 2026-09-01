@@ -1,6 +1,14 @@
 import type { ManagerState, ProcessState } from "./DaemonStatus.ts";
 
-export type LifecycleOperationKind = "stop" | "restart" | "enable" | "disable" | "disable-now";
+export type LifecycleOperationKind =
+  | "stop"
+  | "restart"
+  | "enable"
+  | "disable"
+  | "disable-now"
+  | "remove"
+  | "purge"
+  | "purge-recovery";
 
 export type LifecycleStage =
   | "prepared"
@@ -12,6 +20,10 @@ export type LifecycleStage =
   | "cleanup-started"
   | "owned-processes-stopped"
   | "process-stopped"
+  | "service-unregistered"
+  | "installation-removed"
+  | "purge-authorized"
+  | "data-deletion-started"
   | "replacement-started"
   | "completed"
   | "repair-required";
@@ -64,6 +76,7 @@ export interface LifecycleOperation {
   readonly handoffDigest?: string;
   readonly controllerAcceptedAt?: string;
   readonly forceAuthorizationId?: string;
+  readonly purgeSafetyEvidenceId?: string;
   readonly outcome?: Exclude<LifecycleOutcome, "in-progress">;
   readonly detail?: string;
 }
@@ -74,6 +87,9 @@ export type LifecycleNextAction =
   | "complete-handoff"
   | "stop-native-service"
   | "start-replacement"
+  | "remove-service-registration"
+  | "remove-managed-installation"
+  | "delete-daemon-data"
   | "inspect-result"
   | "repair"
   | "none";
@@ -97,9 +113,13 @@ export const lifecycleStageOrder: Readonly<Record<LifecycleStage, number>> = {
   "cleanup-started": 6,
   "owned-processes-stopped": 7,
   "process-stopped": 8,
+  "service-unregistered": 9,
+  "installation-removed": 10,
+  "purge-authorized": 1,
+  "data-deletion-started": 2,
   "replacement-started": 9,
-  completed: 10,
-  "repair-required": 10,
+  completed: 11,
+  "repair-required": 11,
 };
 
 export const lifecycleOperationKinds: ReadonlyArray<LifecycleOperationKind> = [
@@ -108,6 +128,9 @@ export const lifecycleOperationKinds: ReadonlyArray<LifecycleOperationKind> = [
   "enable",
   "disable",
   "disable-now",
+  "remove",
+  "purge",
+  "purge-recovery",
 ];
 
 export const lifecycleStages: ReadonlyArray<LifecycleStage> = [
@@ -120,6 +143,10 @@ export const lifecycleStages: ReadonlyArray<LifecycleStage> = [
   "cleanup-started",
   "owned-processes-stopped",
   "process-stopped",
+  "service-unregistered",
+  "installation-removed",
+  "purge-authorized",
+  "data-deletion-started",
   "replacement-started",
   "completed",
   "repair-required",
