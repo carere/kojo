@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Effect, Layer } from "effect";
@@ -9,6 +10,12 @@ const inside = (root: string, target: string): boolean => {
   return child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child);
 };
 
+const selectedRetainedRoot = new AsyncLocalStorage<string>();
+
+/** Keep one exact Factory asset root across asynchronous authored Workflow work. */
+export const withRetainedFactoryRoot = <A>(root: string, run: () => Promise<A>): Promise<A> =>
+  selectedRetainedRoot.run(resolve(root), run);
+
 /** Map authored `.kojo` paths to the retained Factory root selected by the Daemon. */
 export const layer = (options?: {
   readonly authoredRoot?: string;
@@ -17,7 +24,10 @@ export const layer = (options?: {
   Layer.sync(FactoryAssetRepository, () => {
     const authoredRoot = resolve(options?.authoredRoot ?? join(process.cwd(), ".kojo"));
     const retainedRoot = resolve(
-      options?.retainedRoot ?? process.env.KOJO_FACTORY_ASSET_ROOT ?? authoredRoot,
+      options?.retainedRoot ??
+        selectedRetainedRoot.getStore() ??
+        process.env.KOJO_FACTORY_ASSET_ROOT ??
+        authoredRoot,
     );
     const selected = (authoredPath: string): string => {
       const absolute = resolve(authoredPath);

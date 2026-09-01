@@ -34,6 +34,7 @@ export interface WorkflowDocument {
   readonly sourceFault?: string;
   readonly remedy?: string;
   readonly currentRevisionId?: string;
+  readonly currentPackageGraphId?: string;
   readonly candidateRevisionId?: string;
   readonly trigger: TriggerObservation;
   readonly currentRuns: ReadonlyArray<CurrentWorkflowRun>;

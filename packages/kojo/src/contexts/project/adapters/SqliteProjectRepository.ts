@@ -34,6 +34,7 @@ interface WorkflowRow {
   readonly source_fault: string | null;
   readonly remedy: string | null;
   readonly current_revision_id: string | null;
+  readonly current_package_graph_id: string | null;
   readonly candidate_revision_id: string | null;
   readonly trigger_state: "not-declared" | "not-observed" | "polling" | "delayed" | "failed";
   readonly trigger_observed_at: string | null;
@@ -97,6 +98,9 @@ const workflowDocumentOf = (row: WorkflowRow): WorkflowDocument => ({
   ...(row.source_fault === null ? {} : { sourceFault: row.source_fault }),
   ...(row.remedy === null ? {} : { remedy: row.remedy }),
   ...(row.current_revision_id === null ? {} : { currentRevisionId: row.current_revision_id }),
+  ...(row.current_package_graph_id === null
+    ? {}
+    : { currentPackageGraphId: row.current_package_graph_id }),
   ...(row.candidate_revision_id === null ? {} : { candidateRevisionId: row.candidate_revision_id }),
   trigger: {
     state: row.trigger_state,
@@ -521,9 +525,11 @@ export class SqliteProjectRepository {
             `SELECT w.project_id, w.workflow_name, w.activity, w.availability, w.source,
                   w.source_fault, w.remedy, w.current_revision_id, w.candidate_revision_id,
                   w.trigger_state, w.trigger_observed_at, w.trigger_detail, w.refreshed_at,
+                  r.package_graph_id AS current_package_graph_id,
                   p.location AS label, p.project_state, p.factory_state, p.refresh_state
              FROM project_workflows w
              JOIN projects p ON p.project_id = w.project_id
+             LEFT JOIN workflow_revisions r ON r.revision_id = w.current_revision_id
             ORDER BY p.registered_at, w.workflow_name`,
           )
           .all();

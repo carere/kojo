@@ -45,6 +45,7 @@ export const runStatusLine = (run: RunDocument, json: boolean, details = false):
         `Workflow=${run.workflowName}`,
         `State=${run.state}`,
         `Revision=${run.revisionId}`,
+        `Graph=${run.packageGraphId}`,
         ...(run.queueReason === undefined ? [] : [`Queue=${run.queueReason}`]),
         ...(run.executionFault === undefined
           ? []

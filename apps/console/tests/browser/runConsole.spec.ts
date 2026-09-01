@@ -62,6 +62,7 @@ test("shows a Daemon Run and builds its initial Waterfall only from completed Ph
   await expect(page.locator('[data-run-header="run-no-trigger"]')).toBeVisible();
   await expect(page.locator('[data-stamp="project"]')).toContainText("project-browser-fixture");
   await expect(page.locator('[data-stamp="revision"]')).toContainText("cccccccccccc");
+  await expect(page.locator('[data-stamp="graph"]')).toContainText("dddddddddddd");
   await expect(page.locator('[data-stamp="execution"]')).toContainText("succeeded");
   await expect(page.locator("[data-waterfall]")).toBeVisible();
   await expect(page.locator("[data-phase]")).toHaveCount(2);
@@ -93,9 +94,11 @@ test("shows the exact pinned-content fault and repair remedy for a held Run", as
     });
   });
   await page.goto(launch());
+  await expect(page.getByText("Access active", { exact: true })).toBeVisible();
   await page.goto(`${origin}/runs/run-held-content`);
 
   await expect(page.getByText("held", { exact: true })).toBeVisible();
+  await expect(page.locator('[data-stamp="graph"]')).toContainText("ffffffffffff");
   await expect(page.locator('[data-stamp="execution"]')).toContainText("pinned-content");
   await expect(page.getByText("Pinned content fault: RETAINED_CONTENT_CORRUPT")).toBeVisible();
   await expect(

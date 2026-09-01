@@ -21,6 +21,8 @@ const executionRoot = fileURLToPath(new URL("../../../fixtures/runner", import.m
 const execute = async (
   request: ExecuteRegisteredRequest,
   counter: string,
+  registrations: ReadonlyArray<ExecuteRegisteredRequest> = [request],
+  dispose?: { readonly revisionId: string; readonly workflowName: string },
 ): Promise<ExecuteRegisteredResult> => {
   const channel = join(dirname(counter), `runner-${crypto.randomUUID()}.sock`);
   let accepted: (socket: Socket) => void = () => undefined;
@@ -90,28 +92,47 @@ const execute = async (
       },
     }),
   );
-  await Effect.runPromise(
-    writeRunnerFrame(socket, {
-      version: 1,
-      kind: "RegisterRevision",
-      requestId: "register_1",
-      daemonInstanceId: request.daemonInstanceId,
-      runnerInstanceId: request.runnerInstanceId,
-      body: {
-        registrationVersion: 1,
-        revisionId: request.revisionId,
-        packageGraphId: request.packageGraphId,
-        workflowName: request.workflowName,
-        retainedRoot: request.executionRoot,
-        entrySource: request.entrySource,
-        payload: request.payload as never,
-      },
-    }),
-  );
-  expect(await readFrame()).toMatchObject({
-    kind: "Ready",
-    body: { operationRequestId: "register_1", state: "committed" },
-  });
+  for (const [index, registration] of registrations.entries()) {
+    const requestId = `register_${index + 1}`;
+    await Effect.runPromise(
+      writeRunnerFrame(socket, {
+        version: 1,
+        kind: "RegisterRevision",
+        requestId,
+        daemonInstanceId: request.daemonInstanceId,
+        runnerInstanceId: request.runnerInstanceId,
+        body: {
+          registrationVersion: 1,
+          revisionId: registration.revisionId,
+          packageGraphId: registration.packageGraphId,
+          workflowName: registration.workflowName,
+          retainedRoot: registration.executionRoot,
+          entrySource: registration.entrySource,
+          payload: registration.payload as never,
+        },
+      }),
+    );
+    expect(await readFrame()).toMatchObject({
+      kind: "Ready",
+      body: { operationRequestId: requestId, state: "committed" },
+    });
+  }
+  if (dispose !== undefined) {
+    await Effect.runPromise(
+      writeRunnerFrame(socket, {
+        version: 1,
+        kind: "DisposeRevision",
+        requestId: "dispose_1",
+        daemonInstanceId: request.daemonInstanceId,
+        runnerInstanceId: request.runnerInstanceId,
+        body: dispose,
+      }),
+    );
+    expect(await readFrame()).toMatchObject({
+      kind: "Ready",
+      body: { operationRequestId: "dispose_1", state: "committed" },
+    });
+  }
   await Effect.runPromise(
     writeRunnerFrame(socket, {
       version: 1,
@@ -158,6 +179,49 @@ const execute = async (
 };
 
 describe("fresh Project Runner replay", () => {
+  it("routes same-name revisions exactly after it disposes one registration", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "kojo-runner-registration-"));
+    const counter = join(directory, "effects.txt");
+    writeFileSync(counter, "");
+    try {
+      const selected: ExecuteRegisteredRequest = {
+        registrationVersion: 1,
+        selectedProtocol: 1,
+        daemonInstanceId: "daemon-registration",
+        runnerInstanceId: "runner-registration",
+        projectId: "project-registration",
+        boundProjectId: "project-registration",
+        revisionId: "e".repeat(64),
+        packageGraphId: "f".repeat(64),
+        boundPackageGraphId: "f".repeat(64),
+        executionRoot,
+        workflowName: "example",
+        entrySource: "example-second.ts",
+        payload: null,
+        connectionSecret: "ef".repeat(32),
+        runId: "run-second-registration",
+        recordedResults: {},
+        deferredResults: {},
+        scheduledWakeups: {},
+      };
+      const first = {
+        ...selected,
+        revisionId: "d".repeat(64),
+        entrySource: "example.ts",
+        runId: "run-first-registration",
+      };
+      const result = await execute(selected, counter, [first, selected], {
+        revisionId: first.revisionId,
+        workflowName: first.workflowName,
+      });
+      expect(result.runId).toBe(selected.runId);
+      expect(result.idempotencyKey).toBe("second-revision");
+      expect(readFileSync(counter, "utf8")).toBe("second\n");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the Daemon Run ID and does not repeat a committed code Phase", async () => {
     const directory = mkdtempSync(join(tmpdir(), "kojo-runner-replay-"));
     const counter = join(directory, "effects.txt");

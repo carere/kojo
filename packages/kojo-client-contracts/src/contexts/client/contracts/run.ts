@@ -39,9 +39,19 @@ export interface RunDocument {
       | "RETAINED_CONTENT_MISSING"
       | "RETAINED_CONTENT_CORRUPT"
       | "RETAINED_HOST_INCOMPATIBLE"
+      | "RETAINED_BUN_INCOMPATIBLE"
+      | "RETAINED_EFFECT_INCOMPATIBLE"
       | "RETAINED_PROTOCOL_INCOMPATIBLE";
     readonly detail: string;
     readonly remedy: string;
+    readonly retry?: "after-repair" | "after-compatible-release";
+    readonly scope?: {
+      readonly projectId: string;
+      readonly workflowName: string;
+      readonly revisionId: string;
+      readonly packageGraphId: string;
+    };
+    readonly diagnostic?: string;
   };
   readonly admittedAt: string;
   readonly startedAt?: string;

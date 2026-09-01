@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
 } from "node:fs";
@@ -109,8 +110,16 @@ const packageSource = (
 
 const copyFile = (source: string, target: string, mode: number): void => {
   mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
-  cpSync(source, target, { errorOnExist: true });
-  chmodSync(target, mode);
+  if (!existsSync(target)) {
+    const staged = `${target}.staging-${crypto.randomUUID()}`;
+    try {
+      cpSync(source, staged, { errorOnExist: true });
+      chmodSync(staged, mode);
+      renameSync(staged, target);
+    } finally {
+      rmSync(staged, { force: true });
+    }
+  }
   if (
     (lstatSync(target).mode & 0o777) !== mode ||
     hash(readFileSync(target)) !== hash(readFileSync(source))
@@ -147,7 +156,12 @@ const linkPackage = (target: string, packageRoot: string): void => {
     }
     return;
   }
-  symlinkSync(relative(dirname(target), packageRoot), target, "dir");
+  try {
+    symlinkSync(relative(dirname(target), packageRoot), target, "dir");
+  } catch (cause) {
+    if (existsSync(target) && realpathSync(target) === realpathSync(packageRoot)) return;
+    throw cause;
+  }
 };
 
 /** Materialize one exact retained graph without a registry, install script, or live package link. */
@@ -207,7 +221,31 @@ export const materializeRevision = (options: {
     const packageById = new Map(
       manifest.packages.map((entry) => [entry.packageId, entry] as const),
     );
-    const retainedPackages = join(root, ".kojo-retained", "packages");
+    const retainedEffect = packageById.get(manifest.sharedEffect.packageId);
+    if (
+      retainedEffect?.name !== "effect" ||
+      manifest.resolution.some(
+        (edge) =>
+          packageById.get(edge.targetPackageId)?.name === "effect" &&
+          edge.targetPackageId !== manifest.sharedEffect.packageId,
+      )
+    ) {
+      throw fault(
+        "RETAINED_EFFECT_INCOMPATIBLE",
+        "the retained graph does not resolve one exact shared Effect instance",
+        "Restore the exact accepted package graph. Kojo will not substitute another Effect.",
+      );
+    }
+    // All revisions of one graph link to one verified physical package store. A Project Runner can
+    // therefore host several current Workflow registrations without loading a second Effect.
+    const retainedPackages = join(
+      options.executionRoot,
+      "graphs",
+      options.packageGraphId,
+      "packages",
+    );
+    mkdirSync(retainedPackages, { recursive: true, mode: 0o700 });
+    linkPackage(join(root, ".kojo-retained", "packages"), retainedPackages);
     for (const entry of manifest.packages) {
       const target = join(retainedPackages, entry.packageId);
       for (const file of entry.files) {
@@ -284,13 +322,17 @@ export const materializeRevision = (options: {
       !Bun.semver.satisfies(Bun.version, `>=${runtimeManifest.bun.minimum}`)
     ) {
       throw fault(
-        "RETAINED_HOST_INCOMPATIBLE",
+        "RETAINED_BUN_INCOMPATIBLE",
         `the pinned Project runtime needs Bun ${runtimeManifest.bun?.minimum ?? "unknown"}`,
         "Use a compatible managed Bun. Kojo will not provision another Bun for this Run.",
       );
     }
     const runner = normalize(join(runtimeRoot, manifest.runtime.runner));
-    if (!inside(root, runner) || !existsSync(runner) || isAbsolute(manifest.runtime.runner)) {
+    if (
+      !inside(options.executionRoot, runner) ||
+      !existsSync(runner) ||
+      isAbsolute(manifest.runtime.runner)
+    ) {
       throw fault(
         "RETAINED_CONTENT_CORRUPT",
         "the retained Runner entry escapes its exact package",

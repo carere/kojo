@@ -164,11 +164,17 @@ const workflowColumns = (
       header: "Revision",
       cell: (info) => (
         <span class="font-mono text-xs">
-          {(
-            info.row.original.candidateRevisionId ??
-            info.row.original.currentRevisionId ??
-            "none"
-          ).slice(0, 12)}
+          <span class="block">
+            Revision:{" "}
+            {(
+              info.row.original.candidateRevisionId ??
+              info.row.original.currentRevisionId ??
+              "none"
+            ).slice(0, 12)}
+          </span>
+          <span class="block">
+            Graph: {(info.row.original.currentPackageGraphId ?? "none").slice(0, 12)}
+          </span>
         </span>
       ),
     }),
@@ -205,7 +211,7 @@ export const Workflows = (props: { readonly projectId: string }): JSX.Element =>
         (query.availability === "all" || workflow.availability === query.availability) &&
         (query.activity === "all" || workflow.activity === query.activity) &&
         (text === "" ||
-          `${workflow.workflowName}\n${workflow.source}\n${workflow.sourceFault ?? ""}\n${revision}`
+          `${workflow.workflowName}\n${workflow.source}\n${workflow.sourceFault ?? ""}\n${revision}\n${workflow.currentPackageGraphId ?? ""}`
             .toLocaleLowerCase()
             .includes(text))
       );

@@ -280,12 +280,13 @@ import { code } from "@carere/kojo-runtime/contexts/workflow/services/phase/code
 import { workflow } from "@carere/kojo-runtime/contexts/workflow/services/workflow";
 
 const priorEvents = readFileSync(${JSON.stringify(journal)}, "utf8");
-const priorPids = [...priorEvents.matchAll(/current-pid:(\\d+)/g)];
-const priorPid = Number(priorPids.at(-1)?.[1] ?? "0");
-let priorPollerAlive = priorPid > 0;
-try { process.kill(priorPid, 0); } catch { priorPollerAlive = false; }
-if (priorPollerAlive) throw new Error("historical source imported before current polling stopped");
-appendFileSync(${JSON.stringify(journal)}, "current-poller-confirmed-stopped\\n");
+const priorPids = [...new Set([...priorEvents.matchAll(/current-pid:[^:]+:(\\d+)/g)].map((match) => Number(match[1])))];
+for (const priorPid of priorPids) {
+  let priorPollerAlive = priorPid > 0;
+  try { process.kill(priorPid, 0); } catch { priorPollerAlive = false; }
+  if (priorPollerAlive) throw new Error("historical source imported before all current polling stopped");
+}
+appendFileSync(${JSON.stringify(journal)}, "current-pollers-confirmed-stopped\\n");
 appendFileSync(${JSON.stringify(journal)}, "historical-imported\\n");
 const trigger = Layer.succeed(Trigger)({
   stream: Stream.fromEffect(Effect.sync(() => {
@@ -317,6 +318,7 @@ export const tickets = workflow(
 const currentTriggerSource = (
   journal: string,
   checkpoint: string,
+  workflowName = "tickets",
 ): string => `import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { Effect, Layer, Schema, Stream } from "effect";
 import { TriggerEvent } from "@carere/kojo-runtime/contexts/trigger/models/TriggerEvent";
@@ -324,34 +326,34 @@ import { Trigger } from "@carere/kojo-runtime/contexts/trigger/ports/Trigger";
 import { code } from "@carere/kojo-runtime/contexts/workflow/services/phase/code";
 import { workflow } from "@carere/kojo-runtime/contexts/workflow/services/workflow";
 
-appendFileSync(${JSON.stringify(journal)}, "current-pid:" + process.pid + "\\n");
-appendFileSync(${JSON.stringify(journal)}, "current-imported\\n");
+appendFileSync(${JSON.stringify(journal)}, "current-pid:${workflowName}:" + process.pid + "\\n");
+appendFileSync(${JSON.stringify(journal)}, "current-imported:${workflowName}\\n");
 const checkpoint = () => readFileSync(${JSON.stringify(checkpoint)}, "utf8").trim();
 const event = Effect.sync(() => {
   const at = checkpoint();
-  appendFileSync(${JSON.stringify(journal)}, "polling-started:" + at + "\\n");
+  appendFileSync(${JSON.stringify(journal)}, "polling-started:${workflowName}:" + at + "\\n");
   return at;
 }).pipe(
   Effect.flatMap((at) => Effect.sleep(500).pipe(
     Effect.flatMap(() => at === "1"
-      ? Effect.succeed(new TriggerEvent({ source: "checkpoint", key: "ticket-1", payload: { ticket: "ticket-1" }, receivedAt: Date.now() }))
+      ? Effect.succeed(new TriggerEvent({ source: "checkpoint", key: "${workflowName}-1", payload: { ticket: "${workflowName}-1" }, receivedAt: Date.now() }))
       : Effect.never),
   )),
 );
 const trigger = Layer.succeed(Trigger)({
   stream: Stream.fromEffect(event).pipe(
     Stream.concat(Stream.never),
-    Stream.ensuring(Effect.sync(() => appendFileSync(${JSON.stringify(journal)}, "polling-stopped:" + checkpoint() + "\\n"))),
+    Stream.ensuring(Effect.sync(() => appendFileSync(${JSON.stringify(journal)}, "polling-stopped:${workflowName}:" + checkpoint() + "\\n"))),
   ),
   ack: (event) => Effect.sync(() => {
-    appendFileSync(${JSON.stringify(journal)}, "acknowledged:" + event.key + "\\n");
+    appendFileSync(${JSON.stringify(journal)}, "acknowledged:${workflowName}:" + event.key + "\\n");
     writeFileSync(${JSON.stringify(checkpoint)}, "2\\n");
   }),
 });
 
-export const tickets = workflow(
+export const selected = workflow(
   {
-    name: "tickets",
+    name: "${workflowName}",
     payload: { ticket: Schema.String },
     success: Schema.String,
     error: Schema.Never,
@@ -389,15 +391,18 @@ afterEach(async () => {
 });
 
 describe("Daemon no-Trigger Run API", () => {
-  it("stops current Trigger polling before historical import and resumes the durable checkpoint", async () => {
+  it("stops all current Trigger polling before historical import and restores all checkpoints in one Runner", async () => {
     const hostPaths = paths();
     const root = roots[0] ?? "";
     const journal = join(root, "switch-events.txt");
-    const checkpoint = join(root, "trigger-checkpoint.txt");
+    const checkpoint = join(root, "tickets-checkpoint.txt");
+    const alertCheckpoint = join(root, "alerts-checkpoint.txt");
     writeFileSync(journal, "");
     writeFileSync(checkpoint, "1\n");
+    writeFileSync(alertCheckpoint, "1\n");
     const location = triggerSwitchProject(root);
     const workflowSource = join(location, ".kojo", "workflows", "tickets.ts");
+    const alertSource = join(location, ".kojo", "workflows", "alerts.ts");
     writeFileSync(workflowSource, historicalTriggerSource(journal));
     mkdirSync(hostPaths.dataRoot, { recursive: true, mode: 0o700 });
     const historical = captureWorkflowRevision({
@@ -405,11 +410,17 @@ describe("Daemon no-Trigger Run API", () => {
       dataRoot: hostPaths.dataRoot,
       workflowName: "tickets",
     });
-    writeFileSync(workflowSource, currentTriggerSource(journal, checkpoint));
+    writeFileSync(workflowSource, currentTriggerSource(journal, checkpoint, "tickets"));
+    writeFileSync(alertSource, currentTriggerSource(journal, alertCheckpoint, "alerts"));
     const current = captureWorkflowRevision({
       project: location,
       dataRoot: hostPaths.dataRoot,
       workflowName: "tickets",
+    });
+    const alerts = captureWorkflowRevision({
+      project: location,
+      dataRoot: hostPaths.dataRoot,
+      workflowName: "alerts",
     });
     execFileSync("git", ["-C", location, "add", "."]);
     execFileSync("git", ["-C", location, "commit", "-m", "test: trigger switch fixture"]);
@@ -438,6 +449,13 @@ describe("Daemon no-Trigger Run API", () => {
               triggerDeclared: true,
               revision: historical,
             },
+            {
+              workflowName: "alerts",
+              availability: "available",
+              source: alertSource,
+              triggerDeclared: true,
+              revision: alerts,
+            },
           ],
         },
       }),
@@ -455,6 +473,13 @@ describe("Daemon no-Trigger Run API", () => {
               triggerDeclared: true,
               revision: current,
             },
+            {
+              workflowName: "alerts",
+              availability: "available",
+              source: alertSource,
+              triggerDeclared: true,
+              revision: alerts,
+            },
           ],
         },
         "current",
@@ -467,6 +492,15 @@ describe("Daemon no-Trigger Run API", () => {
         requestId: "start-current-trigger",
         projectId: registered.project.projectId,
         workflowName: "tickets",
+        changedAt: "2026-09-01T00:00:02.000Z",
+      }),
+    );
+    await Effect.runPromise(
+      projects.startActivity({
+        dataIdentity: "seed-data",
+        requestId: "start-current-alert-trigger",
+        projectId: registered.project.projectId,
+        workflowName: "alerts",
         changedAt: "2026-09-01T00:00:02.000Z",
       }),
     );
@@ -492,22 +526,55 @@ describe("Daemon no-Trigger Run API", () => {
     daemons.push(daemon);
     expect((await waitForRun(daemon, admission.run.runId)).state).toBe("succeeded");
     const deadline = Date.now() + 10_000;
-    while (readFileSync(checkpoint, "utf8").trim() !== "2" && Date.now() < deadline) {
+    while (
+      (readFileSync(checkpoint, "utf8").trim() !== "2" ||
+        readFileSync(alertCheckpoint, "utf8").trim() !== "2") &&
+      Date.now() < deadline
+    ) {
       await Bun.sleep(20);
     }
     const events = readFileSync(journal, "utf8").trim().split("\n");
     expect(readFileSync(checkpoint, "utf8").trim(), events.join("\n")).toBe("2");
+    expect(readFileSync(alertCheckpoint, "utf8").trim(), events.join("\n")).toBe("2");
     expect(events).not.toContain("historical-trigger-started");
-    const stopped = events.indexOf("current-poller-confirmed-stopped");
+    const stopped = events.indexOf("current-pollers-confirmed-stopped");
     const imported = events.indexOf("historical-imported");
     const executed = events.indexOf("historical-executed");
-    const resumed = events.indexOf("polling-started:1", stopped + 1);
-    const acknowledged = events.indexOf("acknowledged:ticket-1");
+    const resumedTickets = events.indexOf("polling-started:tickets:1", stopped + 1);
+    const resumedAlerts = events.indexOf("polling-started:alerts:1", stopped + 1);
+    const acknowledgedTickets = events.indexOf("acknowledged:tickets:tickets-1");
+    const acknowledgedAlerts = events.indexOf("acknowledged:alerts:alerts-1");
+    const firstAcknowledged = Math.min(acknowledgedTickets, acknowledgedAlerts);
+    const runnerPids = (
+      selected: ReadonlyArray<string>,
+    ): ReadonlyArray<{ readonly workflowName: string; readonly pid: string }> =>
+      selected.flatMap((event) => {
+        const match = /^current-pid:([^:]+):(\d+)$/.exec(event);
+        return match === null
+          ? []
+          : [{ workflowName: match[1] as string, pid: match[2] as string }];
+      });
+    const initialPids = runnerPids(events.slice(0, stopped));
+    const resumedPids = runnerPids(events.slice(executed + 1, firstAcknowledged));
     expect(stopped).toBeGreaterThanOrEqual(0);
     expect(imported).toBeGreaterThan(stopped);
     expect(executed).toBeGreaterThan(imported);
-    expect(resumed).toBeGreaterThan(executed);
-    expect(acknowledged).toBeGreaterThan(resumed);
+    expect(resumedTickets).toBeGreaterThan(executed);
+    expect(resumedAlerts).toBeGreaterThan(executed);
+    expect(resumedTickets).toBeLessThan(firstAcknowledged);
+    expect(resumedAlerts).toBeLessThan(firstAcknowledged);
+    expect(acknowledgedTickets).toBeGreaterThan(resumedTickets);
+    expect(acknowledgedAlerts).toBeGreaterThan(resumedAlerts);
+    expect([...new Set(initialPids.map(({ workflowName }) => workflowName))].sort()).toEqual([
+      "alerts",
+      "tickets",
+    ]);
+    expect(new Set(initialPids.map(({ pid }) => pid)).size).toBe(1);
+    expect([...new Set(resumedPids.map(({ workflowName }) => workflowName))].sort()).toEqual([
+      "alerts",
+      "tickets",
+    ]);
+    expect(new Set(resumedPids.map(({ pid }) => pid)).size).toBe(1);
   }, 30_000);
 
   it("executes one retained effect in a fresh offline Runner without the current Factory or packages", async () => {

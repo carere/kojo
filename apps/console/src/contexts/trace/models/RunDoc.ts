@@ -157,6 +157,7 @@ export interface RunDoc {
   readonly daemon?: {
     readonly projectId: string;
     readonly revisionId: string;
+    readonly packageGraphId: string;
     readonly state:
       | "queued"
       | "executing"

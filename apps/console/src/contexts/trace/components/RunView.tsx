@@ -239,6 +239,9 @@ export const RunView = (props: {
                       <Stamp name="revision" label="Pinned revision">
                         {daemon().revisionId}
                       </Stamp>
+                      <Stamp name="graph" label="Pinned graph">
+                        {daemon().packageGraphId}
+                      </Stamp>
                       <Stamp name="execution" label="Execution">
                         {daemon().queueReason ?? daemon().state}
                       </Stamp>

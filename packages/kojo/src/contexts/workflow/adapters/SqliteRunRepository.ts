@@ -42,6 +42,7 @@ interface RunRow {
   readonly hold_code?: RunExecutionFault["code"] | null;
   readonly hold_detail?: string | null;
   readonly hold_remedy?: string | null;
+  readonly hold_fault_json?: string | null;
 }
 
 interface ClaimRow {
@@ -90,11 +91,14 @@ const runOf = (row: RunRow): DaemonRun => ({
       : { queueReason: row.queue_reason }
     : {
         queueReason: "pinned-content" as const,
-        executionFault: {
-          code: row.hold_code,
-          detail: row.hold_detail ?? "the pinned Workflow Revision cannot execute",
-          remedy: row.hold_remedy ?? "Restore the exact retained content.",
-        },
+        executionFault:
+          row.hold_fault_json === undefined || row.hold_fault_json === null
+            ? {
+                code: row.hold_code,
+                detail: row.hold_detail ?? "the pinned Workflow Revision cannot execute",
+                remedy: row.hold_remedy ?? "Restore the exact retained content.",
+              }
+            : (JSON.parse(row.hold_fault_json) as RunExecutionFault),
       }),
 });
 
@@ -222,10 +226,13 @@ export class SqliteRunRepository {
           'RETAINED_CONTENT_MISSING',
           'RETAINED_CONTENT_CORRUPT',
           'RETAINED_HOST_INCOMPATIBLE',
+          'RETAINED_BUN_INCOMPATIBLE',
+          'RETAINED_EFFECT_INCOMPATIBLE',
           'RETAINED_PROTOCOL_INCOMPATIBLE'
         )),
         detail TEXT NOT NULL,
         remedy TEXT NOT NULL,
+        fault_json TEXT NOT NULL,
         held_at TEXT NOT NULL,
         FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
       ) STRICT
@@ -687,8 +694,8 @@ export class SqliteRunRepository {
               });
             }
             this.#database.run(
-              "INSERT INTO workflow_run_holds (run_id, code, detail, remedy, held_at) VALUES (?, ?, ?, ?, ?)",
-              [row.run_id, fault.code, fault.detail, fault.remedy, heldAt],
+              "INSERT INTO workflow_run_holds (run_id, code, detail, remedy, fault_json, held_at) VALUES (?, ?, ?, ?, ?, ?)",
+              [row.run_id, fault.code, fault.detail, fault.remedy, JSON.stringify(fault), heldAt],
             );
             this.#database.run("DELETE FROM workflow_queue WHERE run_id = ?", [row.run_id]);
             this.#database.run("DELETE FROM workflow_reservations WHERE run_id = ?", [row.run_id]);
@@ -727,14 +734,22 @@ export class SqliteRunRepository {
           .transaction(() => {
             this.#assertAuthority(authority);
             this.#database.run(
-              `INSERT INTO workflow_run_holds (run_id, code, detail, remedy, held_at)
-               VALUES (?, ?, ?, ?, ?)
+              `INSERT INTO workflow_run_holds (run_id, code, detail, remedy, fault_json, held_at)
+               VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(run_id) DO UPDATE SET
                  code = excluded.code,
                  detail = excluded.detail,
                  remedy = excluded.remedy,
+                 fault_json = excluded.fault_json,
                  held_at = excluded.held_at`,
-              [authority.runId, fault.code, fault.detail, fault.remedy, heldAt],
+              [
+                authority.runId,
+                fault.code,
+                fault.detail,
+                fault.remedy,
+                JSON.stringify(fault),
+                heldAt,
+              ],
             );
             this.#database.run("UPDATE workflow_runs SET state = 'queued' WHERE run_id = ?", [
               authority.runId,
@@ -777,7 +792,8 @@ export class SqliteRunRepository {
         const row = this.#database
           .query<RunRow, [string]>(
             `SELECT r.*, q.queue_kind, q.queue_reason,
-                    h.code AS hold_code, h.detail AS hold_detail, h.remedy AS hold_remedy
+                    h.code AS hold_code, h.detail AS hold_detail, h.remedy AS hold_remedy,
+                    h.fault_json AS hold_fault_json
                FROM workflow_runs r
                LEFT JOIN workflow_queue q ON q.run_id = r.run_id
                LEFT JOIN workflow_run_holds h ON h.run_id = r.run_id
@@ -794,7 +810,8 @@ export class SqliteRunRepository {
       this.#database
         .query<RunRow, []>(
           `SELECT r.*, q.queue_kind, q.queue_reason,
-                  h.code AS hold_code, h.detail AS hold_detail, h.remedy AS hold_remedy
+                  h.code AS hold_code, h.detail AS hold_detail, h.remedy AS hold_remedy,
+                  h.fault_json AS hold_fault_json
              FROM workflow_runs r
              LEFT JOIN workflow_queue q ON q.run_id = r.run_id
              LEFT JOIN workflow_run_holds h ON h.run_id = r.run_id
@@ -944,7 +961,8 @@ export class SqliteRunRepository {
     const row = this.#database
       .query<RunRow, [string]>(
         `SELECT r.*, q.queue_kind, q.queue_reason,
-                h.code AS hold_code, h.detail AS hold_detail, h.remedy AS hold_remedy
+                h.code AS hold_code, h.detail AS hold_detail, h.remedy AS hold_remedy,
+                h.fault_json AS hold_fault_json
            FROM workflow_runs r
            LEFT JOIN workflow_queue q ON q.run_id = r.run_id
            LEFT JOIN workflow_run_holds h ON h.run_id = r.run_id

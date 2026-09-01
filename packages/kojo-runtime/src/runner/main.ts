@@ -14,12 +14,12 @@ import { Gate } from "../contexts/gate/ports/Gate.ts";
 import { GateRepository } from "../contexts/gate/ports/GateRepository.ts";
 import {
   makeRunnerFrameReader,
-  type RunnerFrameReader,
   writeRunnerFrame,
 } from "../contexts/project/services/runnerChannel.ts";
 import { Tracer } from "../contexts/trace/ports/Tracer.ts";
 import { Trigger } from "../contexts/trigger/ports/Trigger.ts";
 import { layer as daemonEngine } from "../contexts/workflow/adapters/DaemonWorkflowEngine.ts";
+import { withRetainedFactoryRoot } from "../contexts/workflow/adapters/RetainedFactoryAssetRepository.ts";
 import { DaemonExecutionRepository } from "../contexts/workflow/ports/DaemonExecutionRepository.ts";
 
 /** Stable Project Runner composition entry point. Importing it cannot execute a Workflow. */
@@ -331,61 +331,25 @@ const triggerProcessError = (cause: unknown): TriggerProcessError =>
     cause,
   });
 
-const committedReply = async (
-  reader: RunnerFrameReader,
-  binding: RunnerBinding,
-  operationRequestId: string,
-): Promise<Record<string, JsonValue>> => {
-  const frame = await Effect.runPromise(reader.read);
-  assertAddress(frame, binding);
-  const body = frame.body as unknown as {
-    readonly operationRequestId?: string;
-    readonly state?: string;
-    readonly result?: JsonValue;
-  };
-  if (
-    frame.kind !== "Ready" ||
-    body.operationRequestId !== operationRequestId ||
-    body.state !== "committed" ||
-    body.result === null ||
-    Array.isArray(body.result) ||
-    typeof body.result !== "object"
-  ) {
-    throw new Error("the Daemon did not commit the Trigger operation reply");
-  }
-  return body.result as Record<string, JsonValue>;
-};
-
 const runRegisteredTrigger = async (options: {
   readonly registration: BoundRegistrationRequest;
-  readonly binding: RunnerBinding;
   readonly pollerId: string;
-  readonly socket: Socket;
-  readonly reader: RunnerFrameReader;
+  readonly signal: AbortSignal;
+  readonly sendMutation: (
+    kind: "AdmitTriggerRequest" | "RecordRejectedTriggerEvent" | "RecordTriggerProgress",
+    registration: BoundRegistrationRequest,
+    pollerId: string,
+    body: JsonValue,
+  ) => Promise<Record<string, JsonValue>>;
 }): Promise<void> => {
   const bundle = await loadRegisteredBundle(options.registration);
   if (bundle.trigger === undefined)
     throw new Error("the exact Workflow revision does not declare a Trigger");
-  const sendMutation = async (
+  const sendMutation = (
     kind: "AdmitTriggerRequest" | "RecordRejectedTriggerEvent" | "RecordTriggerProgress",
     body: JsonValue,
-  ): Promise<Record<string, JsonValue>> => {
-    const requestId = crypto.randomUUID();
-    await Effect.runPromise(
-      writeRunnerFrame(options.socket, {
-        version: 1,
-        kind,
-        requestId,
-        daemonInstanceId: options.binding.daemonInstanceId,
-        runnerInstanceId: options.binding.runnerInstanceId,
-        runId: options.pollerId,
-        revisionId: options.registration.revisionId,
-        claimGeneration: 1,
-        body,
-      }),
-    );
-    return committedReply(options.reader, options.binding, requestId);
-  };
+  ): Promise<Record<string, JsonValue>> =>
+    options.sendMutation(kind, options.registration, options.pollerId, body);
   const processEvent = async (
     trigger: Trigger["Service"],
     event: Parameters<Trigger["Service"]["ack"]>[0],
@@ -496,7 +460,7 @@ const runRegisteredTrigger = async (options: {
     unknown,
     never
   >;
-  await Effect.runPromise(program);
+  await Effect.runPromise(program, { signal: options.signal });
   throw new Error("the live Trigger stream ended");
 };
 
@@ -565,143 +529,269 @@ const runPrivateProtocol = async (): Promise<void> => {
       throw new Error("the Daemon Welcome does not match the Runner binding");
     }
 
-    const register = await Effect.runPromise(reader.read);
-    assertAddress(register, binding);
-    if (register.kind !== "RegisterRevision")
-      throw new Error("the first bound Runner operation must register a revision");
-    const body = register.body as unknown as {
-      readonly registrationVersion: 1;
-      readonly revisionId: string;
-      readonly packageGraphId: string;
-      readonly workflowName: string;
-      readonly retainedRoot: string;
-      readonly entrySource: string;
-      readonly payload: JsonValue;
-      readonly purpose?: "execution" | "trigger";
+    const registrations = new Map<string, BoundRegistrationRequest>();
+    const triggers = new Map<
+      string,
+      { readonly controller: AbortController; readonly running: Promise<void> }
+    >();
+    const mutationReplies = new Map<
+      string,
+      {
+        readonly resolve: (result: Record<string, JsonValue>) => void;
+        readonly reject: (cause: unknown) => void;
+      }
+    >();
+    const registrationKey = (revisionId: string, workflowName: string): string =>
+      JSON.stringify([revisionId, workflowName]);
+    const reply = (operationRequestId: string, result: JsonValue): Promise<void> =>
+      Effect.runPromise(
+        writeRunnerFrame(socket, {
+          version: 1,
+          kind: "Ready",
+          requestId: crypto.randomUUID(),
+          daemonInstanceId: binding.daemonInstanceId,
+          runnerInstanceId: binding.runnerInstanceId,
+          body: {
+            replyVersion: 1,
+            operationRequestId,
+            state: "committed",
+            result,
+          },
+        }),
+      );
+    const stopTrigger = async (key: string): Promise<void> => {
+      const active = triggers.get(key);
+      if (active === undefined) return;
+      active.controller.abort();
+      await active.running.catch(() => undefined);
+      triggers.delete(key);
     };
-    const registration: BoundRegistrationRequest = {
-      registrationVersion: body.registrationVersion,
-      selectedProtocol: 1,
-      daemonInstanceId: binding.daemonInstanceId,
-      runnerInstanceId: binding.runnerInstanceId,
-      projectId: binding.projectId,
-      boundProjectId: binding.projectId,
-      revisionId: body.revisionId,
-      packageGraphId: body.packageGraphId,
-      boundPackageGraphId: binding.packageGraphId,
-      executionRoot: body.retainedRoot,
-      workflowName: body.workflowName,
-      entrySource: body.entrySource,
-      payload: body.payload,
-      ...(body.purpose === undefined ? {} : { purpose: body.purpose }),
-      connectionSecret,
+    const sendMutation = async (
+      kind: "AdmitTriggerRequest" | "RecordRejectedTriggerEvent" | "RecordTriggerProgress",
+      registration: BoundRegistrationRequest,
+      pollerId: string,
+      body: JsonValue,
+    ): Promise<Record<string, JsonValue>> => {
+      const requestId = crypto.randomUUID();
+      const committed = new Promise<Record<string, JsonValue>>((resolve, reject) => {
+        mutationReplies.set(requestId, { resolve, reject });
+      });
+      await Effect.runPromise(
+        writeRunnerFrame(socket, {
+          version: 1,
+          kind,
+          requestId,
+          daemonInstanceId: binding.daemonInstanceId,
+          runnerInstanceId: binding.runnerInstanceId,
+          runId: pollerId,
+          revisionId: registration.revisionId,
+          claimGeneration: 1,
+          body,
+        }),
+      ).catch((cause) => {
+        mutationReplies.delete(requestId);
+        throw cause;
+      });
+      return committed;
     };
-    const inspected =
-      registration.purpose === "trigger"
-        ? {
-            registrationVersion: 1 as const,
-            triggerDeclared: (await loadRegisteredBundle(registration)).trigger !== undefined,
-          }
-        : await inspectRegisteredRevision(registration);
-    await Effect.runPromise(
-      writeRunnerFrame(socket, {
-        version: 1,
-        kind: "Ready",
-        requestId: crypto.randomUUID(),
-        daemonInstanceId: binding.daemonInstanceId,
-        runnerInstanceId: binding.runnerInstanceId,
-        body: {
-          replyVersion: 1,
-          operationRequestId: register.requestId,
-          state: "committed",
-          result: inspected as unknown as JsonValue,
-        },
-      }),
-    );
 
-    const operation = await Effect.runPromise(reader.read);
-    assertAddress(operation, binding);
-    if (operation.kind === "ExecuteRun") {
-      if (operation.revisionId !== registration.revisionId) {
-        throw new Error("the execution revision does not match the bound registration");
+    let shutdown = false;
+    while (!shutdown) {
+      const operation = await Effect.runPromise(reader.read);
+      assertAddress(operation, binding);
+      if (operation.kind === "Ready") {
+        const body = operation.body as unknown as {
+          readonly operationRequestId?: string;
+          readonly state?: string;
+          readonly result?: JsonValue;
+        };
+        const pending =
+          typeof body.operationRequestId === "string"
+            ? mutationReplies.get(body.operationRequestId)
+            : undefined;
+        if (
+          pending === undefined ||
+          body.state !== "committed" ||
+          body.result === null ||
+          Array.isArray(body.result) ||
+          typeof body.result !== "object"
+        ) {
+          throw new Error("the Daemon did not commit the Trigger operation reply");
+        }
+        mutationReplies.delete(body.operationRequestId as string);
+        pending.resolve(body.result as Record<string, JsonValue>);
+        continue;
       }
-      const execute = operation.body as unknown as {
-        readonly executionVersion: 1;
-        readonly workflowName: string;
-        readonly payload: JsonValue;
-        readonly recordedResults: Readonly<Record<string, JsonValue>>;
-        readonly deferredResults: Readonly<Record<string, JsonValue>>;
-        readonly scheduledWakeups: Readonly<Record<string, string>>;
-      };
-      const result = await executeRegisteredRevision({
-        ...registration,
-        runId: operation.runId,
-        workflowName: execute.workflowName,
-        payload: execute.payload,
-        recordedResults: execute.recordedResults,
-        deferredResults: execute.deferredResults,
-        scheduledWakeups: execute.scheduledWakeups,
-      });
-      await Effect.runPromise(
-        writeRunnerFrame(socket, {
-          version: 1,
-          kind: "Ready",
-          requestId: crypto.randomUUID(),
+      if (operation.kind === "RegisterRevision") {
+        const body = operation.body as unknown as {
+          readonly registrationVersion: 1;
+          readonly revisionId: string;
+          readonly packageGraphId: string;
+          readonly workflowName: string;
+          readonly retainedRoot: string;
+          readonly entrySource: string;
+          readonly payload: JsonValue;
+          readonly purpose?: "execution" | "trigger";
+        };
+        const registration: BoundRegistrationRequest = {
+          registrationVersion: body.registrationVersion,
+          selectedProtocol: 1,
           daemonInstanceId: binding.daemonInstanceId,
           runnerInstanceId: binding.runnerInstanceId,
-          body: {
-            replyVersion: 1,
-            operationRequestId: operation.requestId,
-            state: "committed",
-            result: result as unknown as JsonValue,
-          },
-        }),
-      );
-    } else if (operation.kind === "StartTrigger") {
-      const start = operation.body as unknown as { readonly pollerId?: string };
-      if (registration.purpose !== "trigger" || typeof start.pollerId !== "string") {
-        throw new Error("the Trigger start does not match its bound registration");
+          projectId: binding.projectId,
+          boundProjectId: binding.projectId,
+          revisionId: body.revisionId,
+          packageGraphId: body.packageGraphId,
+          boundPackageGraphId: binding.packageGraphId,
+          executionRoot: body.retainedRoot,
+          workflowName: body.workflowName,
+          entrySource: body.entrySource,
+          payload: body.payload,
+          ...(body.purpose === undefined ? {} : { purpose: body.purpose }),
+          connectionSecret,
+        };
+        const inspected =
+          registration.purpose === "trigger"
+            ? {
+                registrationVersion: 1 as const,
+                triggerDeclared: (await loadRegisteredBundle(registration)).trigger !== undefined,
+              }
+            : await inspectRegisteredRevision(registration);
+        registrations.set(
+          registrationKey(registration.revisionId, registration.workflowName),
+          registration,
+        );
+        await reply(operation.requestId, inspected as unknown as JsonValue);
+        continue;
       }
-      await Effect.runPromise(
-        writeRunnerFrame(socket, {
-          version: 1,
-          kind: "Ready",
-          requestId: crypto.randomUUID(),
-          daemonInstanceId: binding.daemonInstanceId,
-          runnerInstanceId: binding.runnerInstanceId,
-          body: {
-            replyVersion: 1,
-            operationRequestId: operation.requestId,
-            state: "committed",
-            result: { polling: true },
-          },
-        }),
-      );
-      await runRegisteredTrigger({
-        registration,
-        binding,
-        pollerId: start.pollerId,
-        socket,
-        reader,
-      });
-    } else if (operation.kind !== "Shutdown") {
-      throw new Error("the Project Runner received an unexpected bound operation");
+      if (operation.kind === "ExecuteRun") {
+        const execute = operation.body as unknown as {
+          readonly executionVersion: 1;
+          readonly workflowName: string;
+          readonly payload: JsonValue;
+          readonly recordedResults: Readonly<Record<string, JsonValue>>;
+          readonly deferredResults: Readonly<Record<string, JsonValue>>;
+          readonly scheduledWakeups: Readonly<Record<string, string>>;
+        };
+        const registration = registrations.get(
+          registrationKey(operation.revisionId, execute.workflowName),
+        );
+        if (registration === undefined || registration.purpose === "trigger") {
+          throw new Error("the execution has no exact bound registration");
+        }
+        const result = await withRetainedFactoryRoot(registration.executionRoot, () =>
+          executeRegisteredRevision({
+            ...registration,
+            runId: operation.runId,
+            payload: execute.payload,
+            recordedResults: execute.recordedResults,
+            deferredResults: execute.deferredResults,
+            scheduledWakeups: execute.scheduledWakeups,
+          }),
+        );
+        await reply(operation.requestId, result as unknown as JsonValue);
+        continue;
+      }
+      if (operation.kind === "StartTrigger") {
+        const start = operation.body as unknown as {
+          readonly pollerId?: string;
+          readonly revisionId?: string;
+          readonly workflowName?: string;
+        };
+        if (
+          typeof start.pollerId !== "string" ||
+          typeof start.revisionId !== "string" ||
+          typeof start.workflowName !== "string"
+        ) {
+          throw new Error("the Trigger start has no exact registration identity");
+        }
+        const key = registrationKey(start.revisionId, start.workflowName);
+        const registration = registrations.get(key);
+        if (registration?.purpose !== "trigger") {
+          throw new Error("the Trigger start does not match its bound registration");
+        }
+        if (triggers.has(key)) throw new Error("the Trigger is already polling");
+        const controller = new AbortController();
+        await reply(operation.requestId, { polling: true });
+        const running = Promise.resolve()
+          .then(() =>
+            withRetainedFactoryRoot(registration.executionRoot, () =>
+              runRegisteredTrigger({
+                registration,
+                pollerId: start.pollerId as string,
+                signal: controller.signal,
+                sendMutation,
+              }),
+            ),
+          )
+          .finally(() => triggers.delete(key));
+        triggers.set(key, { controller, running });
+        void running.catch(async (cause) => {
+          if (controller.signal.aborted) return;
+          await Effect.runPromise(
+            writeRunnerFrame(socket, {
+              version: 1,
+              kind: "Fault",
+              requestId: crypto.randomUUID(),
+              daemonInstanceId: binding.daemonInstanceId,
+              runnerInstanceId: binding.runnerInstanceId,
+              body: {
+                revisionId: registration.revisionId,
+                workflowName: registration.workflowName,
+                message: cause instanceof Error ? cause.message : String(cause),
+              },
+            }),
+          ).catch(() => undefined);
+        });
+        continue;
+      }
+      if (operation.kind === "StopTrigger") {
+        const stop = operation.body as unknown as {
+          readonly revisionId?: string;
+          readonly workflowName?: string;
+        };
+        if (typeof stop.revisionId !== "string" || typeof stop.workflowName !== "string") {
+          throw new Error("the Trigger stop has no exact registration identity");
+        }
+        await stopTrigger(registrationKey(stop.revisionId, stop.workflowName));
+        await reply(operation.requestId, { polling: false });
+        continue;
+      }
+      if (operation.kind === "DisposeRevision") {
+        const dispose = operation.body as unknown as {
+          readonly revisionId?: string;
+          readonly workflowName?: string;
+        };
+        if (typeof dispose.revisionId !== "string" || typeof dispose.workflowName !== "string") {
+          throw new Error("the revision disposal has no exact registration identity");
+        }
+        const key = registrationKey(dispose.revisionId, dispose.workflowName);
+        await stopTrigger(key);
+        registrations.delete(key);
+        await reply(operation.requestId, { disposed: true });
+        continue;
+      }
+      if (operation.kind === "Shutdown") {
+        await Promise.all([...triggers.keys()].map(stopTrigger));
+        for (const pending of mutationReplies.values()) {
+          pending.reject(new Error("the Project Runner stopped before the mutation reply"));
+        }
+        mutationReplies.clear();
+        await Effect.runPromise(
+          writeRunnerFrame(socket, {
+            version: 1,
+            kind: "Stopped",
+            requestId: crypto.randomUUID(),
+            daemonInstanceId: binding.daemonInstanceId,
+            runnerInstanceId: binding.runnerInstanceId,
+            body: { operationRequestId: operation.requestId },
+          }),
+        );
+        shutdown = true;
+        continue;
+      }
+      throw new Error(`the Project Runner received unexpected ${operation.kind}`);
     }
-
-    const shutdown =
-      operation.kind === "Shutdown" ? operation : await Effect.runPromise(reader.read);
-    assertAddress(shutdown, binding);
-    if (shutdown.kind !== "Shutdown") throw new Error("the Project Runner needs Shutdown");
-    await Effect.runPromise(
-      writeRunnerFrame(socket, {
-        version: 1,
-        kind: "Stopped",
-        requestId: crypto.randomUUID(),
-        daemonInstanceId: binding.daemonInstanceId,
-        runnerInstanceId: binding.runnerInstanceId,
-        body: null,
-      }),
-    );
   } finally {
     socket.end();
   }

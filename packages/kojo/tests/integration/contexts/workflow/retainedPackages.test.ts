@@ -1,9 +1,11 @@
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -54,6 +56,8 @@ const fixture = (): {
     `${JSON.stringify({ name: "fixture-local", version: "1.0.0", exports: "./index.ts" })}\n`,
   );
   writeFileSync(join(localPackage, "index.ts"), 'export const retained = "retained";\n');
+  writeFileSync(join(localPackage, "fixture-tool"), "#!/bin/sh\nexit 0\n");
+  chmodSync(join(localPackage, "fixture-tool"), 0o755);
   writeFileSync(linkedSource, "individual linked file bytes\n");
   symlinkSync(relative(localPackage, linkedSource), join(localPackage, "linked.txt"));
   for (const side of ["left", "right"] as const) {
@@ -181,6 +185,7 @@ describe("real Workflow Revision capture", () => {
     ]);
     const local = safe?.revision?.manifest.packages.find((entry) => entry.name === "fixture-local");
     expect(local?.files.map((file) => file.path)).toEqual([
+      "fixture-tool",
       "index.ts",
       "linked.txt",
       "package.json",
@@ -241,6 +246,10 @@ describe("real Workflow Revision capture", () => {
         join(materialized.root, ".kojo-retained", "packages", local?.packageId ?? "missing"),
       ),
     );
+    expect(
+      statSync(join(materialized.root, "node_modules", "fixture-local", "fixture-tool")).mode &
+        0o777,
+    ).toBe(0o755);
     const runtimeRoot = join(
       materialized.root,
       ".kojo-retained",
@@ -271,6 +280,17 @@ describe("real Workflow Revision capture", () => {
         join(retainedPackages, rightSharedId ?? "missing", "node_modules", "fixture-peer"),
       ),
     ).toBe(realpathSync(join(retainedPackages, rightPeerId ?? "missing")));
+    const secondMaterialized = materializeRevision({
+      retainedRoot: safe?.revision?.publishedPath ?? "missing",
+      executionRoot: join(subject.dataRoot, "materialized"),
+      revisionId: safe?.revision?.revisionId ?? "missing",
+      packageGraphId: safe?.revision?.packageGraphId ?? "missing",
+    });
+    expect(realpathSync(join(secondMaterialized.root, "node_modules", "effect"))).toBe(
+      realpathSync(join(materialized.root, "node_modules", "effect")),
+    );
+    expect(secondMaterialized.runner).toBe(materialized.runner);
+    secondMaterialized.dispose();
     materialized.dispose();
 
     writeFileSync(join(subject.root, ".kojo", "prompt.md"), "changed prompt bytes\n");

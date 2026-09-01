@@ -33,6 +33,7 @@ export const useRun = (runId: () => string): UseQueryResult<RunDoc, Error> =>
           daemon: {
             projectId: run.projectId,
             revisionId: run.revisionId,
+            packageGraphId: run.packageGraphId,
             state: run.state,
             ...(run.queueReason === undefined ? {} : { queueReason: run.queueReason }),
             ...(run.executionFault === undefined ? {} : { executionFault: run.executionFault }),
