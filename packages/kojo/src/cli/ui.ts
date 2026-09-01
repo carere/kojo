@@ -1,7 +1,6 @@
 import { Console, Effect } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { macBrowser } from "../contexts/daemon/adapters/MacBrowser.ts";
-import { LifecycleError } from "../contexts/daemon/models/LifecycleError.ts";
 import { launchConsole } from "../contexts/daemon/services/launchConsole.ts";
 import { macPaths } from "../contexts/daemon/services/macPaths.ts";
 import { commandFailed } from "./CommandFailed.ts";
@@ -14,13 +13,9 @@ export const ui = Command.make(
     ),
   },
   Effect.fn(function* ({ noOpen }) {
-    const line = yield* Effect.tryPromise({
-      try: () => launchConsole(macPaths(), macBrowser(), noOpen),
-      catch: (cause) =>
-        cause instanceof LifecycleError
-          ? cause
-          : new LifecycleError("DAEMON_ACCESS_FAILED", "the Console launch failed", cause),
-    }).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)));
+    const line = yield* launchConsole(macPaths(), macBrowser(), noOpen).pipe(
+      Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+    );
     yield* Console.log(line);
   }),
 ).pipe(
