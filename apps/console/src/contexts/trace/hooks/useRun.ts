@@ -35,6 +35,7 @@ export const useRun = (runId: () => string): UseQueryResult<RunDoc, Error> =>
             revisionId: run.revisionId,
             state: run.state,
             ...(run.queueReason === undefined ? {} : { queueReason: run.queueReason }),
+            ...(run.executionFault === undefined ? {} : { executionFault: run.executionFault }),
           },
           run: {
             run: {

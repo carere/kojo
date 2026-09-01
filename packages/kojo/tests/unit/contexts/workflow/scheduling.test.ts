@@ -14,6 +14,7 @@ const admit = (
   projectId: string,
   key: string,
   sequence: number,
+  packageGraphId = "graph",
 ) =>
   repository.admit({
     dataIdentity: "data",
@@ -24,7 +25,7 @@ const admit = (
     idempotencyKey: key,
     payload: { key },
     revisionId: "revision",
-    packageGraphId: "graph",
+    packageGraphId,
     admittedAt: new Date(sequence).toISOString(),
   });
 
@@ -120,5 +121,57 @@ it.effect("releases the Project slot when a Run suspends", () =>
     yield* repository.suspend(authority, new Date(4).toISOString());
     const next = yield* repository.claimNext("runner-two", new Date(5).toISOString());
     expect(next?.run.runId).toBe(second.run.runId);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("keeps the older graph-switch Run ahead of newer matching-graph work", () =>
+  Effect.gen(function* () {
+    const repository = yield* RunRepository;
+    const executing = yield* admit(repository, "project-a", "loaded", 1, "graph-a");
+    const olderSwitch = yield* admit(repository, "project-a", "older-switch", 2, "graph-b");
+    yield* admit(repository, "project-a", "newer-match", 3, "graph-a");
+    const authority = yield* repository.claim(
+      executing.run.runId,
+      "runner-a",
+      new Date(4).toISOString(),
+    );
+
+    expect((yield* repository.read(olderSwitch.run.runId))?.queueReason).toBe("package-switch");
+    yield* repository.completeRun(authority, "succeeded", new Date(5).toISOString());
+    const selected = yield* repository.claimNext("runner-b", new Date(6).toISOString());
+    expect(selected?.run.idempotencyKey).toBe("older-switch");
+    expect(selected?.run.packageGraphId).toBe("graph-b");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("holds only the Run that needs damaged pinned content", () =>
+  Effect.gen(function* () {
+    const repository = yield* RunRepository;
+    const damaged = yield* admit(repository, "project-a", "damaged", 1, "graph-bad");
+    yield* admit(repository, "project-a", "sibling", 2, "graph-good");
+    yield* admit(repository, "project-b", "other-project", 3, "graph-other");
+    const reserved = yield* repository.reserveNext("reservation-bad", new Date(4).toISOString());
+    expect(reserved?.run.runId).toBe(damaged.run.runId);
+    yield* repository.holdReserved(
+      "reservation-bad",
+      {
+        code: "RETAINED_CONTENT_CORRUPT",
+        detail: "one pinned package byte changed",
+        remedy: "Restore the exact retained package bytes.",
+      },
+      new Date(5).toISOString(),
+    );
+
+    expect(yield* repository.read(damaged.run.runId)).toMatchObject({
+      state: "held",
+      queueReason: "pinned-content",
+      executionFault: { code: "RETAINED_CONTENT_CORRUPT" },
+    });
+    const first = yield* repository.claimNext("runner-good-a", new Date(6).toISOString());
+    const second = yield* repository.claimNext("runner-good-b", new Date(7).toISOString());
+    expect([first?.run.idempotencyKey, second?.run.idempotencyKey].toSorted()).toEqual([
+      "other-project",
+      "sibling",
+    ]);
   }).pipe(Effect.provide(layer)),
 );

@@ -42,6 +42,7 @@ import { Waterfall } from "./Waterfall.tsx";
 const statusTones: Record<string, BadgeTone> = {
   executing: "running",
   suspended: "waiting",
+  held: "danger",
   succeeded: "good",
   failed: "danger",
 };
@@ -91,7 +92,7 @@ export const RunView = (props: {
   const navigate = useNavigate();
 
   const doc = () => settled(run);
-  const status = (): RunStatus => doc()?.run.outcome ?? "executing";
+  const status = (): RunStatus => doc()?.daemon?.state ?? doc()?.run.outcome ?? "executing";
   /** The server answered, and what it answered was *there is no such run*. */
   const missing = () => refusal(run);
 
@@ -269,6 +270,15 @@ export const RunView = (props: {
                 </Stamp>
               </div>
             </header>
+
+            <Show when={document().daemon?.executionFault}>
+              {(fault) => (
+                <Notice tone="empty" title={`Pinned content fault: ${fault().code}`}>
+                  <p class="mt-1">{fault().detail}</p>
+                  <p class="mt-1 font-mono text-xs">Remedy: {fault().remedy}</p>
+                </Notice>
+              )}
+            </Show>
 
             {/*
              * The gate card, directly beneath the header — console.md §4 — because it is the one

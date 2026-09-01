@@ -372,11 +372,12 @@ const packageGraph = (
     dependencyRoots.set(root, resolved);
   }
 
-  const nodes = [...roots.entries()].map(([root, metadata]): PackageNode => {
+  const nodes = [...roots.entries()].map(([root, metadata], occurrence): PackageNode => {
     const files = packageFiles(root);
     const identity = {
       name: metadata.name,
       version: metadata.version,
+      occurrence,
       files: files.map(({ source: _source, ...file }) => file),
     };
     return {

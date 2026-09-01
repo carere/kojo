@@ -77,6 +77,20 @@ describe("Daemon Run status CLI contract", () => {
     expect(runStatusLine(subject, false, true)).toContain("Phase=compile#1:code:succeeded");
   });
 
+  it("states why exact pinned content is held and gives the operator remedy", () => {
+    const subject = {
+      ...run("held"),
+      queueReason: "pinned-content" as const,
+      executionFault: {
+        code: "RETAINED_CONTENT_CORRUPT" as const,
+        detail: "the pinned package file does not match its retained hash",
+        remedy: "Restore the exact retained package bytes.",
+      },
+    };
+    expect(runStatusLine(subject, false)).toContain("Fault=RETAINED_CONTENT_CORRUPT");
+    expect(runStatusLine(subject, false)).toContain("Restore the exact retained package bytes.");
+  });
+
   it("keeps inspection successful and maps a requested terminal failure to exit 1", () => {
     expect(requestedRunExitCode(run("failed"), false)).toBe(0);
     expect(requestedRunExitCode(run("failed"), true)).toBe(1);

@@ -4,6 +4,7 @@ export type RunExecutionState =
   | "queued"
   | "executing"
   | "suspended"
+  | "held"
   | "succeeded"
   | "failed"
   | "cancelled";
@@ -31,7 +32,17 @@ export interface RunDocument {
     | "execution-capacity"
     | "project-capacity"
     | "runner-starting"
-    | "package-switch";
+    | "package-switch"
+    | "pinned-content";
+  readonly executionFault?: {
+    readonly code:
+      | "RETAINED_CONTENT_MISSING"
+      | "RETAINED_CONTENT_CORRUPT"
+      | "RETAINED_HOST_INCOMPATIBLE"
+      | "RETAINED_PROTOCOL_INCOMPATIBLE";
+    readonly detail: string;
+    readonly remedy: string;
+  };
   readonly admittedAt: string;
   readonly startedAt?: string;
   readonly finishedAt?: string;
