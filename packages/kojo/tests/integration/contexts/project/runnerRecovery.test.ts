@@ -55,7 +55,19 @@ const project = (
   firstCrash: string,
   descendantStarted: string,
   completed: string,
+  failure: "crash" | "stall" = "crash",
 ): string => {
+  const firstFailure =
+    failure === "stall"
+      ? `writeFileSync(${JSON.stringify(descendantStarted)}, String(process.pid));
+        const stalled = new Int32Array(new SharedArrayBuffer(4));
+        Atomics.wait(stalled, 0, 0, 60_000);`
+      : `const descendant = Bun.spawn(
+          [process.execPath, "-e", "setInterval(() => undefined, 1000)"],
+          { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+        );
+        writeFileSync(${JSON.stringify(descendantStarted)}, String(descendant.pid));
+        process.exit(42);`;
   const location = join(root, "project");
   mkdirSync(join(location, ".kojo", "workflows"), { recursive: true });
   linkEngine({ root: location, packageRoot });
@@ -92,12 +104,7 @@ export const recover = workflow(
     Effect.sync(() => {
       if (!existsSync(${JSON.stringify(firstCrash)})) {
         writeFileSync(${JSON.stringify(firstCrash)}, String(process.pid));
-        const descendant = Bun.spawn(
-          [process.execPath, "-e", "setInterval(() => undefined, 1000)"],
-          { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
-        );
-        writeFileSync(${JSON.stringify(descendantStarted)}, String(descendant.pid));
-        process.exit(42);
+        ${firstFailure}
       }
       writeFileSync(${JSON.stringify(completed)}, String(process.pid));
       return null;
@@ -325,5 +332,85 @@ describe("real Project Runner recovery", () => {
       await Bun.sleep(20);
     }
     expect(run).toMatchObject({ runId: admitted.runId, state: "succeeded" });
+  }, 30_000);
+
+  it("replaces a stalled Runner after health control stops receiving replies", async () => {
+    const paths = hostPaths();
+    const stalled = join(roots[0] ?? "", "stalled.txt");
+    const stalledProcess = join(roots[0] ?? "", "stalled-process.txt");
+    const completed = join(roots[0] ?? "", "stall-completed.txt");
+    const location = project(roots[0] ?? "", stalled, stalledProcess, completed, "stall");
+    mkdirSync(paths.dataRoot, { recursive: true, mode: 0o700 });
+    const captured = captureWorkflowRevision({
+      project: location,
+      dataRoot: paths.dataRoot,
+      workflowName: "recover",
+    });
+    const databasePath = join(paths.dataRoot, "kojo.db");
+    const database = new Database(databasePath, { create: true, strict: true });
+    database.run(
+      "CREATE TABLE daemon_metadata (name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT",
+    );
+    const projects = new SqliteProjectRepository(database);
+    const registered = await Effect.runPromise(
+      projects.register({
+        requestId: "seed-stall-project",
+        requestBody: "seed-stall-project",
+        dataIdentity: "seed-data",
+        location,
+        observedAt: "2026-09-01T00:00:00.000Z",
+        factory: {
+          state: "available",
+          refreshState: "current",
+          workflows: [
+            {
+              workflowName: "recover",
+              availability: "available",
+              source: join(location, ".kojo", "workflows", "recover.ts"),
+              revision: captured,
+            },
+          ],
+        },
+      }),
+    );
+    database.close(false);
+    chmodSync(databasePath, 0o600);
+    let clockOffset = 0;
+    const daemon = startDaemon(paths, {
+      automaticRefresh: false,
+      runnerIdleMillis: 50,
+      now: () => Date.now() + clockOffset,
+    });
+    daemons.push(daemon);
+    const response = await call(
+      daemon,
+      `/api/v1/projects/${registered.project.projectId}/workflows/recover/actions/start`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          requestId: "start-stall-recovery",
+          dataIdentity: daemon.endpoint.dataIdentity,
+          payload: null,
+        }),
+      },
+    );
+    const admitted = (await response.json()) as StartRunResult;
+    const stallDeadline = Date.now() + 10_000;
+    while (!existsSync(stalled) && Date.now() < stallDeadline) await Bun.sleep(10);
+    expect(existsSync(stalled)).toBe(true);
+    clockOffset += 31_000;
+
+    const deadline = Date.now() + 20_000;
+    let run: RunDocument | undefined;
+    while (Date.now() < deadline) {
+      run = (await (await call(daemon, `/api/v1/runs/${admitted.runId}`)).json()) as RunDocument;
+      if (run.state === "succeeded") break;
+      await Bun.sleep(25);
+    }
+    expect(run).toMatchObject({ runId: admitted.runId, state: "succeeded" });
+    expect(existsSync(completed)).toBe(true);
+    const stalledPid = Number(readFileSync(stalledProcess, "utf8"));
+    expect(() => process.kill(stalledPid, 0)).toThrow();
   }, 30_000);
 });
