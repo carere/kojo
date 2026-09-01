@@ -35,6 +35,7 @@ evidence_home=$(getent passwd "$evidence_user" | cut -d: -f6)
 runtime_directory=/run/user/$evidence_uid
 endpoint=$runtime_directory/kojo-native-logout-evidence/endpoint.json
 chown -R "$evidence_user:$evidence_user" "$workspace"
+chmod o+x /home/runner /home/runner/work "$(dirname "$workspace")"
 
 install -d -m 0700 -o "$evidence_user" -g "$evidence_user" "$evidence_home/.ssh"
 ssh-keygen -q -t ed25519 -N "" -f "$key"
