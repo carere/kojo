@@ -1,6 +1,6 @@
 import type { EngineDependency } from "../../src/contexts/scaffold/models/EngineDependency.ts";
 import { engineDependency } from "../../src/contexts/scaffold/services/resolveEngine.ts";
-import { enginePackage } from "../../src/contexts/shared/models/FactoryLayout.ts";
+import { runtimePackage } from "../../src/contexts/shared/models/FactoryLayout.ts";
 
 /**
  * The two entries a stamped repository must declare, as the two tiers each need them.
@@ -14,11 +14,11 @@ import { enginePackage } from "../../src/contexts/shared/models/FactoryLayout.ts
 /** A published pair, invented. Nothing resolves it; it is only ever written into a file. */
 export const someEngine: EngineDependency = {
   reach: "published",
-  kojo: {
-    name: enginePackage,
+  runtime: {
+    name: runtimePackage,
     specifier: "9.9.9",
     version: "9.9.9",
-    directory: "/somewhere/kojo",
+    directory: "/somewhere/kojo-runtime",
   },
   effect: {
     name: "effect",

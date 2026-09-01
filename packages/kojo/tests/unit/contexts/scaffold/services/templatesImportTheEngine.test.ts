@@ -6,7 +6,7 @@ import {
 } from "../../../../../src/contexts/scaffold/models/FactoryChoices.ts";
 import { toolchainFor } from "../../../../../src/contexts/scaffold/models/PackageManager.ts";
 import { plan } from "../../../../../src/contexts/scaffold/services/plan.ts";
-import { enginePackage } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
+import { runtimePackage } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
 import { someEngine } from "../../../../support/engineDependency.ts";
 
 /**
@@ -23,7 +23,7 @@ import { someEngine } from "../../../../support/engineDependency.ts";
  * ready, because `doctor` checks that the *declared* dependency resolves, which it does.
  *
  * So the rule is checked rather than remembered: every bare specifier a stamped file imports is
- * either `effect`, or it begins with `enginePackage`. Relative paths are the factory's own files
+ * either `effect`, or it begins with `runtimePackage`. Relative paths are the factory's own files
  * and are not this test's business.
  */
 const choicesFor = (template: TemplateName): FactoryChoices => ({
@@ -57,7 +57,7 @@ describe("what a stamped factory imports the engine as", () => {
     expect(bare.length).toBeGreaterThan(0);
 
     for (const { file, specifier } of bare) {
-      const allowed = specifier === "effect" || specifier.startsWith(`${enginePackage}/`);
+      const allowed = specifier === "effect" || specifier.startsWith(`${runtimePackage}/`);
       expect(
         allowed,
         `${file.path} imports "${specifier}", which is neither effect nor the engine`,
@@ -69,7 +69,7 @@ describe("what a stamped factory imports the engine as", () => {
     const stamped = plan(choicesFor(template));
 
     const importers = stamped.files.filter((file) =>
-      specifiersIn(file.content).some((specifier) => specifier.startsWith(`${enginePackage}/`)),
+      specifiersIn(file.content).some((specifier) => specifier.startsWith(`${runtimePackage}/`)),
     );
 
     // Envelopes, checks and the workflow all import the engine. If a rename ever leaves the
@@ -80,6 +80,6 @@ describe("what a stamped factory imports the engine as", () => {
   it("declares the engine under the same name it imports it by", () => {
     // The two ends of the seam, compared directly: what `init` writes into `dependencies`, and what
     // the stamped files ask a resolver for.
-    expect(someEngine.kojo.name).toBe(enginePackage);
+    expect(someEngine.runtime.name).toBe(runtimePackage);
   });
 });

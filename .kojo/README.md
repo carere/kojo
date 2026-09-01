@@ -4,7 +4,7 @@ This is the factory used to develop Kojo, running in Kojo's own repository. It i
 a stamped starter: `kojo init` cannot produce a router and three lanes, and the point of this
 directory is that the taxonomy belongs to the author (architecture.md **D1**). So it was written
 here, by hand, against the same public API a stamped factory imports — every reference to the engine
-is `from "@carere/kojo/..."`, resolved through `node_modules/kojo`, and nothing under `.kojo/` is a copy of
+is `from "@carere/kojo-runtime/..."`, resolved through the Project installation, and nothing under `.kojo/` is a copy of
 engine source.
 
 Read [`workflows/factory.ts`](workflows/factory.ts) first. It is the product.
@@ -34,10 +34,9 @@ Two files the design record names and this factory deliberately does **not** hav
 - **`sandbox/Dockerfile`.** This factory runs `noSandbox()` — see below — so a Dockerfile here would
   be a file nothing reads, which is the same lie as a placeholder command that exits 0.
 
-**`.env` is not committed, and it cannot be** — the repository root ignores `.env*`, which is the
-point of it. So a fresh clone of Kojo reports `kojo doctor`'s `credentials` check as failed until a
-maintainer writes one. Write the two lines by hand, or export `CLAUDE_CODE_OAUTH_TOKEN` in the
-environment.
+**`.env` is not committed, and it cannot be** — the repository root ignores `.env*`. Standalone
+Factory validation does not test external credentials. The Project Runner resolves them only when
+execution needs them.
 
 **Do not run `kojo init` to get that file here.** `init` keeps every file you edited, but it also
 writes the ones it thinks are missing: doing it in this repository stamps the two files named just

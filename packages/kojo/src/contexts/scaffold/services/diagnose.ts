@@ -6,8 +6,8 @@ import { spendFrom, spendVariable } from "../../agent/models/AgentSpend.ts";
 import { Roster } from "../../agent/ports/Roster.ts";
 import { decodeUnknown } from "../../shared/lib/decode.ts";
 import {
-  enginePackage,
   factoryDirectory,
+  runtimePackage,
   workflowExtension,
   workflowsDirectory,
 } from "../../shared/models/FactoryLayout.ts";
@@ -146,6 +146,8 @@ const remaining = [
  */
 export const diagnose = (options: {
   readonly root: string;
+  /** Stop after Host, repository, Factory-layout, and Project-package checks. */
+  readonly contracts?: "all" | "global" | undefined;
   /** Overrides what the workflows say about where this factory runs. */
   readonly sandbox?: SandboxChoice | undefined;
   /** Overrides the image tag read out of the workflows. */
@@ -224,11 +226,15 @@ export const diagnose = (options: {
     const toolchain = yield* detectPackageManager(root);
     const dependencies = dependencyFinding({
       engine,
-      kojo: installedPackage(at(), enginePackage),
+      runtime: installedPackage(at(), runtimePackage),
       effect: installedPackage(at(), "effect"),
       manager: toolchain.manager,
     });
     findings.push(dependencies);
+
+    if (options.contracts === "global") {
+      return { root, findings, loadable: false };
+    }
 
     // Two copies of one package is a fault that makes every answer below it meaningless rather than
     // merely worse — the modules load, and what they build cannot be used. Reported once, and the

@@ -1,81 +1,12 @@
-import { Console, Duration, Effect, FileSystem, Layer, Option, Path, Result } from "effect";
+import { Console, Effect, FileSystem, Option, Path } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
-import type * as SandcastleSandboxSource from "../contexts/sandbox/adapters/SandcastleSandboxSource.ts";
 import { sandboxChoices } from "../contexts/scaffold/models/FactoryChoices.ts";
-import { type Finding, isReady, skipped } from "../contexts/scaffold/models/Finding.ts";
+import { isReady, skipped } from "../contexts/scaffold/models/Finding.ts";
 import { diagnose } from "../contexts/scaffold/services/diagnose.ts";
-import { layersFinding } from "../contexts/scaffold/services/readiness.ts";
+import { standaloneValidation } from "../contexts/scaffold/services/standaloneValidation.ts";
+import { factoryDirectory } from "../contexts/shared/models/FactoryLayout.ts";
 import { commandFailed } from "./CommandFailed.ts";
 import { renderDiagnosis, verdictLine } from "./doctorReport.ts";
-import { factory } from "./factory.ts";
-import { bodiesOf, everything } from "./workflows.ts";
-
-/**
- * How long the dry run is given to build every layer and take them down again.
- *
- * Generous, because the engine's layer starts and stops a shard manager and that is the slowest
- * thing here — and bounded, because a diagnostic that hangs is worse than one that says it could
- * not finish. A timeout comes back as a failed `layers` finding, not as a hung terminal.
- */
-const patience = Duration.seconds(60);
-
-/**
- * The dry run: assemble every layer over every workflow body, and stop.
- *
- * **Over a scratch database, and that is not a shortcut.** Building the real engine layer registers
- * this process as a runner, and a runner picks up every verdict written since the last one ran — so
- * a doctor pointed at the factory's own file would silently resume suspended runs. Looking must
- * never be an act of execution (adr/gate/0001), and this is the one command whose entire purpose is
- * looking. A scratch file proves the same thing the real one would: that the engine's storage, the
- * askings, the trace, the sandbox source, the agent invoker and every workflow body agree on their
- * services, and that the migrations apply.
- *
- * Nothing is started. `Effect.void` under the layer is the whole program: the layers are built,
- * `Effect.void` succeeds, and the scope closes. There is no `execute`, so there is no run — which is
- * the half of "stops before the first spawn" that matters.
- */
-const dryRun = (
-  root: string,
-): Effect.Effect<Finding, never, SandcastleSandboxSource.HostServices> =>
-  Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const scratch = yield* fileSystem.makeTempDirectoryScoped({ prefix: "kojo-doctor-" });
-
-    // Every workflow, not only one: `kojo watch` and `kojo gate answer` both register the whole set,
-    // because a suspended run adopted from another process may belong to any of them.
-    const runnables = yield* everything(root);
-
-    yield* Effect.void.pipe(
-      Effect.provide(
-        bodiesOf(runnables).pipe(Layer.provideMerge(factory(path.join(scratch, "dry-run.db")))),
-      ),
-      Effect.timeout(patience),
-    );
-
-    return runnables.map((runnable) => runnable.name);
-  }).pipe(
-    Effect.scoped,
-    Effect.result,
-    Effect.map((outcome) =>
-      Result.isSuccess(outcome)
-        ? layersFinding({
-            over: `a scratch database, for ${outcome.success.join(", ")}`,
-          })
-        : layersFinding({ reason: describe(outcome.failure) }),
-    ),
-  );
-
-/** Whatever refused, on one line. Three unrelated error types reach here; all three have a message. */
-const describe = (failure: unknown): string => {
-  const message =
-    failure instanceof Error
-      ? failure.message
-      : typeof failure === "object" && failure !== null && "message" in failure
-        ? String((failure as { readonly message: unknown }).message)
-        : String(failure);
-  return (message.split("\n").find((line) => line.trim() !== "") ?? message).trim();
-};
 
 /**
  * Refuse to call an unfinished factory ready.
@@ -115,20 +46,20 @@ export const doctor = Command.make(
   Effect.fn(function* ({ root, sandbox, image }) {
     const examination = yield* diagnose({
       root,
+      contracts: "global",
       sandbox: Option.getOrUndefined(sandbox),
       image: Option.getOrUndefined(image),
     });
 
-    // Assembled only when every workflow module loaded. Attempting it otherwise would report a
-    // second failure about the first one, and bury the file that actually needs editing.
-    const layers = examination.loadable
-      ? yield* dryRun(examination.root)
-      : skipped(
-          "layers",
-          "a workflow did not load, so there was nothing to assemble the layers over",
-        );
-
-    const findings = [...examination.findings, layers];
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const hasFactory = yield* fileSystem
+      .exists(path.join(examination.root, factoryDirectory))
+      .pipe(Effect.orElseSucceed(() => false));
+    const project = hasFactory
+      ? yield* standaloneValidation(examination.root)
+      : [skipped("validation", "there is no Factory to validate")];
+    const findings = [...examination.findings, ...project];
     yield* Console.log(renderDiagnosis({ root: examination.root, findings }));
 
     // The verdict is the exit code, said out loud. On stderr when it is bad, because that is where

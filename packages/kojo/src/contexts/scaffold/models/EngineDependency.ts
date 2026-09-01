@@ -47,12 +47,9 @@ export type Reach = "published" | "linked";
 /** The two dependencies, decided together, because the pin only works if both agree. */
 export interface EngineDependency {
   readonly reach: Reach;
-  readonly kojo: Declared;
+  readonly runtime: Declared;
   readonly effect: Declared;
 }
-
-/** Whether a package directory sits inside a `node_modules`, which is to say it was installed. */
-const installed = (directory: string): boolean => directory.split("/").includes("node_modules");
 
 /**
  * What a stamped repository must declare, given the engine that is stamping it.
@@ -62,10 +59,11 @@ const installed = (directory: string): boolean => directory.split("/").includes(
  * no second place for it to drift from the one the engine was built against.
  */
 export const dependencyFor = (options: {
-  readonly engine: ResolvedPackage;
+  readonly runtime: ResolvedPackage;
   readonly effect: ResolvedPackage;
+  readonly reach: Reach;
 }): EngineDependency => {
-  const reach: Reach = installed(options.engine.directory) ? "published" : "linked";
+  const reach = options.reach;
   const specifier = (resolved: ResolvedPackage) =>
     reach === "published" ? resolved.version : `file:${resolved.directory}`;
 
@@ -76,11 +74,11 @@ export const dependencyFor = (options: {
     directory: resolved.directory,
   });
 
-  return { reach, kojo: declare(options.engine), effect: declare(options.effect) };
+  return { reach, runtime: declare(options.runtime), effect: declare(options.effect) };
 };
 
 /** The two entries in the order they are declared and reported. */
 export const declarations = (engine: EngineDependency): ReadonlyArray<Declared> => [
-  engine.kojo,
+  engine.runtime,
   engine.effect,
 ];

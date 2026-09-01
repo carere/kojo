@@ -6,10 +6,10 @@
 // A check never asks the agent anything. It compares a claim against the repository, and it returns
 // faults rather than a boolean, because a correction turn is written from the fault.
 
-import type { Workspace } from "@carere/kojo/contexts/sandbox/ports/Workspace";
-import type { Check } from "@carere/kojo/contexts/workflow/guards/Check";
-import { artifactsExist } from "@carere/kojo/contexts/workflow/guards/checks/artifactsExist";
-import { diffMatchesClaims } from "@carere/kojo/contexts/workflow/guards/checks/diffMatchesClaims";
+import type { Workspace } from "@carere/kojo-runtime/contexts/sandbox/ports/Workspace";
+import type { Check } from "@carere/kojo-runtime/contexts/workflow/guards/Check";
+import { artifactsExist } from "@carere/kojo-runtime/contexts/workflow/guards/checks/artifactsExist";
+import { diffMatchesClaims } from "@carere/kojo-runtime/contexts/workflow/guards/checks/diffMatchesClaims";
 import type { Built, Planned } from "./envelopes.ts";
 
 /**

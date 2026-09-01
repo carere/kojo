@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import { manifestFor } from "../../../../../src/contexts/scaffold/services/manifest.ts";
-import { enginePackage } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
+import { runtimePackage } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
 import { someEngine } from "../../../../support/engineDependency.ts";
 
 const decide = (existing?: string) =>
@@ -15,7 +15,7 @@ describe("the manifest a repository needs before one stamped file resolves", () 
     const manifest = parsed(decision.content);
 
     expect(decision.outcome).toBe("created");
-    expect(manifest.dependencies).toEqual({ [enginePackage]: "9.9.9", effect: "4.0.0-test" });
+    expect(manifest.dependencies).toEqual({ [runtimePackage]: "9.9.9", effect: "4.0.0-test" });
     // A name a registry would accept, out of a directory name a person chose.
     expect(manifest.name).toBe("my-repo");
     expect(manifest.private).toBe(true);
@@ -42,10 +42,10 @@ describe("the manifest a repository needs before one stamped file resolves", () 
     expect(manifest.scripts).toEqual({ build: "tsc" });
     expect(manifest.dependencies).toEqual({
       zod: "3.0.0",
-      [enginePackage]: "9.9.9",
+      [runtimePackage]: "9.9.9",
       effect: "4.0.0-test",
     });
-    expect(decision.added.map((entry) => entry.name)).toEqual([enginePackage, "effect"]);
+    expect(decision.added.map((entry) => entry.name)).toEqual([runtimePackage, "effect"]);
   });
 
   it("never re-pins what the repository already declares — it reports the disagreement instead", () => {
@@ -58,7 +58,7 @@ describe("the manifest a repository needs before one stamped file resolves", () 
     expect(decision.mismatched).toEqual([
       { name: "effect", wanted: "4.0.0-test", declared: "3.11.0" },
     ]);
-    expect(decision.added.map((entry) => entry.name)).toEqual([enginePackage]);
+    expect(decision.added.map((entry) => entry.name)).toEqual([runtimePackage]);
   });
 
   it("counts a dependency declared in any of the four blocks as declared", () => {
@@ -67,8 +67,8 @@ describe("the manifest a repository needs before one stamped file resolves", () 
     );
 
     expect(decision.mismatched).toEqual([]);
-    expect(decision.added.map((entry) => entry.name)).toEqual([enginePackage]);
-    expect(parsed(decision.content).dependencies).toEqual({ [enginePackage]: "9.9.9" });
+    expect(decision.added.map((entry) => entry.name)).toEqual([runtimePackage]);
+    expect(parsed(decision.content).dependencies).toEqual({ [runtimePackage]: "9.9.9" });
   });
 
   it("keeps a manifest it cannot read rather than replacing it", () => {
@@ -76,7 +76,7 @@ describe("the manifest a repository needs before one stamped file resolves", () 
 
     expect(decision.outcome).toBe("unreadable");
     expect(decision.content).toBeUndefined();
-    expect(decision.mismatched.map((entry) => entry.name)).toEqual([enginePackage, "effect"]);
+    expect(decision.mismatched.map((entry) => entry.name)).toEqual([runtimePackage, "effect"]);
   });
 
   it("is exactly idempotent: run over its own output it changes nothing and says so", () => {

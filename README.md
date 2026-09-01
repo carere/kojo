@@ -90,8 +90,9 @@ kojo doctor
 **A freshly stamped factory fails `doctor` on purpose.** Three of the four entries in
 `.kojo/commands.ts` are placeholders that exit 78, because a scaffolder cannot know how your
 repository runs its own suite and a plausible-but-wrong command that exits 0 is worse than one that
-says it is fake. `doctor` loads every file, builds a payload against the engine's own schemas, and
-exits non-zero with a remedy per fault — so it is what a CI job gates on, not a summary.
+says it is fake. `doctor` performs Host and package checks, then invokes the Project-local standalone
+validator, and exits non-zero with a remedy per fault — so it is what a CI job gates on, not a
+summary.
 
 ### 3. Run it
 

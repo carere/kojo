@@ -1,0 +1,16 @@
+{
+  "formatVersion": 1,
+  "assets": [
+    "kojo.config.yaml",
+    "prompts/builder/system.md",
+    "prompts/builder/user.md",
+    "prompts/fixer/system.md",
+    "prompts/fixer/user.md",
+    "prompts/planner/system.md",
+    "prompts/planner/user.md",
+    "prompts/router/system.md",
+    "prompts/router/user.md",
+    "prompts/tidier/system.md",
+    "prompts/tidier/user.md"
+  ]
+}
