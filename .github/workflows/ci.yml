@@ -135,8 +135,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes dbus-user-session jq openssh-server policykit-1
-          sudo install -m 0755 "$(readlink -f "$(command -v bun)")" /usr/local/bin/bun
-          sudo install -m 0755 "$(readlink -f "$(command -v moon)")" /usr/local/bin/moon
+          bun_binary=$(find "$HOME/.proto/tools/bun" -mindepth 2 -maxdepth 2 -type f -name bun -perm /111 -print -quit)
+          moon_binary=$(find "$HOME/.proto/tools/moon" -mindepth 2 -maxdepth 2 -type f -name moon -perm /111 -print -quit)
+          test -n "$bun_binary"
+          test -n "$moon_binary"
+          echo "Installing Bun from $bun_binary"
+          echo "Installing Moon from $moon_binary"
+          sudo install -m 0755 "$bun_binary" /usr/local/bin/bun
+          sudo install -m 0755 "$moon_binary" /usr/local/bin/moon
 
       - name: Run native systemd Host evidence
         run: sudo bash .github/scripts/systemd-native-evidence.sh "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/native-host-evidence"

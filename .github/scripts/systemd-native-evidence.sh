@@ -64,10 +64,10 @@ ssh_arguments=(
   -o UserKnownHostsFile=/dev/null
   "$evidence_user@127.0.0.1"
 )
-remote_prefix="cd '$workspace' && export PATH=/usr/local/bin:/usr/bin:/bin CI=1 NO_COLOR=1 XDG_RUNTIME_DIR='$runtime_directory' DBUS_SESSION_BUS_ADDRESS='unix:path=$runtime_directory/bus'"
+remote_prefix="cd '$workspace' && export PATH=/usr/local/bin:/usr/bin:/bin CI=1 NO_COLOR=1 HOME='$evidence_home' XDG_RUNTIME_DIR='$runtime_directory' XDG_CONFIG_HOME='$evidence_home/.config' XDG_DATA_HOME='$evidence_home/.local/share' XDG_STATE_HOME='$evidence_home/.local/state' XDG_CACHE_HOME='$evidence_home/.cache' DBUS_SESSION_BUS_ADDRESS='unix:path=$runtime_directory/bus'"
 
 ssh "${ssh_arguments[@]}" \
-  "$remote_prefix && id && stat -c 'RuntimeDirectory=%n Owner=%u Mode=%a' '$runtime_directory' && test -S '$runtime_directory/bus' && /usr/bin/systemctl --user show-environment && loginctl show-user '$evidence_user' --property=Sessions,Linger,State" \
+  "$remote_prefix && id && stat -c 'RuntimeDirectory=%n Owner=%u Mode=%a' '$runtime_directory' && test -S '$runtime_directory/bus' && /usr/bin/systemctl --user import-environment HOME XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME && /usr/bin/systemctl --user show-environment && loginctl show-user '$evidence_user' --property=Sessions,Linger,State" \
   >"$evidence_directory/pam-session.log"
 
 ssh "${ssh_arguments[@]}" \
