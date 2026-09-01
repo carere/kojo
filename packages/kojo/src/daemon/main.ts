@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { join } from "node:path";
+import { Effect } from "effect";
 import { startDaemon } from "../contexts/daemon/adapters/DaemonOwner.ts";
 import { hostPaths } from "../contexts/daemon/services/hostPaths.ts";
 
@@ -27,9 +28,9 @@ let stopping = false;
 const stop = (): void => {
   if (stopping) return;
   stopping = true;
-  void daemon.stop();
+  void Effect.runPromise(daemon.stop);
 };
 process.on("SIGTERM", stop);
 process.on("SIGINT", stop);
 
-await daemon.stopped;
+await Effect.runPromise(daemon.stopped);

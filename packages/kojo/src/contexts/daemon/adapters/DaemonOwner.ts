@@ -17,6 +17,7 @@ import type {
   BrowserSessionResponse,
   DaemonDocument,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/browser";
+import { Effect } from "effect";
 import type { DaemonPaths } from "../models/DaemonPaths.ts";
 import type { DaemonEndpoint } from "../models/Endpoint.ts";
 import { LifecycleError } from "../models/LifecycleError.ts";
@@ -77,8 +78,8 @@ const acquireLock = (path: string): LockHandle => {
 
 export interface RunningDaemon {
   readonly endpoint: DaemonEndpoint;
-  readonly stopped: Promise<void>;
-  readonly stop: () => Promise<void>;
+  readonly stopped: Effect.Effect<void, LifecycleError>;
+  readonly stop: Effect.Effect<void, LifecycleError>;
 }
 
 export interface StartDaemonOptions {
@@ -357,7 +358,7 @@ export const startDaemon = (
       resolveStopped = resolve;
     });
     let stopping: Promise<void> | undefined;
-    const stop = (): Promise<void> => {
+    const stopPromise = (): Promise<void> => {
       if (stopping !== undefined) return stopping;
       stopping = Promise.resolve().then(() => {
         socketServer?.stop(true);
@@ -372,7 +373,19 @@ export const startDaemon = (
       });
       return stopping;
     };
-    return { endpoint, stopped, stop };
+    const surfaceFailure = (cause: unknown): LifecycleError =>
+      cause instanceof LifecycleError
+        ? cause
+        : new LifecycleError(
+            "DAEMON_STOP_FAILED",
+            cause instanceof Error ? cause.message : String(cause),
+            cause,
+          );
+    return {
+      endpoint,
+      stopped: Effect.tryPromise({ try: () => stopped, catch: surfaceFailure }),
+      stop: Effect.tryPromise({ try: stopPromise, catch: surfaceFailure }),
+    };
   } catch (cause) {
     socketServer?.stop(true);
     consoleServer?.stop(true);

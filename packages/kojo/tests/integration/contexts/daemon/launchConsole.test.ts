@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Effect } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   type RunningDaemon,
@@ -21,8 +22,10 @@ const paths = (): DaemonPaths => {
   const value = {
     installationRoot,
     dataRoot: join(root, "data"),
+    configurationRoot: join(root, "config"),
+    cacheRoot: join(root, "cache"),
     runtimeRoot: join(root, "runtime"),
-    launchAgent: join(root, "LaunchAgents", "dev.kojo.test.plist"),
+    serviceDefinition: join(root, "LaunchAgents", "dev.kojo.test.plist"),
     managedCli: join(installationRoot, "bin", "kojo"),
     managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
   };
@@ -31,7 +34,7 @@ const paths = (): DaemonPaths => {
 };
 
 afterEach(async () => {
-  for (const daemon of daemons.splice(0)) await daemon.stop();
+  for (const daemon of daemons.splice(0)) await Effect.runPromise(daemon.stop);
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 

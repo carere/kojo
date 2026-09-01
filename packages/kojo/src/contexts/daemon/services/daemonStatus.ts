@@ -1,9 +1,11 @@
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { Effect } from "effect";
 import { managedInstallationIsPresent } from "../adapters/ManagedInstallation.ts";
 import type { DaemonPaths } from "../models/DaemonPaths.ts";
 import type { DaemonStatus } from "../models/DaemonStatus.ts";
 import type { DaemonEndpoint } from "../models/Endpoint.ts";
+import { LifecycleError } from "../models/LifecycleError.ts";
 import type { NativeService } from "../ports/NativeService.ts";
 
 const privateOwned = (path: string, kind: "file" | "socket"): boolean => {
@@ -75,31 +77,42 @@ const probe = async (endpoint: DaemonEndpoint): Promise<boolean> => {
   }
 };
 
-export const inspectDaemon = async (
+export const inspectDaemon = (
   paths: DaemonPaths,
   nativeService: NativeService,
-): Promise<DaemonStatus> => {
-  const native = nativeService.inspect();
-  const endpoint = readDaemonEndpoint(paths);
-  const responsive = endpoint === undefined ? false : await probe(endpoint);
-  return {
-    installed:
-      managedInstallationIsPresent(paths) &&
-      existsSync(paths.serviceDefinition) &&
-      privateOwned(paths.serviceDefinition, "file"),
-    managedCli: paths.managedCli,
-    automaticStart: native.automaticStart,
-    manager: native.manager,
-    process: native.process,
-    responsiveness:
-      native.process === "running" || endpoint !== undefined
-        ? responsive
-          ? "responsive"
-          : "unresponsive"
-        : "unknown",
-    ready: responsive,
-    loginLifetime: native.loginLifetime,
-    logoutPersistence: native.logoutPersistence,
-    ...(native.detail === undefined ? {} : { detail: native.detail }),
-  };
-};
+): Effect.Effect<DaemonStatus, LifecycleError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const native = nativeService.inspect();
+      const endpoint = readDaemonEndpoint(paths);
+      const responsive = endpoint === undefined ? false : await probe(endpoint);
+      return {
+        installed:
+          managedInstallationIsPresent(paths) &&
+          existsSync(paths.serviceDefinition) &&
+          privateOwned(paths.serviceDefinition, "file"),
+        managedCli: paths.managedCli,
+        automaticStart: native.automaticStart,
+        manager: native.manager,
+        process: native.process,
+        responsiveness:
+          native.process === "running" || endpoint !== undefined
+            ? responsive
+              ? "responsive"
+              : "unresponsive"
+            : "unknown",
+        ready: responsive,
+        loginLifetime: native.loginLifetime,
+        logoutPersistence: native.logoutPersistence,
+        ...(native.detail === undefined ? {} : { detail: native.detail }),
+      };
+    },
+    catch: (cause) =>
+      cause instanceof LifecycleError
+        ? cause
+        : new LifecycleError(
+            "DAEMON_INSPECTION_FAILED",
+            cause instanceof Error ? cause.message : String(cause),
+            cause,
+          ),
+  });

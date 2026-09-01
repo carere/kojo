@@ -8,8 +8,10 @@ const installationRoot = join(root, "installation");
 const paths: DaemonPaths = {
   installationRoot,
   dataRoot: join(root, "data"),
+  configurationRoot: join(root, "config"),
+  cacheRoot: join(root, "cache"),
   runtimeRoot: join(root, "runtime"),
-  launchAgent: join(root, "LaunchAgents", "dev.kojo.test.plist"),
+  serviceDefinition: join(root, "LaunchAgents", "dev.kojo.test.plist"),
   managedCli: join(installationRoot, "bin", "kojo"),
   managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
 };

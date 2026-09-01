@@ -10,13 +10,16 @@ import type { NativeService } from "../ports/NativeService.ts";
 import { inspectDaemon } from "./daemonStatus.ts";
 
 export interface DaemonLifecycle {
-  readonly install: () => Promise<{ readonly changed: boolean; readonly status: DaemonStatus }>;
-  readonly start: () => Promise<DaemonStatus>;
-  readonly stop: () => Promise<DaemonStatus>;
-  readonly enable: () => Promise<DaemonStatus>;
-  readonly disable: (stopNow: boolean) => Promise<DaemonStatus>;
+  readonly install: Effect.Effect<
+    { readonly changed: boolean; readonly status: DaemonStatus },
+    LifecycleError
+  >;
+  readonly start: Effect.Effect<DaemonStatus, LifecycleError>;
+  readonly stop: Effect.Effect<DaemonStatus, LifecycleError>;
+  readonly enable: Effect.Effect<DaemonStatus, LifecycleError>;
+  readonly disable: (stopNow: boolean) => Effect.Effect<DaemonStatus, LifecycleError>;
   readonly keepRunningAfterLogout: Effect.Effect<DaemonStatus, LifecycleError>;
-  readonly status: () => Promise<DaemonStatus>;
+  readonly status: Effect.Effect<DaemonStatus, LifecycleError>;
 }
 
 const lifecycleError = (cause: unknown): LifecycleError =>
@@ -33,45 +36,29 @@ export const manageDaemon = (
   nativeService: NativeService,
   installation: Omit<ManagedInstallationOptions, "paths" | "serviceDocument"> = {},
 ): DaemonLifecycle => {
-  const status = (): Promise<DaemonStatus> => inspectDaemon(paths, nativeService);
+  const status = inspectDaemon(paths, nativeService);
+  const nativeAction = (action: () => void): Effect.Effect<void, LifecycleError> =>
+    Effect.try({ try: action, catch: lifecycleError });
+  const transition = (action: () => void): Effect.Effect<DaemonStatus, LifecycleError> =>
+    nativeAction(action).pipe(Effect.flatMap(() => status));
   return {
-    install: async () => {
-      nativeService.assertSupported();
-      const installed = await installManagedRelease({
+    install: Effect.gen(function* () {
+      yield* nativeAction(nativeService.assertSupported);
+      const installed = yield* installManagedRelease({
         ...installation,
         paths,
         serviceDocument: nativeService.serviceDocument,
       });
-      if (installed.outcome === "installed") nativeService.installAndStart(paths.serviceDefinition);
-      return { changed: installed.outcome === "installed", status: await status() };
-    },
-    start: async () => {
-      nativeService.start(paths.serviceDefinition);
-      return status();
-    },
-    stop: async () => {
-      nativeService.stop();
-      return status();
-    },
-    enable: async () => {
-      nativeService.enable();
-      return status();
-    },
-    disable: async (stopNow) => {
-      nativeService.disable(stopNow);
-      return status();
-    },
-    keepRunningAfterLogout: Effect.try({
-      try: () => nativeService.keepRunningAfterLogout(),
-      catch: lifecycleError,
-    }).pipe(
-      Effect.flatMap(() =>
-        Effect.tryPromise({
-          try: status,
-          catch: lifecycleError,
-        }),
-      ),
-    ),
+      if (installed.outcome === "installed") {
+        yield* nativeAction(() => nativeService.installAndStart(paths.serviceDefinition));
+      }
+      return { changed: installed.outcome === "installed", status: yield* status };
+    }),
+    start: transition(() => nativeService.start(paths.serviceDefinition)),
+    stop: transition(nativeService.stop),
+    enable: transition(nativeService.enable),
+    disable: (stopNow) => transition(() => nativeService.disable(stopNow)),
+    keepRunningAfterLogout: transition(nativeService.keepRunningAfterLogout),
     status,
   };
 };
