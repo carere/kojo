@@ -2,6 +2,7 @@ import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/cl
 import type { OperationReceipt } from "@carere/kojo-client-contracts/contexts/client/contracts/operation";
 import type {
   ClientRequestDocument,
+  ProjectLocationResult,
   ProjectSnapshot,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
 import { Console, Data, Effect, Option } from "effect";
@@ -163,7 +164,11 @@ const list = Command.make(
     }
     for (const project of snapshot.projects) {
       yield* Console.log(
-        `${project.projectId}\t${project.projectState}\t${project.factoryState}\t${project.location}`,
+        `${project.projectId}\t${project.projectState}\t${project.factoryState}\t${
+          project.locationChange.state === "draining"
+            ? `${project.locationChange.action}-draining`
+            : "steady"
+        }\t${project.locationActive ? "active-location" : "retained-location"}\t${project.location}`,
       );
     }
   }),
@@ -172,6 +177,102 @@ const list = Command.make(
 const projectArgument = Argument.string("project").pipe(
   Argument.withDescription("The full Project ID"),
 );
+
+const locationRequestId = Flag.string("request-id").pipe(
+  Flag.withDescription("Reuse this ID only for this exact Project location change"),
+  Flag.optional,
+);
+
+const confirmLocationChange = Flag.boolean("confirm").pipe(
+  Flag.withDescription("Confirm the shown location, Workflow, Run, and history consequences"),
+);
+
+const runLocationChange = (
+  projectId: string,
+  action: "relocate" | "archive" | "restore",
+  requestId: Option.Option<string>,
+  confirm: boolean,
+  location?: string,
+) =>
+  Effect.gen(function* () {
+    if (!confirm) {
+      return yield* commandFailed(
+        "use --confirm after you accept that dispatch drains, Workflows become inactive, and retained Runs keep their pinned revisions",
+      );
+    }
+    const endpoint = readDaemonEndpoint(productionPaths());
+    if (endpoint === undefined)
+      return yield* commandFailed("the Daemon is not ready; run `kojo daemon status`");
+    const id = Option.getOrElse(requestId, () => crypto.randomUUID());
+    yield* Console.log(`request ${id}`);
+    yield* Console.log(`draining Project ${projectId} before ${action}`);
+    const receipt = yield* daemonRequest<OperationReceipt>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/actions/${action}`,
+      {
+        method: "POST",
+        body: {
+          requestId: id,
+          dataIdentity: endpoint.dataIdentity,
+          confirm: true,
+          ...(location === undefined ? {} : { location }),
+        },
+      },
+    ).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
+    const result = receipt.result as unknown as ProjectLocationResult;
+    yield* Console.log(
+      `${result.action} committed for Project ${result.project.projectId}: ${result.project.projectState}`,
+    );
+    yield* Console.log(`location ${result.project.location}`);
+    for (const consequence of result.consequences) yield* Console.log(consequence);
+  });
+
+const relocate = Command.make(
+  "relocate",
+  {
+    project: projectArgument,
+    to: Flag.directory("to", { mustExist: true }).pipe(
+      Flag.withDescription("The exact new Git working-tree root"),
+    ),
+    requestId: locationRequestId,
+    confirm: confirmLocationChange,
+  },
+  Effect.fn(function* ({ project, to, requestId, confirm }) {
+    const location = yield* Effect.try({
+      try: () => exactGitWorkingTree(to),
+      catch: clientError,
+    }).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
+    yield* runLocationChange(project, "relocate", requestId, confirm, location);
+  }),
+).pipe(
+  Command.withDescription("Relocate or explicitly confirm one Project after execution drains"),
+);
+
+const archive = Command.make(
+  "archive",
+  { project: projectArgument, requestId: locationRequestId, confirm: confirmLocationChange },
+  Effect.fn(function* ({ project, requestId, confirm }) {
+    yield* runLocationChange(project, "archive", requestId, confirm);
+  }),
+).pipe(Command.withDescription("Archive one Project without deleting its history"));
+
+const restore = Command.make(
+  "restore",
+  {
+    project: projectArgument,
+    to: Flag.directory("to", { mustExist: true }).pipe(
+      Flag.withDescription("The exact Git working-tree root to activate"),
+    ),
+    requestId: locationRequestId,
+    confirm: confirmLocationChange,
+  },
+  Effect.fn(function* ({ project, to, requestId, confirm }) {
+    const location = yield* Effect.try({
+      try: () => exactGitWorkingTree(to),
+      catch: clientError,
+    }).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
+    yield* runLocationChange(project, "restore", requestId, confirm, location);
+  }),
+).pipe(Command.withDescription("Restore one Archived Project at an unclaimed location"));
 
 const revisionFlag = Flag.string("revision").pipe(
   Flag.withDescription("The full Workflow Revision SHA-256 identity"),
@@ -264,5 +365,15 @@ const repair = Command.make(
 
 export const project = Command.make("project").pipe(
   Command.withDescription("Register and inspect Projects owned by the Daemon"),
-  Command.withSubcommands([register, list, status, repair, lookup, retry]),
+  Command.withSubcommands([
+    register,
+    list,
+    relocate,
+    archive,
+    restore,
+    status,
+    repair,
+    lookup,
+    retry,
+  ]),
 );

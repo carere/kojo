@@ -253,14 +253,6 @@ export const startDaemon = (
     const triggerRepository = new SqliteTriggerRepository(database);
     const gateRepository = new SqliteDaemonGateRepository(database);
     const artifactRepository = new AtomicArtifactRepository(database, paths.dataRoot);
-    const projectApi = new ProjectApi({
-      dataIdentity,
-      instanceId,
-      journal: new HostClientRequestJournal(join(paths.dataRoot, "client-requests")),
-      now,
-      repository: projectRepository,
-      dataRoot: paths.dataRoot,
-    });
     const runApi = new RunApi({
       dataIdentity,
       instanceId,
@@ -286,6 +278,15 @@ export const startDaemon = (
       ...(options.resourceRecoveryBoundary === undefined
         ? {}
         : { resourceRecoveryBoundary: options.resourceRecoveryBoundary }),
+    });
+    const projectApi = new ProjectApi({
+      dataIdentity,
+      instanceId,
+      journal: new HostClientRequestJournal(join(paths.dataRoot, "client-requests")),
+      now,
+      repository: projectRepository,
+      dataRoot: paths.dataRoot,
+      runs: runApi,
     });
     void Effect.runPromise(runApi.restore()).catch(() => undefined);
     const gateApi = new GateApi({
@@ -804,6 +805,18 @@ export const startDaemon = (
           if (request.method === "POST" && cancelOneRun !== null) {
             return cancelRun(request, cancelOneRun[1] ?? "invalid");
           }
+          const changeProjectLocation = url.pathname.match(
+            /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/actions\/(relocate|archive|restore)$/,
+          );
+          if (request.method === "POST" && changeProjectLocation !== null) {
+            return Effect.runPromise(
+              projectApi.locationChange(
+                changeProjectLocation[1] ?? "invalid",
+                changeProjectLocation[2] as "relocate" | "archive" | "restore",
+                await requestJson(request),
+              ),
+            );
+          }
           const repairOneProject = url.pathname.match(
             /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/actions\/repair$/,
           );
@@ -958,6 +971,20 @@ export const startDaemon = (
         if (request.method === "POST" && cancelOneRun !== null) {
           if (!isJson(request)) return problem(415, "json-required", "Cancel requires JSON");
           return cancelRun(request, cancelOneRun[1] ?? "invalid");
+        }
+        const changeProjectLocation = url.pathname.match(
+          /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/actions\/(relocate|archive|restore)$/,
+        );
+        if (request.method === "POST" && changeProjectLocation !== null) {
+          if (!isJson(request))
+            return problem(415, "json-required", "Project location change requires JSON");
+          return Effect.runPromise(
+            projectApi.locationChange(
+              changeProjectLocation[1] ?? "invalid",
+              changeProjectLocation[2] as "relocate" | "archive" | "restore",
+              await requestJson(request),
+            ),
+          );
         }
         const repairOneProject = url.pathname.match(
           /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/actions\/repair$/,

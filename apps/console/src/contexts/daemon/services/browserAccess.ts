@@ -9,7 +9,11 @@ import type {
   RecordVerdictRequest,
   RecordVerdictResult,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/gate";
-import type { ProjectSnapshot } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
+import type { OperationReceipt } from "@carere/kojo-client-contracts/contexts/client/contracts/operation";
+import type {
+  ProjectLocationResult,
+  ProjectSnapshot,
+} from "@carere/kojo-client-contracts/contexts/client/contracts/project";
 import type {
   CancelRunResult,
   RunDocument,
@@ -168,10 +172,15 @@ const authorizedMutation = async <A>(path: string, body: unknown): Promise<A> =>
     throw new ConsoleAccessError("access-required", "Run `kojo ui` again to open this Console.");
   }
   if (!response.ok) {
-    const problem = (await response.json().catch(() => ({}))) as { readonly message?: string };
+    const problem = (await response.json().catch(() => ({}))) as {
+      readonly message?: string;
+      readonly problem?: { readonly diagnostic?: string; readonly remedy?: string };
+    };
     throw new ConsoleAccessError(
       "api-refused",
-      problem.message ?? "The Daemon refused the mutation.",
+      [problem.problem?.diagnostic, problem.problem?.remedy].filter(Boolean).join(" ") ||
+        problem.message ||
+        "The Daemon refused the mutation.",
     );
   }
   return (await response.json()) as A;
@@ -182,6 +191,24 @@ export const readDaemon = (): Promise<DaemonDocument> =>
 
 export const readProjects = (): Promise<ProjectSnapshot> =>
   authorizedRead<ProjectSnapshot>("/api/v1/projects");
+
+export const changeProjectLocation = async (
+  projectId: string,
+  action: "relocate" | "archive" | "restore",
+  location?: string,
+): Promise<ProjectLocationResult> => {
+  const bootstrap = await compatibility();
+  const receipt = await authorizedMutation<OperationReceipt>(
+    `/api/v1/projects/${encodeURIComponent(projectId)}/actions/${action}`,
+    {
+      requestId: crypto.randomUUID(),
+      dataIdentity: bootstrap.dataIdentity,
+      confirm: true,
+      ...(location === undefined ? {} : { location }),
+    },
+  );
+  return receipt.result as unknown as ProjectLocationResult;
+};
 
 export const readWorkflows = (projectId?: string): Promise<WorkflowSnapshot> =>
   authorizedRead<WorkflowSnapshot>(

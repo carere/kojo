@@ -9,6 +9,7 @@ import {
   startTriggerWorkflow,
   stopWorkflow,
 } from "../../daemon/services/browserAccess.ts";
+import { ProjectLocation } from "../../project/components/ProjectLocation.tsx";
 import { Badge, type BadgeTone } from "../../shared/components/Badge.tsx";
 import { ConsoleNavigation } from "../../shared/components/ConsoleNavigation.tsx";
 import { DataGrid } from "../../shared/components/data-grid/DataGrid.tsx";
@@ -292,6 +293,7 @@ export const Workflows = (props: { readonly projectId: string }): JSX.Element =>
           </div>
           <WorkflowFilters filters={filters()} onChange={setFilters} />
         </header>
+        <ProjectLocation projectId={props.projectId} />
         <Switch>
           <Match when={workflows.isPending}>
             <p role="status">Reading fresh Workflow state…</p>
