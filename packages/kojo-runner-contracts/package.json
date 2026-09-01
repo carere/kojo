@@ -26,6 +26,7 @@
     "./contexts/project/contracts/frame": "./src/contexts/project/contracts/frame.ts",
     "./contexts/project/contracts/handshake": "./src/contexts/project/contracts/handshake.ts",
     "./contexts/project/contracts/operations": "./src/contexts/project/contracts/operations.ts",
+    "./contexts/project/contracts/resource": "./src/contexts/project/contracts/resource.ts",
     "./contexts/shared/codecs/json": "./src/contexts/shared/codecs/json.ts",
     "./contexts/shared/models/identity": "./src/contexts/shared/models/identity.ts"
   },

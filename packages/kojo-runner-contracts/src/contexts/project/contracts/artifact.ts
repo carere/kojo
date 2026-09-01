@@ -9,6 +9,21 @@ import {
 import { decodeRunnerIdentity, decodeSha256 } from "../../shared/models/identity.ts";
 
 export const MAX_ARTIFACT_CHUNK_BYTES = 256 * 1024;
+export const MAX_ARTIFACT_BYTES = 16 * 1024 * 1024;
+
+export interface BeginArtifactBody {
+  readonly artifactVersion: 1;
+  readonly transferId: string;
+  readonly name: string;
+  readonly mediaType: string;
+  readonly totalSize: number;
+  readonly sha256: string;
+}
+
+export interface FinishArtifactBody {
+  readonly artifactVersion: 1;
+  readonly transferId: string;
+}
 
 export interface ArtifactChunkBody {
   readonly artifactChunkVersion: 1;
@@ -44,7 +59,10 @@ export const decodeArtifactChunkBody = (input: unknown): DecodeResult<ArtifactCh
   if (!transferId.ok) return transferId;
   const ordinal = decodeInteger(record.value.ordinal, ["ordinal"], { minimum: 0 });
   if (!ordinal.ok) return ordinal;
-  const totalSize = decodeInteger(record.value.totalSize, ["totalSize"], { minimum: 0 });
+  const totalSize = decodeInteger(record.value.totalSize, ["totalSize"], {
+    minimum: 0,
+    maximum: MAX_ARTIFACT_BYTES,
+  });
   if (!totalSize.ok) return totalSize;
   const sha256 = decodeSha256(record.value.sha256, ["sha256"]);
   if (!sha256.ok) return sha256;
@@ -64,4 +82,51 @@ export const decodeArtifactChunkBody = (input: unknown): DecodeResult<ArtifactCh
     sha256: sha256.value,
     data: data.value,
   });
+};
+
+export const decodeBeginArtifactBody = (input: unknown): DecodeResult<BeginArtifactBody> => {
+  const record = decodeClosedRecord(input, [
+    "artifactVersion",
+    "transferId",
+    "name",
+    "mediaType",
+    "totalSize",
+    "sha256",
+  ]);
+  if (!record.ok) return record;
+  if (record.value.artifactVersion !== 1)
+    return decodeFailure(["artifactVersion"], "Expected Artifact version 1");
+  const transferId = decodeRunnerIdentity(record.value.transferId, ["transferId"]);
+  if (!transferId.ok) return transferId;
+  const name = decodeString(record.value.name, ["name"], { minLength: 1 });
+  if (!name.ok) return name;
+  const mediaType = decodeString(record.value.mediaType, ["mediaType"], { minLength: 1 });
+  if (!mediaType.ok) return mediaType;
+  const totalSize = decodeInteger(record.value.totalSize, ["totalSize"], {
+    minimum: 0,
+    maximum: MAX_ARTIFACT_BYTES,
+  });
+  if (!totalSize.ok) return totalSize;
+  const sha256 = decodeSha256(record.value.sha256, ["sha256"]);
+  return sha256.ok
+    ? decodeSuccess({
+        artifactVersion: 1,
+        transferId: transferId.value,
+        name: name.value,
+        mediaType: mediaType.value,
+        totalSize: totalSize.value,
+        sha256: sha256.value,
+      })
+    : sha256;
+};
+
+export const decodeFinishArtifactBody = (input: unknown): DecodeResult<FinishArtifactBody> => {
+  const record = decodeClosedRecord(input, ["artifactVersion", "transferId"]);
+  if (!record.ok) return record;
+  if (record.value.artifactVersion !== 1)
+    return decodeFailure(["artifactVersion"], "Expected Artifact version 1");
+  const transferId = decodeRunnerIdentity(record.value.transferId, ["transferId"]);
+  return transferId.ok
+    ? decodeSuccess({ artifactVersion: 1, transferId: transferId.value })
+    : transferId;
 };

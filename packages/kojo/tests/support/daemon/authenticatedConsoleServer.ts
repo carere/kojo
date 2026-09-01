@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { Effect } from "effect";
 import { startDaemon } from "../../../src/contexts/daemon/adapters/DaemonOwner.ts";
 import type { DaemonPaths } from "../../../src/contexts/daemon/models/DaemonPaths.ts";
+import { AtomicArtifactRepository } from "../../../src/contexts/trace/adapters/AtomicArtifactRepository.ts";
 import { captureWorkflowRevision } from "../../../src/contexts/workflow/services/captureRevision.ts";
 import { publishConsoleRelease } from "./consoleRelease.ts";
 
@@ -298,6 +299,19 @@ if (fixture === "gates") {
       ],
     );
   }
+  const content = new TextEncoder().encode("<script>window.__artifactExecuted = true</script>\n");
+  const artifactRepository = new AtomicArtifactRepository(database, paths.dataRoot);
+  artifactRepository.begin({
+    transferId: "browser-artifact-transfer",
+    runId: "run-applied",
+    name: "agent <output>.txt",
+    mediaType: "text/plain; charset=utf-8",
+    totalSize: content.byteLength,
+    sha256: new Bun.CryptoHasher("sha256").update(content).digest("hex"),
+  });
+  artifactRepository.write("browser-artifact-transfer", 0, content);
+  const artifact = artifactRepository.finish("browser-artifact-transfer", createdAt);
+  writeFileSync(join(root, "artifact-id"), artifact.artifactId);
   database.close(false);
 }
 

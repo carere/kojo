@@ -25,6 +25,7 @@ import type {
   SqliteProjectRepository,
 } from "../../project/adapters/SqliteProjectRepository.ts";
 import type { ProjectRecovery } from "../../project/models/ProjectRecovery.ts";
+import type { SqliteResourceLeaseRepository } from "../../project/adapters/SqliteResourceLeaseRepository.ts";
 import {
   type MaterializedRevision,
   materializeRevision,
@@ -38,6 +39,7 @@ import {
   RunnerChannelError,
   writeRunnerFrame,
 } from "../../project/services/runnerChannel.ts";
+import type { AtomicArtifactRepository } from "../../trace/adapters/AtomicArtifactRepository.ts";
 import type { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRepository.ts";
 import type { SqliteRevisionRepository } from "../adapters/SqliteRevisionRepository.ts";
 import type { SqliteRunRepository } from "../adapters/SqliteRunRepository.ts";
@@ -213,6 +215,8 @@ export class RunApi {
   readonly #revisions: SqliteRevisionRepository;
   readonly #triggers: SqliteTriggerRepository;
   readonly #gates: SqliteDaemonGateRepository;
+  readonly #resources: SqliteResourceLeaseRepository;
+  readonly #artifacts: AtomicArtifactRepository;
   readonly #runnerIdleMillis: number;
   readonly #runnerCleanupMillis: number;
   readonly #runnerSupervisor = new ProjectRunnerSupervisor();
@@ -237,6 +241,8 @@ export class RunApi {
     readonly revisions: SqliteRevisionRepository;
     readonly triggers: SqliteTriggerRepository;
     readonly gates: SqliteDaemonGateRepository;
+    readonly resources: SqliteResourceLeaseRepository;
+    readonly artifacts: AtomicArtifactRepository;
     readonly runnerIdleMillis?: number;
     readonly runnerCleanupMillis?: number;
   }) {
@@ -250,6 +256,8 @@ export class RunApi {
     this.#revisions = options.revisions;
     this.#triggers = options.triggers;
     this.#gates = options.gates;
+    this.#resources = options.resources;
+    this.#artifacts = options.artifacts;
     this.#runnerIdleMillis = options.runnerIdleMillis ?? DEFAULT_RUNNER_IDLE_MILLIS;
     this.#runnerCleanupMillis = options.runnerCleanupMillis ?? 30_000;
   }
@@ -1895,6 +1903,22 @@ export class RunApi {
         { readonly resolve: (value: JsonValue) => void; readonly reject: (cause: unknown) => void }
       >();
       let stoppedRequestId: string | undefined;
+      const replyMutation = (frame: RunnerFrame, result: JsonValue): Promise<void> =>
+        Effect.runPromise(
+          writeRunnerFrame(socket as Socket, {
+            version: 1,
+            kind: "Ready",
+            requestId: crypto.randomUUID(),
+            daemonInstanceId: request.daemonInstanceId,
+            runnerInstanceId: request.runnerInstanceId,
+            body: {
+              replyVersion: 1,
+              operationRequestId: frame.requestId,
+              state: "committed",
+              result,
+            },
+          }),
+        );
       const readerDone = (async () => {
         while (true) {
           const frame = await Effect.runPromise(reader.read);
@@ -1916,6 +1940,156 @@ export class RunApi {
             typeof body.operationRequestId === "string"
               ? pending.get(body.operationRequestId)
               : undefined;
+          if (
+            frame.kind === "BeginResourceAcquisition" ||
+            frame.kind === "ConfirmResourceAcquired" ||
+            frame.kind === "BeginResourceRelease" ||
+            frame.kind === "ConfirmResourceReleased" ||
+            frame.kind === "PreserveResource" ||
+            frame.kind === "ReportRecovery"
+          ) {
+            if (
+              !("runId" in frame) ||
+              frame.runId !== authority.runId ||
+              frame.revisionId !== authority.revisionId ||
+              frame.claimGeneration !== authority.generation
+            ) {
+              throw new Error("the Resource mutation escaped current Run authority");
+            }
+            const resourceAuthority = {
+              projectId: request.projectId,
+              runId: authority.runId,
+              revisionId: authority.revisionId,
+              runnerInstanceId: authority.runnerInstanceId,
+              claimGeneration: authority.generation,
+            };
+            const resource = frame.body as unknown as Record<string, unknown>;
+            const leaseId = String(resource.leaseId ?? "");
+            if (frame.kind === "BeginResourceAcquisition") {
+              await Effect.runPromise(
+                this.#resources.beginAcquisition({
+                  ...resourceAuthority,
+                  leaseId,
+                  kind: resource.kind as "agent" | "sandbox" | "worktree",
+                  acquisitionKey: String(resource.acquisitionKey),
+                  requestedAt: String(resource.requestedAt),
+                  detail: resource.detail as Readonly<Record<string, string>>,
+                }),
+              );
+            } else if (frame.kind === "ConfirmResourceAcquired") {
+              await Effect.runPromise(
+                this.#resources.confirmAcquired(
+                  resourceAuthority,
+                  leaseId,
+                  String(resource.acquiredAt),
+                  {
+                    providerIdentity: String(resource.providerIdentity),
+                    locator: String(resource.locator),
+                  },
+                ),
+              );
+            } else if (frame.kind === "BeginResourceRelease") {
+              await Effect.runPromise(
+                this.#resources.beginRelease(
+                  resourceAuthority,
+                  leaseId,
+                  String(resource.requestedAt),
+                ),
+              );
+            } else if (frame.kind === "ConfirmResourceReleased") {
+              await Effect.runPromise(
+                this.#resources.confirmReleased(
+                  resourceAuthority,
+                  leaseId,
+                  String(resource.releasedAt),
+                  String(resource.evidence),
+                ),
+              );
+            } else if (frame.kind === "PreserveResource") {
+              await Effect.runPromise(
+                this.#resources.preserve(
+                  resourceAuthority,
+                  leaseId,
+                  String(resource.observedAt),
+                  String(resource.reason),
+                ),
+              );
+            } else if (resource.outcome === "released") {
+              await Effect.runPromise(
+                this.#resources.confirmReleased(
+                  resourceAuthority,
+                  leaseId,
+                  String(resource.observedAt),
+                  String(resource.reason),
+                ),
+              );
+            } else if (resource.outcome === "preserved") {
+              await Effect.runPromise(
+                this.#resources.preserve(
+                  resourceAuthority,
+                  leaseId,
+                  String(resource.observedAt),
+                  String(resource.reason),
+                ),
+              );
+            } else {
+              await Effect.runPromise(
+                this.#resources.unresolved(
+                  resourceAuthority,
+                  leaseId,
+                  String(resource.observedAt),
+                  String(resource.reason),
+                ),
+              );
+            }
+            await replyMutation(frame, { state: "committed" });
+            continue;
+          }
+          if (
+            frame.kind === "BeginArtifact" ||
+            frame.kind === "WriteArtifactChunk" ||
+            frame.kind === "FinishArtifact"
+          ) {
+            if (
+              !("runId" in frame) ||
+              frame.runId !== authority.runId ||
+              frame.revisionId !== authority.revisionId ||
+              frame.claimGeneration !== authority.generation
+            ) {
+              throw new Error("the Artifact mutation escaped current Run authority");
+            }
+            const artifact = frame.body as unknown as Record<string, unknown>;
+            const transferId = String(artifact.transferId ?? "");
+            if (frame.kind === "BeginArtifact") {
+              this.#artifacts.begin({
+                transferId,
+                runId: authority.runId,
+                name: String(artifact.name),
+                mediaType: String(artifact.mediaType),
+                totalSize: Number(artifact.totalSize),
+                sha256: String(artifact.sha256),
+              });
+              await replyMutation(frame, { transferId });
+            } else if (frame.kind === "WriteArtifactChunk") {
+              this.#artifacts.write(
+                transferId,
+                Number(artifact.ordinal),
+                Uint8Array.fromBase64(String(artifact.data)),
+                {
+                  totalSize: Number(artifact.totalSize),
+                  sha256: String(artifact.sha256),
+                },
+              );
+              await replyMutation(frame, { transferId, written: true });
+            } else {
+              const published = this.#artifacts.finish(
+                transferId,
+                new Date(this.#now()).toISOString(),
+              );
+              await replyMutation(frame, { artifactId: published.artifactId });
+            }
+            continue;
+          }
           if (frame.kind === "Ready" && selected !== undefined && body.state === "committed") {
             pending.delete(body.operationRequestId as string);
             selected.resolve(body.result ?? null);

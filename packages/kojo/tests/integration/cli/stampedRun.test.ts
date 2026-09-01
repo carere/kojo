@@ -47,40 +47,22 @@ interface Ran {
  * and cut its branch) while making the call itself impossible. `/usr/bin:/bin` still carries `git`
  * and `sh`, which the sandbox scope needs.
  *
- * **And a `PATH` alone was never enough.** Twice in this build a child with a `PATH` like this one
- * resolved a real binary anyway, and the reports written afterwards were honest and wrong. Since
- * ticket 49 the guard is the invoker's: this suite's children declare nothing, so they are
- * unattended and refused before a process exists. The `PATH` stays as the second line.
+ * The test does not inherit the operator's agent executable. Agent selection, credentials and
+ * spending belong to authored configuration; Kojo does not add a consent switch.
  */
 const withoutAnAgent = "/usr/bin:/bin:/usr/sbin:/sbin";
-
-/**
- * A stand-in that is not there — how this suite asks for the *no binary* fault on purpose.
- *
- * Naming a file that does not exist is the honest way to write "there is nothing to spawn": the
- * invoker resolves `claude` for itself, finds nothing, and refuses. Declaring `allow` here instead
- * would put the whole suite one stray `/usr/bin/claude` away from spending somebody's money on
- * every CI run, which is the trade this switch exists to remove.
- */
-const noSuchAgent = "stand-in:/nowhere/kojo-has-no-agent/claude";
 
 /** One whole `kojo` process, launched from inside the target repository, the way a person does. */
 const kojo = (
   root: string,
   args: ReadonlyArray<string>,
-  options?: { readonly path?: string; readonly spend?: string },
+  options?: { readonly path?: string },
 ): Effect.Effect<Ran> =>
   Effect.sync(() => {
-    // Left unset, the child inherits this worker's environment and declares no spend — so it is
-    // unattended and the invoker refuses every agent call. That is the default this suite wants.
     const environment =
-      options?.path === undefined && options?.spend === undefined
+      options?.path === undefined
         ? undefined
-        : ({
-            ...process.env,
-            ...(options?.path === undefined ? {} : { PATH: options.path }),
-            ...(options?.spend === undefined ? {} : { KOJO_AGENT_SPEND: options.spend }),
-          } as NodeJS.ProcessEnv);
+        : ({ ...process.env, PATH: options.path } as NodeJS.ProcessEnv);
     const finished = spawnSync(bun(), [cli, ...args], {
       cwd: root,
       encoding: "utf8",
@@ -260,28 +242,20 @@ describe("kojo run in a repository with a factory in it", () => {
    * stamped factory *has* a provider — see `withoutAnAgent`. The reader is the same person and the
    * three fields send them to the same three places.
    *
-   * Since ticket 49 the fault is `refused-to-spend` rather than `provider-failed`, and the change is
-   * the point: the invoker resolves `claude` itself, finds the stand-in this child declared is not
-   * there, and refuses **before** a process exists. Nothing about the reporting path changed — the
-   * whole typed error still travels from the invocation, through the engine, off the finished run
-   * and onto stderr field by field, which is what this test is for.
+   * The controlled `PATH` cannot resolve the provider executable. The typed provider fault still
+   * travels from the invocation, through the engine, off the finished run and onto stderr.
    */
   it.live("says why the agent never answered, and exits non-zero for it", () =>
     inStampedRepository((root) =>
       Effect.gen(function* () {
-        const ran = yield* kojo(root, ["run", "review", "the change"], {
-          path: withoutAnAgent,
-          spend: noSuchAgent,
-        });
+        const ran = yield* kojo(root, ["run", "review", "the change"], { path: withoutAnAgent });
 
         expect(ran.status).not.toBe(0);
         expect(ran.stderr).toContain("AgentInvocationError");
         // The three fields the error carries, each of which sends the reader somewhere different.
         expect(ran.stderr).toContain("agent: drafter");
-        expect(ran.stderr).toContain("fault: refused-to-spend");
+        expect(ran.stderr).toContain("fault: provider-failed");
         expect(ran.stderr).toContain("claude");
-        // And the switch, by name, because that is the one thing to change to get past this.
-        expect(ran.stderr).toContain("KOJO_AGENT_SPEND");
         // The reason on stderr, the phase table on stdout.
         expect(ran.stdout).toContain("draft");
         expect(ran.stdout).not.toContain("AgentInvocationError");

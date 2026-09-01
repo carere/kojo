@@ -1,4 +1,5 @@
 import { Cause, Clock, Effect, Exit, Layer, Option, Scope } from "effect";
+import { ResourceLeaseClient } from "../../project/ports/ResourceLeaseClient.ts";
 import { workspaceIsReachable, workspaceProbe } from "../../sandbox/guards/workspaceIsReachable.ts";
 import { worktreeIsUsable } from "../../sandbox/guards/worktreeIsUsable.ts";
 import type { SandboxError } from "../../sandbox/models/SandboxError.ts";
@@ -43,6 +44,7 @@ interface Attempt {
 const acquireOnce = (config: SandboxConfig) =>
   Effect.gen(function* () {
     const source = yield* SandboxSource;
+    const resources = yield* ResourceLeaseClient;
     const tracer = yield* Tracer;
     const run = yield* CurrentRun;
 
@@ -74,7 +76,58 @@ const acquireOnce = (config: SandboxConfig) =>
       environment,
       hidden: config.hidden ?? factoryOwnPaths,
     };
-    const acquired = yield* source.acquire(request);
+    const sandboxLeaseId = crypto.randomUUID();
+    const worktreeLeaseId = crypto.randomUUID();
+    yield* resources.beginAcquisition({
+      leaseId: sandboxLeaseId,
+      kind: "sandbox",
+      acquisitionKey: `${id}/sandbox`,
+      detail: { branch: config.branch, scope: config.name },
+    });
+    yield* resources.beginAcquisition({
+      leaseId: worktreeLeaseId,
+      kind: "worktree",
+      acquisitionKey: `${id}/worktree`,
+      detail: { branch: config.branch, scope: config.name },
+    });
+    const acquired = yield* source
+      .acquire(request, {
+        acquired: (sandbox) =>
+          Effect.all([
+            resources.confirmAcquired(sandboxLeaseId, {
+              providerIdentity: sandbox.provider,
+              locator: sandbox.worktreePath,
+            }),
+            resources.confirmAcquired(worktreeLeaseId, {
+              providerIdentity: sandbox.branch,
+              locator: sandbox.worktreePath,
+            }),
+          ]).pipe(Effect.asVoid),
+        releaseIntent: Effect.all([
+          resources.beginRelease(sandboxLeaseId),
+          resources.beginRelease(worktreeLeaseId),
+        ]).pipe(Effect.asVoid),
+        released: (kind, evidence) =>
+          resources.confirmReleased(
+            kind === "sandbox" ? sandboxLeaseId : worktreeLeaseId,
+            evidence,
+          ),
+        preserved: (kind, reason) =>
+          resources.preserve(kind === "sandbox" ? sandboxLeaseId : worktreeLeaseId, reason),
+        unresolved: (kind, reason) =>
+          resources.unresolved(kind === "sandbox" ? sandboxLeaseId : worktreeLeaseId, reason),
+      })
+      .pipe(
+        Effect.tapError(() =>
+          Effect.all([
+            resources.unresolved(sandboxLeaseId, "the provider did not return a sandbox identity"),
+            resources.unresolved(
+              worktreeLeaseId,
+              "the provider did not return a worktree identity",
+            ),
+          ]).pipe(Effect.asVoid),
+        ),
+      );
     const sandbox: SandboxHandle = { ...acquired, id, environment };
 
     // The one trace write in Kojo that is deliberately **outside** an activity. Everywhere else

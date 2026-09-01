@@ -5,6 +5,15 @@ import type { SandboxRequest } from "../models/SandboxRequest.ts";
 import type { WorktreeState } from "../models/WorktreeState.ts";
 import type { Workspace } from "./Workspace.ts";
 
+/** Provider evidence that moves durable Resource leases. */
+export interface SandboxResourceObserver {
+  readonly acquired: (sandbox: AcquiredSandbox) => Effect.Effect<void>;
+  readonly releaseIntent: Effect.Effect<void>;
+  readonly released: (kind: "sandbox" | "worktree", evidence: string) => Effect.Effect<void>;
+  readonly preserved: (kind: "sandbox" | "worktree", reason: string) => Effect.Effect<void>;
+  readonly unresolved: (kind: "sandbox" | "worktree", reason: string) => Effect.Effect<void>;
+}
+
 /**
  * Where a sandbox comes from.
  *
@@ -34,6 +43,7 @@ export class SandboxSource extends Context.Service<
      */
     readonly acquire: (
       request: SandboxRequest,
+      observer?: SandboxResourceObserver,
     ) => Effect.Effect<AcquiredSandbox, SandboxError, Scope.Scope>;
     /** Read the worktree as it stands. An observation; the guard decides what it means. */
     readonly worktree: (sandbox: AcquiredSandbox) => Effect.Effect<WorktreeState, SandboxError>;

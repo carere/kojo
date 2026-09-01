@@ -29,7 +29,9 @@ import { SqliteDaemonGateRepository } from "../../gate/adapters/SqliteDaemonGate
 import { GateApi } from "../../gate/services/GateApi.ts";
 import { SqliteProjectRecoveryRepository } from "../../project/adapters/SqliteProjectRecoveryRepository.ts";
 import { SqliteProjectRepository } from "../../project/adapters/SqliteProjectRepository.ts";
+import { SqliteResourceLeaseRepository } from "../../project/adapters/SqliteResourceLeaseRepository.ts";
 import { ProjectApi } from "../../project/services/ProjectApi.ts";
+import { AtomicArtifactRepository } from "../../trace/adapters/AtomicArtifactRepository.ts";
 import { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRepository.ts";
 import { SqliteRevisionRepository } from "../../workflow/adapters/SqliteRevisionRepository.ts";
 import { SqliteRunRepository } from "../../workflow/adapters/SqliteRunRepository.ts";
@@ -242,9 +244,11 @@ export const startDaemon = (
     const projectRepository = new SqliteProjectRepository(database);
     const projectRecoveryRepository = new SqliteProjectRecoveryRepository(database);
     const runRepository = new SqliteRunRepository(database);
+    const resourceRepository = new SqliteResourceLeaseRepository(database);
     const revisionRepository = new SqliteRevisionRepository(database, paths.dataRoot);
     const triggerRepository = new SqliteTriggerRepository(database);
     const gateRepository = new SqliteDaemonGateRepository(database);
+    const artifactRepository = new AtomicArtifactRepository(database, paths.dataRoot);
     const projectApi = new ProjectApi({
       dataIdentity,
       instanceId,
@@ -264,6 +268,8 @@ export const startDaemon = (
       revisions: revisionRepository,
       triggers: triggerRepository,
       gates: gateRepository,
+      resources: resourceRepository,
+      artifacts: artifactRepository,
       ...(options.runnerIdleMillis === undefined
         ? {}
         : { runnerIdleMillis: options.runnerIdleMillis }),
@@ -806,6 +812,36 @@ export const startDaemon = (
             return run === undefined
               ? problem(404, "run-not-found", "the selected Run was not found")
               : noStoreJson(run);
+          }
+          const oneArtifact = url.pathname.match(
+            /^\/api\/v1\/runs\/([A-Za-z0-9_-]+)\/artifacts\/([A-Za-z0-9_-]+)$/,
+          );
+          if (request.method === "GET" && oneArtifact !== null) {
+            const artifact = artifactRepository.read(
+              oneArtifact[1] ?? "invalid",
+              oneArtifact[2] ?? "invalid",
+            );
+            if (artifact === undefined)
+              return problem(404, "artifact-not-found", "the selected Artifact was not found");
+            const content = readFileSync(artifact.path);
+            if (url.searchParams.get("download") !== "1") {
+              return noStoreJson({
+                artifactId: artifact.artifactId,
+                name: artifact.name,
+                mediaType: artifact.mediaType,
+                content: new TextDecoder().decode(content),
+              });
+            }
+            const safeName = artifact.name.replace(/[^A-Za-z0-9._-]/g, "_") || "artifact.txt";
+            return new Response(content, {
+              headers: {
+                "cache-control": "no-store",
+                "content-disposition": `attachment; filename="${safeName}"`,
+                "content-security-policy": "sandbox; default-src 'none'",
+                "content-type": "application/octet-stream",
+                "x-content-type-options": "nosniff",
+              },
+            });
           }
           const projectRuns = url.pathname.match(/^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/runs$/);
           if (request.method === "GET" && projectRuns !== null) {
