@@ -33,6 +33,8 @@ ${entry("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")}
 ${entry("KOJO_MANAGED_INSTALLATION", paths.installationRoot)}
 ${entry("KOJO_DAEMON_DATA", paths.dataRoot)}
 ${entry("KOJO_DAEMON_RUNTIME", paths.runtimeRoot)}
+${entry("KOJO_DAEMON_CONFIG", paths.configurationRoot)}
+${entry("KOJO_DAEMON_CACHE", paths.cacheRoot)}
     </dict>
 ${entry("WorkingDirectory", paths.installationRoot)}
     <key>KeepAlive</key>

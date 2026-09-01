@@ -5,8 +5,10 @@ import { launchAgentDocument } from "../../../../../src/contexts/daemon/services
 const paths: DaemonPaths = {
   installationRoot: "/Users/example/Library/Application Support/Kojo",
   dataRoot: "/Users/example/Library/Application Support/Kojo/data",
+  configurationRoot: "/Users/example/Library/Application Support/Kojo/config",
+  cacheRoot: "/Users/example/Library/Caches/Kojo",
   runtimeRoot: "/private/var/folders/example/T/Kojo",
-  launchAgent: "/Users/example/Library/LaunchAgents/dev.kojo.daemon.plist",
+  serviceDefinition: "/Users/example/Library/LaunchAgents/dev.kojo.daemon.plist",
   managedCli: "/Users/example/Library/Application Support/Kojo/bin/kojo",
   managedLauncher: "/Users/example/Library/Application Support/Kojo/bin/kojo-launcher",
 };

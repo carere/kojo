@@ -1,17 +1,21 @@
 #!/usr/bin/env bun
 import { join } from "node:path";
 import { startDaemon } from "../contexts/daemon/adapters/DaemonOwner.ts";
-import { macPaths } from "../contexts/daemon/services/macPaths.ts";
+import { hostPaths } from "../contexts/daemon/services/hostPaths.ts";
 
 const installationRoot = process.env.KOJO_MANAGED_INSTALLATION;
 const dataRoot = process.env.KOJO_DAEMON_DATA;
 const runtimeRoot = process.env.KOJO_DAEMON_RUNTIME;
-const paths = macPaths(
+const configurationRoot = process.env.KOJO_DAEMON_CONFIG;
+const cacheRoot = process.env.KOJO_DAEMON_CACHE;
+const paths = hostPaths(
   installationRoot !== undefined && dataRoot !== undefined && runtimeRoot !== undefined
     ? {
         installationRoot,
         dataRoot,
         runtimeRoot,
+        ...(configurationRoot === undefined ? {} : { configurationRoot }),
+        ...(cacheRoot === undefined ? {} : { cacheRoot }),
         managedCli: join(installationRoot, "bin", "kojo"),
         managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
       }

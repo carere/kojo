@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { LifecycleError } from "../models/LifecycleError.ts";
 import type { NativeService, NativeServiceObservation } from "../ports/NativeService.ts";
+import { launchAgentDocument } from "../services/launchAgentDocument.ts";
 
 interface CommandResult {
   readonly exitCode: number;
@@ -54,12 +55,20 @@ export const macLaunchAgent = (
         automaticStart,
         manager: disabled.exitCode === 0 ? "unloaded" : "unavailable",
         process: disabled.exitCode === 0 ? "stopped" : "unknown",
+        loginLifetime: "macOS GUI login session",
+        logoutPersistence: "unsupported",
         ...(detail.length === 0 ? {} : { detail }),
       };
     }
 
     const state = /\bstate\s*=\s*running\b/.test(printed.stdout) ? "running" : "stopped";
-    return { automaticStart, manager: "loaded", process: state };
+    return {
+      automaticStart,
+      manager: "loaded",
+      process: state,
+      loginLifetime: "macOS GUI login session",
+      logoutPersistence: "unsupported",
+    };
   };
 
   const run = (operation: string, arguments_: ReadonlyArray<string>): void => {
@@ -68,6 +77,12 @@ export const macLaunchAgent = (
   };
 
   return {
+    serviceDocument: (paths) =>
+      launchAgentDocument(paths, {
+        label,
+        home: process.env.HOME ?? "",
+      }),
+    assertSupported: () => {},
     inspect,
     installAndStart: (launchAgent) => {
       run("enable automatic start", ["enable", target]);
@@ -97,6 +112,12 @@ export const macLaunchAgent = (
       if (stopNow && inspect().manager === "loaded") {
         run("stop the disabled LaunchAgent", ["bootout", target]);
       }
+    },
+    keepRunningAfterLogout: () => {
+      throw new LifecycleError(
+        "LOGOUT_PERSISTENCE_UNSUPPORTED",
+        "a macOS LaunchAgent stops at final GUI logout; Kojo cannot enable logout persistence",
+      );
     },
   };
 };

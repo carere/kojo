@@ -84,8 +84,8 @@ export const inspectDaemon = async (
   return {
     installed:
       managedInstallationIsPresent(paths) &&
-      existsSync(paths.launchAgent) &&
-      privateOwned(paths.launchAgent, "file"),
+      existsSync(paths.serviceDefinition) &&
+      privateOwned(paths.serviceDefinition, "file"),
     managedCli: paths.managedCli,
     automaticStart: native.automaticStart,
     manager: native.manager,
@@ -97,7 +97,8 @@ export const inspectDaemon = async (
           : "unresponsive"
         : "unknown",
     ready: responsive,
-    loginLifetime: "macOS GUI login session",
+    loginLifetime: native.loginLifetime,
+    logoutPersistence: native.logoutPersistence,
     ...(native.detail === undefined ? {} : { detail: native.detail }),
   };
 };

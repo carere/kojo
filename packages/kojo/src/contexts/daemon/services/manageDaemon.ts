@@ -13,23 +13,29 @@ export interface DaemonLifecycle {
   readonly stop: () => Promise<DaemonStatus>;
   readonly enable: () => Promise<DaemonStatus>;
   readonly disable: (stopNow: boolean) => Promise<DaemonStatus>;
+  readonly keepRunningAfterLogout: () => Promise<DaemonStatus>;
   readonly status: () => Promise<DaemonStatus>;
 }
 
 export const manageDaemon = (
   paths: DaemonPaths,
   nativeService: NativeService,
-  installation: Omit<ManagedInstallationOptions, "paths"> = {},
+  installation: Omit<ManagedInstallationOptions, "paths" | "serviceDocument"> = {},
 ): DaemonLifecycle => {
   const status = (): Promise<DaemonStatus> => inspectDaemon(paths, nativeService);
   return {
     install: async () => {
-      const installed = await installManagedRelease({ ...installation, paths });
-      if (installed.outcome === "installed") nativeService.installAndStart(paths.launchAgent);
+      nativeService.assertSupported();
+      const installed = await installManagedRelease({
+        ...installation,
+        paths,
+        serviceDocument: nativeService.serviceDocument,
+      });
+      if (installed.outcome === "installed") nativeService.installAndStart(paths.serviceDefinition);
       return { changed: installed.outcome === "installed", status: await status() };
     },
     start: async () => {
-      nativeService.start(paths.launchAgent);
+      nativeService.start(paths.serviceDefinition);
       return status();
     },
     stop: async () => {
@@ -42,6 +48,10 @@ export const manageDaemon = (
     },
     disable: async (stopNow) => {
       nativeService.disable(stopNow);
+      return status();
+    },
+    keepRunningAfterLogout: async () => {
+      nativeService.keepRunningAfterLogout();
       return status();
     },
     status,

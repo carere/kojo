@@ -1,16 +1,25 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { macLaunchAgent } from "../../../../src/contexts/daemon/adapters/MacLaunchAgent.ts";
+import { systemdUserService } from "../../../../src/contexts/daemon/adapters/SystemdUserService.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
 import { launchAgentDocument } from "../../../../src/contexts/daemon/services/launchAgentDocument.ts";
+import { systemdUnitDocument } from "../../../../src/contexts/daemon/services/systemdUnitDocument.ts";
 
 const waitFor = async (predicate: () => boolean, timeout = 10_000): Promise<void> => {
   const deadline = Date.now() + timeout;
   while (!predicate()) {
-    if (Date.now() >= deadline)
-      throw new Error("native LaunchAgent did not reach the expected state");
+    if (Date.now() >= deadline) throw new Error("native service did not reach the expected state");
     await Bun.sleep(50);
   }
 };
@@ -23,8 +32,10 @@ describe.skipIf(process.platform !== "darwin")("the native macOS Daemon lifecycl
     const paths: DaemonPaths = {
       installationRoot,
       dataRoot: join(root, "data"),
+      configurationRoot: join(root, "config"),
+      cacheRoot: join(root, "cache"),
       runtimeRoot: join(root, "runtime"),
-      launchAgent: join(root, `${label}.plist`),
+      serviceDefinition: join(root, `${label}.plist`),
       managedCli: join(installationRoot, "bin", "kojo"),
       managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
     };
@@ -36,13 +47,13 @@ describe.skipIf(process.platform !== "darwin")("the native macOS Daemon lifecycl
       { mode: 0o700 },
     );
     chmodSync(paths.managedLauncher, 0o700);
-    writeFileSync(paths.launchAgent, launchAgentDocument(paths, { label, home: root }), {
+    writeFileSync(paths.serviceDefinition, launchAgentDocument(paths, { label, home: root }), {
       mode: 0o600,
     });
     const service = macLaunchAgent({ label });
 
     try {
-      service.installAndStart(paths.launchAgent);
+      service.installAndStart(paths.serviceDefinition);
       await waitFor(() => service.inspect().process === "running");
       await waitFor(() => existsSync(join(paths.runtimeRoot, "endpoint.json")));
 
@@ -64,7 +75,7 @@ describe.skipIf(process.platform !== "darwin")("the native macOS Daemon lifecycl
       });
       service.disable(true);
       await waitFor(() => service.inspect().manager === "unloaded");
-      service.start(paths.launchAgent);
+      service.start(paths.serviceDefinition);
       await waitFor(() => service.inspect().process === "running");
       expect(service.inspect().automaticStart).toBe("disabled");
       service.enable();
@@ -78,6 +89,104 @@ describe.skipIf(process.platform !== "darwin")("the native macOS Daemon lifecycl
       } catch {
         // The unique test service can already be absent. The private root is still removed below.
       }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+const processExists = (processId: number): boolean => {
+  try {
+    process.kill(processId, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const systemdUserManagerAvailable =
+  process.platform === "linux" &&
+  Bun.spawnSync(["/usr/bin/systemctl", "--user", "show-environment"]).exitCode === 0;
+
+describe.skipIf(!systemdUserManagerAvailable)("the native systemd user Daemon lifecycle", () => {
+  it("uses an isolated unit for one idle Daemon and stops its complete process group", async () => {
+    const root = mkdtempSync(join(tmpdir(), "kojo-native-systemd-service-"));
+    const identity = `kojo-test-${crypto.randomUUID()}`;
+    const unit = `${identity}.service`;
+    const installationRoot = join(root, "installation");
+    const unitDirectory = join(homedir(), ".config", "systemd", "user");
+    const paths: DaemonPaths = {
+      installationRoot,
+      dataRoot: join(root, "state", "kojo"),
+      configurationRoot: join(root, "config", "kojo"),
+      cacheRoot: join(root, "cache", "kojo"),
+      runtimeRoot: join(root, "runtime", "kojo"),
+      serviceDefinition: join(unitDirectory, unit),
+      managedCli: join(installationRoot, "bin", "kojo"),
+      managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
+    };
+    const childProcessIdPath = join(root, "child.pid");
+    mkdirSync(join(installationRoot, "bin"), { recursive: true, mode: 0o700 });
+    mkdirSync(unitDirectory, { recursive: true, mode: 0o700 });
+    const daemonMain = new URL("../../../../src/daemon/main.ts", import.meta.url).pathname;
+    writeFileSync(
+      paths.managedLauncher,
+      `#!/bin/sh\nsleep 300 &\nprintf '%s\\n' "$!" > ${JSON.stringify(childProcessIdPath)}\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(daemonMain)}\n`,
+      { mode: 0o700 },
+    );
+    chmodSync(paths.managedLauncher, 0o700);
+    writeFileSync(
+      paths.serviceDefinition,
+      systemdUnitDocument(paths, {
+        home: root,
+        managedDirectoryName: identity,
+      }),
+      { mode: 0o600 },
+    );
+    const service = systemdUserService({ unit });
+
+    try {
+      service.installAndStart(paths.serviceDefinition);
+      await waitFor(() => service.inspect().process === "running");
+      await waitFor(() => existsSync(join(paths.runtimeRoot, "endpoint.json")));
+      await waitFor(() => existsSync(childProcessIdPath));
+      const childProcessId = Number(readFileSync(childProcessIdPath, "utf8").trim());
+
+      const duplicate = Bun.spawnSync([process.execPath, daemonMain], {
+        env: {
+          ...process.env,
+          KOJO_MANAGED_INSTALLATION: installationRoot,
+          KOJO_DAEMON_DATA: paths.dataRoot,
+          KOJO_DAEMON_RUNTIME: paths.runtimeRoot,
+          KOJO_DAEMON_CONFIG: paths.configurationRoot,
+          KOJO_DAEMON_CACHE: paths.cacheRoot,
+        },
+      });
+      expect(duplicate.exitCode).not.toBe(0);
+
+      expect(service.inspect()).toMatchObject({
+        automaticStart: "enabled",
+        manager: "loaded",
+        process: "running",
+      });
+      expect(["disabled", "enabled"]).toContain(service.inspect().logoutPersistence);
+      service.disable(false);
+      expect(service.inspect()).toMatchObject({
+        automaticStart: "disabled",
+        process: "running",
+      });
+      service.enable();
+      service.stop();
+      await waitFor(() => service.inspect().process === "stopped");
+      await waitFor(() => !processExists(childProcessId));
+      expect(existsSync(join(paths.runtimeRoot, "endpoint.json"))).toBe(false);
+    } finally {
+      try {
+        service.disable(true);
+      } catch {
+        // The unique test service can already be stopped. Cleanup continues below.
+      }
+      rmSync(paths.serviceDefinition, { force: true });
+      Bun.spawnSync(["/usr/bin/systemctl", "--user", "daemon-reload"]);
       rmSync(root, { recursive: true, force: true });
     }
   });
