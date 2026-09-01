@@ -5,6 +5,7 @@ import type {
   DaemonDocument,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/browser";
 import type { ProjectSnapshot } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
+import type { WorkflowSnapshot } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 
 interface StoredSession {
   readonly credential: string;
@@ -139,3 +140,10 @@ export const readDaemon = (): Promise<DaemonDocument> =>
 
 export const readProjects = (): Promise<ProjectSnapshot> =>
   authorizedRead<ProjectSnapshot>("/api/v1/projects");
+
+export const readWorkflows = (projectId?: string): Promise<WorkflowSnapshot> =>
+  authorizedRead<WorkflowSnapshot>(
+    projectId === undefined
+      ? "/api/v1/workflows"
+      : `/api/v1/projects/${encodeURIComponent(projectId)}/workflows`,
+  );

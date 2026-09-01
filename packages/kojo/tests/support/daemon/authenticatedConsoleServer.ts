@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -26,9 +27,12 @@ const paths: DaemonPaths = {
   managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
 };
 publishConsoleRelease(paths, { assets, releaseId: "kojo-browser-test" });
-const daemon = startDaemon(paths, { consolePort: port });
+const daemon = startDaemon(paths, {
+  consolePort: port,
+  automaticRefresh: fixture !== "workflows",
+});
 
-if (fixture === "projects") {
+if (fixture === "projects" || fixture === "workflows") {
   for (const [index, state] of ["missing", "invalid"].entries()) {
     const projectPath = join(root, `project-${state}`);
     mkdirSync(projectPath);
@@ -67,6 +71,78 @@ if (fixture === "projects") {
     });
     if (!committed.ok) throw new Error(`fixture registration failed: ${await committed.text()}`);
   }
+}
+
+if (fixture === "workflows") {
+  const database = new Database(join(paths.dataRoot, "kojo.db"));
+  const project = database
+    .query<{ readonly project_id: string }, []>(
+      "SELECT project_id FROM projects ORDER BY registered_at LIMIT 1",
+    )
+    .get();
+  if (project === null) throw new Error("the Workflow fixture has no Project");
+  const now = "2026-09-01T00:00:00.000Z";
+  const available = "a".repeat(64);
+  const removed = "b".repeat(64);
+  for (const revision of [available, removed]) {
+    database.run(
+      `INSERT INTO workflow_revisions (
+         revision_id, package_graph_id, manifest_json, published_path, published_at
+       ) VALUES (?, ?, '{}', ?, ?)`,
+      [revision, revision, join(paths.dataRoot, "revisions", revision), now],
+    );
+  }
+  database.run(
+    `UPDATE projects
+        SET factory_state = 'available', refresh_state = 'current', refreshed_at = ?,
+            fault = NULL, remedy = NULL
+      WHERE project_id = ?`,
+    [now, project.project_id],
+  );
+  for (const workflow of [
+    {
+      name: "available",
+      availability: "available",
+      activity: "active",
+      revision: available,
+      fault: null,
+    },
+    {
+      name: "invalid",
+      availability: "invalid",
+      activity: "inactive",
+      revision: available,
+      fault: "declares another name",
+    },
+    {
+      name: "removed",
+      availability: "removed",
+      activity: "inactive",
+      revision: removed,
+      fault: null,
+    },
+  ]) {
+    database.run(
+      `INSERT INTO project_workflows (
+         project_id, workflow_name, activity, availability, source, source_fault, remedy,
+         current_revision_id, candidate_revision_id, trigger_state, trigger_detail, refreshed_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+      [
+        project.project_id,
+        workflow.name,
+        workflow.activity,
+        workflow.availability,
+        join(root, "project-missing", ".kojo", "workflows", `${workflow.name}.ts`),
+        workflow.fault,
+        workflow.fault === null ? null : "Make the declared name match the file name.",
+        workflow.revision,
+        workflow.name === "available" ? "polling" : "not-declared",
+        workflow.name === "available" ? "Trigger position 42" : null,
+        now,
+      ],
+    );
+  }
+  database.close(false);
 }
 
 const stop = (): void => {

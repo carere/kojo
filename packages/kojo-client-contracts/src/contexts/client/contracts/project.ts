@@ -3,6 +3,7 @@ import type { OperationReceipt } from "./operation.ts";
 
 export type ProjectState = "available" | "unavailable" | "archived";
 export type FactoryState = "missing" | "invalid" | "available";
+export type FactoryRefreshState = "pending" | "refreshing" | "failed" | "current";
 
 export interface ProjectDocument {
   readonly projectId: string;
@@ -10,6 +11,7 @@ export interface ProjectDocument {
   readonly location: string;
   readonly projectState: ProjectState;
   readonly factoryState: FactoryState;
+  readonly refreshState: FactoryRefreshState;
   readonly registeredAt: string;
   readonly refreshedAt: string;
   readonly fault?: string;

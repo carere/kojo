@@ -8,7 +8,9 @@ import {
   fchmodSync,
   fstatSync,
   openSync,
+  readdirSync,
   readFileSync,
+  statSync,
 } from "node:fs";
 import { extname, join } from "node:path";
 import type { BootstrapResponse } from "@carere/kojo-client-contracts/contexts/client/contracts/bootstrap";
@@ -20,6 +22,8 @@ import type {
 import { Effect } from "effect";
 import { SqliteProjectRepository } from "../../project/adapters/SqliteProjectRepository.ts";
 import { ProjectApi } from "../../project/services/ProjectApi.ts";
+import { RevisionCaptureError } from "../../workflow/models/RevisionCaptureError.ts";
+import { refreshFactory } from "../../workflow/services/refreshFactory.ts";
 import type { DaemonPaths } from "../models/DaemonPaths.ts";
 import type { DaemonEndpoint } from "../models/Endpoint.ts";
 import { LifecycleError } from "../models/LifecycleError.ts";
@@ -88,6 +92,7 @@ export interface RunningDaemon {
 export interface StartDaemonOptions {
   readonly consolePort?: number;
   readonly now?: () => number;
+  readonly automaticRefresh?: boolean;
 }
 
 const retainedDirectories = [
@@ -226,6 +231,107 @@ export const startDaemon = (
       repository: projectRepository,
       dataRoot: paths.dataRoot,
     });
+    let refreshCoordinatorStopped = false;
+    const refreshFingerprints = new Map<string, string>();
+    const projectRefreshes = new Map<string, Promise<void>>();
+    const inventoryFingerprint = (location: string): string => {
+      const hasher = new Bun.CryptoHasher("sha256");
+      const visit = (directory: string): void => {
+        if (!existsSync(directory)) return;
+        for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) =>
+          left.name.localeCompare(right.name),
+        )) {
+          const path = join(directory, entry.name);
+          const stat = statSync(path);
+          hasher.update(`${path}\0${stat.mode}\0${stat.size}\0${stat.mtimeMs}\n`);
+          if (entry.isDirectory() && !entry.isSymbolicLink()) visit(path);
+        }
+      };
+      visit(join(location, ".kojo"));
+      for (const name of ["package.json", "bun.lock", "bun.lockb"]) {
+        const path = join(location, name);
+        if (existsSync(path)) {
+          const stat = statSync(path);
+          hasher.update(`${path}\0${stat.mode}\0${stat.size}\0${stat.mtimeMs}\n`);
+        }
+      }
+      return hasher.digest("hex");
+    };
+    const refreshProject = (project: {
+      readonly projectId: string;
+      readonly location: string;
+    }): Promise<void> => {
+      const current = projectRefreshes.get(project.projectId);
+      if (current !== undefined) return current;
+      const running = (async () => {
+        await Effect.runPromise(projectRepository.markRefreshPending(project.projectId));
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        if (refreshCoordinatorStopped) return;
+        try {
+          const refreshed = await Effect.runPromise(
+            refreshFactory({
+              project: project.location,
+              dataRoot: paths.dataRoot,
+            }),
+          );
+          await Effect.runPromise(
+            projectRepository.refresh(
+              project.projectId,
+              refreshed,
+              "current",
+              new Date(now()).toISOString(),
+            ),
+          );
+          refreshFingerprints.set(project.projectId, inventoryFingerprint(project.location));
+        } catch (cause) {
+          const error =
+            cause instanceof RevisionCaptureError
+              ? cause
+              : new RevisionCaptureError({
+                  code: "CAPTURE_FAILED",
+                  message: cause instanceof Error ? cause.message : String(cause),
+                  remedy: "Repair the operational fault, then retry Factory Refresh.",
+                  cause,
+                });
+          await Effect.runPromise(
+            projectRepository.refresh(
+              project.projectId,
+              {
+                factoryState: existsSync(join(project.location, ".kojo")) ? "available" : "missing",
+                workflows: [],
+                fault: error.message,
+                remedy: error.remedy,
+              },
+              error.code === "REFRESH_UNSTABLE" ? "pending" : "failed",
+              new Date(now()).toISOString(),
+            ),
+          );
+        }
+      })().finally(() => projectRefreshes.delete(project.projectId));
+      projectRefreshes.set(project.projectId, running);
+      return running;
+    };
+    const inspectProjectInventories = async (force: boolean): Promise<void> => {
+      const projects = await Effect.runPromise(projectRepository.activeProjects);
+      await Promise.all(
+        projects.map(async (project) => {
+          let fingerprint: string;
+          try {
+            fingerprint = inventoryFingerprint(project.location);
+          } catch {
+            fingerprint = "unreadable";
+          }
+          if (force || refreshFingerprints.get(project.projectId) !== fingerprint) {
+            await refreshProject(project);
+          }
+        }),
+      );
+    };
+    if (options.automaticRefresh !== false) void inspectProjectInventories(true);
+    const refreshInventoryTimer = setInterval(() => {
+      if (!refreshCoordinatorStopped && options.automaticRefresh !== false)
+        void inspectProjectInventories(false);
+    }, 5_000);
     consoleServer = Bun.serve({
       hostname: "127.0.0.1",
       port: options.consolePort ?? 0,
@@ -243,7 +349,12 @@ export const startDaemon = (
             instanceId,
             dataIdentity,
             clientApiVersions: [1],
-            features: ["browser-session", "project-catalogue", "client-request-journal"],
+            features: [
+              "browser-session",
+              "project-catalogue",
+              "workflow-revisions",
+              "client-request-journal",
+            ],
             packageVersion: release.packageVersion,
           };
           return noStoreJson(body);
@@ -339,6 +450,15 @@ export const startDaemon = (
           if (request.method === "GET" && url.pathname === "/api/v1/projects") {
             return Effect.runPromise(projectApi.snapshot());
           }
+          if (request.method === "GET" && url.pathname === "/api/v1/workflows") {
+            return Effect.runPromise(projectApi.workflowSnapshot());
+          }
+          const projectWorkflows = url.pathname.match(
+            /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/workflows$/,
+          );
+          if (request.method === "GET" && projectWorkflows !== null) {
+            return Effect.runPromise(projectApi.workflowSnapshot(projectWorkflows[1]));
+          }
           const clientRequest = url.pathname.match(
             /^\/api\/v1\/client-requests\/([A-Za-z0-9_-]+)(\/retry)?$/,
           );
@@ -393,6 +513,15 @@ export const startDaemon = (
         if (request.method === "GET" && url.pathname === "/api/v1/projects") {
           return Effect.runPromise(projectApi.snapshot());
         }
+        if (request.method === "GET" && url.pathname === "/api/v1/workflows") {
+          return Effect.runPromise(projectApi.workflowSnapshot());
+        }
+        const projectWorkflows = url.pathname.match(
+          /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/workflows$/,
+        );
+        if (request.method === "GET" && projectWorkflows !== null) {
+          return Effect.runPromise(projectApi.workflowSnapshot(projectWorkflows[1]));
+        }
         const clientRequest = url.pathname.match(
           /^\/api\/v1\/client-requests\/([A-Za-z0-9_-]+)(\/retry)?$/,
         );
@@ -426,9 +555,12 @@ export const startDaemon = (
     let stopping: Promise<void> | undefined;
     const stopPromise = (): Promise<void> => {
       if (stopping !== undefined) return stopping;
-      stopping = Promise.resolve().then(() => {
+      stopping = Promise.resolve().then(async () => {
+        refreshCoordinatorStopped = true;
+        clearInterval(refreshInventoryTimer);
         socketServer?.stop(true);
         consoleServer?.stop(true);
+        await Promise.allSettled([...projectRefreshes.values()]);
         database?.close(false);
         if (currentEndpointIs(runtimeEndpoint, endpoint.instanceId)) {
           removeOwnedPlainFile(runtimeEndpoint);

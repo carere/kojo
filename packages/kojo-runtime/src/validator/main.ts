@@ -252,47 +252,47 @@ const workflowDiagnostic = async (factory: string): Promise<ReadonlyArray<Projec
     ];
   }
 
-  const loaded: Array<string> = [];
-  const definitions: Array<Record<string, unknown>> = [];
+  const diagnostics: ProjectDiagnostic[] = [];
+  const loaded: Array<{ readonly name: string; readonly definition: Record<string, unknown> }> = [];
   for (const name of names) {
     const source = join(directory, `${name}.ts`);
     try {
       const module = (await import(pathToFileURL(source).href)) as Record<string, unknown>;
       const bundles = Object.values(module).filter(isBundle);
       if (bundles.length !== 1) {
-        return [
+        diagnostics.push(
           failed(
-            "workflows",
+            `workflow:${name}`,
             `${source} exports ${bundles.length} Workflows; one file must export one Workflow`,
             "Export exactly one value returned by `workflow(...)`.",
           ),
-        ];
+        );
+        continue;
       }
       const declared = bundles[0]?.definition._tag;
       if (declared !== name) {
-        return [
+        diagnostics.push(
           failed(
-            "workflows",
+            `workflow:${name}`,
             `${source} declares ${String(declared)} instead of ${name}`,
             "Make the Workflow name agree with its file name.",
           ),
-        ];
+        );
+        continue;
       }
-      loaded.push(name);
-      definitions.push(bundles[0]?.definition ?? {});
+      loaded.push({ name, definition: bundles[0]?.definition ?? {} });
     } catch (cause) {
-      return [
+      diagnostics.push(
         failed(
-          "workflows",
+          `workflow:${name}`,
           `${source}: ${oneLine(cause)}`,
           "Fix the Factory import or Workflow declaration named above.",
         ),
-      ];
+      );
     }
   }
 
-  let payload: ProjectDiagnostic = ok("payload", "no one-field Project Workflow payload to probe");
-  for (const [index, definition] of definitions.entries()) {
+  for (const { name, definition } of loaded) {
     const schema = definition.payloadSchema;
     if (!hasProperties(schema) || !hasProperties(schema.fields)) continue;
     const fields = Object.keys(schema.fields);
@@ -306,23 +306,27 @@ const workflowDiagnostic = async (factory: string): Promise<ReadonlyArray<Projec
       );
       const key = (definition.idempotencyKey as (value: unknown) => unknown)(decoded);
       if (typeof key !== "string") throw new Error("the idempotency key is not a string");
-      payload = ok("payload", `${loaded[index]} — built and keyed against this Project runtime`);
+      diagnostics.push(ok(`workflow:${name}`, "declaration, Layer, payload, and key are valid"));
     } catch (cause) {
-      payload = failed(
-        "payload",
-        `${loaded[index]}: ${oneLine(cause)}`,
-        "Fix the Workflow payload schema or its idempotency key.",
+      diagnostics.push(
+        failed(
+          `workflow:${name}`,
+          `${name}: ${oneLine(cause)}`,
+          "Fix the Workflow payload schema or its idempotency key.",
+        ),
       );
-      break;
     }
   }
 
   return [
-    ok("workflows", `${loaded.length === 0 ? "no" : loaded.join(", ")} Project Workflows loaded`),
-    payload,
+    ok(
+      "workflows",
+      `${names.length === 0 ? "no" : names.join(", ")} top-level Project Workflows discovered`,
+    ),
+    ...diagnostics,
     ok(
       "layers",
-      `${loaded.length} Workflow layer${loaded.length === 1 ? "" : "s"} validated; none was built or run`,
+      `${loaded.length} valid Workflow layer${loaded.length === 1 ? "" : "s"} inspected; no Workflow was run`,
     ),
   ];
 };

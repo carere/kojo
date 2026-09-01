@@ -9,6 +9,7 @@ import { root } from "./root.ts";
 import { run } from "./run.ts";
 import { ui } from "./ui.ts";
 import { watch } from "./watch.ts";
+import { workflow } from "./workflow.ts";
 
 /**
  * The whole command tree.
@@ -18,7 +19,7 @@ import { watch } from "./watch.ts";
  * import cycle.
  */
 export const kojo = root.pipe(
-  Command.withSubcommands([init, doctor, run, watch, gate, ui, daemon, project]),
+  Command.withSubcommands([init, doctor, run, watch, gate, ui, daemon, project, workflow]),
 );
 
 /**

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   decodeMutationEnvelope,
@@ -12,12 +13,18 @@ import type {
   ProjectCounts,
   ProjectSnapshot,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
+import type {
+  WorkflowCounts,
+  WorkflowSnapshot,
+} from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import { Effect } from "effect";
 import type { HostClientRequestJournal } from "../../daemon/adapters/HostClientRequestJournal.ts";
+import type { FactoryRefreshObservation } from "../../workflow/models/FactoryRefresh.ts";
+import { RevisionCaptureError } from "../../workflow/models/RevisionCaptureError.ts";
+import { refreshFactory } from "../../workflow/services/refreshFactory.ts";
 import type { SqliteProjectRepository } from "../adapters/SqliteProjectRepository.ts";
 import { ProjectStoreError } from "../models/ProjectStoreError.ts";
 import { exactGitWorkingTree } from "./gitWorkingTree.ts";
-import { inspectFactory } from "./inspectFactory.ts";
 
 const response = (body: unknown, status = 200): Response =>
   Response.json(body, { status, headers: { "cache-control": "no-store" } });
@@ -73,8 +80,17 @@ const countsOf = (projects: ProjectSnapshot["projects"]): ProjectCounts => ({
   invalidFactories: projects.filter((project) => project.factoryState === "invalid").length,
 });
 
+const workflowCountsOf = (workflows: WorkflowSnapshot["workflows"]): WorkflowCounts => ({
+  total: workflows.length,
+  available: workflows.filter((workflow) => workflow.availability === "available").length,
+  invalid: workflows.filter((workflow) => workflow.availability === "invalid").length,
+  removed: workflows.filter((workflow) => workflow.availability === "removed").length,
+  active: workflows.filter((workflow) => workflow.activity === "active").length,
+});
+
 export class ProjectApi {
   readonly #dataIdentity: string;
+  readonly #dataRoot: string;
   readonly #instanceId: string;
   readonly #journal: HostClientRequestJournal;
   readonly #now: () => number;
@@ -90,6 +106,7 @@ export class ProjectApi {
     readonly dataRoot: string;
   }) {
     this.#dataIdentity = options.dataIdentity;
+    this.#dataRoot = options.dataRoot;
     this.#instanceId = options.instanceId;
     this.#journal = options.journal;
     this.#now = options.now;
@@ -119,6 +136,38 @@ export class ProjectApi {
         return refusal(
           cause instanceof ProjectStoreError ? cause : invalid(String(cause)),
           "snapshot",
+          this.#dataIdentity,
+        );
+      }
+    });
+  }
+
+  workflowSnapshot(projectId?: string): Effect.Effect<Response> {
+    return Effect.promise(async () => {
+      try {
+        const [all, snapshotVersion] = await Promise.all([
+          Effect.runPromise(this.#repository.workflows),
+          Effect.runPromise(this.#repository.snapshotVersion),
+        ]);
+        const workflows =
+          projectId === undefined
+            ? all
+            : all.filter((workflow) => workflow.projectId === projectId);
+        const body: WorkflowSnapshot = {
+          observationVersion: 1,
+          instanceId: this.#instanceId,
+          dataIdentity: this.#dataIdentity,
+          snapshotVersion,
+          observedAt: new Date(this.#now()).toISOString(),
+          refreshAfterMillis: 1_000,
+          counts: workflowCountsOf(workflows),
+          workflows,
+        };
+        return response(body);
+      } catch (cause) {
+        return refusal(
+          cause instanceof ProjectStoreError ? cause : invalid(String(cause)),
+          "workflow-snapshot",
           this.#dataIdentity,
         );
       }
@@ -205,7 +254,42 @@ export class ProjectApi {
         const location = exactGitWorkingTree(sentLocation, this.#worktrees);
         if (location !== sentLocation)
           throw invalid("The Daemon resolved a different Project location.");
-        const factory = await Effect.runPromise(inspectFactory(location));
+        let factory: {
+          readonly state: "missing" | "invalid" | "available";
+          readonly refreshState: "current" | "failed" | "pending";
+          readonly workflows: FactoryRefreshObservation["workflows"];
+          readonly fault?: string;
+          readonly remedy?: string;
+        };
+        try {
+          const refreshed = await Effect.runPromise(
+            refreshFactory({ project: location, dataRoot: this.#dataRoot }),
+          );
+          factory = {
+            state: refreshed.factoryState,
+            refreshState: "current",
+            workflows: refreshed.workflows,
+            ...(refreshed.fault === undefined ? {} : { fault: refreshed.fault }),
+            ...(refreshed.remedy === undefined ? {} : { remedy: refreshed.remedy }),
+          };
+        } catch (cause) {
+          const error =
+            cause instanceof RevisionCaptureError
+              ? cause
+              : new RevisionCaptureError({
+                  code: "CAPTURE_FAILED",
+                  message: cause instanceof Error ? cause.message : String(cause),
+                  remedy: "Retry Factory Refresh after the operational fault is repaired.",
+                  cause,
+                });
+          factory = {
+            state: existsSync(join(location, ".kojo")) ? "available" : "missing",
+            refreshState: error.code === "REFRESH_UNSTABLE" ? "pending" : "failed",
+            workflows: [],
+            fault: error.message,
+            remedy: error.remedy,
+          };
+        }
         await Effect.runPromise(
           this.#repository.register({
             requestId,
