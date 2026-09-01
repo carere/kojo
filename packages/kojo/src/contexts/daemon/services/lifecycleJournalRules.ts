@@ -19,6 +19,11 @@ export const beginLifecycleOperation = (
     request.dataIdentity.length === 0 ||
     !/^[a-f0-9]{64}$/.test(request.originalRequestHash) ||
     !validReleaseId(request.sourceReleaseId) ||
+    (request.candidateReleaseId !== undefined && !validReleaseId(request.candidateReleaseId)) ||
+    (request.checkedRetainedSetHash !== undefined &&
+      !/^[a-f0-9]{64}$/.test(request.checkedRetainedSetHash)) ||
+    (request.kind === "upgrade" &&
+      (request.candidateReleaseId === undefined || request.checkedRetainedSetHash === undefined)) ||
     !Number.isFinite(Date.parse(request.startedAt))
   ) {
     throw new LifecycleError(
@@ -31,7 +36,9 @@ export const beginLifecycleOperation = (
       existing.dataIdentity !== request.dataIdentity ||
       existing.originalRequestHash !== request.originalRequestHash ||
       existing.kind !== request.kind ||
-      existing.sourceReleaseId !== request.sourceReleaseId
+      existing.sourceReleaseId !== request.sourceReleaseId ||
+      existing.candidateReleaseId !== request.candidateReleaseId ||
+      existing.checkedRetainedSetHash !== request.checkedRetainedSetHash
     ) {
       throw new LifecycleError(
         "LIFECYCLE_REQUEST_CONFLICT",
@@ -59,11 +66,17 @@ export const beginLifecycleOperation = (
     originalRequestHash: request.originalRequestHash,
     kind: request.kind,
     sourceReleaseId: request.sourceReleaseId,
+    ...(request.candidateReleaseId === undefined
+      ? {}
+      : { candidateReleaseId: request.candidateReleaseId }),
+    ...(request.checkedRetainedSetHash === undefined
+      ? {}
+      : { checkedRetainedSetHash: request.checkedRetainedSetHash }),
     stage: "prepared",
     stageRevision: 1,
     startedAt: request.startedAt,
     updatedAt: request.startedAt,
-    compatibility: "not-applicable",
+    compatibility: request.kind === "upgrade" ? "pending" : "not-applicable",
     rollbackAttempted: false,
   };
 };

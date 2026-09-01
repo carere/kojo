@@ -5,9 +5,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { FileLifecycleJournalRepository } from "../../../../src/contexts/daemon/adapters/FileLifecycleJournalRepository.ts";
 import {
   SocketDaemonLifecycleControl,
+  SocketDaemonUpgradeControl,
   startLifecycleControlServer,
 } from "../../../../src/contexts/daemon/adapters/LifecycleControlTransport.ts";
 import type { DaemonLifecycleControl } from "../../../../src/contexts/daemon/ports/DaemonLifecycleControl.ts";
+import type { DaemonUpgradeControl } from "../../../../src/contexts/daemon/ports/DaemonUpgradeControl.ts";
 
 const roots: Array<string> = [];
 
@@ -80,7 +82,199 @@ const control = (
     }),
 });
 
+const upgradeControl = (activationCalls: Array<string>): DaemonUpgradeControl => ({
+  inspectPreflight: () =>
+    Effect.succeed({
+      daemonInstanceId: "daemon-old",
+      runnerInstanceIds: [],
+      recordedAt: "2026-09-01T10:00:00.000Z",
+    }),
+  beginDrain: () =>
+    Effect.succeed({
+      held: true,
+      executingRunIds: [],
+      observedAt: "2026-09-01T10:00:01.000Z",
+    }),
+  readDrain: () =>
+    Effect.succeed({
+      held: true,
+      executingRunIds: [],
+      observedAt: "2026-09-01T10:00:01.000Z",
+    }),
+  forceDrain: (_operationId, _cleanupMillis, forceAuthorizationId) => {
+    activationCalls.push(`force:${forceAuthorizationId}`);
+    return Effect.succeed({
+      held: true,
+      executingRunIds: [],
+      observedAt: "2026-09-01T10:00:01.000Z",
+    });
+  },
+  holdMutations: () => Effect.void,
+  repeatFinalPreflight: () =>
+    Effect.succeed({
+      outcome: "accepted",
+      retainedSetHash: "c".repeat(64),
+      owner: {
+        daemonInstanceId: "daemon-old",
+        runnerInstanceIds: [],
+        recordedAt: "2026-09-01T10:00:00.000Z",
+      },
+      detail: "compatible",
+    }),
+  releaseUpgradeHolds: () => Effect.void,
+  prepareHandoff: () =>
+    Effect.succeed({
+      digest: "d".repeat(64),
+      owner: {
+        daemonInstanceId: "daemon-old",
+        runnerInstanceIds: [],
+        recordedAt: "2026-09-01T10:00:00.000Z",
+      },
+    }),
+  confirmControllerReady: () => Effect.void,
+  createVerifiedBackup: () =>
+    Effect.succeed({
+      backupId: "upgrade-operation",
+      sha256: "e".repeat(64),
+      dataVersion: "f".repeat(64),
+      verifiedAt: "2026-09-01T10:00:02.000Z",
+    }),
+  stopOwnedProcesses: () =>
+    Effect.succeed({
+      daemonInstanceId: "daemon-old",
+      runnerInstanceIds: [],
+      recordedAt: "2026-09-01T10:00:00.000Z",
+    }),
+  readCandidateReadiness: () =>
+    Effect.succeed({
+      daemonInstanceId: "daemon-new",
+      dataIdentity: "data-1",
+      sourceReleaseId: "source-release",
+      candidateReleaseId: "candidate-release",
+      receiptDigest: "1".repeat(64),
+      wakeupDigest: "2".repeat(64),
+      integrity: "ok",
+      transports: "ready",
+      workflowExecutions: 0,
+      checkedAt: "2026-09-01T10:00:03.000Z",
+    }),
+  authorizeActivation: () => {
+    activationCalls.push("activate");
+    return Effect.succeed({
+      daemonInstanceId: "daemon-new",
+      runnerInstanceIds: [],
+      recordedAt: "2026-09-01T10:00:03.000Z",
+    });
+  },
+  inspectRollbackSafety: () =>
+    Effect.succeed({
+      safe: true,
+      sourceReleaseId: "source-release",
+      dataVersion: "f".repeat(64),
+      executionStopped: true,
+      detail: "safe",
+    }),
+  readRollbackReadiness: () =>
+    Effect.succeed({
+      daemonInstanceId: "daemon-rollback",
+      dataIdentity: "data-1",
+      sourceReleaseId: "source-release",
+      candidateReleaseId: "source-release",
+      receiptDigest: "3".repeat(64),
+      wakeupDigest: "2".repeat(64),
+      integrity: "ok",
+      transports: "ready",
+      workflowExecutions: 0,
+      checkedAt: "2026-09-01T10:00:04.000Z",
+    }),
+  authorizeRollback: () =>
+    Effect.succeed({
+      daemonInstanceId: "daemon-rollback",
+      runnerInstanceIds: [],
+      recordedAt: "2026-09-01T10:00:04.000Z",
+    }),
+});
+
 describe("the private lifecycle control transport", () => {
+  it("carries exact managed upgrade evidence on the authenticated lifecycle socket", async () => {
+    const root = mkdtempSync("/tmp/kojo-upgrade-lc-");
+    roots.push(root);
+    const runtimeRoot = join(root, "runtime");
+    mkdirSync(runtimeRoot, { mode: 0o700 });
+    const journal = new FileLifecycleJournalRepository(join(root, "journal"));
+    const upgradeOperation = journal.begin({
+      operationId: "upgrade-operation",
+      dataIdentity: "data-1",
+      originalRequestHash: "b".repeat(64),
+      kind: "upgrade",
+      sourceReleaseId: "source-release",
+      candidateReleaseId: "candidate-release",
+      checkedRetainedSetHash: "c".repeat(64),
+      startedAt: "2026-09-01T10:00:00.000Z",
+    });
+    const socketPath = join(runtimeRoot, "lifecycle-control.sock");
+    const activationCalls: Array<string> = [];
+    const server = startLifecycleControlServer({
+      socketPath,
+      journal,
+      control: control("daemon-old", []),
+      upgradeControl: upgradeControl(activationCalls),
+    });
+    try {
+      const client = new SocketDaemonUpgradeControl(runtimeRoot, journal);
+      expect(
+        (
+          await Effect.runPromise(
+            client.inspectPreflight(
+              upgradeOperation.operationId,
+              "data-1",
+              "b".repeat(64),
+              "source-release",
+              "candidate-release",
+              "c".repeat(64),
+            ),
+          )
+        ).daemonInstanceId,
+      ).toBe("daemon-old");
+      const draining = journal.advance({
+        operationId: upgradeOperation.operationId,
+        expectedRevision: upgradeOperation.stageRevision,
+        stage: "draining",
+        updatedAt: "2026-09-01T10:00:01.000Z",
+      });
+      journal.authorizeForce({
+        formatVersion: 1,
+        authorizationId: "force-upgrade",
+        pendingOperationId: draining.operationId,
+        requestHash: "f".repeat(64),
+        authorizedAt: "2026-09-01T10:00:02.000Z",
+      });
+      await expect(
+        Effect.runPromise(client.forceDrain(upgradeOperation.operationId, 30_000, "wrong-force")),
+      ).rejects.toThrow(/force authorization is not valid/);
+      expect(
+        (
+          await Effect.runPromise(
+            client.forceDrain(upgradeOperation.operationId, 30_000, "force-upgrade"),
+          )
+        ).executingRunIds,
+      ).toEqual([]);
+      const candidate = await Effect.runPromise(
+        client.readCandidateReadiness(upgradeOperation.operationId, "daemon-old"),
+      );
+      expect(candidate).toMatchObject({
+        daemonInstanceId: "daemon-new",
+        integrity: "ok",
+        transports: "ready",
+        workflowExecutions: 0,
+      });
+      await Effect.runPromise(client.authorizeActivation(upgradeOperation.operationId, candidate));
+      expect(activationCalls).toEqual(["force:force-upgrade", "activate"]);
+    } finally {
+      server.stop();
+    }
+  });
+
   it("reconnects one operation after endpoint loss and observes the replacement owner", async () => {
     const test = fixture();
     const socketPath = join(test.runtimeRoot, "lifecycle-control.sock");
