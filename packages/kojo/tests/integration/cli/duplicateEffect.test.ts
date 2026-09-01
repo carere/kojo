@@ -135,7 +135,11 @@ describe("a factory that resolves a second copy of effect", () => {
         const report = flat(ran.stdout);
 
         expect(ran.status).not.toBe(0);
-        expect(report).toContain("two copies of effect");
+        expect(report).toContain("Factory resolves");
+        expect(report).toContain("but the Project runtime resolves");
+        expect(report).toContain(
+          "Declare the exact Effect peer required by `@carere/kojo-runtime`",
+        );
         // Both versions, and both directories. The versions are equal — that is the ordinary case,
         // and it is why a check comparing versions would have called this factory ready.
         expect(report).toContain(mine.version);
@@ -188,8 +192,8 @@ describe("a factory that resolves a second copy of effect", () => {
 
         expect(flat(ran.stdout)).toContain("one copy of each");
         // And the check that loading a workflow is not: the payload was built and keyed against
-        // this engine's own schemas.
-        expect(flat(ran.stdout)).toContain("review — built and keyed against this engine");
+        // this Project runtime's own schemas.
+        expect(flat(ran.stdout)).toContain("review — built and keyed against this Project runtime");
       }),
     ),
   );
@@ -223,9 +227,9 @@ describe("a factory that resolves a second copy of effect", () => {
 
         expect(flat(ran.stdout)).toContain("one copy of each");
         expect(flat(ran.stdout)).not.toContain("two copies");
-        // And it really is one: the payload built and keyed against this engine's own schemas,
+        // And it really is one: the payload built and keyed against this Project runtime's schemas,
         // which is the thing two copies make impossible.
-        expect(flat(ran.stdout)).toContain("review — built and keyed against this engine");
+        expect(flat(ran.stdout)).toContain("review — built and keyed against this Project runtime");
       }),
     ),
   );

@@ -60,3 +60,6 @@ export const enginePackage = "@carere/kojo";
 
 /** The Project-local package that authored Factory modules import. */
 export const runtimePackage = "@carere/kojo-runtime";
+
+/** The plain-data package that a checkout runtime resolves through its source workspace. */
+export const runnerContractsPackage = "@carere/kojo-runner-contracts";
