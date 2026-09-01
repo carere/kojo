@@ -57,6 +57,24 @@ const useLifecycle = <A>(operation: (lifecycle: DaemonLifecycle) => Promise<A>) 
           ),
   }).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)));
 
+const useLifecycleEffect = <A>(
+  operation: (lifecycle: DaemonLifecycle) => Effect.Effect<A, LifecycleError>,
+) =>
+  Effect.try({
+    try: productionLifecycle,
+    catch: (cause) =>
+      cause instanceof LifecycleError
+        ? cause
+        : new LifecycleError(
+            "LIFECYCLE_FAILED",
+            cause instanceof Error ? cause.message : String(cause),
+            cause,
+          ),
+  }).pipe(
+    Effect.flatMap(operation),
+    Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
+  );
+
 const install = Command.make(
   "install",
   {},
@@ -128,7 +146,7 @@ const keepRunningAfterLogout = Command.make(
         "This changes linger for the complete OS user. All user services can then run after logout.",
       );
     }
-    yield* printStatus(yield* useLifecycle((lifecycle) => lifecycle.keepRunningAfterLogout()));
+    yield* printStatus(yield* useLifecycleEffect((lifecycle) => lifecycle.keepRunningAfterLogout));
   }),
 ).pipe(
   Command.withDescription(

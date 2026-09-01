@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Effect } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
 import type {
@@ -83,6 +84,7 @@ describe("the managed Daemon installation", () => {
       logoutPersistence: "disabled",
     };
     const second = await lifecycle.install();
+    await Effect.runPromise(lifecycle.keepRunningAfterLogout);
 
     expect(first.changed).toBe(true);
     expect(second.changed).toBe(false);
@@ -91,7 +93,7 @@ describe("the managed Daemon installation", () => {
       manager: "unloaded",
       process: "stopped",
     });
-    expect(calls).toEqual(["install-and-start"]);
+    expect(calls).toEqual(["install-and-start", "linger"]);
     expect(readFileSync(paths.managedCli, "utf8")).toContain("active-release");
     expect(readFileSync(paths.managedLauncher, "utf8")).toContain("launcher.js");
     const releaseId = readFileSync(join(installationRoot, "active-release"), "utf8").trim();
