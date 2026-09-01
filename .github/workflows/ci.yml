@@ -134,7 +134,7 @@ jobs:
       - name: Install native Host prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install --yes jq openssh-server policykit-1
+          sudo apt-get install --yes dbus-user-session jq openssh-server policykit-1
           sudo install -m 0755 "$(readlink -f "$(command -v bun)")" /usr/local/bin/bun
           sudo install -m 0755 "$(readlink -f "$(command -v moon)")" /usr/local/bin/moon
 

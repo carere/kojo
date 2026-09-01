@@ -64,10 +64,10 @@ ssh_arguments=(
   -o UserKnownHostsFile=/dev/null
   "$evidence_user@127.0.0.1"
 )
-remote_prefix="cd '$workspace' && export PATH=/usr/local/bin:/usr/bin:/bin CI=1 NO_COLOR=1"
+remote_prefix="cd '$workspace' && export PATH=/usr/local/bin:/usr/bin:/bin CI=1 NO_COLOR=1 XDG_RUNTIME_DIR='$runtime_directory' DBUS_SESSION_BUS_ADDRESS='unix:path=$runtime_directory/bus'"
 
 ssh "${ssh_arguments[@]}" \
-  "$remote_prefix && test \"\${XDG_RUNTIME_DIR:-}\" = '$runtime_directory' && test -S '$runtime_directory/bus' && /usr/bin/systemctl --user show-environment" \
+  "$remote_prefix && id && stat -c 'RuntimeDirectory=%n Owner=%u Mode=%a' '$runtime_directory' && test -S '$runtime_directory/bus' && /usr/bin/systemctl --user show-environment && loginctl show-user '$evidence_user' --property=Sessions,Linger,State" \
   >"$evidence_directory/pam-session.log"
 
 ssh "${ssh_arguments[@]}" \
