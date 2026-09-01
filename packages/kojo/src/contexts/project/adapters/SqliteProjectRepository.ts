@@ -444,6 +444,22 @@ export class SqliteProjectRepository {
             return { project: result.project, created: result.created };
           }
 
+          const reserved = this.#database
+            .query<{ readonly project_id: string }, [string]>(
+              `SELECT project_id FROM projects
+                WHERE requested_location = ? AND location_action IN ('relocate', 'restore')`,
+            )
+            .get(request.location);
+          if (reserved !== null) {
+            throw new ProjectStoreError({
+              code: "PROJECT_LOCATION_RESERVED",
+              message: "The Project location is reserved by an accepted location change.",
+              status: 409,
+              retry: "safe",
+              remedy: "Wait for the accepted Project location change to finish, then retry.",
+            });
+          }
+
           let row = this.#database
             .query<ProjectRow, [string]>(
               `SELECT ${projectColumns}
@@ -645,11 +661,14 @@ export class SqliteProjectRepository {
             }
             if (request.requestedLocation !== undefined) {
               const conflict = this.#database
-                .query<{ readonly project_id: string }, [string, string]>(
+                .query<{ readonly project_id: string }, [string, string, string]>(
                   `SELECT project_id FROM projects
-                    WHERE location = ? AND project_id != ? AND project_state != 'archived'`,
+                    WHERE project_id != ? AND (
+                      (location = ? AND project_state != 'archived') OR
+                      (requested_location = ? AND location_action IN ('relocate', 'restore'))
+                    )`,
                 )
-                .get(request.requestedLocation, request.projectId);
+                .get(request.projectId, request.requestedLocation, request.requestedLocation);
               if (conflict !== null) {
                 throw new ProjectStoreError({
                   code: "PROJECT_LOCATION_CONFLICT",
@@ -756,7 +775,7 @@ export class SqliteProjectRepository {
               );
             } else {
               if (requested === null) throw new Error("the accepted location was not retained");
-              if (requested !== priorLocation) {
+              if (request.action === "restore" || requested !== priorLocation) {
                 this.#database.run(
                   `UPDATE project_location_history SET released_at = ?, release_reason = 'relocated'
                     WHERE project_id = ? AND released_at IS NULL`,
@@ -1014,6 +1033,22 @@ export class SqliteProjectRepository {
                 });
               }
               return JSON.parse(prior.receipt_json) as WorkflowActivityReceipt;
+            }
+            const project = this.#project(request.projectId);
+            if (
+              project === null ||
+              project.project_state !== "available" ||
+              project.location_active !== 1 ||
+              project.location_confirmed !== 1 ||
+              project.location_action !== null
+            ) {
+              throw new ProjectStoreError({
+                code: "PROJECT_LOCATION_UNAVAILABLE",
+                message: "The Project location cannot accept a new Workflow Start.",
+                status: 409,
+                retry: "safe",
+                remedy: "Wait for the Project location change or confirm the restored location.",
+              });
             }
             const workflow = this.#workflowRow(request.projectId, request.workflowName);
             if (workflow.availability !== "available" || workflow.current_revision_id === null) {

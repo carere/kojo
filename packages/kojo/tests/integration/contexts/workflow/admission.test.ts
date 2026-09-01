@@ -11,7 +11,10 @@ const databaseWithRevision = (): Database => {
   );
   new SqliteProjectRepository(database);
   database.run(
-    "INSERT INTO projects VALUES (?, ?, 'available', 'available', 'current', ?, ?, NULL, NULL)",
+    `INSERT INTO projects (
+       project_id, location, project_state, factory_state, refresh_state,
+       registered_at, refreshed_at, fault, remedy
+     ) VALUES (?, ?, 'available', 'available', 'current', ?, ?, NULL, NULL)`,
     ["project-1", "/tmp/project-1", "2026-09-01T10:00:00.000Z", "2026-09-01T10:00:00.000Z"],
   );
   database.run("INSERT INTO workflow_revisions VALUES (?, ?, '{}', '/retained', ?)", [

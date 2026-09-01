@@ -11,7 +11,10 @@ const fixture = (): { readonly database: Database; readonly runs: SqliteRunRepos
   );
   new SqliteProjectRepository(database);
   database.run(
-    "INSERT INTO projects VALUES ('project', '/tmp/project', 'available', 'available', 'current', 'now', 'now', NULL, NULL)",
+    `INSERT INTO projects (
+       project_id, location, project_state, factory_state, refresh_state,
+       registered_at, refreshed_at, fault, remedy
+     ) VALUES ('project', '/tmp/project', 'available', 'available', 'current', 'now', 'now', NULL, NULL)`,
   );
   database.run(
     "INSERT INTO workflow_revisions VALUES ('revision', 'graph', ?, '/retained', 'now')",

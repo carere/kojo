@@ -216,9 +216,11 @@ const rebuildTableCheck = (
 /** The sole-owner SQLite adapter for Run admission, Claims, slots, and replayed results. */
 export class SqliteRunRepository {
   readonly #database: Database;
+  readonly #enforceProjectEligibility: boolean;
 
-  constructor(database: Database) {
+  constructor(database: Database, options: { readonly enforceProjectEligibility?: boolean } = {}) {
     this.#database = database;
+    this.#enforceProjectEligibility = options.enforceProjectEligibility ?? true;
     database.run("PRAGMA foreign_keys = ON");
     database.run(`
       CREATE TABLE IF NOT EXISTS workflow_runs (
@@ -471,6 +473,35 @@ export class SqliteRunRepository {
               }
               const row = this.#runRow(priorReceipt.run_id);
               return { run: runOf(row), duplicate: priorReceipt.duplicate === 1 };
+            }
+
+            if (this.#enforceProjectEligibility) {
+              const project = this.#database
+                .query<
+                  {
+                    readonly project_state: string;
+                    readonly location_active: number;
+                    readonly location_confirmed: number;
+                    readonly location_action: string | null;
+                  },
+                  [string]
+                >(
+                  `SELECT project_state, location_active, location_confirmed, location_action
+                     FROM projects WHERE project_id = ?`,
+                )
+                .get(request.projectId);
+              if (
+                project === null ||
+                project.project_state !== "available" ||
+                project.location_active !== 1 ||
+                project.location_confirmed !== 1 ||
+                project.location_action !== null
+              ) {
+                throw new RunStoreError({
+                  code: "RUN_NOT_ELIGIBLE",
+                  message: "the Project location cannot accept a new Run admission",
+                });
+              }
             }
 
             const runId = runIdOf(request.projectId, request.workflowName, request.idempotencyKey);

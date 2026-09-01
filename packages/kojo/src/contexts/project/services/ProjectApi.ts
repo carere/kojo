@@ -135,6 +135,15 @@ export class ProjectApi {
           await Effect.runPromise(
             this.#repository.markMissingLocations(missing, new Date(this.#now()).toISOString()),
           );
+          await Promise.all(
+            projects
+              .filter((project) => missing.includes(project.location))
+              .map((project) =>
+                Effect.runPromise(
+                  this.#runs.holdProjectDispatch(project.projectId, "Project location unavailable"),
+                ),
+              ),
+          );
           projects = await Effect.runPromise(this.#repository.projects);
         }
         const snapshotVersion = await Effect.runPromise(this.#repository.snapshotVersion);

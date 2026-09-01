@@ -24,7 +24,9 @@ import {
   startDaemon,
 } from "../../../../src/contexts/daemon/adapters/DaemonOwner.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
+import { SqliteProjectRepository } from "../../../../src/contexts/project/adapters/SqliteProjectRepository.ts";
 import { SqliteResourceLeaseRepository } from "../../../../src/contexts/project/adapters/SqliteResourceLeaseRepository.ts";
+import { SqliteRunRepository } from "../../../../src/contexts/workflow/adapters/SqliteRunRepository.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
 
 const roots: string[] = [];
@@ -197,9 +199,80 @@ describe("durable Project registration", () => {
     expect(snapshot.counts.total).toBe(1);
   });
 
+  it("keeps an accepted destination reserved and blocks new Run admission across restart", async () => {
+    const hostPaths = paths();
+    const parent = roots[0] ?? "";
+    const origin = repository(parent, "reservation-origin");
+    const destination = repository(parent, "reservation-destination");
+    let daemon = startDaemon(hostPaths);
+    daemons.push(daemon);
+    const registration = mutation(daemon, "reservation-project", origin);
+    await prepare(daemon, registration);
+    const registered = (await (
+      await retry(daemon, registration.requestId)
+    ).json()) as OperationReceipt;
+    const projectId = (
+      registered.result as unknown as { readonly project: { readonly projectId: string } }
+    ).project.projectId;
+    const dataIdentity = daemon.endpoint.dataIdentity;
+    await Effect.runPromise(daemon.stop);
+    daemons.splice(daemons.indexOf(daemon), 1);
+
+    const database = new Database(join(hostPaths.dataRoot, "kojo.db"), { strict: true });
+    const projects = new SqliteProjectRepository(database);
+    await Effect.runPromise(
+      projects.beginLocationChange({
+        requestId: "accepted-relocation",
+        requestBody: "accepted-relocation",
+        dataIdentity,
+        projectId,
+        action: "relocate",
+        requestedLocation: destination,
+        changedAt: "2026-09-01T10:00:00.000Z",
+      }),
+    );
+    const runs = new SqliteRunRepository(database, { enforceProjectEligibility: true });
+    await expect(
+      Effect.runPromise(
+        runs.admit({
+          dataIdentity,
+          requestId: "start-during-drain",
+          canonicalRequest: "start-during-drain",
+          projectId,
+          workflowName: "retained",
+          idempotencyKey: "start-during-drain",
+          payload: null,
+          revisionId: "a".repeat(64),
+          packageGraphId: "b".repeat(64),
+          admittedAt: "2026-09-01T10:00:00.100Z",
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "RUN_NOT_ELIGIBLE" });
+    database.close();
+
+    daemon = startDaemon(hostPaths);
+    daemons.push(daemon);
+    const competing = mutation(daemon, "competing-registration", destination);
+    expect((await prepare(daemon, competing)).status).toBe(201);
+    const refused = await retry(daemon, competing.requestId);
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({
+      problem: { code: "PROJECT_LOCATION_RESERVED", retry: "safe" },
+    });
+    const snapshot = (await (await call(daemon, "/api/v1/projects")).json()) as ProjectSnapshot;
+    expect(snapshot.projects.find((project) => project.projectId === projectId)).toMatchObject({
+      location: origin,
+      locationChange: {
+        state: "draining",
+        action: "relocate",
+        requestedLocation: destination,
+      },
+    });
+  });
+
   it("requires explicit same-path confirmation and retains identity while locations change", async () => {
     const hostPaths = paths();
-    const daemon = startDaemon(hostPaths);
+    let daemon = startDaemon(hostPaths);
     daemons.push(daemon);
     const parent = roots[0] ?? "";
     const firstLocation = repository(parent, "relocating");
@@ -315,6 +388,15 @@ describe("durable Project registration", () => {
       request: { operation: "archiveProject", target: { kind: "project", parts: [originalId] } },
       receipt: { status: "accepted" },
     });
+    await Effect.runPromise(daemon.stop);
+    daemons.splice(daemons.indexOf(daemon), 1);
+    daemon = startDaemon(hostPaths);
+    daemons.push(daemon);
+    expect(
+      (await (
+        await call(daemon, "/api/v1/client-requests/archive-original")
+      ).json()) as ClientRequestDocument,
+    ).toMatchObject({ receipt: { status: "accepted" } });
     await Effect.runPromise(
       resources.confirmAcquired(
         resourceAuthority,
@@ -419,6 +501,39 @@ describe("durable Project registration", () => {
           location: alternateLocation,
           locationHistory: [
             { location: firstLocation, releaseReason: "archived" },
+            { location: alternateLocation },
+          ],
+        },
+      },
+    });
+
+    const secondArchive = await call(daemon, `/api/v1/projects/${originalId}/actions/archive`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        requestId: "archive-restored-location",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        confirm: true,
+      }),
+    });
+    expect(secondArchive.status, await secondArchive.clone().text()).toBe(200);
+    const samePathRestore = await call(daemon, `/api/v1/projects/${originalId}/actions/restore`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        requestId: "restore-same-path",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        location: alternateLocation,
+        confirm: true,
+      }),
+    });
+    expect(samePathRestore.status, await samePathRestore.clone().text()).toBe(200);
+    expect((await samePathRestore.json()) as OperationReceipt).toMatchObject({
+      result: {
+        project: {
+          locationHistory: [
+            { location: firstLocation, releaseReason: "archived" },
+            { location: alternateLocation, releaseReason: "archived" },
             { location: alternateLocation },
           ],
         },

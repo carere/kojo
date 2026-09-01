@@ -256,6 +256,7 @@ export class RunApi {
   readonly #triggerGroups = new Map<string, ProjectTriggerGroup>();
   readonly #activeExecutions = new Map<string, ActiveExecutionControl>();
   readonly #projectDispatchHolds = new Set<string>();
+  readonly #projectDispatches = new Map<string, number>();
   readonly #recoveryWaits = new Set<{
     readonly timer: ReturnType<typeof setTimeout>;
     readonly resolve: (continueRecovery: boolean) => void;
@@ -450,13 +451,28 @@ export class RunApi {
       catch: runApiFault,
     });
 
+  /** Stop new dispatch and Trigger polling without cancelling admitted Runs. */
+  readonly holdProjectDispatch = (
+    projectId: string,
+    detail: string,
+  ): Effect.Effect<void, RunApiFault> =>
+    Effect.tryPromise({
+      try: async () => {
+        this.#projectDispatchHolds.add(projectId);
+        await this.#stopProjectTriggerPollers(projectId, detail);
+      },
+      catch: runApiFault,
+    });
+
   /** Hold one Project before its active location changes, then confirm its Runner is stopped. */
   readonly drainProject = (projectId: string): Effect.Effect<void, RunApiFault> =>
     Effect.tryPromise({
       try: async () => {
-        this.#projectDispatchHolds.add(projectId);
-        await this.#stopProjectTriggerPollers(projectId, "Project location change draining");
+        await Effect.runPromise(
+          this.holdProjectDispatch(projectId, "Project location change draining"),
+        );
         while (
+          (this.#projectDispatches.get(projectId) ?? 0) > 0 ||
           [...this.#activeExecutions.values()].some((control) => control.projectId === projectId)
         ) {
           await Bun.sleep(10);
@@ -779,7 +795,16 @@ export class RunApi {
           this.#runs.reserveNext(reservationId, new Date(now).toISOString(), blockedProjectIds),
         );
         if (reserved === undefined) break;
-        void this.#dispatch(reserved).finally(() => this.#pump());
+        this.#projectDispatches.set(
+          reserved.run.projectId,
+          (this.#projectDispatches.get(reserved.run.projectId) ?? 0) + 1,
+        );
+        void this.#dispatch(reserved).finally(() => {
+          const remaining = (this.#projectDispatches.get(reserved.run.projectId) ?? 1) - 1;
+          if (remaining === 0) this.#projectDispatches.delete(reserved.run.projectId);
+          else this.#projectDispatches.set(reserved.run.projectId, remaining);
+          void this.#pump();
+        });
       }
     } finally {
       this.#pumping = false;

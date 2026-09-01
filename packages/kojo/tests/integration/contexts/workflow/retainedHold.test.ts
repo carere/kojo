@@ -99,7 +99,7 @@ describe("retained content recovery hold", () => {
       )
     `);
 
-    new SqliteRunRepository(database);
+    new SqliteRunRepository(database, { enforceProjectEligibility: false });
     database.close(false);
 
     const reopened = new Database(join(root, "kojo.db"), { strict: true });
@@ -156,7 +156,7 @@ describe("retained content recovery hold", () => {
     for (const revisionId of ["revision-a", "revision-b", "revision-c"]) {
       firstDatabase.run("INSERT INTO workflow_revisions (revision_id) VALUES (?)", [revisionId]);
     }
-    const first = new SqliteRunRepository(firstDatabase);
+    const first = new SqliteRunRepository(firstDatabase, { enforceProjectEligibility: false });
     const damaged = await admit(first, "project-a", "damaged", 1, "revision-a");
     await admit(first, "project-a", "sibling", 2, "revision-b");
     await admit(first, "project-b", "other", 3, "revision-c");
@@ -185,7 +185,9 @@ describe("retained content recovery hold", () => {
     firstDatabase.close(false);
 
     const reopenedDatabase = new Database(path, { strict: true });
-    const reopened = new SqliteRunRepository(reopenedDatabase);
+    const reopened = new SqliteRunRepository(reopenedDatabase, {
+      enforceProjectEligibility: false,
+    });
     expect(await Effect.runPromise(reopened.read(damaged.run.runId))).toMatchObject({
       state: "held",
       queueReason: "pinned-content",

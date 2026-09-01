@@ -152,7 +152,10 @@ const fixture = (): {
   const insertRevision = (revision: FixtureRevision, current = false): void => {
     const projectId = `project-${revision.manifest.workflowName}`;
     database.run(
-      "INSERT OR IGNORE INTO projects VALUES (?, ?, 'available', 'available', 'current', ?, ?, NULL, NULL)",
+      `INSERT OR IGNORE INTO projects (
+         project_id, location, project_state, factory_state, refresh_state,
+         registered_at, refreshed_at, fault, remedy
+       ) VALUES (?, ?, 'available', 'available', 'current', ?, ?, NULL, NULL)`,
       [
         projectId,
         join(dataRoot, projectId),
@@ -459,7 +462,10 @@ describe("Workflow Revision protection and collection", () => {
       ),
     ).toThrow("revision collection excludes admission");
     test.database.run(
-      "INSERT INTO projects VALUES ('project-late', ?, 'available', 'available', 'current', ?, ?, NULL, NULL)",
+      `INSERT INTO projects (
+         project_id, location, project_state, factory_state, refresh_state,
+         registered_at, refreshed_at, fault, remedy
+       ) VALUES ('project-late', ?, 'available', 'available', 'current', ?, ?, NULL, NULL)`,
       [join(test.dataRoot, "project-late"), "2026-09-04T00:00:00.000Z", "2026-09-04T00:00:00.000Z"],
     );
     expect(() =>
