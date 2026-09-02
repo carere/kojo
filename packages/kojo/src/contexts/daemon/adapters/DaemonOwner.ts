@@ -536,13 +536,16 @@ export const startDaemon = (
       resources: resourceRepository,
       trace: traceRepository,
       artifacts: artifactRepository,
-      runnerSettings: () => configurationRepository.daemonConfiguration().runner,
-      ...(options.runnerIdleMillis === undefined
-        ? {}
-        : { runnerIdleMillis: options.runnerIdleMillis }),
-      ...(options.runnerCleanupMillis === undefined
-        ? {}
-        : { runnerCleanupMillis: options.runnerCleanupMillis }),
+      runnerSettings: () => {
+        const configured = configurationRepository.daemonConfiguration().runner;
+        return {
+          ...configured,
+          ...(options.runnerIdleMillis === undefined ? {} : { idleMs: options.runnerIdleMillis }),
+          ...(options.runnerCleanupMillis === undefined
+            ? {}
+            : { cleanupMs: options.runnerCleanupMillis }),
+        };
+      },
       ...(options.resourceMutationFault === undefined
         ? {}
         : { resourceMutationFault: options.resourceMutationFault }),
