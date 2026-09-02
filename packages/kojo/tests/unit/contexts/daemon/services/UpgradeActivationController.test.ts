@@ -1,3 +1,4 @@
+import { it as effectIt } from "@effect/vitest";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 import { InMemoryLifecycleJournalRepository } from "../../../../../src/contexts/daemon/adapters/InMemoryLifecycleJournalRepository.ts";
@@ -119,6 +120,9 @@ const fixture = (
     readonly selectedRelease?: string;
     readonly process?: "running" | "stopped";
     readonly releaseReplyLostOnce?: boolean;
+    readonly stopReadyAfter?: number;
+    readonly endpointWithdrawnAfter?: number;
+    readonly stopMillis?: number;
   } = {},
 ) => {
   const events: Array<string> = [];
@@ -130,10 +134,21 @@ const fixture = (
     loginLifetime: "test",
     logoutPersistence: "disabled",
   };
+  let stopRequested = false;
+  let stopInspections = 0;
+  let endpointInspections = 0;
   const native: NativeService = {
     serviceDocument: () => "fixture",
     assertSupported: () => {},
-    inspect: () => observation,
+    inspect: () => {
+      if (stopRequested && observation.process !== "stopped") {
+        stopInspections += 1;
+        if (stopInspections >= (options.stopReadyAfter ?? 1)) {
+          observation = { ...observation, process: "stopped" };
+        }
+      }
+      return observation;
+    },
     installAndStart: () => {},
     start: () => {
       events.push(`native:start:${selectedRelease}`);
@@ -141,7 +156,7 @@ const fixture = (
     },
     stop: () => {
       events.push(`native:stop:${selectedRelease}`);
-      observation = { ...observation, process: "stopped" };
+      stopRequested = true;
     },
     enable: () => {},
     disable: () => {},
@@ -248,18 +263,28 @@ const fixture = (
       return Effect.succeed(newOwner);
     },
   };
+  const controllerOptions = {
+    journal: options.journal ?? new RecordingJournal(),
+    control,
+    nativeService: native,
+    releases,
+    serviceDefinition: "fixture",
+    pollIntervalMillis: 1,
+    readinessMillis: 5,
+    stopMillis: options.stopMillis ?? 30,
+    observedDaemonInstanceId: () => {
+      endpointInspections += 1;
+      return endpointInspections >= (options.endpointWithdrawnAfter ?? 1)
+        ? undefined
+        : "daemon-old";
+    },
+  };
   return {
     events,
-    controller: new UpgradeActivationController({
-      journal: options.journal ?? new RecordingJournal(),
-      control,
-      nativeService: native,
-      releases,
-      serviceDefinition: "fixture",
-      pollIntervalMillis: 1,
-      readinessMillis: 5,
-    }),
+    controller: new UpgradeActivationController(controllerOptions),
     selected: () => selectedRelease,
+    stopInspections: () => stopInspections,
+    endpointInspections: () => endpointInspections,
   };
 };
 
@@ -365,6 +390,49 @@ describe("managed upgrade activation", () => {
     expect(status.outcome).toBe("repair-required");
     expect(test.selected()).toBe(candidateReleaseId);
     expect(status.operation.detail).toContain("cannot be used safely");
+  });
+
+  effectIt.live("waits for SIGTERMed source exit and endpoint withdrawal", () => {
+    const journal = new RecordingJournal();
+    const test = fixture({
+      journal,
+      stopReadyAfter: 2,
+      endpointWithdrawnAfter: 4,
+    });
+
+    return Effect.gen(function* () {
+      const status = yield* test.controller.request(request);
+
+      expect(status.outcome).toBe("activated");
+      expect(test.stopInspections()).toBeGreaterThanOrEqual(2);
+      expect(test.endpointInspections()).toBeGreaterThanOrEqual(4);
+      expect(journal.snapshots.some((snapshot) => snapshot.stage === "repair-required")).toBe(
+        false,
+      );
+    });
+  });
+
+  effectIt.live("bounds an unconfirmed source stop and retains repair evidence", () => {
+    const journal = new RecordingJournal();
+    const test = fixture({
+      journal,
+      stopReadyAfter: Number.POSITIVE_INFINITY,
+      endpointWithdrawnAfter: Number.POSITIVE_INFINITY,
+      stopMillis: 3,
+    });
+
+    return Effect.gen(function* () {
+      const status = yield* test.controller.request(request);
+
+      expect(status.outcome).toBe("repair-required");
+      expect(status.operation.detail).toContain("source Daemon stopped");
+      expect(journal.snapshots.map((snapshot) => snapshot.stage)).toContain(
+        "owned-processes-stopped",
+      );
+      expect(test.stopInspections()).toBeGreaterThan(1);
+      expect(test.endpointInspections()).toBeGreaterThan(1);
+      expect(test.selected()).toBe(sourceReleaseId);
+    });
   });
 
   it("records Repair required from rollback-selected when source readiness fails", async () => {

@@ -63,6 +63,8 @@ export class UpgradeActivationController {
   readonly #now: () => number;
   readonly #pollIntervalMillis: number;
   readonly #readinessMillis: number;
+  readonly #stopMillis: number;
+  readonly #observedDaemonInstanceId: () => string | undefined;
 
   constructor(options: {
     readonly journal: LifecycleJournalRepository;
@@ -73,6 +75,8 @@ export class UpgradeActivationController {
     readonly now?: () => number;
     readonly pollIntervalMillis?: number;
     readonly readinessMillis?: number;
+    readonly stopMillis?: number;
+    readonly observedDaemonInstanceId?: () => string | undefined;
   }) {
     this.#journal = options.journal;
     this.#control = options.control;
@@ -82,6 +86,8 @@ export class UpgradeActivationController {
     this.#now = options.now ?? Date.now;
     this.#pollIntervalMillis = options.pollIntervalMillis ?? 100;
     this.#readinessMillis = options.readinessMillis ?? 60_000;
+    this.#stopMillis = options.stopMillis ?? DAEMON_CLEANUP_MILLIS;
+    this.#observedDaemonInstanceId = options.observedDaemonInstanceId ?? (() => undefined);
   }
 
   #time(): string {
@@ -90,6 +96,31 @@ export class UpgradeActivationController {
 
   #sync<A>(body: () => A): Effect.Effect<A, LifecycleError> {
     return Effect.try({ try: body, catch: failure });
+  }
+
+  #awaitNativeStop(): Effect.Effect<void, LifecycleError> {
+    const controller = this;
+    return Effect.gen(function* () {
+      while (true) {
+        const observation = yield* controller.#sync(controller.#nativeService.inspect);
+        const observedDaemonInstanceId = yield* controller.#sync(
+          controller.#observedDaemonInstanceId,
+        );
+        if (observation.process === "stopped" && observedDaemonInstanceId === undefined) return;
+        yield* Effect.sleep(controller.#pollIntervalMillis);
+      }
+    }).pipe(
+      Effect.timeoutOrElse({
+        duration: Duration.millis(controller.#stopMillis),
+        orElse: () =>
+          Effect.fail(
+            new LifecycleError(
+              "UPGRADE_STOP_UNCONFIRMED",
+              "the native manager did not confirm that the source Daemon stopped and withdrew its endpoint",
+            ),
+          ),
+      }),
+    );
   }
 
   #advance(
@@ -382,15 +413,9 @@ export class UpgradeActivationController {
       }
       if (operation.stage === "owned-processes-stopped") {
         yield* controller.#sync(controller.#nativeService.stop);
-        const observed = yield* controller.#sync(controller.#nativeService.inspect);
-        if (observed.process !== "stopped") {
-          return yield* controller.#repair(
-            operation,
-            new LifecycleError(
-              "UPGRADE_STOP_UNCONFIRMED",
-              "the native manager did not confirm that the source Daemon stopped",
-            ),
-          );
+        const stopped = yield* controller.#awaitNativeStop().pipe(Effect.result);
+        if (Result.isFailure(stopped)) {
+          return yield* controller.#repair(operation, stopped.failure);
         }
         operation = yield* controller.#advance(operation, "process-stopped");
       }

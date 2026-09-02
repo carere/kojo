@@ -122,6 +122,17 @@ export class LifecycleController {
     return Effect.try({ try: body, catch: lifecycleError });
   }
 
+  #nativeStopConfirmed(): Effect.Effect<boolean, LifecycleError> {
+    const controller = this;
+    return Effect.gen(function* () {
+      const observation = yield* controller.#sync(controller.#nativeService.inspect);
+      const observedDaemonInstanceId = yield* controller.#sync(
+        controller.#observedDaemonInstanceId,
+      );
+      return observation.process === "stopped" && observedDaemonInstanceId === undefined;
+    });
+  }
+
   #advance(
     operation: LifecycleOperation,
     stage: LifecycleOperation["stage"],
@@ -193,7 +204,7 @@ export class LifecycleController {
       if (
         operation.stage === "prepared" &&
         (operation.kind === "stop" || operation.kind === "disable-now") &&
-        (yield* controller.#sync(controller.#nativeService.inspect)).process === "stopped"
+        (yield* controller.#nativeStopConfirmed())
       ) {
         operation = yield* controller.#advance(operation, "completed", {
           outcome: "succeeded",
@@ -321,13 +332,7 @@ export class LifecycleController {
         operation = yield* Effect.gen(function* () {
           yield* controller.#sync(controller.#nativeService.stop);
           while (true) {
-            const observation = yield* controller.#sync(controller.#nativeService.inspect);
-            const observedDaemonInstanceId = yield* controller.#sync(
-              controller.#observedDaemonInstanceId,
-            );
-            if (observation.process === "stopped" && observedDaemonInstanceId === undefined) {
-              break;
-            }
+            if (yield* controller.#nativeStopConfirmed()) break;
             yield* Effect.sleep(controller.#pollIntervalMillis);
           }
           return yield* controller.#advance(ownedProcessesStopped, "process-stopped");

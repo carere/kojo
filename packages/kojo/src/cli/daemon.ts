@@ -112,6 +112,7 @@ const productionUpgradeController = (): ProductionUpgradeController => {
       nativeService: nativeService(),
       releases: managedReleaseSelection(paths),
       serviceDefinition: paths.serviceDefinition,
+      observedDaemonInstanceId: () => readDaemonEndpoint(paths)?.instanceId,
     }),
   };
 };

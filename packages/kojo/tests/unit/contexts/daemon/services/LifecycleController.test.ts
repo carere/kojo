@@ -1,3 +1,4 @@
+import { it as effectIt } from "@effect/vitest";
 import { Duration, Effect, Option } from "effect";
 import { describe, expect, it } from "vitest";
 import { InMemoryLifecycleJournalRepository } from "../../../../../src/contexts/daemon/adapters/InMemoryLifecycleJournalRepository.ts";
@@ -157,48 +158,85 @@ describe("the Daemon lifecycle controller", () => {
     expect(status.operation.drain?.executingRunIds).toEqual([]);
   });
 
-  it("waits for native process exit and endpoint withdrawal before stop succeeds", async () => {
+  effectIt.live(
+    "waits for native process exit and endpoint withdrawal before stop succeeds",
+    () => {
+      const drained = {
+        held: true as const,
+        executingRunIds: [],
+        observedAt: "2026-09-01T10:00:01.000Z",
+      };
+      const test = fixture([drained]);
+      let stopRequested = false;
+      let postStopInspections = 0;
+      let endpointInspections = 0;
+      const delayedNative: NativeService = {
+        ...test.native,
+        stop: () => {
+          stopRequested = true;
+          test.events.push("native:stop");
+        },
+        inspect: () => {
+          if (!stopRequested) return test.native.inspect();
+          postStopInspections += 1;
+          return {
+            ...test.native.inspect(),
+            process: postStopInspections >= 2 ? "stopped" : "running",
+          };
+        },
+      };
+      const controller = new LifecycleController({
+        journal: test.journal,
+        control: test.control,
+        nativeService: delayedNative,
+        serviceDefinition: "/managed/service",
+        pollIntervalMillis: 1,
+        observedDaemonInstanceId: () => {
+          endpointInspections += 1;
+          return endpointInspections >= 4 ? undefined : "daemon-old";
+        },
+      });
+
+      return Effect.gen(function* () {
+        const status = yield* controller.request(request());
+
+        expect(status.outcome).toBe("succeeded");
+        expect(postStopInspections).toBeGreaterThanOrEqual(4);
+        expect(endpointInspections).toBeGreaterThanOrEqual(4);
+      });
+    },
+  );
+
+  effectIt.live("does not use the prepared stop shortcut while an endpoint remains", () => {
     const drained = {
       held: true as const,
       executingRunIds: [],
       observedAt: "2026-09-01T10:00:01.000Z",
     };
     const test = fixture([drained]);
-    let stopRequested = false;
-    let postStopInspections = 0;
+    test.native.stop();
+    test.events.splice(0);
     let endpointInspections = 0;
-    const delayedNative: NativeService = {
-      ...test.native,
-      stop: () => {
-        stopRequested = true;
-        test.events.push("native:stop");
-      },
-      inspect: () => {
-        if (!stopRequested) return test.native.inspect();
-        postStopInspections += 1;
-        return {
-          ...test.native.inspect(),
-          process: postStopInspections >= 2 ? "stopped" : "running",
-        };
-      },
-    };
     const controller = new LifecycleController({
       journal: test.journal,
       control: test.control,
-      nativeService: delayedNative,
+      nativeService: test.native,
       serviceDefinition: "/managed/service",
       pollIntervalMillis: 1,
       observedDaemonInstanceId: () => {
         endpointInspections += 1;
-        return endpointInspections >= 4 ? undefined : "daemon-old";
+        return endpointInspections === 1 ? "daemon-old" : undefined;
       },
     });
 
-    const status = await Effect.runPromise(controller.request(request()));
+    return Effect.gen(function* () {
+      const status = yield* controller.request(request());
 
-    expect(status.outcome).toBe("succeeded");
-    expect(postStopInspections).toBeGreaterThanOrEqual(4);
-    expect(endpointInspections).toBeGreaterThanOrEqual(4);
+      expect(status.outcome).toBe("succeeded");
+      expect(test.events).toContain("daemon:hold");
+      expect(test.events).toContain("native:stop");
+      expect(endpointInspections).toBeGreaterThanOrEqual(2);
+    });
   });
 
   it("uses a separate durable force identity and keeps an interrupted Run out of cancellation", async () => {
