@@ -59,12 +59,6 @@ export const plan = (choices: FactoryChoices): FactoryPlan => {
   };
 };
 
-/** Where the image is built from, relative to the target repository root. */
-export const imagePaths = {
-  dockerfile: `${factoryDirectory}/sandbox/Dockerfile`,
-  context: `${factoryDirectory}/sandbox`,
-} as const;
-
 /**
  * The default image tag for a repository, derived from its directory name.
  *

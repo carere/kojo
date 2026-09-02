@@ -19,7 +19,6 @@ import {
 } from "../../../../../src/contexts/scaffold/models/Placeholder.ts";
 import {
   defaultImageName,
-  imagePaths,
   plan,
   starters,
 } from "../../../../../src/contexts/scaffold/services/plan.ts";
@@ -46,13 +45,6 @@ const contentAt = (files: ReadonlyArray<PlannedFile>, path: string): string => {
 };
 
 describe("what a stamped factory is made of", () => {
-  it("keeps the legacy image paths for callers that build the image later", () => {
-    expect(imagePaths).toEqual({
-      dockerfile: ".kojo/sandbox/Dockerfile",
-      context: ".kojo/sandbox",
-    });
-  });
-
   it.each(templateNames)(
     "%s stamps the tree the design record names, and only that",
     (template) => {
