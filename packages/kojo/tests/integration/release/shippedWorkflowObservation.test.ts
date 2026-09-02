@@ -19,6 +19,9 @@ describe("the shipped Workflow observation bound", () => {
     roots.push(root);
     const output = JSON.stringify({
       observationVersion: 1,
+      instanceId: "instance-id",
+      dataIdentity: "data-identity",
+      refreshAfterMillis: 10,
       workflows: [
         {
           projectId: "project-id",
@@ -27,6 +30,8 @@ describe("the shipped Workflow observation bound", () => {
           refreshState: "current",
           workflowName: "review",
           availability: "available",
+          currentRevisionId: "revision-id",
+          currentPackageGraphId: "package-graph-id",
         },
       ],
     });
@@ -40,7 +45,8 @@ describe("the shipped Workflow observation bound", () => {
       commandTimeoutMillis: 250,
       hardKillAfterMillis: 50,
       finalizationReserveMillis: 50,
-      delayMillis: 0,
+      delayMillis: 10,
+      stabilityWindowMillis: 30,
     });
 
     expect(result.ready).toBe(true);
@@ -55,6 +61,7 @@ describe("the shipped Workflow observation bound", () => {
         readiness: { ready: true },
         stdout: `${output}\n`,
         stderr: "",
+        stability: { accepted: true },
       },
     });
   });
@@ -98,6 +105,9 @@ describe("the shipped Workflow observation bound", () => {
     roots.push(root);
     mkdirSync(join(root, "workflow-list.json"));
     const output = JSON.stringify({
+      instanceId: "instance-id",
+      dataIdentity: "data-identity",
+      refreshAfterMillis: 10,
       workflows: [
         {
           projectId: "project-id",
@@ -106,6 +116,8 @@ describe("the shipped Workflow observation bound", () => {
           refreshState: "current",
           workflowName: "review",
           availability: "available",
+          currentRevisionId: "revision-id",
+          currentPackageGraphId: "package-graph-id",
         },
       ],
     });
@@ -120,6 +132,8 @@ describe("the shipped Workflow observation bound", () => {
         commandTimeoutMillis: 250,
         hardKillAfterMillis: 50,
         finalizationReserveMillis: 50,
+        stabilityWindowMillis: 0,
+        delayMillis: 0,
       }),
     ).rejects.toThrow();
     const finalPath = join(root, "bounded-factory-refresh-observation-final.json");

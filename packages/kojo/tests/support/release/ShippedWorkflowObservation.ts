@@ -1,10 +1,28 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { FACTORY_INVENTORY_SCAN_MILLIS } from "../../../src/contexts/workflow/models/FactoryRefresh.ts";
 
 export interface ShippedWorkflowObservation {
   readonly ready: boolean;
   readonly diagnostic: string;
   readonly snapshot?: Record<string, unknown>;
+  readonly candidate?: {
+    readonly instanceId: string;
+    readonly dataIdentity: string;
+    readonly revisionId: string;
+    readonly packageGraphId: string;
+    readonly refreshAfterMillis: number;
+  };
+}
+
+export interface ShippedWorkflowStability {
+  readonly candidateKey?: string;
+  readonly currentSinceMillis?: number;
+  readonly consecutiveCurrent: number;
+  readonly stableForMillis: number;
+  readonly requiredStableMillis: number;
+  readonly accepted: boolean;
+  readonly fact: "not-current" | "candidate-started" | "candidate-continuing";
 }
 
 interface BoundedCommandResult {
@@ -26,6 +44,7 @@ export interface ObserveShippedWorkflowOptions {
   readonly hardKillAfterMillis?: number;
   readonly finalizationReserveMillis?: number;
   readonly delayMillis?: number;
+  readonly stabilityWindowMillis?: number;
 }
 
 export interface ObserveShippedWorkflowResult {
@@ -139,14 +158,74 @@ export const shippedWorkflowObservation = (
     `Factory Refresh ${String(workflow.refreshState)}`,
     `Workflow ${String(workflow.availability)}`,
   ].join(", ");
+  const candidate =
+    nonEmptyString(decoded.instanceId) &&
+    nonEmptyString(decoded.dataIdentity) &&
+    Number.isSafeInteger(decoded.refreshAfterMillis) &&
+    Number(decoded.refreshAfterMillis) > 0 &&
+    nonEmptyString(workflow.currentRevisionId) &&
+    nonEmptyString(workflow.currentPackageGraphId)
+      ? {
+          instanceId: decoded.instanceId,
+          dataIdentity: decoded.dataIdentity,
+          revisionId: workflow.currentRevisionId,
+          packageGraphId: workflow.currentPackageGraphId,
+          refreshAfterMillis: Number(decoded.refreshAfterMillis),
+        }
+      : undefined;
   return {
     ready:
       workflow.projectState === "available" &&
       workflow.factoryState === "available" &&
       workflow.refreshState === "current" &&
-      workflow.availability === "available",
+      workflow.availability === "available" &&
+      candidate !== undefined,
     diagnostic,
     snapshot: decoded,
+    ...(candidate === undefined ? {} : { candidate }),
+  };
+};
+
+const nonEmptyString = (value: unknown): value is string =>
+  typeof value === "string" && value.length > 0;
+
+const candidateKey = (candidate: NonNullable<ShippedWorkflowObservation["candidate"]>): string =>
+  [
+    candidate.instanceId,
+    candidate.dataIdentity,
+    candidate.revisionId,
+    candidate.packageGraphId,
+  ].join("/");
+
+export const advanceShippedWorkflowStability = (
+  prior: ShippedWorkflowStability | undefined,
+  observation: ShippedWorkflowObservation,
+  observedAtMillis: number,
+  requiredStableMillis = FACTORY_INVENTORY_SCAN_MILLIS +
+    (observation.candidate?.refreshAfterMillis ?? 0),
+): ShippedWorkflowStability => {
+  if (!observation.ready || observation.candidate === undefined) {
+    return {
+      consecutiveCurrent: 0,
+      stableForMillis: 0,
+      requiredStableMillis,
+      accepted: false,
+      fact: "not-current",
+    };
+  }
+  const key = candidateKey(observation.candidate);
+  const continuing = prior?.candidateKey === key && prior.currentSinceMillis !== undefined;
+  const currentSinceMillis = continuing ? prior.currentSinceMillis : observedAtMillis;
+  const consecutiveCurrent = continuing ? prior.consecutiveCurrent + 1 : 1;
+  const stableForMillis = Math.max(0, observedAtMillis - currentSinceMillis);
+  return {
+    candidateKey: key,
+    currentSinceMillis,
+    consecutiveCurrent,
+    stableForMillis,
+    requiredStableMillis,
+    accepted: consecutiveCurrent >= 2 && stableForMillis >= requiredStableMillis,
+    fact: continuing ? "candidate-continuing" : "candidate-started",
   };
 };
 
@@ -194,7 +273,6 @@ export const observeShippedWorkflow = async (
   const commandTimeoutMillis = options.commandTimeoutMillis ?? 10_000;
   const hardKillAfterMillis = options.hardKillAfterMillis ?? 1_000;
   const finalizationReserveMillis = options.finalizationReserveMillis ?? 500;
-  const delayMillis = options.delayMillis ?? 1_000;
   const observations = join(options.evidenceDirectory, "bounded-factory-refresh-observations");
   const finalPath = join(
     options.evidenceDirectory,
@@ -205,6 +283,7 @@ export const observeShippedWorkflow = async (
   let attempts = 0;
   let lastAttempt: Record<string, unknown> | undefined;
   let lastSnapshotPath: string | undefined;
+  let stability: ShippedWorkflowStability | undefined;
 
   while (Date.now() + hardKillAfterMillis + finalizationReserveMillis < deadline) {
     attempts += 1;
@@ -239,6 +318,13 @@ export const observeShippedWorkflow = async (
               ? "Workflow observation ignored TERM and received KILL"
               : `workflow list exited ${result.exitCode}: ${result.stderr.trim()}`,
           };
+    stability = advanceShippedWorkflowStability(
+      stability,
+      readiness,
+      Date.now(),
+      options.stabilityWindowMillis ??
+        FACTORY_INVENTORY_SCAN_MILLIS + (readiness.candidate?.refreshAfterMillis ?? 0),
+    );
     writeFileSync(snapshotPath, result.stdout);
     writeFileSync(stderrPath, result.stderr);
     writeJson(decodedPath, readiness);
@@ -254,12 +340,18 @@ export const observeShippedWorkflow = async (
       hardKillSent: result.hardKillSent,
       noRepairReregisterRestartOrStart: true,
       readiness,
+      stability,
       stdout: result.stdout,
       stderr: result.stderr,
     };
     writeJson(attemptPath, lastAttempt);
     lastSnapshotPath = snapshotPath;
-    if (result.exitCode === 0 && readiness.ready && readiness.snapshot !== undefined) {
+    if (
+      result.exitCode === 0 &&
+      readiness.ready &&
+      readiness.snapshot !== undefined &&
+      stability.accepted
+    ) {
       writeJson(finalPath, {
         kind: "bounded-read-only-factory-refresh",
         readiness: "current",
@@ -267,6 +359,7 @@ export const observeShippedWorkflow = async (
         attempts,
         noRepairReregisterRestartOrStart: true,
         finalAttempt: lastAttempt,
+        stability,
       });
       copyFileSync(snapshotPath, join(options.evidenceDirectory, "workflow-list.json"));
       writeFileSync(
@@ -276,6 +369,9 @@ export const observeShippedWorkflow = async (
           "FactoryRefreshReadiness=current",
           `TimeoutMillis=${options.timeoutMillis}`,
           `Attempts=${attempts}`,
+          `ConsecutiveCurrent=${stability.consecutiveCurrent}`,
+          `StableForMillis=${stability.stableForMillis}`,
+          `RequiredStableMillis=${stability.requiredStableMillis}`,
           "NoRepairReregisterRestartOrStart=yes",
           `FinalEvidence=${finalPath}`,
           "",
@@ -284,7 +380,7 @@ export const observeShippedWorkflow = async (
       return { ready: true, attempts, elapsedMillis: Date.now() - startedAt };
     }
     const delay = Math.min(
-      delayMillis,
+      options.delayMillis ?? readiness.candidate?.refreshAfterMillis ?? 1_000,
       Math.max(0, deadline - Date.now() - hardKillAfterMillis - finalizationReserveMillis),
     );
     if (delay > 0) await Bun.sleep(delay);
@@ -297,6 +393,7 @@ export const observeShippedWorkflow = async (
     attempts,
     noRepairReregisterRestartOrStart: true,
     lastAttempt,
+    stability,
   });
   if (lastSnapshotPath !== undefined) {
     copyFileSync(lastSnapshotPath, join(options.evidenceDirectory, "workflow-list.json"));

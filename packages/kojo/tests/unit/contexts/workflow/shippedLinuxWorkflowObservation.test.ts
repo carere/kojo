@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  advanceShippedWorkflowStability,
   shippedWorkflowObservation,
   shippedWorkflowObservationBounds,
 } from "../../../support/release/ShippedWorkflowObservation.ts";
@@ -13,8 +14,19 @@ const workflow = (overrides: Record<string, unknown> = {}): Record<string, unkno
   refreshState: "current",
   workflowName: "review",
   availability: "available",
+  currentRevisionId: "revision-a",
+  currentPackageGraphId: "package-graph-a",
   ...overrides,
 });
+
+const snapshot = (workflowRows: ReadonlyArray<Record<string, unknown>>): string =>
+  JSON.stringify({
+    observationVersion: 1,
+    instanceId: "instance-a",
+    dataIdentity: "data-a",
+    refreshAfterMillis: 1_000,
+    workflows: workflowRows,
+  });
 
 describe("shipped Linux Workflow observation", () => {
   it("reserves failure classification inside the strict total bound", () => {
@@ -33,10 +45,7 @@ describe("shipped Linux Workflow observation", () => {
   });
 
   it("waits while the controlled Workflow Factory Refresh is pending", () => {
-    const output = JSON.stringify({
-      observationVersion: 1,
-      workflows: [workflow({ refreshState: "pending" })],
-    });
+    const output = snapshot([workflow({ refreshState: "pending" })]);
 
     expect(shippedWorkflowObservation(output, projectId, "review")).toMatchObject({
       ready: false,
@@ -46,7 +55,7 @@ describe("shipped Linux Workflow observation", () => {
   });
 
   it("accepts one exact available Workflow after the Factory Refresh is current", () => {
-    const output = JSON.stringify({ observationVersion: 1, workflows: [workflow()] });
+    const output = snapshot([workflow()]);
 
     expect(shippedWorkflowObservation(output, projectId, "review")).toMatchObject({
       ready: true,
@@ -56,14 +65,11 @@ describe("shipped Linux Workflow observation", () => {
   });
 
   it("does not combine readiness from a different Project or Workflow row", () => {
-    const output = JSON.stringify({
-      observationVersion: 1,
-      workflows: [
-        workflow({ availability: "invalid" }),
-        workflow({ projectId: "another-project", availability: "available" }),
-        workflow({ workflowName: "another-workflow", availability: "available" }),
-      ],
-    });
+    const output = snapshot([
+      workflow({ availability: "invalid" }),
+      workflow({ projectId: "another-project", availability: "available" }),
+      workflow({ workflowName: "another-workflow", availability: "available" }),
+    ]);
 
     expect(shippedWorkflowObservation(output, projectId, "review")).toMatchObject({
       ready: false,
@@ -72,11 +78,56 @@ describe("shipped Linux Workflow observation", () => {
   });
 
   it("rejects duplicate exact Workflow rows", () => {
-    const output = JSON.stringify({ observationVersion: 1, workflows: [workflow(), workflow()] });
+    const output = snapshot([workflow(), workflow()]);
 
     expect(shippedWorkflowObservation(output, projectId, "review")).toMatchObject({
       ready: false,
       diagnostic: `expected one review Workflow for Project ${projectId}; observed 2`,
+    });
+  });
+
+  it("resets stability across the seventh-run current to pending watcher transition", () => {
+    const current = shippedWorkflowObservation(snapshot([workflow()]), projectId, "review");
+    const pending = shippedWorkflowObservation(
+      snapshot([workflow({ refreshState: "pending" })]),
+      projectId,
+      "review",
+    );
+
+    const first = advanceShippedWorkflowStability(undefined, current, 0);
+    const premature = advanceShippedWorkflowStability(first, current, 1_000);
+    const reset = advanceShippedWorkflowStability(premature, pending, 2_000);
+    const restarted = advanceShippedWorkflowStability(reset, current, 3_000);
+    const stable = advanceShippedWorkflowStability(restarted, current, 9_000);
+
+    expect(first).toMatchObject({ accepted: false, consecutiveCurrent: 1 });
+    expect(premature).toMatchObject({ accepted: false, stableForMillis: 1_000 });
+    expect(reset).toMatchObject({ accepted: false, consecutiveCurrent: 0, fact: "not-current" });
+    expect(restarted).toMatchObject({ accepted: false, consecutiveCurrent: 1 });
+    expect(stable).toMatchObject({
+      accepted: true,
+      consecutiveCurrent: 2,
+      stableForMillis: 6_000,
+      requiredStableMillis: 6_000,
+    });
+  });
+
+  it("restarts stability when the authoritative revision changes", () => {
+    const first = shippedWorkflowObservation(snapshot([workflow()]), projectId, "review");
+    const changed = shippedWorkflowObservation(
+      snapshot([workflow({ currentRevisionId: "revision-b" })]),
+      projectId,
+      "review",
+    );
+
+    const initial = advanceShippedWorkflowStability(undefined, first, 0);
+    const restarted = advanceShippedWorkflowStability(initial, changed, 7_000);
+
+    expect(restarted).toMatchObject({
+      accepted: false,
+      consecutiveCurrent: 1,
+      stableForMillis: 0,
+      fact: "candidate-started",
     });
   });
 });

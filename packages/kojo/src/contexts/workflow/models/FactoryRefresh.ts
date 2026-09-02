@@ -2,6 +2,9 @@ import type { FactoryState } from "@carere/kojo-client-contracts/contexts/client
 import type { WorkflowAvailability } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import type { CapturedWorkflowRevision } from "./RevisionManifest.ts";
 
+/** Interval for authoritative Project inventory change detection. */
+export const FACTORY_INVENTORY_SCAN_MILLIS = 5_000;
+
 export interface WorkflowRefreshObservation {
   readonly workflowName: string;
   readonly availability: WorkflowAvailability;
