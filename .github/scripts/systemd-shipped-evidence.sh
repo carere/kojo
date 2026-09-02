@@ -12,6 +12,7 @@ policy=/etc/polkit-1/rules.d/49-kojo-shipped-evidence.rules
 user_script=.github/scripts/systemd-shipped-user-evidence.sh
 login_readiness_script=.github/scripts/systemd-shipped-login-readiness.sh
 login_state_evidence_script=.github/scripts/systemd-shipped-login-state-evidence.sh
+linger_authorization_script=.github/scripts/systemd-shipped-linger-authorization.sh
 logout_readiness_script=.github/scripts/systemd-shipped-logout-readiness.sh
 playwright_cli=$workspace/apps/console/node_modules/@playwright/test/cli.js
 diagnostic=$evidence_directory/controller-diagnostic.log
@@ -197,31 +198,136 @@ jq -e '
 managed_kojo=$evidence_home/.local/share/kojo/bin/kojo
 diagnostic_step=linger-authorization
 ssh "${ssh_arguments[@]}" \
-  "$remote_prefix && bash '$login_readiness_script' '$evidence_directory/login-readiness-observations.jsonl' '$evidence_directory/login-readiness-final.json' '$evidence_directory/login-readiness.stderr.log' 20 0.25s && PATH=/usr/bin:/bin '$managed_kojo' daemon start >'$evidence_directory/managed-start-after-login.log' 2>'$evidence_directory/managed-start-after-login.stderr.log' && if PATH=/usr/bin:/bin '$managed_kojo' daemon keep-running-after-logout >'$evidence_directory/keep-running-refusal.log' 2>&1; then echo 'Linger unexpectedly changed without authority.' >&2; exit 90; fi && bash '$login_state_evidence_script' '$evidence_directory/post-refusal-login-state.json' '$evidence_directory/post-refusal-login-state.stderr.log' '$evidence_user' '$evidence_uid' no present 1 0s"
+  "$remote_prefix && bash '$login_readiness_script' '$evidence_directory/login-readiness-observations.jsonl' '$evidence_directory/login-readiness-final.json' '$evidence_directory/login-readiness.stderr.log' 20 0.25s && PATH=/usr/bin:/bin '$managed_kojo' daemon start >'$evidence_directory/managed-start-after-login.log' 2>'$evidence_directory/managed-start-after-login.stderr.log' && PATH=/usr/bin:/bin bash '$linger_authorization_script' '$evidence_directory/initial-linger-authorization.json' '$evidence_directory/initial-keep-running-after-logout.log' '$evidence_directory/initial-linger-login-state.json' '$evidence_directory/initial-linger-login-state.stderr.log' '$managed_kojo' '$login_state_evidence_script' '$evidence_user' '$evidence_uid' success-or-refusal"
 jq -e '
   .accepted == true and
   .managerReady == true and
   .noServiceStartRepairOrLingerChange == true
 ' "$evidence_directory/login-readiness-final.json" >/dev/null
-assert_login_state_receipt "$evidence_directory/post-refusal-login-state.json" no present
+initial_linger_outcome=$(jq -er '
+  select(
+    .expected.classification == "explicit-linger-success-or-policy-refusal" and
+    .expected.command == "daemon keep-running-after-logout" and
+    .accepted == true and
+    ((.actual.classification == "host-authorized-success" and
+      .actual.commandExit == 0 and
+      .actual.linger == "yes" and
+      .actual.loginStateAccepted == true and
+      .retryRequired == false) or
+     (.actual.classification == "host-policy-refusal" and
+      .actual.commandExit == 1 and
+      .actual.linger == "no" and
+      .actual.loginStateAccepted == true and
+      .retryRequired == true))
+  ) |
+  .actual.classification
+' "$evidence_directory/initial-linger-authorization.json")
 
-install -d -m 0755 /etc/polkit-1/rules.d
-cat >"$policy" <<EOF
+policy_installed=false
+retry_performed=false
+case "$initial_linger_outcome" in
+  host-authorized-success)
+    cp "$evidence_directory/initial-keep-running-after-logout.log" \
+      "$evidence_directory/keep-running-after-logout.log"
+    cp "$evidence_directory/initial-linger-login-state.json" \
+      "$evidence_directory/authorized-live-login-state.json"
+    cp "$evidence_directory/initial-linger-login-state.stderr.log" \
+      "$evidence_directory/authorized-live-login-state.stderr.log"
+    jq -n \
+      --slurpfile initial "$evidence_directory/initial-linger-authorization.json" \
+      '{
+        formatVersion: 1,
+        kind: "shipped-systemd-linger-authorization",
+        expected: {
+          classification: "explicit-linger-success-or-policy-refusal-with-authorized-retry",
+          finalLinger: "yes"
+        },
+        actual: {
+          classification: "host-authorized-first-attempt",
+          initial: $initial[0],
+          retry: null,
+          policyInstalled: false,
+          retryPerformed: false,
+          finalLinger: "yes"
+        },
+        accepted: true
+      }' >"$evidence_directory/linger-authorization.json"
+    ;;
+  host-policy-refusal)
+    policy_installed=true
+    retry_performed=true
+    install -d -m 0755 /etc/polkit-1/rules.d
+    cat >"$policy" <<EOF
 polkit.addRule(function(action, subject) {
-  if (action.id == "org.freedesktop.login1.set-user-linger" &&
+  if ((action.id == "org.freedesktop.login1.set-user-linger" ||
+       action.id == "org.freedesktop.login1.set-self-linger") &&
       subject.user == "$evidence_user") {
     return polkit.Result.YES;
   }
 });
 EOF
+    ssh "${ssh_arguments[@]}" \
+      "$remote_prefix && PATH=/usr/bin:/bin bash '$linger_authorization_script' '$evidence_directory/policy-retry-linger-authorization.json' '$evidence_directory/keep-running-after-logout.log' '$evidence_directory/authorized-live-login-state.json' '$evidence_directory/authorized-live-login-state.stderr.log' '$managed_kojo' '$login_state_evidence_script' '$evidence_user' '$evidence_uid' success-required"
+    jq -e '
+      .expected.classification == "explicit-linger-success" and
+      .expected.command == "daemon keep-running-after-logout" and
+      .actual.classification == "host-authorized-success" and
+      .actual.commandExit == 0 and
+      .actual.linger == "yes" and
+      .actual.loginStateAccepted == true and
+      .retryRequired == false and
+      .accepted == true
+    ' "$evidence_directory/policy-retry-linger-authorization.json" >/dev/null
+    jq -n \
+      --slurpfile initial "$evidence_directory/initial-linger-authorization.json" \
+      --slurpfile retry "$evidence_directory/policy-retry-linger-authorization.json" \
+      '{
+        formatVersion: 1,
+        kind: "shipped-systemd-linger-authorization",
+        expected: {
+          classification: "explicit-linger-success-or-policy-refusal-with-authorized-retry",
+          finalLinger: "yes"
+        },
+        actual: {
+          classification: "policy-authorized-after-refusal",
+          initial: $initial[0],
+          retry: $retry[0],
+          policyInstalled: true,
+          retryPerformed: true,
+          finalLinger: "yes"
+        },
+        accepted: true
+      }' >"$evidence_directory/linger-authorization.json"
+    ;;
+  *)
+    echo "The initial linger authorization outcome is invalid." >&2
+    exit 1
+    ;;
+esac
 
-ssh "${ssh_arguments[@]}" \
-  "$remote_prefix && PATH=/usr/bin:/bin '$managed_kojo' daemon keep-running-after-logout >'$evidence_directory/keep-running-after-logout.log' && bash '$login_state_evidence_script' '$evidence_directory/authorized-live-login-state.json' '$evidence_directory/authorized-live-login-state.stderr.log' '$evidence_user' '$evidence_uid' yes present 1 0s"
 grep -F "This changes linger for the complete OS user. All user services can then run after logout." \
   "$evidence_directory/keep-running-after-logout.log" >/dev/null
 grep -F "Keep running after logout: enabled." \
   "$evidence_directory/keep-running-after-logout.log" >/dev/null
 assert_login_state_receipt "$evidence_directory/authorized-live-login-state.json" yes present
+jq -e \
+  --argjson policyInstalled "$policy_installed" \
+  --argjson retryPerformed "$retry_performed" \
+  '.expected.classification == "explicit-linger-success-or-policy-refusal-with-authorized-retry" and
+    .expected.finalLinger == "yes" and
+    .actual.policyInstalled == $policyInstalled and
+    .actual.retryPerformed == $retryPerformed and
+    ((.actual.classification == "host-authorized-first-attempt" and
+      $policyInstalled == false and
+      $retryPerformed == false and
+      .actual.retry == null) or
+     (.actual.classification == "policy-authorized-after-refusal" and
+      $policyInstalled == true and
+      $retryPerformed == true and
+      .actual.retry.accepted == true)) and
+    .actual.finalLinger == "yes" and
+    .accepted == true' \
+  "$evidence_directory/linger-authorization.json" >/dev/null
 
 bash "$login_state_evidence_script" \
   "$evidence_directory/authorized-final-login-state.json" \
@@ -352,7 +458,7 @@ jq -n \
       { name: "authenticated-browser", expected: "one authenticated browser inspects the actual encoded wire and renders persisted records and Artifact", actual: "passed", evidence: "browser-tests.log" },
       { name: "global-tool-independence", expected: "managed status and repair work after candidate global Kojo and Bun removal", actual: "passed", evidence: "global-removal.log; managed-status-after-global-removal.log; managed-repair-after-global-removal.log" },
       { name: "replacement-and-access", expected: "the Type=exec control group contains the replacement MainPID; old process and browser authority are revoked; another OS user is refused", actual: "passed", evidence: "cgroup-before-replacement.log; replacement-access.log; final-logout-with-linger.log" },
-      { name: "login-lifetime", expected: "final logout reaches an exact terminal stopped manager state without linger; the next PAM login restores manager readiness without root reset and preserves the Daemon only after explicit authorized linger", actual: "passed", evidence: "pre-logout-login-state.json; pre-logout-login-state.stderr.log; logout-readiness-observations.jsonl; logout-readiness-final.json; logout-readiness.stderr.log; final-logout-without-linger.log; login-readiness-observations.jsonl; login-readiness-final.json; login-readiness.stderr.log; post-refusal-login-state.json; post-refusal-login-state.stderr.log; keep-running-refusal.log; keep-running-after-logout.log; authorized-live-login-state.json; authorized-live-login-state.stderr.log; authorized-final-login-state.json; authorized-final-login-state.stderr.log; final-logout-with-linger.log" },
+      { name: "login-lifetime", expected: "final logout reaches an exact terminal stopped manager state without linger; the next PAM login restores manager readiness without root reset; explicit linger either succeeds under Host policy or is retried after an exact policy refusal", actual: "passed", evidence: "pre-logout-login-state.json; pre-logout-login-state.stderr.log; logout-readiness-observations.jsonl; logout-readiness-final.json; logout-readiness.stderr.log; final-logout-without-linger.log; login-readiness-observations.jsonl; login-readiness-final.json; login-readiness.stderr.log; initial-linger-authorization.json; initial-keep-running-after-logout.log; initial-linger-login-state.json; initial-linger-login-state.stderr.log; linger-authorization.json; keep-running-after-logout.log; authorized-live-login-state.json; authorized-live-login-state.stderr.log; authorized-final-login-state.json; authorized-final-login-state.stderr.log; final-logout-with-linger.log" },
       { name: "removal-preserves-linger", expected: "shipped removal never disables user linger", actual: "passed", evidence: "managed-removal.log; removal-login-state.json; removal-login-state.stderr.log; removal-preserves-linger.log" }
     ],
     noHiddenRepairs: {

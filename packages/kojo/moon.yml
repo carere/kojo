@@ -32,6 +32,7 @@ tasks:
       - /.github/scripts/systemd-native-evidence.sh
       - /.github/scripts/systemd-shipped-login-readiness.sh
       - /.github/scripts/systemd-shipped-login-state-evidence.sh
+      - /.github/scripts/systemd-shipped-linger-authorization.sh
       - /.github/scripts/systemd-shipped-logout-readiness.sh
       - /.github/scripts/systemd-shipped-singleton-evidence.sh
       - src/**/*
