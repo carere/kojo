@@ -2,6 +2,9 @@ import { spawnSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
 
 const root = "/tmp/kojo-ticket-71-browser";
+// A two-core CI host can render this catalogue while another Daemon fixture uses the other worker.
+// Keep its first-render bound below the 60-second test bound; later assertions keep Playwright's default.
+const catalogueNavigationTimeout = 30_000;
 const grantScript = new URL(
   "../../../../packages/kojo/tests/support/daemon/consoleGrant.ts",
   import.meta.url,
@@ -39,7 +42,9 @@ test("shows separate Workflow state in a Project-scoped Zaidan grid", async ({ p
   await expect(page.getByText("Access active", { exact: true })).toBeVisible();
   await page.goto("http://127.0.0.1:47243/");
   await page.getByRole("link", { name: "project-missing" }).click();
-  await expect(page.getByRole("heading", { name: "Workflows" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Workflows" })).toBeVisible({
+    timeout: catalogueNavigationTimeout,
+  });
   await expect(page.locator("[data-workflow-id]")).toHaveCount(4);
   for (const heading of [
     "Project",
