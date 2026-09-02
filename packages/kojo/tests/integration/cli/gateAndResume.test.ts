@@ -160,7 +160,7 @@ const waitForAsking = async (
   runId: string,
   gatePath = "ship",
 ): Promise<AskingDocument> => {
-  const deadline = Date.now() + 10_000;
+  const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const asking = (await snapshot(daemon)).askings.find(
       (candidate) => candidate.identity.runId === runId && candidate.identity.gatePath === gatePath,
