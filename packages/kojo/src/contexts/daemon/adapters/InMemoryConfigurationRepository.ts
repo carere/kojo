@@ -70,6 +70,8 @@ export class InMemoryConfigurationRepository implements ConfigurationRepositoryP
   >();
   #version = 1;
 
+  readonly recordOutcome: ConfigurationRepositoryPort["recordOutcome"] = () => Effect.void;
+
   readonly status = (target: ConfigurationTarget) => Effect.sync(() => this.#status(target));
 
   readonly preview = (target: ConfigurationTarget, changes: ReadonlyArray<ConfigurationChange>) =>

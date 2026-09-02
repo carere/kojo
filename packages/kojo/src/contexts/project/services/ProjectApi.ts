@@ -260,7 +260,6 @@ export class ProjectApi {
           }),
         );
         if (accepted.status === "committed") {
-          this.#journal.resolve(requestId);
           return response(accepted);
         }
         await Effect.runPromise(this.#runs.drainProject(projectId));
@@ -279,7 +278,6 @@ export class ProjectApi {
         );
         if (receipt === undefined)
           throw new Error("the committed Project receipt was not retained");
-        this.#journal.resolve(requestId);
         return response(receipt);
       } catch (cause) {
         return refusal(
@@ -383,9 +381,7 @@ export class ProjectApi {
             this.#dataIdentity,
           );
         }
-        const receipt = await Effect.runPromise(
-          this.#repository.receipt(this.#dataIdentity, requestId),
-        );
+        const receipt = this.#journal.outcome(requestId);
         const document: ClientRequestDocument = {
           subject: {
             requestId: retained.requestId,
@@ -410,9 +406,7 @@ export class ProjectApi {
       try {
         const requests = await Promise.all(
           this.#journal.list().map(async (retained): Promise<ClientRequestDocument> => {
-            const receipt = await Effect.runPromise(
-              this.#repository.receipt(this.#dataIdentity, retained.requestId),
-            );
+            const receipt = this.#journal.outcome(retained.requestId);
             return {
               subject: {
                 requestId: retained.requestId,
@@ -458,6 +452,8 @@ export class ProjectApi {
             this.#dataIdentity,
           );
         }
+        const recorded = this.#journal.outcome(requestId);
+        if (recorded?.status === "committed") return response(recorded);
         if (retained.request === undefined || retained.body === undefined) {
           return response({
             subject: {
@@ -539,7 +535,6 @@ export class ProjectApi {
           this.#repository.receipt(this.#dataIdentity, requestId),
         );
         if (receipt === undefined) throw new Error("the committed receipt could not be read");
-        this.#journal.resolve(requestId);
         return response(receipt satisfies OperationReceipt);
       } catch (cause) {
         return refusal(

@@ -141,6 +141,21 @@ const startRun = Command.make(
         const endpoint = readDaemonEndpoint(productionPaths());
         if (endpoint === undefined)
           throw new Error("the Daemon is not ready; run `kojo daemon start`");
+        const snapshotResponse = await fetch(
+          `http://localhost/api/v1/projects/${encodeURIComponent(projectId)}/workflows`,
+          {
+            unix: endpoint.socketPath,
+            headers: { accept: "application/json" },
+          } as RequestInit & { readonly unix: string },
+        );
+        if (!snapshotResponse.ok)
+          throw new Error(`the Daemon refused Workflow review (${snapshotResponse.status})`);
+        const snapshot = (await snapshotResponse.json()) as WorkflowSnapshot;
+        const reviewed = snapshot.workflows.find(
+          (workflow) => workflow.projectId === projectId && workflow.workflowName === workflowName,
+        );
+        if (reviewed?.currentRevisionId === undefined)
+          throw new Error("the selected Workflow has no current reviewed revision");
         const requestId = crypto.randomUUID();
         const mutation: MutationEnvelope = {
           mutationVersion: 1,
@@ -149,7 +164,10 @@ const startRun = Command.make(
           operation: "startWorkflow",
           target: { identityVersion: 1, kind: "workflow", parts: [projectId, workflowName] },
           arguments: parsed === undefined ? {} : { payload: parsed as JsonValue },
-          preconditions: {},
+          preconditions: {
+            mode: reviewed.trigger.state === "not-declared" ? "no-trigger" : "trigger",
+            revisionId: reviewed.currentRevisionId,
+          },
         };
         prepareHostClientRequest(productionPaths(), mutation);
         const path = `/api/v1/projects/${encodeURIComponent(projectId)}/workflows/${encodeURIComponent(workflowName)}/actions/start`;

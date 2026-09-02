@@ -1,4 +1,6 @@
 import type { Database } from "bun:sqlite";
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
+import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Effect } from "effect";
 import type {
   ConfigurationChange,
@@ -19,6 +21,7 @@ import type {
   ConfigurationRepositoryPort,
   ConfigurationTarget,
 } from "../ports/ConfigurationRepository.ts";
+import type { OperationRepository } from "../ports/OperationRepository.ts";
 
 interface SettingRow {
   readonly path: string;
@@ -90,9 +93,11 @@ const activationFor = (path: string): ConfigurationFieldStatus["activation"] =>
 /** Daemon-owned SQLite configuration and exact maintenance-plan adapter. */
 export class SqliteConfigurationRepository implements ConfigurationRepositoryPort {
   readonly #database: Database;
+  readonly #operations: OperationRepository | undefined;
 
-  constructor(database: Database) {
+  constructor(database: Database, operations?: OperationRepository) {
     this.#database = database;
+    this.#operations = operations;
     database.run(`
       CREATE TABLE IF NOT EXISTS daemon_configuration_state (
         singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),
@@ -129,6 +134,15 @@ export class SqliteConfigurationRepository implements ConfigurationRepositoryPor
     }
   }
 
+  readonly recordOutcome = (
+    mutation: MutationEnvelope,
+    result: JsonValue,
+  ): Effect.Effect<void, ConfigurationError> =>
+    Effect.try({
+      try: () => this.#database.transaction(() => this.#record(mutation, result)).immediate(),
+      catch: failed,
+    });
+
   readonly status = (
     target: ConfigurationTarget,
   ): Effect.Effect<ConfigurationStatus, ConfigurationError> =>
@@ -143,6 +157,7 @@ export class SqliteConfigurationRepository implements ConfigurationRepositoryPor
   readonly apply = (
     target: ConfigurationTarget,
     changes: ReadonlyArray<ConfigurationChange>,
+    mutation?: MutationEnvelope,
   ): Effect.Effect<ConfigurationStatus, ConfigurationError> =>
     Effect.try({
       try: () =>
@@ -150,7 +165,14 @@ export class SqliteConfigurationRepository implements ConfigurationRepositoryPor
           .transaction(() => {
             this.#applyChanges(target, changes);
             this.#bumpVersion();
-            return this.#status(target);
+            const status = this.#status(target);
+            if (mutation !== undefined)
+              this.#record(mutation, {
+                formatVersion: 1,
+                status,
+                collection: { runs: [], traces: [], artifacts: [] },
+              } as unknown as JsonValue);
+            return status;
           })
           .immediate(),
       catch: failed,
@@ -158,34 +180,39 @@ export class SqliteConfigurationRepository implements ConfigurationRepositoryPor
 
   readonly savePlan = (
     plan: ConfigurationMaintenancePlan,
+    operation?: { readonly mutation: MutationEnvelope; readonly result: JsonValue },
   ): Effect.Effect<void, ConfigurationError> =>
     Effect.try({
-      try: () => {
-        if (plan.expectedStateVersion !== this.#version()) {
-          throw new ConfigurationError({
-            code: "CONFIGURATION_PLAN_STALE",
-            message: "configuration changed before the maintenance plan was retained",
-          });
-        }
-        const encoded = JSON.stringify(plan);
-        const prior = this.#database
-          .query<{ readonly plan_json: string }, [string]>(
-            "SELECT plan_json FROM daemon_configuration_plans WHERE plan_id = ?",
-          )
-          .get(plan.planId);
-        if (prior !== null && prior.plan_json !== encoded) {
-          throw new ConfigurationError({
-            code: "CONFIGURATION_CONFLICT",
-            message: "the maintenance plan ID names different content",
-          });
-        }
-        if (prior === null) {
-          this.#database.run(
-            "INSERT INTO daemon_configuration_plans (plan_id, plan_json, state) VALUES (?, ?, 'pending')",
-            [plan.planId, encoded],
-          );
-        }
-      },
+      try: () =>
+        this.#database
+          .transaction(() => {
+            if (plan.expectedStateVersion !== this.#version()) {
+              throw new ConfigurationError({
+                code: "CONFIGURATION_PLAN_STALE",
+                message: "configuration changed before the maintenance plan was retained",
+              });
+            }
+            const encoded = JSON.stringify(plan);
+            const prior = this.#database
+              .query<{ readonly plan_json: string }, [string]>(
+                "SELECT plan_json FROM daemon_configuration_plans WHERE plan_id = ?",
+              )
+              .get(plan.planId);
+            if (prior !== null && prior.plan_json !== encoded) {
+              throw new ConfigurationError({
+                code: "CONFIGURATION_CONFLICT",
+                message: "the maintenance plan ID names different content",
+              });
+            }
+            if (prior === null) {
+              this.#database.run(
+                "INSERT INTO daemon_configuration_plans (plan_id, plan_json, state) VALUES (?, ?, 'pending')",
+                [plan.planId, encoded],
+              );
+            }
+            if (operation !== undefined) this.#record(operation.mutation, operation.result);
+          })
+          .immediate(),
       catch: failed,
     });
 
@@ -212,6 +239,7 @@ export class SqliteConfigurationRepository implements ConfigurationRepositoryPor
     observedAt: string,
     dataState: string,
     collect: () => RetentionCollectionResult,
+    mutation?: MutationEnvelope,
   ): Effect.Effect<
     {
       readonly plan: ConfigurationMaintenancePlan;
@@ -281,11 +309,40 @@ export class SqliteConfigurationRepository implements ConfigurationRepositoryPor
               "UPDATE daemon_configuration_plans SET state = 'applied', applied_at = ?, result_json = ? WHERE plan_id = ?",
               [observedAt, JSON.stringify(result), planId],
             );
+            if (mutation !== undefined)
+              this.#record(
+                mutation,
+                {
+                  formatVersion: 1,
+                  status: result.status,
+                  collection: result.collection,
+                } as unknown as JsonValue,
+                observedAt,
+              );
             return result;
           })
           .immediate(),
       catch: failed,
     });
+
+  #record(
+    mutation: MutationEnvelope,
+    result: JsonValue,
+    recordedAt = new Date().toISOString(),
+  ): void {
+    this.#operations?.record(
+      mutation,
+      {
+        receiptVersion: 1,
+        requestId: mutation.requestId,
+        dataIdentity: mutation.dataIdentity,
+        operation: mutation.operation,
+        status: "committed",
+        result,
+      },
+      recordedAt,
+    );
+  }
 
   daemonConfiguration(): DaemonConfiguration {
     const values = this.#values({ scope: "daemon" }, "effective");

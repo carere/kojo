@@ -766,8 +766,34 @@ describe("Daemon no-Trigger Run API", () => {
         parts: [registered.project.projectId, "example"],
       },
       arguments: { payload: null },
-      preconditions: {},
+      preconditions: { mode: "no-trigger", revisionId: captured.revisionId },
     };
+    const staleRevision = await mutate(
+      daemon,
+      `/api/v1/projects/${registered.project.projectId}/workflows/example/actions/start`,
+      {
+        ...startBody,
+        requestId: "start-stale-revision",
+        preconditions: { mode: "no-trigger", revisionId: "f".repeat(64) },
+      },
+    );
+    expect(staleRevision.status).toBe(409);
+    expect(await staleRevision.text()).toContain("changed after Start was reviewed");
+    const staleMode = await mutate(
+      daemon,
+      `/api/v1/projects/${registered.project.projectId}/workflows/example/actions/start`,
+      {
+        ...startBody,
+        requestId: "start-stale-mode",
+        preconditions: { mode: "trigger", revisionId: captured.revisionId },
+      },
+    );
+    expect(staleMode.status).toBe(409);
+    expect(await staleMode.text()).toContain("changed after Start was reviewed");
+    const beforeValid = (await (await call(daemon, "/api/v1/runs")).json()) as {
+      readonly runs: ReadonlyArray<unknown>;
+    };
+    expect(beforeValid.runs).toEqual([]);
     const response = await mutate(
       daemon,
       `/api/v1/projects/${registered.project.projectId}/workflows/example/actions/start`,
@@ -967,7 +993,7 @@ describe("Daemon no-Trigger Run API", () => {
               parts: [registered.project.projectId, "example"],
             },
             arguments: { payload: null },
-            preconditions: {},
+            preconditions: { mode: "no-trigger", revisionId: captured.revisionId },
           },
         );
         expect(response.status, await response.clone().text()).toBe(202);
@@ -1048,7 +1074,7 @@ describe("Daemon no-Trigger Run API", () => {
         parts: [registered.project.projectId, "tickets"],
       },
       arguments: {},
-      preconditions: {},
+      preconditions: { mode: "trigger", revisionId: captured.revisionId },
     });
     expect(start.status, await start.clone().text()).toBe(202);
     expect(await start.json()).toMatchObject({
@@ -1067,7 +1093,7 @@ describe("Daemon no-Trigger Run API", () => {
         parts: [registered.project.projectId, "tickets"],
       },
       arguments: {},
-      preconditions: {},
+      preconditions: { mode: "trigger", revisionId: captured.revisionId },
     });
     expect(repeated.status).toBe(202);
     expect(await repeated.json()).toMatchObject({ pollerStarted: false });

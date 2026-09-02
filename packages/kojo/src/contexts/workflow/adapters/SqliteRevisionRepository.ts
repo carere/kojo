@@ -15,7 +15,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
+import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Effect } from "effect";
+import type { OperationRepository } from "../../daemon/ports/OperationRepository.ts";
 import type {
   CollectionResult,
   ReaderReleaseEvidence,
@@ -112,10 +115,12 @@ const fileEntries = (
 export class SqliteRevisionRepository {
   readonly #database: Database;
   readonly #dataRoot: string;
+  readonly #operations: OperationRepository | undefined;
 
-  constructor(database: Database, dataRoot: string) {
+  constructor(database: Database, dataRoot: string, operations?: OperationRepository) {
     this.#database = database;
     this.#dataRoot = dataRoot;
+    this.#operations = operations;
     database.run("PRAGMA foreign_keys = ON");
     database.run(`
       CREATE TABLE IF NOT EXISTS workflow_revision_refs (
@@ -411,11 +416,19 @@ export class SqliteRevisionRepository {
     revisionId: string,
     source: string,
     repairedAt: string,
+    mutation?: MutationEnvelope,
   ): Effect.Effect<RevisionDetails, RevisionMaintenanceError> =>
     Effect.try({
       try: () => {
+        this.#record(mutation, "accepted", { state: "repairing", revisionId }, repairedAt);
         this.#repairExact(revisionId, source);
-        return this.#details(revisionId, repairedAt);
+        return this.#database
+          .transaction(() => {
+            const result = this.#details(revisionId, repairedAt);
+            this.#record(mutation, "committed", result as unknown as JsonValue, repairedAt);
+            return result;
+          })
+          .immediate();
       },
       catch: failed,
     });
@@ -423,8 +436,40 @@ export class SqliteRevisionRepository {
   readonly collect = (
     revisionId: string,
     observedAt: string,
+    mutation?: MutationEnvelope,
   ): Effect.Effect<CollectionResult, RevisionMaintenanceError> =>
-    Effect.try({ try: () => this.#collect(revisionId, observedAt), catch: failed });
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            const result = this.#collect(revisionId, observedAt);
+            this.#record(mutation, "committed", result as unknown as JsonValue, observedAt);
+            return result;
+          })
+          .immediate(),
+      catch: failed,
+    });
+
+  #record(
+    mutation: MutationEnvelope | undefined,
+    status: "accepted" | "committed",
+    result: JsonValue,
+    at: string,
+  ): void {
+    if (mutation === undefined) return;
+    this.#operations?.record(
+      mutation,
+      {
+        receiptVersion: 1,
+        requestId: mutation.requestId,
+        dataIdentity: mutation.dataIdentity,
+        operation: mutation.operation,
+        status,
+        result,
+      },
+      at,
+    );
+  }
 
   #revision(revisionId: string): RevisionRow {
     const row = this.#database

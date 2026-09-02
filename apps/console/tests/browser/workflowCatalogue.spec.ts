@@ -175,7 +175,7 @@ test("validates JSON before a no-Trigger Start and submits one accepted Run payl
       operation: "startWorkflow",
       target: { kind: "workflow", parts: [projectId, "available"] },
       arguments: { payload: { release: 7 } },
-      preconditions: {},
+      preconditions: { mode: "no-trigger", revisionId: expect.any(String) },
     });
     await route.fulfill({
       status: 202,

@@ -1,6 +1,9 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentProvider } from "@ai-hero/sandcastle";
 import * as BunServices from "@effect/platform-bun/BunServices";
-import { describe, expect, it } from "@effect/vitest";
+import { afterAll, describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Option, Path, Result, Schema } from "effect";
 import * as SandcastleAgentInvoker from "../../../../../src/contexts/agent/adapters/SandcastleAgentInvoker.ts";
 import * as YamlRoster from "../../../../../src/contexts/agent/adapters/YamlRoster.ts";
@@ -20,8 +23,20 @@ import { withCorrections } from "../../../../../src/contexts/workflow/services/c
 import { sandboxResourcesAt } from "../../../../support/sandboxResources.ts";
 import { throwawayRepo } from "../../../../support/throwawayRepo.ts";
 
+const gitConfigurationRoot = mkdtempSync(join(tmpdir(), "kojo-sandcastle-git-config-"));
+const gitConfiguration = join(gitConfigurationRoot, "config");
+writeFileSync(gitConfiguration, "", { mode: 0o600 });
+const previousGitConfiguration = process.env.GIT_CONFIG_GLOBAL;
+process.env.GIT_CONFIG_GLOBAL = gitConfiguration;
+
+afterAll(() => {
+  if (previousGitConfiguration === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+  else process.env.GIT_CONFIG_GLOBAL = previousGitConfiguration;
+  rmSync(gitConfigurationRoot, { recursive: true, force: true });
+});
+
 /**
- * The real invoker, the real sandbox, a real process — and no model.
+ * The real invoker, real Daemon adapters, the real sandbox, a real process — and no model.
  *
  * Everything here is the adapter under test, unmodified: `acquireSandbox` builds a real Sandcastle
  * sandbox on a real branch, `YamlRoster` decodes the real `kojo.config.yaml` a real `kojo init`

@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { Buffer } from "node:buffer";
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
+import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Effect } from "effect";
 import type { SqliteRevisionRepository } from "../../workflow/adapters/SqliteRevisionRepository.ts";
 import type { RevisionFault } from "../../workflow/models/RevisionMaintenance.ts";
@@ -7,11 +9,13 @@ import { LifecycleError } from "../models/LifecycleError.ts";
 import type {
   NoRollbackPlan,
   UpgradeCheckReport,
+  UpgradeCheckResult,
   UpgradeEvidence,
   UpgradeRequirement,
   UpgradeRevisionEvidence,
 } from "../models/ManagedUpgrade.ts";
 import { decodeUpgradeCheckReport } from "../models/ManagedUpgrade.ts";
+import type { OperationRepository } from "../ports/OperationRepository.ts";
 import type {
   IssueNoRollbackPlan,
   UpgradePreflightRepository,
@@ -101,12 +105,19 @@ export class SqliteUpgradePreflightRepository implements UpgradePreflightReposit
   readonly #database: Database;
   readonly #dataIdentity: string;
   readonly #revisions: SqliteRevisionRepository;
+  readonly #operations: OperationRepository | undefined;
   readonly latest: Effect.Effect<UpgradeCheckReport | undefined, LifecycleError>;
 
-  constructor(database: Database, dataIdentity: string, revisions: SqliteRevisionRepository) {
+  constructor(
+    database: Database,
+    dataIdentity: string,
+    revisions: SqliteRevisionRepository,
+    operations?: OperationRepository,
+  ) {
     this.#database = database;
     this.#dataIdentity = dataIdentity;
     this.#revisions = revisions;
+    this.#operations = operations;
     database.run(
       "INSERT OR IGNORE INTO daemon_metadata (name, value) VALUES ('data_format_version', '1')",
     );
@@ -400,15 +411,35 @@ export class SqliteUpgradePreflightRepository implements UpgradePreflightReposit
       catch: failed,
     });
 
-  readonly record = (report: UpgradeCheckReport): Effect.Effect<void, LifecycleError> =>
+  readonly record = (
+    report: UpgradeCheckReport,
+    mutation?: MutationEnvelope,
+    result?: UpgradeCheckResult,
+  ): Effect.Effect<void, LifecycleError> =>
     Effect.try({
-      try: () => {
-        this.#database.run(
-          `INSERT INTO daemon_upgrade_check (singleton, report_json) VALUES (1, ?)
+      try: () =>
+        this.#database
+          .transaction(() => {
+            this.#database.run(
+              `INSERT INTO daemon_upgrade_check (singleton, report_json) VALUES (1, ?)
            ON CONFLICT(singleton) DO UPDATE SET report_json = excluded.report_json`,
-          [JSON.stringify(report)],
-        );
-      },
+              [JSON.stringify(report)],
+            );
+            if (mutation !== undefined)
+              this.#operations?.record(
+                mutation,
+                {
+                  receiptVersion: 1,
+                  requestId: mutation.requestId,
+                  dataIdentity: mutation.dataIdentity,
+                  operation: mutation.operation,
+                  status: "committed",
+                  result: (result ?? { report }) as unknown as JsonValue,
+                },
+                report.checkedAt,
+              );
+          })
+          .immediate(),
       catch: failed,
     });
 }

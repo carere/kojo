@@ -1,5 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import type {
   CancelRunResult,
   RunDocument,
@@ -9,6 +10,7 @@ import type {
 import type {
   StartTriggerWorkflowResult,
   StopWorkflowResult,
+  WorkflowMode,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Data, Effect } from "effect";
@@ -233,6 +235,9 @@ export class RunCoordinator {
     readonly requestId: string;
     readonly dataIdentity: string;
     readonly payload?: JsonValue;
+    readonly mutation: MutationEnvelope;
+    readonly reviewedMode: WorkflowMode;
+    readonly reviewedRevisionId: string;
   }): Effect.Effect<StartRunResult | StartTriggerWorkflowResult, RunApiFault> =>
     Effect.tryPromise({
       try: async () => {
@@ -253,6 +258,9 @@ export class RunCoordinator {
               projectId: options.projectId,
               workflowName: options.workflowName,
               changedAt: new Date(this.#now()).toISOString(),
+              ...(options.mutation === undefined ? {} : { mutation: options.mutation }),
+              reviewedMode: options.reviewedMode,
+              reviewedRevisionId: options.reviewedRevisionId,
             }),
           );
           if (receipt.pollerId === undefined)
@@ -284,6 +292,7 @@ export class RunCoordinator {
     readonly requestId: string;
     readonly dataIdentity: string;
     readonly force?: boolean;
+    readonly mutation?: MutationEnvelope;
   }): Effect.Effect<StopWorkflowResult, RunApiFault> =>
     Effect.tryPromise({
       try: async () => {
@@ -303,10 +312,23 @@ export class RunCoordinator {
               projectId: options.projectId,
               workflowName: options.workflowName,
               acceptedAt: changedAt,
+              ...(options.mutation === undefined ? {} : { mutation: options.mutation }),
             }),
           );
           await this.#triggerSupervisor.stopPoller(options.projectId, options.workflowName);
-          await this.#stopCancelledProject(options.projectId, forced.targetRunIds, changedAt);
+          await this.#stopCancelledProject(options.projectId, forced.targetRunIds, changedAt, {
+            ...(options.mutation === undefined ? {} : { mutation: options.mutation }),
+            result: {
+              kind: "stop",
+              projectId: options.projectId,
+              workflowName: options.workflowName,
+              activity: "inactive",
+              admittedRunsContinue: false,
+              forced: true,
+              targetSetId: forced.targetSetId,
+              targetedRunIds: forced.targetRunIds,
+            },
+          });
           return {
             kind: "stop",
             projectId: options.projectId,
@@ -319,7 +341,11 @@ export class RunCoordinator {
           };
         }
         const receipt = await Effect.runPromise(
-          this.#projects.stopActivity({ ...options, changedAt }),
+          this.#projects.stopActivity({
+            ...options,
+            changedAt,
+            ...(options.mutation === undefined ? {} : { mutation: options.mutation }),
+          }),
         );
         await this.#triggerSupervisor.stopPoller(options.projectId, options.workflowName);
         return {
@@ -337,6 +363,7 @@ export class RunCoordinator {
     readonly runId: string;
     readonly requestId: string;
     readonly dataIdentity: string;
+    readonly mutation?: MutationEnvelope;
   }): Effect.Effect<CancelRunResult, RunApiFault> =>
     Effect.tryPromise({
       try: async () => {
@@ -344,13 +371,28 @@ export class RunCoordinator {
           throw new Error("the Daemon data identity changed");
         const requestedAt = new Date(this.#now()).toISOString();
         const cancellation = await Effect.runPromise(
-          this.#runs.requestCancellation(options.runId, options.requestId, requestedAt),
+          this.#runs.requestCancellation(
+            options.runId,
+            options.requestId,
+            requestedAt,
+            options.mutation,
+          ),
         );
         if (cancellation.requiresExecutionStop) {
           await this.#stopCancelledProject(
             cancellation.run.projectId,
             [cancellation.run.runId],
             requestedAt,
+            {
+              ...(options.mutation === undefined ? {} : { mutation: options.mutation }),
+              result: {
+                kind: "cancel",
+                runId: cancellation.run.runId,
+                cancellation: "confirmed",
+                executionStopped: true,
+                state: "cancelled",
+              },
+            },
           );
         }
         await Effect.runPromise(this.#gates.reconcileTerminalInabilities).catch(() => undefined);
@@ -550,6 +592,7 @@ export class RunCoordinator {
     projectId: string,
     targetRunIds: ReadonlyArray<string>,
     requestedAt: string,
+    operation?: { readonly mutation?: MutationEnvelope; readonly result: JsonValue },
   ): Promise<void> {
     const deadline = Date.now() + this.#runnerSettings().cleanupMs;
     let controls: ReadonlyArray<ActiveExecutionControl> = [];
@@ -605,9 +648,17 @@ export class RunCoordinator {
     }
     const stoppedAt = new Date(Math.max(this.#now(), Date.parse(requestedAt))).toISOString();
     await Effect.runPromise(
-      this.#runs.confirmProjectRunnerStopped(projectId, targetRunIds, stoppedAt, {
-        state: "confirmed",
-      }),
+      this.#runs.confirmProjectRunnerStopped(
+        projectId,
+        targetRunIds,
+        stoppedAt,
+        {
+          state: "confirmed",
+        },
+        ...(operation?.mutation === undefined
+          ? []
+          : ([{ mutation: operation.mutation, result: operation.result }] as const)),
+      ),
     );
     void this.#pump();
   }
@@ -658,6 +709,9 @@ export class RunCoordinator {
     readonly requestId: string;
     readonly dataIdentity: string;
     readonly payload: JsonValue;
+    readonly mutation?: MutationEnvelope;
+    readonly reviewedMode?: WorkflowMode;
+    readonly reviewedRevisionId?: string;
   }): Promise<StartRunResult> {
     if (options.dataIdentity !== this.#dataIdentity)
       throw new Error("the Daemon data identity changed");
@@ -702,10 +756,12 @@ export class RunCoordinator {
           dataIdentity: options.dataIdentity,
           requestId: options.requestId,
           canonicalRequest: canonicalJson({
-            operation: "startRun",
-            projectId: options.projectId,
-            workflowName: options.workflowName,
-            payload: options.payload,
+            ...(options.mutation ?? {
+              operation: "startRun",
+              projectId: options.projectId,
+              workflowName: options.workflowName,
+              payload: options.payload,
+            }),
           }),
           projectId: options.projectId,
           workflowName: options.workflowName,
@@ -714,6 +770,11 @@ export class RunCoordinator {
           revisionId: revision.revisionId,
           packageGraphId: revision.packageGraphId,
           admittedAt,
+          ...(options.mutation === undefined ? {} : { mutation: options.mutation }),
+          ...(options.reviewedMode === undefined ? {} : { reviewedMode: options.reviewedMode }),
+          ...(options.reviewedRevisionId === undefined
+            ? {}
+            : { reviewedRevisionId: options.reviewedRevisionId }),
         }),
       );
       await Effect.runPromise(
@@ -1001,6 +1062,7 @@ export class RunCoordinator {
     readonly actionId: string;
     readonly reason: string;
     readonly possibleDuplicationAcknowledged: true;
+    readonly mutation?: MutationEnvelope;
   }): Effect.Effect<
     {
       readonly kind: "retry-uncertain";
@@ -1026,6 +1088,7 @@ export class RunCoordinator {
               possibleDuplicationAcknowledged: options.possibleDuplicationAcknowledged,
             }),
             authorizedAt: new Date(this.#now()).toISOString(),
+            ...(options.mutation === undefined ? {} : { mutation: options.mutation }),
           }),
         );
         void this.#pump();
@@ -1045,9 +1108,12 @@ export class RunCoordinator {
   ): Effect.Effect<ProjectRecovery | undefined, RunApiFault> =>
     this.#recoveryCoordinator.read(projectId).pipe(Effect.mapError(runApiFault));
 
-  readonly repairProject = (projectId: string): Effect.Effect<ProjectRecovery, RunApiFault> =>
+  readonly repairProject = (
+    projectId: string,
+    mutation?: MutationEnvelope,
+  ): Effect.Effect<ProjectRecovery, RunApiFault> =>
     Effect.tryPromise({
-      try: () => this.#recoveryCoordinator.repair(projectId),
+      try: () => this.#recoveryCoordinator.repair(projectId, mutation),
       catch: runApiFault,
     });
 

@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { basename } from "node:path";
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import type { OperationReceipt } from "@carere/kojo-client-contracts/contexts/client/contracts/operation";
 import type {
   ProjectDocument,
@@ -7,8 +8,12 @@ import type {
   ProjectLocationRecord,
   ProjectLocationResult,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
-import type { WorkflowDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
+import type {
+  WorkflowDocument,
+  WorkflowMode,
+} from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import { Effect, Layer } from "effect";
+import type { OperationRepository } from "../../daemon/ports/OperationRepository.ts";
 import type { FactoryRefreshObservation } from "../../workflow/models/FactoryRefresh.ts";
 import type {
   TriggerPoller,
@@ -155,9 +160,11 @@ const failed = (cause: unknown): ProjectStoreError =>
 
 export class SqliteProjectRepository {
   readonly #database: Database;
+  readonly #operations: OperationRepository | undefined;
 
-  constructor(database: Database) {
+  constructor(database: Database, operations?: OperationRepository) {
     this.#database = database;
+    this.#operations = operations;
     database.run(`
       CREATE TABLE IF NOT EXISTS projects (
         project_id TEXT PRIMARY KEY NOT NULL,
@@ -522,6 +529,11 @@ export class SqliteProjectRepository {
               request.observedAt,
             ],
           );
+          this.#operations?.record(
+            JSON.parse(request.requestBody) as MutationEnvelope,
+            receipt,
+            request.observedAt,
+          );
           return { project, created };
         });
         return commit.immediate();
@@ -722,6 +734,11 @@ export class SqliteProjectRepository {
                 request.changedAt,
               ],
             );
+            this.#operations?.record(
+              JSON.parse(request.requestBody) as MutationEnvelope,
+              receipt,
+              request.changedAt,
+            );
             return receipt;
           })
           .immediate(),
@@ -829,6 +846,11 @@ export class SqliteProjectRepository {
                 request.dataIdentity,
                 request.requestId,
               ],
+            );
+            this.#operations?.record(
+              JSON.parse(receipt.request_body) as MutationEnvelope,
+              committedReceipt,
+              request.changedAt,
             );
             return result;
           })
@@ -999,6 +1021,9 @@ export class SqliteProjectRepository {
     readonly projectId: string;
     readonly workflowName: string;
     readonly changedAt: string;
+    readonly mutation?: MutationEnvelope;
+    readonly reviewedMode?: WorkflowMode;
+    readonly reviewedRevisionId?: string;
   }): Effect.Effect<WorkflowActivityReceipt, ProjectStoreError> =>
     Effect.try({
       try: () =>
@@ -1052,6 +1077,20 @@ export class SqliteProjectRepository {
               });
             }
             const trigger = workflow.trigger_state !== "not-declared";
+            const mode: WorkflowMode = trigger ? "trigger" : "no-trigger";
+            if (
+              request.reviewedMode !== undefined &&
+              (request.reviewedMode !== mode ||
+                request.reviewedRevisionId !== workflow.current_revision_id)
+            ) {
+              throw new ProjectStoreError({
+                code: "WORKFLOW_REVIEW_STALE",
+                message: "The Workflow mode or Revision changed after Start was reviewed.",
+                status: 409,
+                retry: "never",
+                remedy: "Read the current Workflow, then prepare a new Start request.",
+              });
+            }
             let pollerStarted = false;
             let pollerId: string | undefined;
             if (trigger) {
@@ -1100,6 +1139,27 @@ export class SqliteProjectRepository {
                 request.changedAt,
               ],
             );
+            if (request.mutation !== undefined) {
+              this.#operations?.record(
+                request.mutation,
+                {
+                  receiptVersion: 1,
+                  requestId: request.requestId,
+                  dataIdentity: request.dataIdentity,
+                  operation: "startWorkflow",
+                  status: "committed",
+                  result: {
+                    kind: "trigger",
+                    projectId: receipt.projectId,
+                    workflowName: receipt.workflowName,
+                    activity: "active",
+                    triggerState: "polling",
+                    pollerStarted: receipt.pollerStarted,
+                  },
+                },
+                request.changedAt,
+              );
+            }
             return receipt;
           })
           .immediate(),
@@ -1112,6 +1172,7 @@ export class SqliteProjectRepository {
     readonly projectId: string;
     readonly workflowName: string;
     readonly changedAt: string;
+    readonly mutation?: MutationEnvelope;
   }): Effect.Effect<WorkflowActivityReceipt, ProjectStoreError> =>
     Effect.try({
       try: () =>
@@ -1169,6 +1230,26 @@ export class SqliteProjectRepository {
                 request.changedAt,
               ],
             );
+            if (request.mutation !== undefined) {
+              this.#operations?.record(
+                request.mutation,
+                {
+                  receiptVersion: 1,
+                  requestId: request.requestId,
+                  dataIdentity: request.dataIdentity,
+                  operation: "stopWorkflow",
+                  status: "committed",
+                  result: {
+                    kind: "stop",
+                    projectId: receipt.projectId,
+                    workflowName: receipt.workflowName,
+                    activity: "inactive",
+                    admittedRunsContinue: true,
+                  },
+                },
+                request.changedAt,
+              );
+            }
             return receipt;
           })
           .immediate(),

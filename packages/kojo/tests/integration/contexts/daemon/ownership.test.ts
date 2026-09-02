@@ -145,7 +145,7 @@ describe("one idle Daemon owns one data root", () => {
     }
   });
 
-  it("serves the durable handoff and owned cleanup through the production lifecycle socket", async () => {
+  it("reconnects one lifecycle operation through the production socket and observes the replacement owner", async () => {
     const hostPaths = paths();
     let plannedStops = 0;
     const daemon = startDaemon(hostPaths, {
@@ -168,6 +168,7 @@ describe("one idle Daemon owns one data root", () => {
       startedAt: "2026-09-01T10:00:00.000Z",
     });
     const control = new SocketDaemonLifecycleControl(hostPaths.runtimeRoot, journal);
+    let replacement: ReturnType<typeof startDaemon> | undefined;
 
     try {
       const owner = await Effect.runPromise(
@@ -194,11 +195,21 @@ describe("one idle Daemon owns one data root", () => {
         control.confirmControllerReady(operation.operationId, handoff.digest),
       );
       expect(
-        (await Effect.runPromise(control.stopOwnedProcesses(operation.operationId, 30_000, false)))
+        (await Effect.runPromise(control.stopOwnedProcesses(operation.operationId, 30_000, true)))
           .daemonInstanceId,
       ).toBe(daemon.endpoint.instanceId);
       expect(plannedStops).toBe(1);
+      await Effect.runPromise(daemon.stop);
+      replacement = startDaemon(hostPaths);
+      expect(
+        (
+          await Effect.runPromise(
+            control.confirmReplacementReady(operation.operationId, daemon.endpoint.instanceId),
+          )
+        ).daemonInstanceId,
+      ).toBe(replacement.endpoint.instanceId);
     } finally {
+      if (replacement !== undefined) await Effect.runPromise(replacement.stop);
       await Effect.runPromise(daemon.stop);
     }
   });

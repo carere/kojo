@@ -32,6 +32,7 @@ import { hostManagedInstallation } from "../adapters/ManagedInstallation.ts";
 import { ensurePurgeRecoveryCapsule } from "../adapters/PurgeRecoveryCapsule.ts";
 import { SqliteConfigurationRepository } from "../adapters/SqliteConfigurationRepository.ts";
 import { SqliteDaemonLifecycleReceiptRepository } from "../adapters/SqliteDaemonLifecycleReceiptRepository.ts";
+import { SqliteOperationRepository } from "../adapters/SqliteOperationRepository.ts";
 import { SqlitePurgeSafetyRepository } from "../adapters/SqlitePurgeSafetyRepository.ts";
 import { SqliteRetentionRepository } from "../adapters/SqliteRetentionRepository.ts";
 import { SqliteUpgradeActivationReceiptRepository } from "../adapters/SqliteUpgradeActivationReceiptRepository.ts";
@@ -202,7 +203,11 @@ export const startDaemonComposition = (
 
     const instanceId = crypto.randomUUID();
     const authority = browserAuthority({ now });
-    const configurationRepository = new SqliteConfigurationRepository(database);
+    const operationRepository = new SqliteOperationRepository(database);
+    const configurationRepository = new SqliteConfigurationRepository(
+      database,
+      operationRepository,
+    );
     const retentionRepository = new SqliteRetentionRepository(database, paths.dataRoot);
     retentionRepository.finishFileCleanup();
     const configurationApi = new ConfigurationApi({
@@ -211,8 +216,9 @@ export const startDaemonComposition = (
       configuration: configurationRepository,
       retention: retentionRepository,
     });
-    const projectRepository = new SqliteProjectRepository(database);
+    const projectRepository = new SqliteProjectRepository(database, operationRepository);
     const projectRecoveryRepository = new SqliteProjectRecoveryRepository(database, {
+      operations: operationRepository,
       settings: () => {
         const runner = configurationRepository.daemonConfiguration().runner;
         return {
@@ -223,17 +229,22 @@ export const startDaemonComposition = (
     });
     const runRepository = new SqliteRunRepository(database, {
       enforceProjectEligibility: true,
+      operations: operationRepository,
       limits: {
         daemon: () => configurationRepository.daemonConfiguration().limits,
         project: (projectId) => configurationRepository.projectConfiguration(projectId).limits,
       },
     });
-    const actionRepository = new SqliteExternalActionRepository(database);
+    const actionRepository = new SqliteExternalActionRepository(database, operationRepository);
     const resourceRepository = new SqliteResourceLeaseRepository(database);
     const traceRepository = new SqliteTraceRepository(database);
-    const revisionRepository = new SqliteRevisionRepository(database, paths.dataRoot);
+    const revisionRepository = new SqliteRevisionRepository(
+      database,
+      paths.dataRoot,
+      operationRepository,
+    );
     const triggerRepository = new SqliteTriggerRepository(database);
-    const gateRepository = new SqliteDaemonGateRepository(database);
+    const gateRepository = new SqliteDaemonGateRepository(database, operationRepository);
     const lifecycleReceipts = new SqliteDaemonLifecycleReceiptRepository(database);
     const upgradeReceipts = new SqliteUpgradeActivationReceiptRepository(database);
     const retainedUpgrade = Effect.runSync(upgradeReceipts.active);
@@ -257,7 +268,12 @@ export const startDaemonComposition = (
     );
     const backgroundWriterActivators: Array<() => void> = [];
     const upgradePreflight = new ManagedUpgradePreflight(
-      new SqliteUpgradePreflightRepository(database, dataIdentity, revisionRepository),
+      new SqliteUpgradePreflightRepository(
+        database,
+        dataIdentity,
+        revisionRepository,
+        operationRepository,
+      ),
       now,
     );
     const artifactRepository = new AtomicArtifactRepository(database, paths.dataRoot);
@@ -448,6 +464,7 @@ export const startDaemonComposition = (
     const clientRequests = new ClientMutationBoundary({
       dataIdentity,
       now,
+      outcomes: operationRepository,
       repository: new HostClientRequestRepository(
         join(paths.dataRoot, "client-requests"),
         dataIdentity,

@@ -166,6 +166,21 @@ describe("durable Project registration", () => {
     };
     expect(firstProject.created).toBe(true);
     expect(firstProject.project.factoryState).toBe("missing");
+    const recordedOutcome = await call(daemon, "/api/v1/operations/request-one");
+    expect(recordedOutcome.status).toBe(200);
+    const publicOutcome = await recordedOutcome.text();
+    expect(JSON.parse(publicOutcome)).toMatchObject({
+      requestId: "request-one",
+      operation: "registerProject",
+      status: "committed",
+      resultReference: {
+        identityVersion: 1,
+        kind: "operationOutcome",
+        parts: ["request-one"],
+      },
+    });
+    expect(publicOutcome).not.toContain(missing);
+    expect(publicOutcome).not.toContain("arguments");
 
     const lostReply = (await (
       await retry(daemon, firstRequest.requestId)

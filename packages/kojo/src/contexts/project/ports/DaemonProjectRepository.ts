@@ -1,10 +1,14 @@
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import type { OperationReceipt } from "@carere/kojo-client-contracts/contexts/client/contracts/operation";
 import type {
   ProjectDocument,
   ProjectLocationAction,
   ProjectLocationResult,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
-import type { WorkflowDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
+import type {
+  WorkflowDocument,
+  WorkflowMode,
+} from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import type { Effect } from "effect";
 import type {
   TriggerPoller,
@@ -65,6 +69,9 @@ export interface DaemonProjectRepository {
     readonly projectId: string;
     readonly workflowName: string;
     readonly changedAt: string;
+    readonly mutation?: MutationEnvelope;
+    readonly reviewedMode?: WorkflowMode;
+    readonly reviewedRevisionId?: string;
   }) => Effect.Effect<WorkflowActivityReceipt, ProjectStoreError>;
   readonly stopActivity: (request: {
     readonly dataIdentity: string;
@@ -72,6 +79,7 @@ export interface DaemonProjectRepository {
     readonly projectId: string;
     readonly workflowName: string;
     readonly changedAt: string;
+    readonly mutation?: MutationEnvelope;
   }) => Effect.Effect<WorkflowActivityReceipt, ProjectStoreError>;
   readonly triggerPollers: Effect.Effect<ReadonlyArray<TriggerPoller>, ProjectStoreError>;
   readonly observeTrigger: (request: {

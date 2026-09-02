@@ -327,11 +327,21 @@ export class HostClientRequestRepository implements ClientRequestRepository {
       const retained = this.#decode(readFileSync(path, "utf8"));
       if (!("request" in retained)) return;
       if (retained.resolution !== undefined) {
+        const sameReference =
+          encodeCanonicalJson(retained.resolution.resultReference as unknown as JsonValue) ===
+          encodeCanonicalJson(resolution.resultReference as unknown as JsonValue);
         if (
-          retained.resolution.status !== resolution.status ||
-          encodeCanonicalJson(retained.resolution.resultReference as unknown as JsonValue) !==
-            encodeCanonicalJson(resolution.resultReference as unknown as JsonValue)
+          retained.resolution.status === "accepted" &&
+          resolution.status === "committed" &&
+          sameReference
         ) {
+          atomicPrivateFile(
+            path,
+            encodeCanonicalJson({ ...retained, resolution } as unknown as JsonValue),
+          );
+          return;
+        }
+        if (retained.resolution.status !== resolution.status || !sameReference) {
           throw new Error("The client request already has different resolution metadata.");
         }
         return;

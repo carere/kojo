@@ -1,3 +1,4 @@
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 
 /** The recovery promise declared by the adapter that performs an external action. */
@@ -66,4 +67,5 @@ export interface AuthorizeUncertainRetryRequest {
   readonly reason: string;
   readonly possibleDuplicationAcknowledged: true;
   readonly authorizedAt: string;
+  readonly mutation?: MutationEnvelope;
 }

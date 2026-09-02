@@ -1,3 +1,5 @@
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
+import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Effect } from "effect";
 import type {
   ConfigurationApplyResult,
@@ -66,6 +68,7 @@ export class ConfigurationApi {
   readonly check = (
     target: ConfigurationTarget,
     patch: unknown,
+    mutation?: MutationEnvelope,
   ): Effect.Effect<ConfigurationCheck, ConfigurationError> => {
     const api = this;
     return Effect.gen(function* () {
@@ -82,14 +85,24 @@ export class ConfigurationApi {
       });
       const current = yield* api.#configuration.status(target);
       const proposed = yield* api.#configuration.preview(target, changes);
-      if (target.scope === "project") return { formatVersion: 1, proposed };
+      if (target.scope === "project") {
+        const result = { formatVersion: 1 as const, proposed };
+        if (mutation !== undefined)
+          yield* api.#configuration.recordOutcome(mutation, result as unknown as JsonValue);
+        return result;
+      }
       const before = retentionFrom(current);
       const after = retentionFrom(proposed);
       const shortens =
         shorter(before.runHistoryMs, after.runHistoryMs) ||
         shorter(before.traceMs, after.traceMs) ||
         shorter(before.artifactMs, after.artifactMs);
-      if (!shortens) return { formatVersion: 1, proposed };
+      if (!shortens) {
+        const result = { formatVersion: 1 as const, proposed };
+        if (mutation !== undefined)
+          yield* api.#configuration.recordOutcome(mutation, result as unknown as JsonValue);
+        return result;
+      }
       const issuedAt = new Date(api.#now()).toISOString();
       const impact = yield* api.#retention.inspect(after, issuedAt);
       if (
@@ -97,7 +110,10 @@ export class ConfigurationApi {
         impact.traceRunIds.length === 0 &&
         impact.artifactIds.length === 0
       ) {
-        return { formatVersion: 1, proposed };
+        const result = { formatVersion: 1 as const, proposed };
+        if (mutation !== undefined)
+          yield* api.#configuration.recordOutcome(mutation, result as unknown as JsonValue);
+        return result;
       }
       const plan: ConfigurationMaintenancePlan = {
         formatVersion: 1,
@@ -113,14 +129,21 @@ export class ConfigurationApi {
         changes,
         impact,
       };
-      yield* api.#configuration.savePlan(plan);
-      return { formatVersion: 1, proposed, plan };
+      const result = { formatVersion: 1 as const, proposed, plan };
+      if (mutation === undefined) yield* api.#configuration.savePlan(plan);
+      else
+        yield* api.#configuration.savePlan(plan, {
+          mutation,
+          result: result as unknown as JsonValue,
+        });
+      return result;
     });
   };
 
   readonly apply = (
     target: ConfigurationTarget,
     patch: unknown,
+    mutation?: MutationEnvelope,
   ): Effect.Effect<ConfigurationApplyResult, ConfigurationError> => {
     const api = this;
     return Effect.gen(function* () {
@@ -142,13 +165,18 @@ export class ConfigurationApi {
                 cause,
               }),
       });
-      const status = yield* api.#configuration.apply(target, changes);
+      const status = yield* api.#configuration.apply(
+        target,
+        changes,
+        ...(mutation === undefined ? [] : ([mutation] as const)),
+      );
       return { formatVersion: 1, status, collection: emptyCollection };
     });
   };
 
   readonly confirm = (
     planId: string,
+    mutation?: MutationEnvelope,
   ): Effect.Effect<ConfigurationApplyResult, ConfigurationError> => {
     const api = this;
     return Effect.gen(function* () {
@@ -173,6 +201,7 @@ export class ConfigurationApi {
         observedAt,
         currentImpact.stateFingerprint,
         () => collectNow(plan.impact, retention, observedAt),
+        ...(mutation === undefined ? [] : ([mutation] as const)),
       );
       api.#retention.finishFileCleanup?.();
       return { formatVersion: 1, status: confirmed.status, collection: confirmed.collection };

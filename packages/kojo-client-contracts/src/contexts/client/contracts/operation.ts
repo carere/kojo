@@ -25,6 +25,43 @@ export interface OperationReceipt {
   readonly result?: JsonValue;
 }
 
+/** Privacy-safe projection returned by the recorded-outcome read route. */
+export interface RecordedOperationOutcome {
+  readonly receiptVersion: 1;
+  readonly requestId: string;
+  readonly dataIdentity: string;
+  readonly operation: string;
+  readonly status: ReceiptStatus;
+  readonly resultReference: StructuredIdentity;
+}
+
+export const decodeRecordedOperationOutcome = (
+  input: unknown,
+): DecodeResult<RecordedOperationOutcome> => {
+  const record = decodeClosedRecord(input, [
+    "receiptVersion",
+    "requestId",
+    "dataIdentity",
+    "operation",
+    "status",
+    "resultReference",
+  ]);
+  if (!record.ok) return record;
+  const receipt = decodeOperationReceipt({
+    receiptVersion: record.value.receiptVersion,
+    requestId: record.value.requestId,
+    dataIdentity: record.value.dataIdentity,
+    operation: record.value.operation,
+    status: record.value.status,
+  });
+  if (!receipt.ok) return receipt;
+  const resultReference = decodeStructuredIdentity(record.value.resultReference, [
+    "resultReference",
+  ]);
+  if (!resultReference.ok) return resultReference;
+  return decodeSuccess({ ...receipt.value, resultReference: resultReference.value });
+};
+
 export interface Problem {
   readonly problemVersion: 1;
   readonly code: string;

@@ -17,6 +17,10 @@ import type {
 import type { DaemonLifecycleControl, LifecycleHandoff } from "../ports/DaemonLifecycleControl.ts";
 import type { DaemonUpgradeControl } from "../ports/DaemonUpgradeControl.ts";
 import type { LifecycleJournalRepository } from "../ports/LifecycleJournalRepository.ts";
+import {
+  decodeLifecycleControlRequest,
+  decodeLifecycleOwner,
+} from "../services/LifecycleControlProtocol.ts";
 import { removeOwnedSocket } from "../services/secureHostPath.ts";
 import { decodePurgeSafetyEvidence } from "./DaemonDataPurger.ts";
 
@@ -100,28 +104,7 @@ const exactKeys = (value: Record<string, unknown>, keys: ReadonlyArray<string>):
   );
 };
 
-const ownerOf = (value: unknown): LifecycleRecordedOwner => {
-  const owner = record(value);
-  if (
-    owner === undefined ||
-    !exactKeys(owner, ["daemonInstanceId", "runnerInstanceIds", "recordedAt"]) ||
-    typeof owner.daemonInstanceId !== "string" ||
-    !/^[A-Za-z0-9_-]+$/.test(owner.daemonInstanceId) ||
-    !Array.isArray(owner.runnerInstanceIds) ||
-    !owner.runnerInstanceIds.every(
-      (runnerInstanceId) =>
-        typeof runnerInstanceId === "string" && /^[A-Za-z0-9_-]+$/.test(runnerInstanceId),
-    ) ||
-    typeof owner.recordedAt !== "string" ||
-    !Number.isFinite(Date.parse(owner.recordedAt))
-  ) {
-    throw new LifecycleError(
-      "LIFECYCLE_CONTROL_UNAVAILABLE",
-      "the lifecycle control owner response is invalid",
-    );
-  }
-  return owner as unknown as LifecycleRecordedOwner;
-};
+const ownerOf = decodeLifecycleOwner;
 
 const drainOf = (value: unknown): LifecycleDrainProgress => {
   const drain = record(value);
@@ -402,7 +385,7 @@ const upgradeResponseValue = (value: unknown, action: UpgradeControlAction): unk
   }
 };
 
-const requestOf = (value: unknown): ControlRequest => {
+const requestOfLegacy = (value: unknown): ControlRequest => {
   const object =
     value !== null && typeof value === "object" && !Array.isArray(value)
       ? (value as Record<string, unknown>)
@@ -498,6 +481,11 @@ const requestOf = (value: unknown): ControlRequest => {
     );
   }
   return object as unknown as ControlRequest;
+};
+
+const requestOf = (value: unknown): ControlRequest => {
+  requestOfLegacy(value);
+  return decodeLifecycleControlRequest(value) as ControlRequest;
 };
 
 const upgradeRequestOf = (value: unknown): UpgradeControlRequest => {

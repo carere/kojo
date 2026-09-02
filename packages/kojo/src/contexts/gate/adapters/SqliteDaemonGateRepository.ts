@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
+import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Effect } from "effect";
+import type { OperationRepository } from "../../daemon/ports/OperationRepository.ts";
 import { rebuildSqliteTableWithoutForeignKey } from "../../shared/adapters/rebuildSqliteTableWithoutForeignKey.ts";
 import type { RunAuthority } from "../../workflow/models/DaemonRun.ts";
 import type {
@@ -112,9 +114,11 @@ const fault = (cause: unknown): GateTransitionError =>
 /** Sole-owner SQLite Gate repository. Each method commits one complete domain transition. */
 export class SqliteDaemonGateRepository {
   readonly #database: Database;
+  readonly #operations: OperationRepository | undefined;
 
-  constructor(database: Database) {
+  constructor(database: Database, operations?: OperationRepository) {
     this.#database = database;
+    this.#operations = operations;
     database.run("PRAGMA foreign_keys = ON");
     database.run(`
       CREATE TABLE IF NOT EXISTS gate_askings (
@@ -335,6 +339,27 @@ export class SqliteDaemonGateRepository {
                 request.now,
               ],
             );
+            if (request.mutation !== undefined) {
+              this.#operations?.record(
+                request.mutation,
+                {
+                  receiptVersion: 1,
+                  requestId: request.requestId,
+                  dataIdentity: request.dataIdentity,
+                  operation: "recordGateVerdict",
+                  status: "committed",
+                  result: {
+                    asking: askingOf(this.#rowByToken(request.token)),
+                    receipt: {
+                      requestId: request.requestId,
+                      state: "committed",
+                      duplicate: false,
+                    },
+                  } as unknown as JsonValue,
+                },
+                request.now,
+              );
+            }
             return {
               asking: askingOf(this.#rowByToken(request.token)),
               requestId: request.requestId,

@@ -240,7 +240,7 @@ const harness = async (key: string, mode: "success" | "failure" | "second" = "su
         parts: [registered.project.projectId, "gated"],
       },
       arguments: { payload: { key, mode } },
-      preconditions: {},
+      preconditions: { mode: "no-trigger", revisionId: captured.revisionId },
     },
   );
   expect(started.status, await started.clone().text()).toBe(202);

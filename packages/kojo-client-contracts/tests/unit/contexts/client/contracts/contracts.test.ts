@@ -5,6 +5,7 @@ import { decodeObservationSnapshot } from "../../../../../src/contexts/client/co
 import {
   decodeOperationReceipt,
   decodeOperationRefusal,
+  decodeRecordedOperationOutcome,
 } from "../../../../../src/contexts/client/contracts/operation.ts";
 import {
   decodePageMetadata,
@@ -40,6 +41,18 @@ describe("client contract golden fixtures", () => {
         operation: "registerProject",
         status: "committed",
         result: { projectId: "project_1" },
+      }),
+      decodeRecordedOperationOutcome({
+        receiptVersion: 1,
+        requestId: "request_1",
+        dataIdentity: "data_1",
+        operation: "registerProject",
+        status: "committed",
+        resultReference: {
+          identityVersion: 1,
+          kind: "operationOutcome",
+          parts: ["request_1"],
+        },
       }),
       decodeOperationRefusal({
         refusalVersion: 1,

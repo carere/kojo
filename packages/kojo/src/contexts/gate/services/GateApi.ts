@@ -4,6 +4,7 @@ import type {
   AskingSnapshot,
   RecordVerdictResult,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/gate";
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import { Cause, Data, Effect, Option } from "effect";
 import type { GateRunControl } from "../../workflow/ports/RunControl.ts";
 import { canonicalJson } from "../../workflow/services/canonicalJson.ts";
@@ -105,6 +106,7 @@ export class GateApi {
     readonly choice: string;
     readonly reason: string;
     readonly answerer?: string;
+    readonly mutation?: MutationEnvelope;
   }): Effect.Effect<RecordVerdictResult, GateApiFault> =>
     Effect.tryPromise({
       try: async () => {
@@ -123,13 +125,16 @@ export class GateApi {
               ...options,
               answerer,
               now,
-              canonicalRequest: canonicalJson({
-                operation: "recordGateVerdict",
-                token: options.token,
-                choice: options.choice,
-                reason: options.reason,
-                answerer,
-              }),
+              canonicalRequest: canonicalJson(
+                options.mutation ?? {
+                  operation: "recordGateVerdict",
+                  token: options.token,
+                  choice: options.choice,
+                  reason: options.reason,
+                  answerer,
+                },
+              ),
+              ...(options.mutation === undefined ? {} : { mutation: options.mutation }),
             }),
           );
         } catch (cause) {

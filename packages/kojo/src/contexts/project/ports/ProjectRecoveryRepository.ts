@@ -1,3 +1,4 @@
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import { Context, type Effect } from "effect";
 import type { ProjectRecovery, RunnerFailure } from "../models/ProjectRecovery.ts";
 import type { ProjectRecoveryStoreError } from "../models/ProjectRecoveryStoreError.ts";
@@ -35,6 +36,7 @@ export class ProjectRecoveryRepository extends Context.Service<
     readonly repair: (
       projectId: string,
       requestedAt: string,
+      mutation?: MutationEnvelope,
     ) => Effect.Effect<ProjectRecovery, ProjectRecoveryStoreError>;
   }
 >()("kojo/project/ProjectRecoveryRepository") {}

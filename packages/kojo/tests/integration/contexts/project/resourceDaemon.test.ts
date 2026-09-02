@@ -311,7 +311,7 @@ console.log(JSON.stringify({ answer: "controlled" }));
               parts: [registered.project.projectId, "resource"],
             },
             arguments: { payload: { gate: crashMode === "gate" } },
-            preconditions: {},
+            preconditions: { mode: "no-trigger", revisionId: captured.revisionId },
           },
         );
         expect(response.status, await response.clone().text()).toBe(202);

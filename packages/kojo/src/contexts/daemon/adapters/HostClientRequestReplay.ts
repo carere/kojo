@@ -61,17 +61,18 @@ export const replayHostClientRequest = async (
   );
   const retained = repository.lookup(requestId);
   if (retained === undefined) return undefined;
-  if (retained.request === undefined) {
+  if (retained.resolution !== undefined) {
     return {
       receiptVersion: 1,
       requestId,
       dataIdentity,
       operation: retained.subject.operation,
-      status: retained.resolution?.status ?? "committed",
-      ...(retained.resolution === undefined
-        ? {}
-        : { result: retained.resolution.resultReference as unknown as JsonValue }),
+      status: retained.resolution.status,
+      result: retained.resolution.resultReference as unknown as JsonValue,
     };
+  }
+  if (retained.request === undefined) {
+    return undefined;
   }
   const mutation = retained.request;
   if (
@@ -87,9 +88,11 @@ export const replayHostClientRequest = async (
   }
   let result: JsonValue;
   if (mutation.operation === "repairDaemonSupervision") {
-    result = new ManagedDaemonSupervision(paths.dataRoot).applyRepair(
-      planTokenOf(mutation.arguments),
-    ) as unknown as JsonValue;
+    const supervision = new ManagedDaemonSupervision(paths.dataRoot);
+    const current = supervision.status();
+    result = (current.repairRequired
+      ? supervision.applyRepair(planTokenOf(mutation.arguments))
+      : current) as unknown as JsonValue;
   } else if (mutation.operation === "repairPurgeSafety") {
     result = (await new PurgeSafetyRecovery({
       paths,

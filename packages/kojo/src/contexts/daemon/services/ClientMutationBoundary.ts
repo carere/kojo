@@ -2,12 +2,14 @@ import {
   decodeMutationEnvelope,
   type MutationEnvelope,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
+import type { OperationReceipt } from "@carere/kojo-client-contracts/contexts/client/contracts/operation";
 import type { StructuredIdentity } from "@carere/kojo-client-contracts/contexts/shared/models/identity";
 import { ProjectStoreError } from "../../project/models/ProjectStoreError.ts";
 import type {
   ClientRequestRepository,
   RetainedClientRequest,
 } from "../ports/ClientRequestRepository.ts";
+import type { OperationRepository } from "../ports/OperationRepository.ts";
 
 const refused = (code: string, message: string): ProjectStoreError =>
   new ProjectStoreError({
@@ -22,15 +24,18 @@ const refused = (code: string, message: string): ProjectStoreError =>
 export class ClientMutationBoundary {
   readonly #dataIdentity: string;
   readonly #now: () => number;
+  readonly #outcomes: OperationRepository | undefined;
   readonly #repository: ClientRequestRepository;
 
   constructor(options: {
     readonly dataIdentity: string;
     readonly now: () => number;
+    readonly outcomes?: OperationRepository;
     readonly repository: ClientRequestRepository;
   }) {
     this.#dataIdentity = options.dataIdentity;
     this.#now = options.now;
+    this.#outcomes = options.outcomes;
     this.#repository = options.repository;
   }
 
@@ -89,6 +94,32 @@ export class ClientMutationBoundary {
         parts: [requestId],
       },
     });
+  }
+
+  /** Read the authoritative SQLite outcome. This operation never starts or repeats work. */
+  outcome(requestId: string): OperationReceipt | undefined {
+    return this.#outcomes?.read(this.#dataIdentity, requestId);
+  }
+
+  /** Return a same-content recorded result before a replay can dispatch the domain use case. */
+  recorded(request: MutationEnvelope): OperationReceipt | undefined {
+    return this.#outcomes?.readExact(request);
+  }
+
+  /** Copy an authoritative result reference to the private Host journal. */
+  resolved(request: MutationEnvelope): OperationReceipt | undefined {
+    const receipt = this.recorded(request);
+    if (receipt === undefined) return undefined;
+    this.#repository.resolve(request.requestId, {
+      resolvedAt: new Date(this.#now()).toISOString(),
+      status: receipt.status,
+      resultReference: {
+        identityVersion: 1,
+        kind: "operationOutcome",
+        parts: [request.requestId],
+      },
+    });
+    return receipt;
   }
 
   lookup(requestId: string): RetainedClientRequest | undefined {

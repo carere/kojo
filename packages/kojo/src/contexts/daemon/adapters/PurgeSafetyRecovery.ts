@@ -453,6 +453,33 @@ export class PurgeSafetyRecovery {
         "the active managed release changed after the recovery check",
       );
     }
+    const existingOperationId = plan.lifecycleOperationId ?? `purge_recovery_${plan.planId}`;
+    const existing = this.#journal.read(existingOperationId);
+    if (existing?.purgeSafetyEvidenceId !== undefined) {
+      const evidencePath = join(this.#paths.dataRoot, "lifecycle", "purge-safety.json");
+      assertPrivateNode(evidencePath, "file");
+      const evidence = JSON.parse(readFileSync(evidencePath, "utf8")) as {
+        readonly evidenceId?: string;
+        readonly dataIdentity?: string;
+        readonly operationId?: string;
+      };
+      if (
+        evidence.evidenceId !== existing.purgeSafetyEvidenceId ||
+        evidence.dataIdentity !== plan.dataIdentity ||
+        evidence.operationId !== existing.operationId
+      ) {
+        throw new LifecycleError(
+          "PURGE_RECOVERY_FAILED",
+          "the recorded purge safety result does not match its exact retained evidence",
+        );
+      }
+      return {
+        outcome: "recovered",
+        dataIdentity: plan.dataIdentity,
+        evidenceId: existing.purgeSafetyEvidenceId,
+        lifecycleOperationId: existing.operationId,
+      };
+    }
     let operation =
       plan.lifecycleOperationId === undefined
         ? this.#journal.begin({

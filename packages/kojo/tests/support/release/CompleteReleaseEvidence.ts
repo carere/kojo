@@ -748,8 +748,8 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
       },
       {
         tier: "kojo-integration",
-        path: "packages/kojo/tests/integration/contexts/daemon/lifecycleControlTransport.test.ts",
-        name: "reconnects one operation after endpoint loss and observes the replacement owner",
+        path: "packages/kojo/tests/integration/contexts/daemon/ownership.test.ts",
+        name: "reconnects one lifecycle operation through the production socket and observes the replacement owner",
       },
       {
         tier: "shipped-systemd",
@@ -769,8 +769,8 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "LIFE-03",
     5,
     "one lifecycle controller keeps the operation through endpoint and owner loss",
-    "packages/kojo/tests/integration/contexts/daemon/lifecycleControlTransport.test.ts",
-    "reconnects one operation after endpoint loss and observes the replacement owner",
+    "packages/kojo/tests/integration/contexts/daemon/ownership.test.ts",
+    "reconnects one lifecycle operation through the production socket and observes the replacement owner",
     ["kojo-integration", "native-systemd"],
     [
       {
@@ -820,7 +820,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     5,
     "readiness and rollback outcomes stay distinct and recoverable",
     "packages/kojo/tests/integration/contexts/daemon/activation.test.ts",
-    "distinguishes failed readiness, safe rollback, failed rollback, and post-activation failure",
+    "holds ordinary mutations, verifies backup, migrates restricted, and activates without Workflow execution",
     ["kojo-unit", "kojo-integration", "native-systemd"],
     [
       {
@@ -833,6 +833,12 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         tier: "kojo-unit",
         path: "packages/kojo/tests/unit/contexts/daemon/services/UpgradeActivationController.test.ts",
         name: "requires repair when current evidence cannot prove rollback safe",
+        issueTiers: [],
+      },
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/daemon/services/UpgradeActivationController.test.ts",
+        name: "records Repair required from rollback-selected when source readiness fails",
         issueTiers: [],
       },
       {

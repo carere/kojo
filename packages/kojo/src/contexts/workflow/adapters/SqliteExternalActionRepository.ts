@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Effect } from "effect";
+import type { OperationRepository } from "../../daemon/ports/OperationRepository.ts";
 import { rebuildSqliteTableWithoutForeignKey } from "../../shared/adapters/rebuildSqliteTableWithoutForeignKey.ts";
 import type { PhaseResult, RunAuthority } from "../models/DaemonRun.ts";
 import type {
@@ -94,9 +95,11 @@ const actionOf = (row: ActionRow): ExternalActionIntent => ({
 /** Daemon-owned action intent and evidence. Trace is not consulted. */
 export class SqliteExternalActionRepository {
   readonly #database: Database;
+  readonly #operations: OperationRepository | undefined;
 
-  constructor(database: Database) {
+  constructor(database: Database, operations?: OperationRepository) {
     this.#database = database;
+    this.#operations = operations;
     database.run("PRAGMA foreign_keys = ON");
     database.run(`
       CREATE TABLE IF NOT EXISTS workflow_external_actions (
@@ -644,7 +647,28 @@ export class SqliteExternalActionRepository {
               ],
             );
             this.#queueHeldRun(request.runId, request.authorizedAt);
-            return actionOf(this.#row(request.actionId));
+            const authorized = actionOf(this.#row(request.actionId));
+            if (request.mutation !== undefined) {
+              this.#operations?.record(
+                request.mutation,
+                {
+                  receiptVersion: 1,
+                  requestId: request.requestId,
+                  dataIdentity: request.dataIdentity,
+                  operation: "retryUncertainAction",
+                  status: "committed",
+                  result: {
+                    kind: "retry-uncertain",
+                    runId: authorized.runId,
+                    actionId: authorized.actionId,
+                    uncertaintyRevision: authorized.uncertaintyRevision,
+                    state: "retry-authorized",
+                  },
+                },
+                request.authorizedAt,
+              );
+            }
+            return authorized;
           })
           .immediate(),
       catch: failure,

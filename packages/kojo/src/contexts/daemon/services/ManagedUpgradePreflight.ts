@@ -1,3 +1,4 @@
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import { Effect } from "effect";
 import { LifecycleError } from "../models/LifecycleError.ts";
 import type { CheckedManagedReleaseManifest } from "../models/ManagedRelease.ts";
@@ -167,6 +168,7 @@ export class ManagedUpgradePreflight {
     readonly candidate: CheckedManagedReleaseManifest;
     readonly sourceReleaseId: string;
     readonly approvalToken?: string;
+    readonly mutation?: MutationEnvelope;
   }): Effect.Effect<UpgradeCheckResult, LifecycleError> => {
     const service = this;
     return Effect.gen(function* () {
@@ -183,6 +185,7 @@ export class ManagedUpgradePreflight {
       readonly candidate: CheckedManagedReleaseManifest;
       readonly sourceReleaseId: string;
       readonly approvalToken?: string;
+      readonly mutation?: MutationEnvelope;
     },
     evidence: {
       readonly checkedAt: string;
@@ -311,11 +314,13 @@ export class ManagedUpgradePreflight {
         ...(plan === undefined ? {} : { plan }),
         remedy,
       };
-      yield* service.#repository.record(report);
-      return {
+      const result: UpgradeCheckResult = {
         report,
         ...(approvalToken === undefined ? {} : { approvalToken }),
       };
+      if (request.mutation === undefined) yield* service.#repository.record(report);
+      else yield* service.#repository.record(report, request.mutation, result);
+      return result;
     });
   };
 }

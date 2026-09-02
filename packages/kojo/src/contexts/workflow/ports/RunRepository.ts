@@ -1,3 +1,5 @@
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
+import type { WorkflowMode } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Context, type Effect } from "effect";
 import type {
@@ -23,6 +25,9 @@ export interface AdmitRunRequest {
   readonly revisionId: string;
   readonly packageGraphId: string;
   readonly admittedAt: string;
+  readonly mutation?: MutationEnvelope;
+  readonly reviewedMode?: WorkflowMode;
+  readonly reviewedRevisionId?: string;
 }
 
 export interface Admission {
@@ -89,6 +94,7 @@ export class RunRepository extends Context.Service<
       runId: string,
       requestId: string,
       requestedAt: string,
+      mutation?: MutationEnvelope,
     ) => Effect.Effect<CancellationRequestResult, RunStoreError>;
     readonly forceStopWorkflow: (request: {
       readonly dataIdentity: string;
@@ -97,12 +103,14 @@ export class RunRepository extends Context.Service<
       readonly projectId: string;
       readonly workflowName: string;
       readonly acceptedAt: string;
+      readonly mutation?: MutationEnvelope;
     }) => Effect.Effect<ForcedStopResult, RunStoreError>;
     readonly confirmProjectRunnerStopped: (
       projectId: string,
       targetRunIds: ReadonlyArray<string>,
       stoppedAt: string,
       cleanup: { readonly state: "confirmed" | "fault"; readonly detail?: string },
+      operation?: { readonly mutation: MutationEnvelope; readonly result: JsonValue },
     ) => Effect.Effect<void, RunStoreError>;
     readonly recordCleanupFault: (
       targetRunIds: ReadonlyArray<string>,

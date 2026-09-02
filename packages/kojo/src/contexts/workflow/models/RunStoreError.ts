@@ -7,6 +7,7 @@ export class RunStoreError extends Data.TaggedError("RunStoreError")<{
     | "QUEUE_FULL"
     | "RUN_NOT_FOUND"
     | "RUN_NOT_ELIGIBLE"
+    | "WORKFLOW_REVIEW_STALE"
     | "STALE_AUTHORITY"
     | "STORE_FAILED";
   readonly message: string;

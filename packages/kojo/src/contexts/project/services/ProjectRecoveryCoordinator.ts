@@ -340,9 +340,16 @@ export class ProjectRecoveryCoordinator {
     return recoveries;
   }
 
-  async repair(projectId: string): Promise<ProjectRecovery> {
+  async repair(
+    projectId: string,
+    mutation?: import("@carere/kojo-client-contracts/contexts/client/contracts/mutation").MutationEnvelope,
+  ): Promise<ProjectRecovery> {
     const requestedAt = new Date(this.#now()).toISOString();
-    const recovery = await Effect.runPromise(this.#recovery.repair(projectId, requestedAt));
+    const recovery = await Effect.runPromise(
+      mutation === undefined
+        ? this.#recovery.repair(projectId, requestedAt)
+        : this.#recovery.repair(projectId, requestedAt, mutation),
+    );
     if (recovery.state === "recovering" && recovery.safety === "safe") {
       await Effect.runPromise(this.#runs.repairProjectRecoveryHolds(projectId, requestedAt));
       await this.#onRecoveryReady(projectId);

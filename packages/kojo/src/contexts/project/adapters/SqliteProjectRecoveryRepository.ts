@@ -1,5 +1,8 @@
 import type { Database } from "bun:sqlite";
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
+import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Effect } from "effect";
+import type { OperationRepository } from "../../daemon/ports/OperationRepository.ts";
 import {
   DEFAULT_RUNNER_HEALTHY_RESET_MILLIS,
   DEFAULT_RUNNER_REPLACEMENT_DELAYS_MILLIS,
@@ -51,6 +54,7 @@ const storeError = (cause: unknown): ProjectRecoveryStoreError =>
 /** SQLite adapter for Project recovery. The table is Daemon-owned and survives its process. */
 export class SqliteProjectRecoveryRepository {
   readonly #database: Database;
+  readonly #operations: OperationRepository | undefined;
   readonly #settings: () => {
     readonly replacementDelaysMillis: ReadonlyArray<number>;
     readonly healthyResetMillis: number;
@@ -65,9 +69,11 @@ export class SqliteProjectRecoveryRepository {
         readonly replacementDelaysMillis: ReadonlyArray<number>;
         readonly healthyResetMillis: number;
       };
+      readonly operations?: OperationRepository;
     } = {},
   ) {
     this.#database = database;
+    this.#operations = options.operations;
     this.#settings =
       options.settings ??
       (() => ({
@@ -259,24 +265,31 @@ export class SqliteProjectRecoveryRepository {
 
   readonly repair = (
     projectId: string,
-    _requestedAt: string,
+    requestedAt: string,
+    mutation?: MutationEnvelope,
   ): Effect.Effect<ProjectRecovery, ProjectRecoveryStoreError> =>
     Effect.try({
       try: () => {
-        if (this.#row(projectId) === null) {
-          return {
-            projectId,
-            cycle: 1,
-            attempts: 0,
-            state: "healthy",
-            safety: "safe",
-            failedOperationPending: false,
-          };
-        }
         return this.#database
           .transaction(() => {
+            if (this.#row(projectId) === null) {
+              const result: ProjectRecovery = {
+                projectId,
+                cycle: 1,
+                attempts: 0,
+                state: "healthy",
+                safety: "safe",
+                failedOperationPending: false,
+              };
+              this.#record(mutation, result, requestedAt);
+              return result;
+            }
             const prior = this.#required(projectId);
-            if (prior.state !== "held" || prior.safety !== "safe") return recoveryOf(prior);
+            if (prior.state !== "held" || prior.safety !== "safe") {
+              const result = recoveryOf(prior);
+              this.#record(mutation, result, requestedAt);
+              return result;
+            }
             this.#database.run(
               `UPDATE project_runner_recovery
                   SET cycle = cycle + 1, attempts = 0, state = 'recovering',
@@ -284,12 +297,30 @@ export class SqliteProjectRecoveryRepository {
                 WHERE project_id = ?`,
               [projectId],
             );
-            return recoveryOf(this.#required(projectId));
+            const result = recoveryOf(this.#required(projectId));
+            this.#record(mutation, result, requestedAt);
+            return result;
           })
           .immediate();
       },
       catch: storeError,
     });
+
+  #record(mutation: MutationEnvelope | undefined, result: ProjectRecovery, at: string): void {
+    if (mutation === undefined) return;
+    this.#operations?.record(
+      mutation,
+      {
+        receiptVersion: 1,
+        requestId: mutation.requestId,
+        dataIdentity: mutation.dataIdentity,
+        operation: mutation.operation,
+        status: "committed",
+        result: result as unknown as JsonValue,
+      },
+      at,
+    );
+  }
 
   #change(
     projectId: string,

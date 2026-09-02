@@ -20,11 +20,11 @@ behavior is removed.
 | `polling.spec.ts` | 2 | 2 | 0 | Restored as authenticated Daemon browser evidence in `polling.spec.ts` |
 | `realRun.spec.ts` | 5 | 5 | 0 | `runConsole.spec.ts`, `gateVerdict.spec.ts`, shipped-Daemon release evidence |
 | `runList.spec.ts` | 5 | 5 | 0 | `runConsole.spec.ts` |
-| `waterfall.spec.ts` | 40 | 40 | 0 | Restored in `waterfall.spec.ts`; that file now has 42 Waterfall and 17 detail leaves |
+| `waterfall.spec.ts` | 40 | 40 | 0 | Restored in `waterfall.spec.ts`; that file now has 41 Waterfall and 18 detail leaves |
 | **Total** | **113** | **104** | **9** | |
 
-The 59 declarations in the current `waterfall.spec.ts` are not all Waterfall cases: 42 test the
-Waterfall and 17 test the current detail panels. The Waterfall adaptation retains every fixed-point
+The 59 declarations in the current `waterfall.spec.ts` are not all Waterfall cases: 41 test the
+Waterfall and 18 test the current detail panels. The Waterfall adaptation retains every fixed-point
 assertion category: Host and acquisition rows,
 scope placement, rebuild rows, collapsed Gate and idle breaks, all-row walls, wall-clock mode,
 concurrency geometry, in-flight Phase growth and settlement, failure/breach/interruption/kind and
@@ -51,7 +51,7 @@ The exact `detailPanel.spec.ts` declaration mapping is:
 
 | Old leaf | Classification | Current exact evidence |
 | ---: | --- | --- |
-| 1 | adapted | `a Phase deep link restores exactly one selected span and keeps the Waterfall` |
+| 1 | adapted | `clicking a Phase span writes its exact Phase URL` |
 | 2 | adapted | same leaf includes direct URL and reload selection |
 | 3 | adapted | `closing and toggling a Phase panel preserve the selected Run view` |
 | 4 | adapted | `closing and toggling a Phase panel preserve the selected Run view` and `the table toggle renders every Waterfall Phase and persists in the URL` |
@@ -134,7 +134,7 @@ The audit restores 38 suites. Each path keeps its suffix and moves from
 | `unit/contexts/workflow/services/phase/whereItRan.test.ts` | same |
 | `unit/contexts/workflow/services/reviewed.test.ts` | same |
 | `unit/contexts/workflow/services/sandboxed.test.ts` | same |
-| `integration/contexts/agent/adapters/SandcastleAgentInvoker.test.ts` | `unit/contexts/agent/adapters/SandcastleAgentInvoker.test.ts` |
+| `integration/contexts/agent/adapters/SandcastleAgentInvoker.test.ts` | same |
 | `integration/contexts/agent/adapters/YamlRoster.test.ts` | same |
 | `integration/contexts/agent/adapters/kojoPi.test.ts` | `integration/contexts/agent/adapters/kojoPiProcess.test.ts` |
 | `integration/contexts/sandbox/adapters/BindMountWorkspace.test.ts` | same |
@@ -151,16 +151,52 @@ the assertions: `.kojo/artifacts` is protected, Resource identity variables cros
 boundary, compensation follows the current replay result, and `.kojo/data` is tested only as a
 barred historic Project path. The restored in-memory adapter suites retain script exhaustion,
 resume refusal, unsafe-command refusal, traversal safety, write, stat, and unlink coverage.
-`SandcastleAgentInvoker.test.ts` retains its scripted-provider and private-channel behavior in the
-unit tier because those collaborators are controlled test implementations. `replayAdapter.test.ts`
-also moved to the unit tier because it uses a Map-backed execution repository and controlled
-Resource lease client. `launchConsole.test.ts` moved to a mirrored unit path because its Console
+`SandcastleAgentInvoker.test.ts` stays in the integration tier because it uses the real Sandcastle,
+YamlRoster, Daemon Resource, Artifact, sandbox, Git, file-system, and child-process adapters. Its
+scripted Agent Provider is an executable process boundary, not an in-memory port layer. `replayAdapter.test.ts`
+uses the pure `DaemonWorkflowReplay` use case with a Map-backed execution repository and controlled
+Resource lease client. The real `DaemonWorkflowEngine` adapter stays covered by Runner integration.
+`launchConsole.test.ts` moved to a mirrored unit path because its Console
 access and Browser Service ports are controlled; authenticated browser and CLI tests keep the real
 Host transport boundary. `removePurge.test.ts` stays in Integration and now uses the concrete systemd
 service adapter with controlled native command results, together with its real SQLite, file-system,
 process, and recovery-capsule boundaries. `SandboxExecWorkspace.test.ts` performs its sequential
 build and check directly through the real sandbox Workspace. The Integration tier does not count a
 hand-built port as a real boundary.
+
+The lifecycle-control test boundary follows the same rule. Pure request and owner-byte validation
+lives in the unit `LifecycleControlProtocol.test.ts` suite. Endpoint loss and durable resume stay in
+the unit `LifecycleController.test.ts` use-case suite. The real Unix-socket adapter remains in the
+integration `ownership.test.ts` suite with a real Daemon owner. Managed upgrade activation keeps its
+real staged-release integration case. Controlled readiness and rollback outcomes stay in the unit
+`UpgradeActivationController.test.ts` suite. The old mixed socket-plus-fake-control integration
+suite is therefore split without dropping a current behavior.
+
+## Prepared mutation replay matrix
+
+The exact operation inventory has 18 entries. Sixteen SQLite owners use the real
+`SqliteOperationRepository` receipt boundary. Its exhaustive integration matrix proves one atomic
+side effect, the original result on retry, and changed-content conflict for every operation below.
+Each domain suite then proves the named owner action. The two Host-file owners use their own real
+adapter tests and do not enter the SQLite matrix.
+
+| Operation | Real owner evidence |
+| --- | --- |
+| `registerProject`, `relocateProject`, `archiveProject`, `restoreProject` | `registration.test.ts` |
+| `configureProject`, `configureDaemon`, `confirmDaemonConfiguration` | `configurationRetention.test.ts`, `ownership.test.ts` |
+| `repairProject` | `runnerRecovery.test.ts` |
+| `repairRevision`, `collectRevision` | `runApi.test.ts`, `revisionRepair.test.ts` |
+| `startWorkflow`, `stopWorkflow` | `runApi.test.ts` |
+| `cancelRun` | `forcedStop.test.ts` |
+| `retryUncertainAction` | `uncertainAction.test.ts`, `cliContract.test.ts` |
+| `recordGateVerdict` | `resourceDaemon.test.ts`, `gateAndResume.test.ts` |
+| `checkDaemonUpgrade` | `preflight.test.ts`, `activation.test.ts` |
+| `repairDaemonSupervision` | `HostClientRequestRepository.test.ts` |
+| `repairPurgeSafety` | `removePurge.test.ts` |
+
+The Host supervision and purge tests apply the same request twice and prove that the second call
+uses the retained result without a second external side effect. The purge leaf uses a one-use
+capability, so any repeated child application fails the test.
 
 The current CLI command suites are also retained. Their pure command and formatting behavior moved
 from `tests/integration/cli` to mirrored `tests/unit/contexts/{daemon,gate,project,scaffold,shared,

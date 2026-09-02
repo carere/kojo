@@ -3,6 +3,7 @@ import type { RunExecutionState } from "./run.ts";
 
 export type WorkflowActivity = "active" | "inactive";
 export type WorkflowAvailability = "available" | "invalid" | "removed";
+export type WorkflowMode = "trigger" | "no-trigger";
 
 export interface TriggerObservation {
   readonly state: "not-declared" | "not-observed" | "polling" | "delayed" | "failed";

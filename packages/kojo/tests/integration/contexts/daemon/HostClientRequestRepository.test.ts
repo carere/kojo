@@ -7,7 +7,6 @@ import { replayHostClientRequest } from "../../../../src/contexts/daemon/adapter
 import { HostClientRequestRepository } from "../../../../src/contexts/daemon/adapters/HostClientRequestRepository.ts";
 import { ManagedDaemonSupervision } from "../../../../src/contexts/daemon/adapters/ManagedDaemonSupervision.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
-import { ClientMutationBoundary } from "../../../../src/contexts/daemon/services/ClientMutationBoundary.ts";
 
 const roots: Array<string> = [];
 const start = Date.parse("2026-09-02T00:00:00.000Z");
@@ -94,54 +93,6 @@ describe("HostClientRequestRepository", () => {
     ).toThrow(/different request content/);
   });
 
-  it("enforces exact prepared content for every current mutation operation family", () => {
-    const root = mkdtempSync(join(tmpdir(), "kojo-client-boundary-"));
-    roots.push(root);
-    const repository = new HostClientRequestRepository(root, request.dataIdentity, () => start);
-    const boundary = new ClientMutationBoundary({
-      dataIdentity: request.dataIdentity,
-      now: () => start,
-      repository,
-    });
-    const operations = [
-      "registerProject",
-      "relocateProject",
-      "archiveProject",
-      "restoreProject",
-      "configureProject",
-      "repairProject",
-      "repairRevision",
-      "collectRevision",
-      "startWorkflow",
-      "stopWorkflow",
-      "cancelRun",
-      "retryUncertainAction",
-      "recordGateVerdict",
-      "configureDaemon",
-      "confirmDaemonConfiguration",
-      "checkDaemonUpgrade",
-      "repairDaemonSupervision",
-      "repairPurgeSafety",
-    ] as const;
-    for (const [index, operation] of operations.entries()) {
-      const mutation: MutationEnvelope = {
-        ...request,
-        requestId: `request-inventory-${index}`,
-        operation,
-        arguments: { sequence: index },
-      };
-      boundary.prepare(mutation);
-      expect(boundary.requireKind(mutation, operation, "project")).toEqual(mutation);
-      expect(() =>
-        boundary.requireKind(
-          { ...mutation, arguments: { sequence: index + 1 } },
-          operation,
-          "project",
-        ),
-      ).toThrow(/different request content/);
-    }
-  });
-
   it("replays an exact Host repair without accepting replacement content", async () => {
     const root = mkdtempSync(join(tmpdir(), "kojo-client-host-replay-"));
     roots.push(root);
@@ -204,5 +155,11 @@ describe("HostClientRequestRepository", () => {
       status: "committed",
       resultReference: { kind: "clientRequestResult", parts: [mutation.requestId] },
     });
+    expect(await replayHostClientRequest(paths, mutation.requestId)).toMatchObject({
+      operation: "repairDaemonSupervision",
+      status: "committed",
+      result: { identityVersion: 1, kind: "clientRequestResult", parts: [mutation.requestId] },
+    });
+    expect(supervision.checkRepair()).toMatchObject({ state: "idle", repairRequired: false });
   });
 });

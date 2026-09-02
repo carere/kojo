@@ -4,6 +4,7 @@ import type {
   GateExpiryBranch,
   GateVerdict,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/gate";
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 
 export interface DaemonAsking extends AskingDocument {
   readonly token: string;
@@ -34,6 +35,7 @@ export interface RecordVerdictTransition {
   readonly reason: string;
   readonly answerer: string;
   readonly now: string;
+  readonly mutation?: MutationEnvelope;
 }
 
 export interface GateTransitionReceipt {

@@ -192,7 +192,7 @@ describe("real Project Runner recovery", () => {
           parts: [registered.project.projectId, "recover"],
         },
         arguments: { payload: null },
-        preconditions: {},
+        preconditions: { mode: "no-trigger", revisionId: captured.revisionId },
       },
     );
     expect(response.status, await response.clone().text()).toBe(202);
@@ -237,7 +237,7 @@ describe("real Project Runner recovery", () => {
         operation: "repairProject",
         target: { identityVersion: 1, kind: "project", parts: [registered.project.projectId] },
         arguments: {},
-        preconditions: {},
+        preconditions: { mode: "no-trigger", revisionId: captured.revisionId },
       },
     );
     expect(repair.status, await repair.clone().text()).toBe(202);
@@ -306,7 +306,7 @@ describe("real Project Runner recovery", () => {
           parts: [registered.project.projectId, "recover"],
         },
         arguments: { payload: null },
-        preconditions: {},
+        preconditions: { mode: "no-trigger", revisionId: captured.revisionId },
       },
     );
     const admitted = (await response.json()) as StartRunResult;
@@ -410,7 +410,7 @@ describe("real Project Runner recovery", () => {
           parts: [registered.project.projectId, "recover"],
         },
         arguments: { payload: null },
-        preconditions: {},
+        preconditions: { mode: "no-trigger", revisionId: captured.revisionId },
       },
     );
     const admitted = (await response.json()) as StartRunResult;

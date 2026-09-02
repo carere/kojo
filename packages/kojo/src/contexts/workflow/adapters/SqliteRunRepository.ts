@@ -1,6 +1,8 @@
 import type { Database } from "bun:sqlite";
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Effect } from "effect";
+import type { OperationRepository } from "../../daemon/ports/OperationRepository.ts";
 import { rebuildSqliteTableWithoutForeignKey } from "../../shared/adapters/rebuildSqliteTableWithoutForeignKey.ts";
 import type {
   ClaimedRun,
@@ -218,6 +220,7 @@ const rebuildTableCheck = (
 /** The sole-owner SQLite adapter for Run admission, Claims, slots, and replayed results. */
 export class SqliteRunRepository {
   readonly #database: Database;
+  readonly #operations: OperationRepository | undefined;
   readonly #enforceProjectEligibility: boolean;
   readonly #limits: {
     readonly daemon: () => { readonly executingRuns: number; readonly newStartQueue: number };
@@ -238,9 +241,11 @@ export class SqliteRunRepository {
           readonly newStartQueue: number;
         };
       };
+      readonly operations?: OperationRepository;
     } = {},
   ) {
     this.#database = database;
+    this.#operations = options.operations;
     this.#enforceProjectEligibility = options.enforceProjectEligibility ?? true;
     this.#limits =
       options.limits ??
@@ -582,6 +587,29 @@ export class SqliteRunRepository {
               }
             }
 
+            if (request.reviewedMode !== undefined || request.reviewedRevisionId !== undefined) {
+              const workflow = this.#database
+                .query<
+                  { readonly current_revision_id: string | null; readonly trigger_state: string },
+                  [string, string]
+                >(
+                  `SELECT current_revision_id, trigger_state FROM project_workflows
+                    WHERE project_id = ? AND workflow_name = ? AND availability = 'available'`,
+                )
+                .get(request.projectId, request.workflowName);
+              const mode = workflow?.trigger_state === "not-declared" ? "no-trigger" : "trigger";
+              if (
+                workflow === null ||
+                request.reviewedMode !== mode ||
+                request.reviewedRevisionId !== workflow.current_revision_id
+              ) {
+                throw new RunStoreError({
+                  code: "WORKFLOW_REVIEW_STALE",
+                  message: "the Workflow mode or Revision changed after Start was reviewed",
+                });
+              }
+            }
+
             const runId = runIdOf(request.projectId, request.workflowName, request.idempotencyKey);
             const existing = this.#database
               .query<RunRow, [string]>("SELECT * FROM workflow_runs WHERE run_id = ?")
@@ -660,7 +688,28 @@ export class SqliteRunRepository {
                 request.admittedAt,
               ],
             );
-            return { run: runOf(this.#runRow(runId)), duplicate };
+            const run = runOf(this.#runRow(runId));
+            if (request.mutation !== undefined) {
+              this.#operations?.record(
+                request.mutation,
+                {
+                  receiptVersion: 1,
+                  requestId: request.requestId,
+                  dataIdentity: request.dataIdentity,
+                  operation: "startWorkflow",
+                  status: "committed",
+                  result: {
+                    kind: "run",
+                    runId: run.runId,
+                    duplicate,
+                    revisionId: run.revisionId,
+                    state: run.state,
+                  },
+                },
+                request.admittedAt,
+              );
+            }
+            return { run, duplicate };
           })
           .immediate(),
       catch: failure,
@@ -1553,6 +1602,7 @@ export class SqliteRunRepository {
     runId: string,
     requestId: string,
     requestedAt: string,
+    mutation?: MutationEnvelope,
   ): Effect.Effect<
     {
       readonly run: DaemonRun;
@@ -1624,8 +1674,29 @@ export class SqliteRunRepository {
               this.#database.run("DELETE FROM workflow_slots WHERE run_id = ?", [runId]);
               this.#database.run("DELETE FROM workflow_claims WHERE run_id = ?", [runId]);
             }
+            const run = runOf(this.#runRow(runId));
+            if (mutation !== undefined) {
+              this.#operations?.record(
+                mutation,
+                {
+                  receiptVersion: 1,
+                  requestId,
+                  dataIdentity: mutation.dataIdentity,
+                  operation: "cancelRun",
+                  status: requiresExecutionStop ? "accepted" : "committed",
+                  result: {
+                    kind: "cancel",
+                    runId: run.runId,
+                    cancellation: run.cancellation?.state ?? "requested",
+                    executionStopped: run.cancellation?.state === "confirmed",
+                    state: run.state,
+                  },
+                },
+                requestedAt,
+              );
+            }
             return {
-              run: runOf(this.#runRow(runId)),
+              run,
               alreadyRequested: prior !== null || receipt !== null,
               requiresExecutionStop,
             };
@@ -1641,6 +1712,7 @@ export class SqliteRunRepository {
     readonly projectId: string;
     readonly workflowName: string;
     readonly acceptedAt: string;
+    readonly mutation?: MutationEnvelope;
   }): Effect.Effect<
     {
       readonly targetSetId: string;
@@ -1763,11 +1835,35 @@ export class SqliteRunRepository {
               this.#database.run("DELETE FROM workflow_slots WHERE run_id = ?", [target.run_id]);
               this.#database.run("DELETE FROM workflow_claims WHERE run_id = ?", [target.run_id]);
             }
-            return {
+            const result = {
               targetSetId,
               targetRunIds: targets.map((target) => target.run_id),
               alreadyAccepted: false,
             };
+            if (request.mutation !== undefined) {
+              this.#operations?.record(
+                request.mutation,
+                {
+                  receiptVersion: 1,
+                  requestId: request.requestId,
+                  dataIdentity: request.dataIdentity,
+                  operation: "stopWorkflow",
+                  status: "accepted",
+                  result: {
+                    kind: "stop",
+                    projectId: request.projectId,
+                    workflowName: request.workflowName,
+                    activity: "inactive",
+                    admittedRunsContinue: false,
+                    forced: true,
+                    targetSetId,
+                    targetedRunIds: result.targetRunIds,
+                  },
+                },
+                request.acceptedAt,
+              );
+            }
+            return result;
           })
           .immediate(),
       catch: failure,
@@ -1778,6 +1874,7 @@ export class SqliteRunRepository {
     targetRunIds: ReadonlyArray<string>,
     stoppedAt: string,
     cleanup: { readonly state: "confirmed" | "fault"; readonly detail?: string },
+    operation?: { readonly mutation: MutationEnvelope; readonly result: JsonValue },
   ): Effect.Effect<void, RunStoreError> =>
     Effect.try({
       try: () =>
@@ -1831,6 +1928,19 @@ export class SqliteRunRepository {
                 ],
               );
             }
+            if (operation !== undefined)
+              this.#operations?.record(
+                operation.mutation,
+                {
+                  receiptVersion: 1,
+                  requestId: operation.mutation.requestId,
+                  dataIdentity: operation.mutation.dataIdentity,
+                  operation: operation.mutation.operation,
+                  status: "committed",
+                  result: operation.result,
+                },
+                stoppedAt,
+              );
           })
           .immediate(),
       catch: failure,

@@ -353,6 +353,17 @@ const workflowMutation = async <A>(
   force = false,
 ): Promise<A> => {
   const bootstrap = await compatibility();
+  const reviewed =
+    action === "start"
+      ? (await readWorkflows(projectId)).workflows.find(
+          (workflow) => workflow.projectId === projectId && workflow.workflowName === workflowName,
+        )
+      : undefined;
+  if (action === "start" && reviewed?.currentRevisionId === undefined)
+    throw new ConsoleAccessError(
+      "api-refused",
+      "The selected Workflow has no current reviewed revision.",
+    );
   const requestId = crypto.randomUUID();
   return prepareAndMutate<A>(
     `/api/v1/projects/${encodeURIComponent(projectId)}/workflows/${encodeURIComponent(workflowName)}/actions/${action}`,
@@ -363,7 +374,13 @@ const workflowMutation = async <A>(
       operation: `${action}Workflow`,
       target: { identityVersion: 1, kind: "workflow", parts: [projectId, workflowName] },
       arguments: { ...(payload === undefined ? {} : { payload }), ...(force ? { force } : {}) },
-      preconditions: {},
+      preconditions:
+        action === "start" && reviewed !== undefined
+          ? {
+              mode: reviewed.trigger.state === "not-declared" ? "no-trigger" : "trigger",
+              revisionId: reviewed.currentRevisionId as string,
+            }
+          : {},
     },
   );
 };

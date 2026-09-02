@@ -333,8 +333,10 @@ describe("remove safety and exact offline purge", () => {
       recovery.apply(Buffer.from(JSON.stringify(forged), "utf8").toString("base64url")),
     ).rejects.toThrow("plan token is invalid");
     const recovered = await recovery.apply(checked.planToken);
+    const replayedAfterLostResolution = await recovery.apply(checked.planToken);
 
     expect(recovered).toMatchObject({ outcome: "recovered", dataIdentity: test.dataIdentity });
+    expect(replayedAfterLostResolution).toEqual(recovered);
     expect(purger.check().plan.evidenceId).toBe(recovered.evidenceId);
     expect(test.native.inspect()).toMatchObject({
       automaticStart: "disabled",

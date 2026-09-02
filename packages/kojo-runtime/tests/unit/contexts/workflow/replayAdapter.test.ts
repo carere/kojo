@@ -3,9 +3,9 @@ import { describe, expect, it } from "@effect/vitest";
 import { Context, Effect, Layer, Schema } from "effect";
 import { Activity, Workflow, WorkflowEngine } from "effect/unstable/workflow";
 import { ResourceLeaseClient } from "../../../../src/contexts/project/ports/ResourceLeaseClient.ts";
-import { layer as daemonEngine } from "../../../../src/contexts/workflow/adapters/DaemonWorkflowEngine.ts";
 import { ActionRecoveryPolicy } from "../../../../src/contexts/workflow/models/ActionRecoveryPolicy.ts";
 import { DaemonExecutionRepository } from "../../../../src/contexts/workflow/ports/DaemonExecutionRepository.ts";
+import { replayLayer } from "../../../../src/contexts/workflow/services/DaemonWorkflowReplay.ts";
 import { code } from "../../../../src/contexts/workflow/services/phase/code.ts";
 
 describe("Daemon Workflow engine replay", () => {
@@ -67,7 +67,7 @@ describe("Daemon Workflow engine replay", () => {
           registration.pipe(
             Layer.provide(resources),
             Layer.provideMerge(
-              daemonEngine("a".repeat(64), resources).pipe(Layer.provide(repository)),
+              replayLayer("a".repeat(64), resources).pipe(Layer.provide(repository)),
             ),
           ),
         ),
@@ -124,7 +124,7 @@ describe("Daemon Workflow engine replay", () => {
           }).pipe(
             Effect.provide(
               registration.pipe(
-                Layer.provideMerge(daemonEngine("a".repeat(64)).pipe(Layer.provide(repository))),
+                Layer.provideMerge(replayLayer("a".repeat(64)).pipe(Layer.provide(repository))),
               ),
             ),
             Effect.withSpan(runner),
@@ -178,7 +178,7 @@ describe("Daemon Workflow engine replay", () => {
       }).pipe(
         Effect.provide(
           registration.pipe(
-            Layer.provideMerge(daemonEngine("a".repeat(64)).pipe(Layer.provide(repository))),
+            Layer.provideMerge(replayLayer("a".repeat(64)).pipe(Layer.provide(repository))),
           ),
         ),
       );

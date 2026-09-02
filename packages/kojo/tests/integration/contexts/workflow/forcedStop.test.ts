@@ -181,7 +181,7 @@ describe("real Project Runner cancellation", () => {
         operation: "startWorkflow",
         target: { identityVersion: 1, kind: "workflow", parts: [projectId, "blocked"] },
         arguments: { payload: null },
-        preconditions: {},
+        preconditions: { mode: "no-trigger", revisionId: captured.revisionId },
       },
     );
     expect(start.status, await start.clone().text()).toBe(202);
