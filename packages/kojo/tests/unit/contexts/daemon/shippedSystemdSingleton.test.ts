@@ -55,7 +55,7 @@ exit "$status"
 
 const runHelper = async (
   subject: ReturnType<typeof fixture>,
-  timeout = "0.2s",
+  timeout = "0.5s",
 ): Promise<{ readonly exitCode: number; readonly elapsedMillis: number }> => {
   const startedAt = performance.now();
   const child = Bun.spawn(

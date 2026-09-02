@@ -10,6 +10,7 @@ evidence_user=kojo-shipped-evidence
 key=/tmp/kojo-shipped-evidence-key
 policy=/etc/polkit-1/rules.d/49-kojo-shipped-evidence.rules
 user_script=.github/scripts/systemd-shipped-user-evidence.sh
+login_readiness_script=.github/scripts/systemd-shipped-login-readiness.sh
 playwright_cli=$workspace/apps/console/node_modules/@playwright/test/cli.js
 diagnostic=$evidence_directory/controller-diagnostic.log
 diagnostic_step=preflight
@@ -134,7 +135,12 @@ done
 managed_kojo=$evidence_home/.local/share/kojo/bin/kojo
 diagnostic_step=linger-authorization
 ssh "${ssh_arguments[@]}" \
-  "$remote_prefix && PATH=/usr/bin:/bin '$managed_kojo' daemon start >'$evidence_directory/managed-start-after-login.log' && if PATH=/usr/bin:/bin '$managed_kojo' daemon keep-running-after-logout >'$evidence_directory/keep-running-refusal.log' 2>&1; then echo 'Linger unexpectedly changed without authority.' >&2; exit 90; fi"
+  "$remote_prefix && bash '$login_readiness_script' '$evidence_directory/login-readiness-observations.jsonl' '$evidence_directory/login-readiness-final.json' '$evidence_directory/login-readiness.stderr.log' 20 0.25s && PATH=/usr/bin:/bin '$managed_kojo' daemon start >'$evidence_directory/managed-start-after-login.log' 2>'$evidence_directory/managed-start-after-login.stderr.log' && if PATH=/usr/bin:/bin '$managed_kojo' daemon keep-running-after-logout >'$evidence_directory/keep-running-refusal.log' 2>&1; then echo 'Linger unexpectedly changed without authority.' >&2; exit 90; fi"
+jq -e '
+  .accepted == true and
+  .managerReady == true and
+  .noServiceStartRepairOrLingerChange == true
+' "$evidence_directory/login-readiness-final.json" >/dev/null
 [[ $(loginctl show-user "$evidence_user" --property=Linger --value) == no ]]
 
 install -d -m 0755 /etc/polkit-1/rules.d
