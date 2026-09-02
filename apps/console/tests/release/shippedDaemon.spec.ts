@@ -1,3 +1,4 @@
+import { isTerminalRunUncertaintyResolved } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 import { expect, test } from "@playwright/test";
 
 const required = (name: string): string => {
@@ -46,16 +47,13 @@ test("renders actual shipped Daemon records through one authenticated browser se
     if (!response.ok) throw new Error(`the Run wire response failed with ${response.status}`);
     return (await response.json()) as Record<string, unknown>;
   }, runId);
-  for (const optional of [
-    "queueReason",
-    "executionFault",
-    "cancellation",
-    "recovery",
-    "cleanup",
-    "uncertainty",
-  ]) {
+  for (const optional of ["queueReason", "executionFault", "cancellation", "recovery", "cleanup"]) {
     expect(Object.hasOwn(wire, optional), `${optional} must be absent, not null`).toBe(false);
   }
+  expect(
+    isTerminalRunUncertaintyResolved(wire.uncertainty),
+    "uncertainty must be absent or result-confirmed with original-result evidence",
+  ).toBe(true);
   const phases = wire.phases as ReadonlyArray<Record<string, unknown>>;
   expect(phases.length).toBeGreaterThanOrEqual(2);
   expect(phases.every((phase) => !Object.hasOwn(phase, "errorTag"))).toBe(true);

@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { isTerminalRunUncertaintyResolved } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 
 export interface ShippedRunEvidence {
   readonly valid: boolean;
@@ -8,9 +9,6 @@ export interface ShippedRunEvidence {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
-
-const nonEmptyString = (value: unknown): value is string =>
-  typeof value === "string" && value.length > 0;
 
 const invalid = (diagnostic: string): ShippedRunEvidence => ({
   valid: false,
@@ -54,32 +52,9 @@ export const shippedRunEvidence = (output: string): ShippedRunEvidence => {
     return { valid: true, diagnostic: "terminal Run has no uncertainty", uncertainty: "absent" };
   }
   const uncertainty = run.uncertainty;
-  if (!isRecord(uncertainty)) return invalid("terminal Run uncertainty is not a record");
-  if (uncertainty.state !== "result-confirmed") {
+  if (!isTerminalRunUncertaintyResolved(uncertainty)) {
+    if (!isRecord(uncertainty)) return invalid("terminal Run uncertainty is not a record");
     return invalid(`terminal Run uncertainty is ${String(uncertainty.state)}`);
-  }
-  if (
-    !nonEmptyString(uncertainty.actionId) ||
-    !nonEmptyString(uncertainty.revisionId) ||
-    !nonEmptyString(uncertainty.phasePath) ||
-    !Number.isSafeInteger(uncertainty.attempt) ||
-    Number(uncertainty.attempt) < 1 ||
-    !nonEmptyString(uncertainty.inputHash) ||
-    !["recover-result", "prove-not-performed", "safe-repetition", "unresolved"].includes(
-      String(uncertainty.recoveryPolicy),
-    ) ||
-    !Number.isSafeInteger(uncertainty.uncertaintyRevision) ||
-    Number(uncertainty.uncertaintyRevision) < 0
-  ) {
-    return invalid("terminal result-confirmed uncertainty has invalid authority fields");
-  }
-  if (
-    !isRecord(uncertainty.evidence) ||
-    uncertainty.evidence.kind !== "original-result" ||
-    !nonEmptyString(uncertainty.evidence.detail) ||
-    !nonEmptyString(uncertainty.evidence.observedAt)
-  ) {
-    return invalid("terminal result-confirmed uncertainty has no original-result evidence");
   }
   return {
     valid: true,

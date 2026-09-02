@@ -147,6 +147,43 @@ export interface RunDocument {
   }>;
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** True when a terminal Run has no external-action record or has a confirmed original result. */
+export const isTerminalRunUncertaintyResolved = (value: unknown): boolean => {
+  if (value === undefined) return true;
+  if (!isRecord(value) || value.state !== "result-confirmed") return false;
+  if (
+    typeof value.actionId !== "string" ||
+    value.actionId.length === 0 ||
+    typeof value.revisionId !== "string" ||
+    value.revisionId.length === 0 ||
+    typeof value.phasePath !== "string" ||
+    value.phasePath.length === 0 ||
+    !Number.isSafeInteger(value.attempt) ||
+    Number(value.attempt) < 1 ||
+    typeof value.inputHash !== "string" ||
+    value.inputHash.length === 0 ||
+    !["recover-result", "prove-not-performed", "safe-repetition", "unresolved"].includes(
+      String(value.recoveryPolicy),
+    ) ||
+    !Number.isSafeInteger(value.uncertaintyRevision) ||
+    Number(value.uncertaintyRevision) < 0
+  ) {
+    return false;
+  }
+  const evidence = value.evidence;
+  return (
+    isRecord(evidence) &&
+    evidence.kind === "original-result" &&
+    typeof evidence.detail === "string" &&
+    evidence.detail.length > 0 &&
+    typeof evidence.observedAt === "string" &&
+    evidence.observedAt.length > 0
+  );
+};
+
 export interface RetryUncertainActionResult {
   readonly kind: "retry-uncertain";
   readonly runId: string;
