@@ -20,6 +20,9 @@ Read these records in order:
 
 Kojo requires Bun.
 
+The current release is a breaking cutover from repository-local execution to one per-user Daemon.
+See the [Daemon cutover release notes](docs/release-notes/daemon-cutover.md).
+
 ```bash
 bun add -g @carere/kojo
 kojo daemon install

@@ -30,6 +30,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -50,6 +51,19 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Require complete evidence for this revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=success&per_page=1" --jq '.workflow_runs[0].id // empty')
+          if [ -z "$run_id" ]; then
+            echo "::error::this revision has no successful ci run with complete supported-Host evidence."
+            exit 1
+          fi
+          mkdir -p /tmp/kojo-complete-release-evidence
+          gh run download "$run_id" --name complete-breaking-release-evidence --dir /tmp/kojo-complete-release-evidence
+          bun .github/scripts/complete-release-evidence.ts verify-complete /tmp/kojo-complete-release-evidence "$GITHUB_SHA"
 
       # The gate that makes typing the version meaningful. All public packages are one coordinated
       # release in this expand step, and the runtime manifest repeats its package version.

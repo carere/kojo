@@ -27,6 +27,8 @@ jobs:
     # Console first. Twenty minutes is roughly four times the observed run, which leaves room for a
     # slow runner without letting a hung daemon hold the queue all day.
     timeout-minutes: 30
+    env:
+      NO_COLOR: "1"
     steps:
       - name: Git checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -81,10 +83,12 @@ jobs:
       # Discover the list with `moon query tasks`; it is not hardcoded anywhere else.
 
       - name: Contract and runtime tests
-        run: moon run kojo-client-contracts:test kojo-runner-contracts:test kojo-runtime:test kojo-runtime:test-integration
+        run: |
+          mkdir -p .release-evidence/logs
+          moon run kojo-client-contracts:test kojo-runner-contracts:test kojo-runtime:test kojo-runtime:test-integration --force 2>&1 | tee .release-evidence/logs/contract-runtime.log
 
       - name: Unit tests and package graph
-        run: moon run kojo:test kojo:check-packages
+        run: moon run kojo:test kojo:check-packages --force 2>&1 | tee .release-evidence/logs/kojo-unit.log
 
       # Two guards that are neither a test tier nor a lint: no bare promise reaches Kojo's published
       # declarations, and the package refuses to build without the Console in it.
@@ -96,13 +100,23 @@ jobs:
         working-directory: apps/console
 
       - name: Browser tests
-        run: moon run console:test-browser
+        run: moon run console:test-browser --force 2>&1 | tee .release-evidence/logs/console-browser.log
 
       # Last because it is the slowest and the only one that needs a container daemon. `ubuntu-latest`
       # ships Docker; the suites build the one image they need and skip with a stated reason if the
       # daemon is missing, so a runner without one says so rather than passing quietly.
       - name: Container tests
-        run: moon run kojo:test-integration
+        run: moon run kojo:test-integration --force 2>&1 | tee .release-evidence/logs/kojo-integration.log
+
+      - name: Record uncached core release evidence
+        run: bun .github/scripts/complete-release-evidence.ts collect-core .release-evidence/core-evidence.json "$(git rev-parse HEAD)" .release-evidence/logs
+
+      - name: Upload core release evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: core-release-evidence
+          path: .release-evidence
+          if-no-files-found: error
 
   native-systemd-host:
     name: Native systemd host evidence
@@ -239,4 +253,54 @@ jobs:
         with:
           name: shipped-macos-release-evidence
           path: ${{ runner.temp }}/artifacts/verification/daemon
+          if-no-files-found: error
+
+  complete-release-evidence:
+    name: Complete breaking release evidence
+    needs: [ci, native-systemd-host, shipped-systemd-release, shipped-macos-release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup toolchain
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        with:
+          auto-install: true
+
+      - name: Download core evidence
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: core-release-evidence
+          path: .release-evidence-input/core
+
+      - name: Download native systemd evidence
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: native-systemd-host-evidence
+          path: .release-evidence-input/native-systemd
+
+      - name: Download shipped systemd evidence
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: shipped-systemd-release-evidence
+          path: .release-evidence-input/shipped-systemd
+
+      - name: Download shipped macOS evidence
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: shipped-macos-release-evidence
+          path: .release-evidence-input/shipped-macos
+
+      - name: Accept the complete breaking release evidence
+        run: bun .github/scripts/complete-release-evidence.ts complete .release-evidence-input .release-evidence-output "$(git rev-parse HEAD)"
+
+      - name: Upload complete breaking release evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: complete-breaking-release-evidence
+          path: .release-evidence-output/artifacts/verification/daemon
           if-no-files-found: error

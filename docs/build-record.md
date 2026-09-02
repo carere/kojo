@@ -33,6 +33,16 @@ The release guard checks that removed commands do not parse, removed package exp
 and forbidden compatibility text is absent. TypeScript, Biome, Knip, package checks, unit tests, and
 integration tests grade the remaining graph.
 
+The `Complete breaking release evidence` CI job is the final acceptance gate. It waits for core,
+native systemd, shipped systemd, and shipped macOS jobs from one tested revision. It writes one
+record for each of the 56 required check IDs under
+`artifacts/verification/daemon/<tested-revision>/<check-id>/`. It refuses a cache hit, zero loaded
+tests, an unnamed skip, a revision mismatch, a missing supported Host, or a missing protected-safety
+regression result. The release artifact also contains one index with the complete decision.
+
+The breaking changes and supported command surface are in
+[`release-notes/daemon-cutover.md`](release-notes/daemon-cutover.md).
+
 ### Shipped macOS evidence
 
 The `Shipped macOS release evidence` CI job runs only on a disposable macOS runner account. It

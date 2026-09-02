@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 interface PackageManifest {
+  readonly bin?: Readonly<Record<string, string>>;
+  readonly files?: ReadonlyArray<string>;
   readonly exports?: Readonly<Record<string, string>>;
 }
 
@@ -77,10 +79,61 @@ describe("the Daemon contract cutover", () => {
         "packages/kojo-runtime/package.json",
         "docs/adr",
         "docs/design",
+        "docs/release-notes",
       ],
       { cwd: root, encoding: "utf8" },
     );
 
     expect(result.status, result.stdout || result.stderr).toBe(1);
+  });
+
+  it("keeps public guidance and package entry points on the one-Daemon release", () => {
+    const root = new URL("../../../../../", import.meta.url);
+    const globalPackage = manifest(new URL("packages/kojo/package.json", root));
+    const runtimePackage = manifest(new URL("packages/kojo-runtime/package.json", root));
+    const runtimeManifest = readFileSync(
+      new URL("packages/kojo-runtime/runtime-manifest.json", root),
+      "utf8",
+    );
+    const guidance = [
+      readFileSync(new URL("README.md", root), "utf8"),
+      readFileSync(new URL(".kojo/README.md", root), "utf8"),
+      readFileSync(new URL("docs/design/typescript-effect.md", root), "utf8"),
+      readFileSync(new URL("docs/release-notes/daemon-cutover.md", root), "utf8"),
+      readFileSync(
+        new URL("packages/kojo/src/contexts/scaffold/templates/support.ts", root),
+        "utf8",
+      ),
+      readFileSync(
+        new URL("packages/kojo/src/contexts/scaffold/templates/skills.ts", root),
+        "utf8",
+      ),
+    ].join("\n");
+    const releaseWorkflow = readFileSync(new URL(".github/workflows/release.yml", root), "utf8");
+
+    expect(globalPackage.bin).toEqual({ kojo: "./src/main.ts" });
+    expect(globalPackage.files).toEqual(["console", "managed-release.json", "src"]);
+    expect(runtimePackage.files).toEqual(["LICENSE", "runtime-manifest.json", "src"]);
+    expect(runtimePackage.exports).toMatchObject({
+      "./runner/main": "./src/runner/main.ts",
+      "./validator/main": "./src/validator/main.ts",
+    });
+    expect(runtimeManifest).toContain('"hosts": ["darwin", "linux"]');
+    expect(releaseWorkflow).toContain("complete-breaking-release-evidence");
+    expect(releaseWorkflow).toContain("verify-complete");
+    for (const command of [
+      "kojo init",
+      "kojo doctor",
+      "kojo daemon install",
+      "kojo project register --path .",
+      "kojo workflow list --project <project-id>",
+      "kojo workflow start <project-id>",
+      "kojo run status <run-id>",
+      "kojo gate list",
+      "kojo gate answer <token>",
+      "kojo ui",
+    ]) {
+      expect(guidance).toContain(command);
+    }
   });
 });
