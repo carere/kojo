@@ -571,6 +571,38 @@ const sanitizeGateSnapshot = (snapshot: GateSnapshot): object => ({
   })),
 });
 
+export const assertShippedWaitingGateEvidence = (run: RunStatus, snapshot: GateSnapshot): void => {
+  const unanswered = snapshot.askings.filter(
+    (asking) => asking.identity.runId === run.runId && asking.state === "unanswered",
+  );
+  if (
+    run.state !== "suspended" ||
+    (run.phases?.length ?? 0) < 1 ||
+    (run.artifacts?.length ?? 0) < 1 ||
+    (run.gates?.length ?? 0) !== 0 ||
+    (run.sandboxes?.length ?? 0) < 1 ||
+    unanswered.length !== 1 ||
+    unanswered[0]?.token.length === 0
+  ) {
+    throw new Error(
+      `the pre-Verdict Run and Asking evidence is incomplete: ${JSON.stringify({ run, gate: sanitizeGateSnapshot(snapshot) })}`,
+    );
+  }
+};
+
+export const assertShippedCompletedRunEvidence = (run: RunStatus): void => {
+  if (
+    run.state !== "succeeded" ||
+    (run.phases?.length ?? 0) < 2 ||
+    (run.artifacts?.length ?? 0) < 1 ||
+    run.gates?.length !== 1 ||
+    run.gates[0]?.outcome !== "answered" ||
+    run.sandboxes?.some((sandbox) => sandbox.outcome === "released") !== true
+  ) {
+    throw new Error(`the settled real Run evidence is incomplete: ${JSON.stringify(run)}`);
+  }
+};
+
 const modes = (paths: ReadonlyArray<string>): ReadonlyArray<object> =>
   paths.map((path) => {
     const stat = statSync(path);
@@ -889,15 +921,7 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
       { cwd: project, env: environment },
     );
     const waitingDocument = (JSON.parse(waitingStatus.stdout) as { readonly run: RunStatus }).run;
-    if (
-      waitingDocument.state !== "suspended" ||
-      (waitingDocument.phases?.length ?? 0) < 1 ||
-      (waitingDocument.artifacts?.length ?? 0) < 1 ||
-      (waitingDocument.gates?.length ?? 0) < 1 ||
-      (waitingDocument.sandboxes?.length ?? 0) < 1
-    ) {
-      throw new Error(`the suspended real Trace is incomplete: ${JSON.stringify(waitingDocument)}`);
-    }
+    assertShippedWaitingGateEvidence(waitingDocument, asking.snapshot);
     recorder.write("run-waiting.json", waitingDocument);
 
     const launch = await recorder.run(
@@ -1021,14 +1045,7 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
       const document = (JSON.parse(result.stdout) as { readonly run: RunStatus }).run;
       return document.state === "succeeded" ? document : undefined;
     }, "the managed Daemon did not apply the Verdict and finish the Run");
-    if (
-      (completed.phases?.length ?? 0) < 2 ||
-      (completed.artifacts?.length ?? 0) < 1 ||
-      completed.gates?.some((gate) => gate.outcome === "answered") !== true ||
-      completed.sandboxes?.some((sandbox) => sandbox.outcome === "released") !== true
-    ) {
-      throw new Error(`the real Run record is incomplete: ${JSON.stringify(completed)}`);
-    }
+    assertShippedCompletedRunEvidence(completed);
     recorder.write("run-complete.json", completed);
     const completedLaunch = await recorder.run(
       "managed-authenticated-console-grant",
@@ -1096,17 +1113,7 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
       { cwd: project, env: managedEnvironment },
     );
     const persistedRun = (JSON.parse(persistedStatus.stdout) as { readonly run: RunStatus }).run;
-    if (
-      persistedRun.state !== "succeeded" ||
-      (persistedRun.phases?.length ?? 0) < 2 ||
-      (persistedRun.artifacts?.length ?? 0) < 1 ||
-      persistedRun.gates?.some((gate) => gate.outcome === "answered") !== true ||
-      persistedRun.sandboxes?.some((sandbox) => sandbox.outcome === "released") !== true
-    ) {
-      throw new Error(
-        `native replacement lost persisted Run evidence: ${JSON.stringify(persistedRun)}`,
-      );
-    }
+    assertShippedCompletedRunEvidence(persistedRun);
     recorder.write("run-after-native-replacement.json", persistedRun);
     const replacementLaunch = await recorder.run(
       "authenticated-console-grant-after-native-replacement",
