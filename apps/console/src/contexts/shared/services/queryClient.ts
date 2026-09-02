@@ -5,6 +5,12 @@ import { refused } from "./api.ts";
 /** How often a live Console asks again. One second, per console.md §7. */
 export const pollMillis = 1_000;
 
+export const daemonPollInterval = (
+  query: { readonly state: { readonly fetchFailureCount: number } },
+  interval: number | false,
+): number | false =>
+  query.state.fetchFailureCount > 0 || !daemonReadsAllowed() ? false : interval;
+
 /**
  * The Console's Daemon API cache.
  *

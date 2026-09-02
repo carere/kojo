@@ -143,7 +143,7 @@ const acquireOnce = (config: SandboxConfig) =>
           ]).pipe(Effect.asVoid),
         ),
       );
-    const sandbox: SandboxHandle = { ...acquired, id, environment };
+    const sandbox: SandboxHandle = { ...acquired, id, environment: request.environment };
 
     // The one trace write in Kojo that is deliberately **outside** an activity. Everywhere else
     // that would be a bug — replay re-runs it and one phase leaves four rows. Here re-running is
@@ -160,7 +160,7 @@ const acquireOnce = (config: SandboxConfig) =>
             kind: sandbox.capabilities.kind,
             branch: sandbox.branch,
             worktreePath: sandbox.worktreePath,
-            environment,
+            environment: request.environment,
             acquiredAt,
             releasedAt,
             // A suspension arrives as an ordinary interrupt, so this is the outcome a gate leaves

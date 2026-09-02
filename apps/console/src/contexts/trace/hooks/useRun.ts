@@ -1,7 +1,7 @@
 import { type UseQueryResult, useQuery } from "@tanstack/solid-query";
 import { readRun } from "../../daemon/services/browserAccess.ts";
 import { refused } from "../../shared/services/api.ts";
-import { pollMillis } from "../../shared/services/queryClient.ts";
+import { daemonPollInterval, pollMillis } from "../../shared/services/queryClient.ts";
 import type { RunDoc } from "../models/RunDoc.ts";
 
 /**
@@ -100,12 +100,16 @@ export const useRun = (runId: () => string): UseQueryResult<RunDoc, Error> =>
       readonly state: {
         readonly data: RunDoc | undefined;
         readonly error: Error | null;
+        readonly fetchFailureCount: number;
       };
     }) => {
       if (refused(query.state.error)) return false as const;
       const outcome = query.state.data?.run.outcome;
-      return outcome === "succeeded" || outcome === "failed" || outcome === "cancelled"
-        ? (false as const)
-        : pollMillis;
+      return daemonPollInterval(
+        query,
+        outcome === "succeeded" || outcome === "failed" || outcome === "cancelled"
+          ? false
+          : pollMillis,
+      );
     },
   }));

@@ -33,10 +33,14 @@ const tier = (name: EvidenceTier): LoadedTestEvidence => ({
   namedSkips: [],
   cacheHit: false,
   log: `${name}.log`,
-  tests: requiredReleaseChecks
-    .flatMap((check) => check.observations)
-    .filter((item) => item.tier === name)
-    .map((item) => ({ path: item.path, name: item.name, status: "passed" as const })),
+  tests: [
+    ...new Map(
+      requiredReleaseChecks
+        .flatMap((check) => check.observations)
+        .filter((item) => item.tier === name)
+        .map((item) => [`${item.path}\0${item.name}`, item]),
+    ).values(),
+  ].map((item) => ({ path: item.path, name: item.name, status: "passed" as const })),
 });
 
 const input = (): CompleteEvidenceInput => ({
@@ -133,6 +137,31 @@ describe("complete breaking release evidence", () => {
         tiers: { ...subject.tiers, "kojo-integration": { ...integration, tests: skipped } },
       }),
     ).toThrow("did not pass");
+  });
+
+  it("refuses a broad substring or a missing required tier observation", () => {
+    const subject = input();
+    const unit = subject.tiers["kojo-unit"] as LoadedTestEvidence;
+    const required = requiredReleaseChecks.find((check) => check.checkId === "STATE-01");
+    const named = required?.observations.find((observation) => observation.tier === "kojo-unit");
+    expect(named).toBeDefined();
+    const broad = unit.tests.map((test) =>
+      test.path === named?.path && test.name === named.name
+        ? { ...test, name: `${test.name} with removed required behavior` }
+        : test,
+    );
+    expect(() =>
+      completeReleaseEvidence({
+        ...subject,
+        tiers: { ...subject.tiers, "kojo-unit": { ...unit, tests: broad } },
+      }),
+    ).toThrow("did not load named observation");
+
+    for (const check of requiredReleaseChecks) {
+      expect(new Set(check.observations.map((observation) => observation.tier))).toEqual(
+        new Set(check.tiers),
+      );
+    }
   });
 });
 

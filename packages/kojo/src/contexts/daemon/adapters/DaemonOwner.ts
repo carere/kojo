@@ -3,9 +3,9 @@ import type { NativeService } from "../ports/NativeService.ts";
 import {
   type RunningDaemon as ComposedRunningDaemon,
   type StartDaemonOptions as CompositionOptions,
-  recoverPurgeSafety as recoverPurgeSafetyComposition,
   startDaemonComposition,
 } from "../services/DaemonComposition.ts";
+import { recoverPurgeSafety as recoverPurgeSafetyUseCase } from "../use-cases/recoverPurgeSafety.ts";
 
 export type RunningDaemon = ComposedRunningDaemon;
 export type StartDaemonOptions = CompositionOptions;
@@ -23,4 +23,4 @@ export const recoverPurgeSafety = (
   nativeService: NativeService,
   now: () => number = Date.now,
 ): Promise<void> =>
-  recoverPurgeSafetyComposition(paths, operationId, planToken, capability, nativeService, now);
+  recoverPurgeSafetyUseCase(paths, operationId, planToken, capability, nativeService, now);

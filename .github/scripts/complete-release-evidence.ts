@@ -41,12 +41,6 @@ const collectCore = (arguments_: ReadonlyArray<string>): void => {
   if (output === undefined || testedRevision === undefined || logDirectory === undefined) {
     fail("collect-core requires OUTPUT REVISION LOG_DIRECTORY");
   }
-  for (const required of requiredReleaseChecks) {
-    if (!existsSync(required.testPath)) fail(`${required.checkId} names missing ${required.testPath}`);
-    if (!readFileSync(required.testPath, "utf8").includes(required.testName)) {
-      fail(`${required.checkId} names missing test ${required.testName}`);
-    }
-  }
   const tierLogs = {
     "contract-runtime": "contract-runtime.log",
     "kojo-unit": "kojo-unit.log",
@@ -69,6 +63,22 @@ const collectCore = (arguments_: ReadonlyArray<string>): void => {
     }),
   );
   const integration = tiers["kojo-integration"] as LoadedTestEvidence;
+  for (const required of requiredReleaseChecks) {
+    for (const observation of required.observations) {
+      const receipt = tiers[observation.tier] as LoadedTestEvidence | undefined;
+      if (receipt === undefined) continue;
+      const matches = receipt.tests.filter(
+        (test) =>
+          (test.path === observation.path || observation.path.endsWith(test.path)) &&
+          test.name === observation.name,
+      );
+      if (matches.length !== 1 || matches[0]?.status !== "passed") {
+        fail(
+          `${required.checkId} exact observation is missing, duplicated, skipped, or failed: ${observation.path} > ${observation.name}`,
+        );
+      }
+    }
+  }
   const protectedTest = integration.tests.find(
     (test) =>
       test.path.endsWith("tests/integration/contexts/sandbox/guards/promiseFreeTypes.test.ts") &&
@@ -184,7 +194,7 @@ const hostTier = (
     log,
     tests: (manifest.checks ?? []).map((check) => ({
       path: manifest.checkId === undefined ? "evidence.json" : `${manifest.checkId}/evidence-manifest.json`,
-      name: `${check.name}: ${check.actual}`,
+      name: check.name,
       status: ["passed", "installed", "recorded", "usable"].includes(check.actual) ||
           check.actual.startsWith("rendered")
         ? "passed"

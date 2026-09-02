@@ -1,6 +1,6 @@
 import { type UseQueryResult, useQuery } from "@tanstack/solid-query";
 import { readRuns } from "../../daemon/services/browserAccess.ts";
-import { pollMillis } from "../../shared/services/queryClient.ts";
+import { daemonPollInterval, pollMillis } from "../../shared/services/queryClient.ts";
 import { allSettled, type RunLine } from "../models/RunLine.ts";
 
 /**
@@ -33,6 +33,9 @@ export const useRuns = (): UseQueryResult<ReadonlyArray<RunLine>, Error> =>
         }),
       ),
     refetchInterval: (query: {
-      readonly state: { readonly data: ReadonlyArray<RunLine> | undefined };
-    }) => (allSettled(query.state.data ?? []) ? (false as const) : pollMillis),
+      readonly state: {
+        readonly data: ReadonlyArray<RunLine> | undefined;
+        readonly fetchFailureCount: number;
+      };
+    }) => daemonPollInterval(query, allSettled(query.state.data ?? []) ? false : pollMillis),
   }));

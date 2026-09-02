@@ -13,7 +13,9 @@ export const observeDaemonNotifications = (client: QueryClient): (() => void) =>
       }
       if (controller.signal.aborted) return;
       try {
-        const response = await openDaemonNotifications(controller.signal);
+        const response = await openDaemonNotifications(
+          AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]),
+        );
         noteDaemonConnected();
         const reader = response.body?.getReader();
         if (reader === undefined) throw new Error("the Daemon notification stream has no body");

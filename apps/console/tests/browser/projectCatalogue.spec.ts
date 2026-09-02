@@ -44,6 +44,7 @@ test("shows Project location history, drain consequences, and explicit confirmat
 }) => {
   await page.goto(launch());
   await page.goto("http://127.0.0.1:47242/");
+  await expect(page.getByText("2 total", { exact: true })).toBeVisible();
   const project = page.getByRole("link", { name: "project-missing", exact: true });
   const href = await project.getAttribute("href");
   expect(href).not.toBeNull();

@@ -1,7 +1,7 @@
 import { type UseQueryResult, useQuery } from "@tanstack/solid-query";
 import type { Accessor } from "solid-js";
 import { readAskings } from "../../daemon/services/browserAccess.ts";
-import { pollMillis } from "../../shared/services/queryClient.ts";
+import { daemonPollInterval, pollMillis } from "../../shared/services/queryClient.ts";
 import type { Asking } from "../models/Asking.ts";
 
 /**
@@ -54,5 +54,5 @@ export const useAskings = (live: Accessor<boolean>): UseQueryResult<ReadonlyArra
         }),
       );
     },
-    refetchInterval: live() ? pollMillis : (false as const),
+    refetchInterval: (query) => daemonPollInterval(query, live() ? pollMillis : false),
   }));

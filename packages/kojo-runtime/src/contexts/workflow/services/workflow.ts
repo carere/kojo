@@ -1,5 +1,5 @@
-import { Cause, Clock, Effect, type Layer, Schema } from "effect";
-import { Activity, Workflow } from "effect/unstable/workflow";
+import { Cause, Clock, Effect, type Layer, Schema, type Scope } from "effect";
+import { Activity, Workflow, type WorkflowEngine } from "effect/unstable/workflow";
 import { present } from "../../shared/lib/present.ts";
 import { BuildInfo } from "../../shared/models/BuildInfo.ts";
 import type { RunId } from "../../shared/models/RunId.ts";
@@ -8,6 +8,8 @@ import { Tracer } from "../../trace/ports/Tracer.ts";
 import type { Trigger } from "../../trigger/ports/Trigger.ts";
 import { CurrentRun } from "./CurrentRun.ts";
 import { type Compensating, compensating } from "./compensation.ts";
+
+type EffectContext<T> = T extends Effect.Effect<unknown, unknown, infer R> ? R : never;
 
 /**
  * An authored workflow: a program made of phases, identified by a run id that names its branch.
@@ -31,7 +33,10 @@ export const workflow = <
   Payload extends Schema.Struct.Fields | Schema.Top,
   Success extends Schema.Top,
   Error extends Schema.Top,
-  R,
+  Body extends (
+    payload: Payload extends Schema.Struct.Fields ? Schema.Struct.Type<Payload> : Payload["Type"],
+    compensation: Compensating<Tag, Error["Type"]>,
+  ) => Effect.Effect<Success["Type"], Error["Type"], unknown>,
 >(
   options: {
     readonly name: Tag;
@@ -43,12 +48,9 @@ export const workflow = <
       payload: Payload extends Schema.Struct.Fields ? Schema.Struct.Type<Payload> : Payload["Type"],
     ) => string;
     /** One logical Trigger source. Start controls it; it is not a second user setting. */
-    readonly trigger?: Layer.Layer<Trigger, never, unknown>;
+    readonly trigger?: Layer.Layer<Trigger>;
   },
-  body: (
-    payload: Payload extends Schema.Struct.Fields ? Schema.Struct.Type<Payload> : Payload["Type"],
-    compensation: Compensating<Tag, Error["Type"]>,
-  ) => Effect.Effect<Success["Type"], Error["Type"], R>,
+  body: Body,
 ) => {
   type AuthoredPayload = Payload extends Schema.Struct.Fields
     ? Schema.Struct.Type<Payload>
@@ -120,7 +122,20 @@ export const workflow = <
         Effect.provideService(CurrentRun, { runId }),
       );
     }),
-  );
+  ) as Layer.Layer<
+    never,
+    never,
+    | Exclude<
+        EffectContext<ReturnType<Body>>,
+        | CurrentRun
+        | WorkflowEngine.WorkflowEngine
+        | WorkflowEngine.WorkflowInstance
+        | Workflow.Execution<Tag>
+        | Scope.Scope
+      >
+    | Tracer
+    | BuildInfo
+  >;
 
   return {
     definition,

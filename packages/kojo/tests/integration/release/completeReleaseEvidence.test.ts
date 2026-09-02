@@ -17,10 +17,14 @@ const writeJson = (path: string, value: unknown): void => {
 };
 
 const loaded = (tier: EvidenceTier) => {
-  const tests = requiredReleaseChecks
-    .flatMap((check) => check.observations)
-    .filter((observation) => observation.tier === tier)
-    .map((observation) => ({ ...observation, status: "passed" as const }));
+  const tests = [
+    ...new Map(
+      requiredReleaseChecks
+        .flatMap((check) => check.observations)
+        .filter((observation) => observation.tier === tier)
+        .map((observation) => [`${observation.path}\0${observation.name}`, observation]),
+    ).values(),
+  ].map((observation) => ({ ...observation, status: "passed" as const }));
   return {
     tier,
     testedRevision: revision,
@@ -80,7 +84,7 @@ describe("the complete breaking release evidence executable", () => {
     writeFileSync(
       join(input, "native-systemd", "host-tests.log"),
       [
-        " ✓ packages/kojo/tests/host/contexts/daemon/service.test.ts > native systemd user Daemon lifecycle",
+        " ✓ packages/kojo/tests/host/contexts/daemon/service.test.ts > uses an isolated unit for one idle Daemon and stops its complete process group",
         " ↓ packages/kojo/tests/host/contexts/daemon/service.test.ts > the native macOS Daemon lifecycle",
         " Tests  1 passed | 1 skipped (2)",
       ].join("\n"),
@@ -107,6 +111,13 @@ describe("the complete breaking release evidence executable", () => {
           actual: "passed",
           evidence: "log",
         },
+        {
+          name: "replacement-and-access",
+          expected: "replacement",
+          actual: "passed",
+          evidence: "log",
+        },
+        { name: "shipped-managed-content", expected: "managed", actual: "passed", evidence: "log" },
       ],
     });
     for (const checkId of ["RELEASE-01", "RELEASE-02", "RELEASE-03"]) {
@@ -133,7 +144,19 @@ describe("the complete breaking release evidence executable", () => {
         },
         loadedTests: [{ loaded: 1, passed: 1, skipped: 0, namedSkips: [] }],
         noHiddenRepairs: true,
-        checks: [{ name, expected: "required", actual, evidence: "record" }],
+        checks: [
+          { name, expected: "required", actual, evidence: "record" },
+          ...(checkId === "RELEASE-01"
+            ? [
+                {
+                  name: "native lifecycle",
+                  expected: "required",
+                  actual: "recorded",
+                  evidence: "record",
+                },
+              ]
+            : []),
+        ],
       });
     }
 

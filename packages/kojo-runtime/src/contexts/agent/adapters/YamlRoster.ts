@@ -125,5 +125,17 @@ const make = (options: { readonly config: string }) =>
  * is decoded, and its prompts are read, while the layers are being built. A malformed roster says
  * which key is wrong before a run exists to be confused by it.
  */
-export const layer = (options: { readonly config: string }): Layer.Layer<Roster, RosterError> =>
-  Layer.effect(Roster, make(options)).pipe(Layer.provide(RetainedFactoryAssetRepository.layer()));
+export const layer = (options: {
+  readonly config: string;
+  /** Select one explicit retained Factory root for an isolated loader or integration fixture. */
+  readonly factoryRoot?: string;
+}): Layer.Layer<Roster, RosterError> =>
+  Layer.effect(Roster, make(options)).pipe(
+    Layer.provide(
+      RetainedFactoryAssetRepository.layer(
+        options.factoryRoot === undefined
+          ? undefined
+          : { authoredRoot: options.factoryRoot, retainedRoot: options.factoryRoot },
+      ),
+    ),
+  );

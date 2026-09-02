@@ -28,8 +28,8 @@ import type {
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { problemOf } from "../../shared/services/api.ts";
 import {
+  beginDaemonRead,
   daemonMutationsAllowed,
-  daemonReadsAllowed,
   noteDaemonReadFailure,
   noteDaemonReadSuccess,
 } from "./connectionState.ts";
@@ -147,8 +147,10 @@ const currentAccess = (): Promise<StoredSession> => {
   return access;
 };
 
-const authorizedRead = async <A>(path: string): Promise<A> => {
-  if (!daemonReadsAllowed()) {
+const activeReads = new Map<string, Promise<unknown>>();
+
+const performAuthorizedRead = async <A>(path: string): Promise<A> => {
+  if (!beginDaemonRead(path)) {
     throw new ConsoleAccessError("api-refused", "Reconnect before you refresh a snapshot.");
   }
   const session = await currentAccess();
@@ -173,11 +175,22 @@ const authorizedRead = async <A>(path: string): Promise<A> => {
   }
   if (!response.ok) {
     if (response.status >= 500) noteDaemonReadFailure(path);
+    else noteDaemonReadSuccess(path);
     throw await problemOf(path, response);
   }
   const result = (await response.json()) as A;
   noteDaemonReadSuccess(path);
   return result;
+};
+
+const authorizedRead = <A>(path: string): Promise<A> => {
+  const current = activeReads.get(path);
+  if (current !== undefined) return current as Promise<A>;
+  const read = performAuthorizedRead<A>(path).finally(() => {
+    if (activeReads.get(path) === read) activeReads.delete(path);
+  });
+  activeReads.set(path, read);
+  return read;
 };
 
 const authorizedMutation = async <A>(path: string, body: unknown): Promise<A> => {
