@@ -17,7 +17,37 @@ export interface RunPhaseDocument {
   readonly description: string;
   readonly startedAt: string;
   readonly endedAt: string;
+  readonly sandboxId?: string;
+  readonly errorTag?: string;
   readonly result?: JsonValue;
+}
+
+export interface RunGateDocument {
+  readonly gate: string;
+  readonly asking: string;
+  readonly description: string;
+  readonly actor: string;
+  readonly requestedAt: string;
+  readonly deadlineAt: string;
+  readonly onExpiry: "fail" | "reject" | "escalate";
+  readonly outcome: "answered" | "expired";
+  readonly answerer?: string;
+  readonly choice?: string;
+  readonly reason?: string;
+  readonly answeredAt?: string;
+}
+
+export interface RunSandboxDocument {
+  readonly sandboxId: string;
+  readonly name: string;
+  readonly provider: string;
+  readonly kind: string;
+  readonly branch: string;
+  readonly worktreePath: string;
+  readonly environment: Readonly<Record<string, string>>;
+  readonly acquiredAt: string;
+  readonly releasedAt: string;
+  readonly outcome: "released" | "interrupted" | "failed";
 }
 
 /** One Daemon-owned Run observation. The authored payload is intentionally not exposed. */
@@ -106,6 +136,8 @@ export interface RunDocument {
   readonly startedAt?: string;
   readonly finishedAt?: string;
   readonly phases: ReadonlyArray<RunPhaseDocument>;
+  readonly gates?: ReadonlyArray<RunGateDocument>;
+  readonly sandboxes?: ReadonlyArray<RunSandboxDocument>;
   readonly artifacts?: ReadonlyArray<{
     readonly artifactId: string;
     readonly name: string;

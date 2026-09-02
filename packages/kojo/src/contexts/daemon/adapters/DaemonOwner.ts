@@ -32,6 +32,7 @@ import { SqliteProjectRepository } from "../../project/adapters/SqliteProjectRep
 import { SqliteResourceLeaseRepository } from "../../project/adapters/SqliteResourceLeaseRepository.ts";
 import { ProjectApi } from "../../project/services/ProjectApi.ts";
 import { AtomicArtifactRepository } from "../../trace/adapters/AtomicArtifactRepository.ts";
+import { SqliteTraceRepository } from "../../trace/adapters/SqliteTraceRepository.ts";
 import { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRepository.ts";
 import { SqliteExternalActionRepository } from "../../workflow/adapters/SqliteExternalActionRepository.ts";
 import { SqliteRevisionRepository } from "../../workflow/adapters/SqliteRevisionRepository.ts";
@@ -489,6 +490,7 @@ export const startDaemon = (
     });
     const actionRepository = new SqliteExternalActionRepository(database);
     const resourceRepository = new SqliteResourceLeaseRepository(database);
+    const traceRepository = new SqliteTraceRepository(database);
     const revisionRepository = new SqliteRevisionRepository(database, paths.dataRoot);
     const triggerRepository = new SqliteTriggerRepository(database);
     const gateRepository = new SqliteDaemonGateRepository(database);
@@ -532,6 +534,7 @@ export const startDaemon = (
       triggers: triggerRepository,
       gates: gateRepository,
       resources: resourceRepository,
+      trace: traceRepository,
       artifacts: artifactRepository,
       runnerSettings: () => configurationRepository.daemonConfiguration().runner,
       ...(options.runnerIdleMillis === undefined

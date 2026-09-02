@@ -45,6 +45,8 @@ import {
   writeRunnerFrame,
 } from "../../project/services/runnerChannel.ts";
 import type { AtomicArtifactRepository } from "../../trace/adapters/AtomicArtifactRepository.ts";
+import type { SqliteTraceRepository } from "../../trace/adapters/SqliteTraceRepository.ts";
+import type { TraceMutation, TraceProjection } from "../../trace/models/DaemonTrace.ts";
 import type { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRepository.ts";
 import type { SqliteExternalActionRepository } from "../adapters/SqliteExternalActionRepository.ts";
 import type { SqliteRevisionRepository } from "../adapters/SqliteRevisionRepository.ts";
@@ -144,6 +146,7 @@ const terminal = (run: DaemonRun): boolean =>
 const documentOf = (
   run: DaemonRun,
   phases: ReadonlyArray<PhaseResult>,
+  trace: TraceProjection,
   artifacts: ReturnType<AtomicArtifactRepository["list"]>,
   uncertainty?: ExternalActionIntent,
 ): RunDocument => ({
@@ -189,18 +192,66 @@ const documentOf = (
             : { retryAuthorization: uncertainty.retryAuthorization }),
         },
       }),
-  phases: phases
-    .filter((phase) => phase.description !== INTERNAL_PHASE_DESCRIPTION)
-    .map((phase) => ({
-      phasePath: phase.phasePath,
-      attempt: phase.attempt,
-      kind: phase.kind,
-      outcome: phase.outcome,
-      description: phase.description,
-      startedAt: phase.startedAt,
-      endedAt: phase.endedAt,
-      result: phase.encodedResult,
-    })),
+  phases:
+    trace.phases.length === 0
+      ? phases
+          .filter((phase) => phase.description !== INTERNAL_PHASE_DESCRIPTION)
+          .map((phase) => ({
+            phasePath: phase.phasePath,
+            attempt: phase.attempt,
+            kind: phase.kind,
+            outcome: phase.outcome,
+            description: phase.description,
+            startedAt: phase.startedAt,
+            endedAt: phase.endedAt,
+            result: phase.encodedResult,
+          }))
+      : trace.phases.map((phase) => {
+          const result = phases.find(
+            (candidate) =>
+              candidate.phasePath === phase.name && candidate.attempt === phase.attempt,
+          );
+          return {
+            phasePath: String(phase.name),
+            attempt: Number(phase.attempt),
+            kind: phase.kind as "actor" | "code" | "agent",
+            outcome: phase.outcome as "succeeded" | "failed" | "interrupted",
+            description: String(phase.description),
+            startedAt: new Date(Number(phase.startedAt)).toISOString(),
+            endedAt: new Date(Number(phase.endedAt)).toISOString(),
+            ...(typeof phase.sandboxId === "string" ? { sandboxId: phase.sandboxId } : {}),
+            ...(typeof phase.errorTag === "string" ? { errorTag: phase.errorTag } : {}),
+            ...(result === undefined ? {} : { result: result.encodedResult }),
+          };
+        }),
+  gates: trace.gates.map((gate) => ({
+    gate: String(gate.gate),
+    asking: String(gate.asking),
+    description: String(gate.description),
+    actor: String(gate.actor),
+    requestedAt: new Date(Number(gate.requestedAt)).toISOString(),
+    deadlineAt: new Date(Number(gate.deadlineAt)).toISOString(),
+    onExpiry: gate.onExpiry as "fail" | "reject" | "escalate",
+    outcome: gate.outcome as "answered" | "expired",
+    ...(typeof gate.answerer === "string" ? { answerer: gate.answerer } : {}),
+    ...(typeof gate.choice === "string" ? { choice: gate.choice } : {}),
+    ...(typeof gate.reason === "string" ? { reason: gate.reason } : {}),
+    ...(typeof gate.answeredAt === "number"
+      ? { answeredAt: new Date(gate.answeredAt).toISOString() }
+      : {}),
+  })),
+  sandboxes: trace.sandboxes.map((sandbox) => ({
+    sandboxId: String(sandbox.sandboxId),
+    name: String(sandbox.name),
+    provider: String(sandbox.provider),
+    kind: String(sandbox.kind),
+    branch: String(sandbox.branch),
+    worktreePath: String(sandbox.worktreePath),
+    environment: sandbox.environment as Readonly<Record<string, string>>,
+    acquiredAt: new Date(Number(sandbox.acquiredAt)).toISOString(),
+    releasedAt: new Date(Number(sandbox.releasedAt)).toISOString(),
+    outcome: sandbox.outcome as "released" | "interrupted" | "failed",
+  })),
   artifacts: artifacts.map(({ artifactId, name, mediaType, size, sha256 }) => ({
     artifactId,
     name,
@@ -274,6 +325,7 @@ export class RunApi {
   readonly #triggers: SqliteTriggerRepository;
   readonly #gates: SqliteDaemonGateRepository;
   readonly #resources: SqliteResourceLeaseRepository;
+  readonly #trace: SqliteTraceRepository;
   readonly #artifacts: AtomicArtifactRepository;
   readonly #runnerSettings: () => {
     readonly idleMs: number;
@@ -315,6 +367,7 @@ export class RunApi {
     readonly triggers: SqliteTriggerRepository;
     readonly gates: SqliteDaemonGateRepository;
     readonly resources: SqliteResourceLeaseRepository;
+    readonly trace: SqliteTraceRepository;
     readonly artifacts: AtomicArtifactRepository;
     readonly runnerIdleMillis?: number;
     readonly runnerCleanupMillis?: number;
@@ -344,6 +397,7 @@ export class RunApi {
     this.#triggers = options.triggers;
     this.#gates = options.gates;
     this.#resources = options.resources;
+    this.#trace = options.trace;
     this.#artifacts = options.artifacts;
     this.#runnerSettings =
       options.runnerSettings ??
@@ -1244,6 +1298,7 @@ export class RunApi {
               documentOf(
                 run,
                 await Effect.runPromise(this.#runs.phases(run.runId)),
+                await Effect.runPromise(this.#trace.projection(run.runId)),
                 this.#artifacts.list(run.runId),
                 await Effect.runPromise(this.#actions.current(run.runId)),
               ),
@@ -1263,6 +1318,7 @@ export class RunApi {
           : documentOf(
               run,
               await Effect.runPromise(this.#runs.phases(runId)),
+              await Effect.runPromise(this.#trace.projection(runId)),
               this.#artifacts.list(runId),
               await Effect.runPromise(this.#actions.current(runId)),
             );
@@ -2603,6 +2659,19 @@ export class RunApi {
                 actionId: String(action.actionId),
               });
             }
+            continue;
+          }
+          if (frame.kind === "WriteTrace") {
+            if (
+              !("runId" in frame) ||
+              frame.runId !== authority.runId ||
+              frame.revisionId !== authority.revisionId ||
+              frame.claimGeneration !== authority.generation
+            ) {
+              throw new Error("the Trace mutation escaped current Run authority");
+            }
+            await Effect.runPromise(this.#trace.write(authority, frame.body as TraceMutation));
+            await replyMutation(frame, { state: "committed" });
             continue;
           }
           if (
