@@ -215,7 +215,7 @@ const broken = (): RunDocument =>
         outcome: "failed",
         errorTag: "PermissionBreach",
         breaches: [
-          { path: ".kojo/factory.json", outcome: { _tag: "Preserved" } },
+          { path: ".kojo/factory.json", outcome: { _tag: "WorkLost" } },
           { path: "src/restored.ts", outcome: { _tag: "Restored" } },
         ],
       }),
@@ -507,11 +507,11 @@ test("the table toggle renders every Waterfall Phase and persists in the URL", a
   await page.locator('[data-view="table"]').click();
   await expect(page).toHaveURL(/view=table/);
   await expect(page.locator("[data-phase-row]")).toHaveCount(spans);
-  await expect(page.locator('[data-phase-row="run-merged/hotfix/1"]')).toContainText("6m");
+  await expect(page.locator('[data-phase-row="run-merged/hotfix/1"]')).toContainText("6m 0s");
   await page.reload();
   await expect(page.locator("[data-phase-row]")).toHaveCount(spans);
   await page.goto(`${origin}/runs/run-merged?view=table`);
-  await expect(page.locator('[data-phase-row="run-merged/hotfix/1"]')).toContainText("6m");
+  await expect(page.locator('[data-phase-row="run-merged/hotfix/1"]')).toContainText("6m 0s");
 });
 
 test("the Phase table includes an in-flight Phase", async ({ page }) => {
@@ -660,6 +660,13 @@ test("a Phase deep link restores exactly one selected span and keeps the Waterfa
   await expect(span(page, "run-merged/hotfix/1")).toHaveAttribute("data-selected", "true");
 });
 
+test("clicking a Phase span writes its exact Phase URL", async ({ page }) => {
+  await openRun(page, "run-merged");
+  await span(page, "run-merged/hotfix/1").click();
+  await expect(page).toHaveURL(/\/runs\/run-merged\/phases\/hotfix\/1\?view=timeline/);
+  await expect(page.locator('[data-detail-panel="phase"]')).toBeVisible();
+});
+
 test("a Phase panel shows Agent session, token, correction, and repository facts", async ({
   page,
 }) => {
@@ -667,7 +674,7 @@ test("a Phase panel shows Agent session, token, correction, and repository facts
   await page.goto(`${origin}/runs/run-merged/phases/hotfix/1?view=timeline`);
   await expect(page.locator('[data-field="attempt"]')).toContainText("1");
   await expect(page.locator('[data-field="started"]')).toContainText("UTC");
-  await expect(page.locator('[data-field="duration"]')).toContainText("6m");
+  await expect(page.locator('[data-field="duration"]')).toContainText("6m 0s");
   await expect(page.locator('[data-field="agent-name"]')).toContainText("builder");
   await expect(page.locator('[data-field="model"]')).toContainText("fixture-model");
   await expect(page.locator('[data-field="session"]')).toContainText("run-merged-hotfix");
@@ -721,7 +728,7 @@ test("Phase errors keep failed checks and permission outcomes distinct", async (
   await page.goto(`${origin}/runs/run-broken/phases/edit/1?view=timeline`);
   await expect(page.locator('[data-breach=".kojo/factory.json"]')).toHaveAttribute(
     "data-breach-outcome",
-    "Preserved",
+    "WorkLost",
   );
   await expect(page.locator('[data-breach="src/restored.ts"]')).toHaveAttribute(
     "data-breach-outcome",

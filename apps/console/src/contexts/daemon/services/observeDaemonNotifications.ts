@@ -16,12 +16,22 @@ const consume = async (
   }
 };
 
+const openWithHandshakeDeadline = async (signal: AbortSignal): Promise<Response> => {
+  const handshake = new AbortController();
+  const timeout = setTimeout(() => handshake.abort(), 5_000);
+  try {
+    return await openDaemonNotifications(AbortSignal.any([signal, handshake.signal]));
+  } finally {
+    // The handshake signal must stay live after response headers arrive. Aborting it would also
+    // abort the established fetch response body.
+    clearTimeout(timeout);
+  }
+};
+
 /** Establish a fresh subscription before a manual reconnect may unlock mutations. */
 export const reconnectDaemonNotifications = async (client: QueryClient): Promise<void> => {
   const controller = new AbortController();
-  const response = await openDaemonNotifications(
-    AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]),
-  );
+  const response = await openWithHandshakeDeadline(controller.signal);
   void consume(response, client, controller.signal).catch(() => requireDaemonReconnect());
 };
 
@@ -36,9 +46,7 @@ export const observeDaemonNotifications = (client: QueryClient): (() => void) =>
       }
       if (controller.signal.aborted) return;
       try {
-        const response = await openDaemonNotifications(
-          AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]),
-        );
+        const response = await openWithHandshakeDeadline(controller.signal);
         noteDaemonConnected();
         await consume(response, client, controller.signal);
       } catch {

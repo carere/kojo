@@ -20,10 +20,12 @@ behavior is removed.
 | `polling.spec.ts` | 2 | 2 | 0 | Restored as authenticated Daemon browser evidence in `polling.spec.ts` |
 | `realRun.spec.ts` | 5 | 5 | 0 | `runConsole.spec.ts`, `gateVerdict.spec.ts`, shipped-Daemon release evidence |
 | `runList.spec.ts` | 5 | 5 | 0 | `runConsole.spec.ts` |
-| `waterfall.spec.ts` | 40 | 40 | 0 | Restored as `waterfall.spec.ts` with 50 authenticated current-contract leaves |
+| `waterfall.spec.ts` | 40 | 40 | 0 | Restored in `waterfall.spec.ts`; that file now has 42 Waterfall and 17 detail leaves |
 | **Total** | **113** | **104** | **9** | |
 
-The Waterfall adaptation retains every fixed-point assertion category: Host and acquisition rows,
+The 59 declarations in the current `waterfall.spec.ts` are not all Waterfall cases: 42 test the
+Waterfall and 17 test the current detail panels. The Waterfall adaptation retains every fixed-point
+assertion category: Host and acquisition rows,
 scope placement, rebuild rows, collapsed Gate and idle breaks, all-row walls, wall-clock mode,
 concurrency geometry, in-flight Phase growth and settlement, failure/breach/interruption/kind and
 correction marks, read-only behavior, scale selection, zoom, selection, hover, table parity, empty
@@ -132,7 +134,7 @@ The audit restores 38 suites. Each path keeps its suffix and moves from
 | `unit/contexts/workflow/services/phase/whereItRan.test.ts` | same |
 | `unit/contexts/workflow/services/reviewed.test.ts` | same |
 | `unit/contexts/workflow/services/sandboxed.test.ts` | same |
-| `integration/contexts/agent/adapters/SandcastleAgentInvoker.test.ts` | same |
+| `integration/contexts/agent/adapters/SandcastleAgentInvoker.test.ts` | `unit/contexts/agent/adapters/SandcastleAgentInvoker.test.ts` |
 | `integration/contexts/agent/adapters/YamlRoster.test.ts` | same |
 | `integration/contexts/agent/adapters/kojoPi.test.ts` | `integration/contexts/agent/adapters/kojoPiProcess.test.ts` |
 | `integration/contexts/sandbox/adapters/BindMountWorkspace.test.ts` | same |
@@ -149,9 +151,16 @@ the assertions: `.kojo/artifacts` is protected, Resource identity variables cros
 boundary, compensation follows the current replay result, and `.kojo/data` is tested only as a
 barred historic Project path. The restored in-memory adapter suites retain script exhaustion,
 resume refusal, unsafe-command refusal, traversal safety, write, stat, and unlink coverage.
-`SandcastleAgentInvoker.test.ts` now supplies the concrete private-channel Resource and Artifact
-adapters. `SandboxExecWorkspace.test.ts` performs its sequential build and check directly through
-the real sandbox Workspace. Neither integration suite composes an in-memory service.
+`SandcastleAgentInvoker.test.ts` retains its scripted-provider and private-channel behavior in the
+unit tier because those collaborators are controlled test implementations. `replayAdapter.test.ts`
+also moved to the unit tier because it uses a Map-backed execution repository and controlled
+Resource lease client. `launchConsole.test.ts` moved to a mirrored unit path because its Console
+access and Browser Service ports are controlled; authenticated browser and CLI tests keep the real
+Host transport boundary. `removePurge.test.ts` stays in Integration and now uses the concrete systemd
+service adapter with controlled native command results, together with its real SQLite, file-system,
+process, and recovery-capsule boundaries. `SandboxExecWorkspace.test.ts` performs its sequential
+build and check directly through the real sandbox Workspace. The Integration tier does not count a
+hand-built port as a real boundary.
 
 The current CLI command suites are also retained. Their pure command and formatting behavior moved
 from `tests/integration/cli` to mirrored `tests/unit/contexts/{daemon,gate,project,scaffold,shared,

@@ -30,6 +30,7 @@ import { SqliteProjectRepository } from "../../../../src/contexts/project/adapte
 import { SqliteResourceLeaseRepository } from "../../../../src/contexts/project/adapters/SqliteResourceLeaseRepository.ts";
 import { SqliteRunRepository } from "../../../../src/contexts/workflow/adapters/SqliteRunRepository.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
+import { sendPreparedMutation } from "../../../support/daemon/preparedMutation.ts";
 
 const roots: string[] = [];
 const daemons: RunningDaemon[] = [];
@@ -367,16 +368,19 @@ describe("durable Project registration", () => {
       locationConfirmed: false,
     });
 
-    const confirmResponse = await call(daemon, `/api/v1/projects/${originalId}/actions/relocate`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+    const confirmResponse = await sendPreparedMutation(
+      daemon,
+      `/api/v1/projects/${originalId}/actions/relocate`,
+      {
+        mutationVersion: 1,
         requestId: "confirm-same-location",
         dataIdentity: daemon.endpoint.dataIdentity,
-        location: firstLocation,
-        confirm: true,
-      }),
-    });
+        operation: "relocateProject",
+        target: { identityVersion: 1, kind: "project", parts: [originalId] },
+        arguments: { location: firstLocation },
+        preconditions: { confirm: true },
+      },
+    );
     expect(confirmResponse.status, await confirmResponse.clone().text()).toBe(200);
     expect((await confirmResponse.json()) as OperationReceipt).toMatchObject({
       operation: "relocateProject",
@@ -391,14 +395,19 @@ describe("durable Project registration", () => {
       },
     });
 
+    const archiveMutation: MutationEnvelope = {
+      mutationVersion: 1,
+      requestId: "archive-original",
+      dataIdentity: daemon.endpoint.dataIdentity,
+      operation: "archiveProject",
+      target: { identityVersion: 1, kind: "project", parts: [originalId] },
+      arguments: {},
+      preconditions: { confirm: true },
+    };
     const archiveRequest = {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        requestId: "archive-original",
-        dataIdentity: daemon.endpoint.dataIdentity,
-        confirm: true,
-      }),
+      body: JSON.stringify(archiveMutation),
     } satisfies RequestInit;
     const database = new Database(join(hostPaths.dataRoot, "kojo.db"), { strict: true });
     const resources = new SqliteResourceLeaseRepository(database);
@@ -429,10 +438,10 @@ describe("durable Project registration", () => {
         },
       ),
     );
-    const heldByResource = await call(
+    const heldByResource = await sendPreparedMutation(
       daemon,
       `/api/v1/projects/${originalId}/actions/archive`,
-      archiveRequest,
+      archiveMutation,
     );
     expect(heldByResource.status).toBe(409);
     const draining = (await (await call(daemon, "/api/v1/projects")).json()) as ProjectSnapshot;
@@ -518,16 +527,19 @@ describe("durable Project registration", () => {
 
     const replacement = await register("new-project-at-released-location", firstLocation);
     expect(replacement.result).toMatchObject({ created: true });
-    const conflict = await call(daemon, `/api/v1/projects/${originalId}/actions/restore`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+    const conflict = await sendPreparedMutation(
+      daemon,
+      `/api/v1/projects/${originalId}/actions/restore`,
+      {
+        mutationVersion: 1,
         requestId: "restore-conflict",
         dataIdentity: daemon.endpoint.dataIdentity,
-        location: firstLocation,
-        confirm: true,
-      }),
-    });
+        operation: "restoreProject",
+        target: { identityVersion: 1, kind: "project", parts: [originalId] },
+        arguments: { location: firstLocation },
+        preconditions: { confirm: true },
+      },
+    );
     expect(conflict.status).toBe(409);
     const afterConflict = (await (
       await call(daemon, "/api/v1/projects")
@@ -540,16 +552,19 @@ describe("durable Project registration", () => {
       locationActive: false,
     });
 
-    const restored = await call(daemon, `/api/v1/projects/${originalId}/actions/restore`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+    const restored = await sendPreparedMutation(
+      daemon,
+      `/api/v1/projects/${originalId}/actions/restore`,
+      {
+        mutationVersion: 1,
         requestId: "restore-alternate",
         dataIdentity: daemon.endpoint.dataIdentity,
-        location: alternateLocation,
-        confirm: true,
-      }),
-    });
+        operation: "restoreProject",
+        target: { identityVersion: 1, kind: "project", parts: [originalId] },
+        arguments: { location: alternateLocation },
+        preconditions: { confirm: true },
+      },
+    );
     expect(restored.status, await restored.clone().text()).toBe(200);
     expect((await restored.json()) as OperationReceipt).toMatchObject({
       status: "committed",
@@ -566,26 +581,33 @@ describe("durable Project registration", () => {
       },
     });
 
-    const secondArchive = await call(daemon, `/api/v1/projects/${originalId}/actions/archive`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+    const secondArchive = await sendPreparedMutation(
+      daemon,
+      `/api/v1/projects/${originalId}/actions/archive`,
+      {
+        mutationVersion: 1,
         requestId: "archive-restored-location",
         dataIdentity: daemon.endpoint.dataIdentity,
-        confirm: true,
-      }),
-    });
+        operation: "archiveProject",
+        target: { identityVersion: 1, kind: "project", parts: [originalId] },
+        arguments: {},
+        preconditions: { confirm: true },
+      },
+    );
     expect(secondArchive.status, await secondArchive.clone().text()).toBe(200);
-    const samePathRestore = await call(daemon, `/api/v1/projects/${originalId}/actions/restore`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+    const samePathRestore = await sendPreparedMutation(
+      daemon,
+      `/api/v1/projects/${originalId}/actions/restore`,
+      {
+        mutationVersion: 1,
         requestId: "restore-same-path",
         dataIdentity: daemon.endpoint.dataIdentity,
-        location: alternateLocation,
-        confirm: true,
-      }),
-    });
+        operation: "restoreProject",
+        target: { identityVersion: 1, kind: "project", parts: [originalId] },
+        arguments: { location: alternateLocation },
+        preconditions: { confirm: true },
+      },
+    );
     expect(samePathRestore.status, await samePathRestore.clone().text()).toBe(200);
     expect((await samePathRestore.json()) as OperationReceipt).toMatchObject({
       result: {

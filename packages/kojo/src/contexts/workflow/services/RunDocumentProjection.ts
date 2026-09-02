@@ -1,3 +1,4 @@
+import { decodeRollbackOutcome } from "@carere/kojo-client-contracts/contexts/client/contracts/rollback";
 import type { RunDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 import type { TraceProjection } from "../../trace/models/DaemonTrace.ts";
 import type { ArtifactRepository } from "../../trace/ports/ArtifactRepository.ts";
@@ -8,6 +9,81 @@ const internalPhaseDescription = "__kojo_internal_activity__";
 
 const terminal = (run: DaemonRun): boolean =>
   run.state === "succeeded" || run.state === "failed" || run.state === "cancelled";
+
+const strings = (value: unknown): ReadonlyArray<string> | undefined =>
+  Array.isArray(value) && value.every((item) => typeof item === "string") ? value : undefined;
+
+const agentOf = (value: unknown): RunDocument["phases"][number]["agent"] | undefined => {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const agent = value as Record<string, unknown>;
+  if (
+    typeof agent.agent !== "string" ||
+    typeof agent.model !== "string" ||
+    typeof agent.session !== "string" ||
+    typeof agent.resumed !== "boolean" ||
+    typeof agent.tokensIn !== "number" ||
+    typeof agent.tokensOut !== "number" ||
+    (agent.contextTokens !== undefined && typeof agent.contextTokens !== "number")
+  )
+    return undefined;
+  return {
+    agent: agent.agent,
+    model: agent.model,
+    session: agent.session,
+    resumed: agent.resumed,
+    tokensIn: agent.tokensIn,
+    tokensOut: agent.tokensOut,
+    ...(typeof agent.contextTokens === "number" ? { contextTokens: agent.contextTokens } : {}),
+  };
+};
+
+const repoOf = (value: unknown): RunDocument["phases"][number]["repo"] | undefined => {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const repo = value as Record<string, unknown>;
+  const claimed = strings(repo.claimed);
+  const changed = strings(repo.changed);
+  const commits = strings(repo.commits);
+  return claimed === undefined || changed === undefined || commits === undefined
+    ? undefined
+    : { claimed, changed, commits };
+};
+
+const breachesOf = (value: unknown): RunDocument["phases"][number]["breaches"] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  const breaches: Array<NonNullable<RunDocument["phases"][number]["breaches"]>[number]> = [];
+  for (const item of value) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return undefined;
+    const breach = item as Record<string, unknown>;
+    const outcome = decodeRollbackOutcome(breach.outcome);
+    if (typeof breach.path !== "string" || !outcome.ok) return undefined;
+    breaches.push({ path: breach.path, outcome: outcome.value });
+  }
+  return breaches;
+};
+
+const verificationOf = (
+  value: unknown,
+): RunDocument["phases"][number]["verification"] | undefined => {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const verification = value as Record<string, unknown>;
+  const ran = strings(verification.ran);
+  const failed = strings(verification.failed);
+  if (
+    typeof verification.envelope !== "string" ||
+    ran === undefined ||
+    failed === undefined ||
+    typeof verification.corrections !== "number" ||
+    typeof verification.correctable !== "boolean"
+  )
+    return undefined;
+  return {
+    envelope: verification.envelope,
+    ran,
+    failed,
+    corrections: verification.corrections,
+    correctable: verification.correctable,
+  };
+};
 
 /** Build the public Run document from durable execution, Trace, Artifact, and uncertainty state. */
 export const runDocumentOf = (
@@ -78,6 +154,10 @@ export const runDocumentOf = (
             (candidate) =>
               candidate.phasePath === phase.name && candidate.attempt === phase.attempt,
           );
+          const agent = agentOf(phase.agent);
+          const repo = repoOf(phase.repo);
+          const breaches = breachesOf(phase.breaches);
+          const verification = verificationOf(phase.verification);
           return {
             phasePath: String(phase.name),
             attempt: Number(phase.attempt),
@@ -88,22 +168,10 @@ export const runDocumentOf = (
             endedAt: new Date(Number(phase.endedAt)).toISOString(),
             ...(typeof phase.sandboxId === "string" ? { sandboxId: phase.sandboxId } : {}),
             ...(typeof phase.errorTag === "string" ? { errorTag: phase.errorTag } : {}),
-            ...(typeof phase.agent === "object" && phase.agent !== null
-              ? {
-                  agent: phase.agent as unknown as NonNullable<
-                    RunDocument["phases"][number]["agent"]
-                  >,
-                }
-              : {}),
-            ...(typeof phase.repo === "object" && phase.repo !== null
-              ? {
-                  repo: phase.repo as unknown as NonNullable<RunDocument["phases"][number]["repo"]>,
-                }
-              : {}),
-            ...(Array.isArray(phase.breaches) ? { breaches: phase.breaches as never } : {}),
-            ...(typeof phase.verification === "object" && phase.verification !== null
-              ? { verification: phase.verification as never }
-              : {}),
+            ...(agent === undefined ? {} : { agent }),
+            ...(repo === undefined ? {} : { repo }),
+            ...(breaches === undefined ? {} : { breaches }),
+            ...(verification === undefined ? {} : { verification }),
             ...(result === undefined ? {} : { result: result.encodedResult }),
           };
         }),

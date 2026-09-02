@@ -54,12 +54,17 @@ test("stops authenticated Daemon polling after every Run reaches a terminal stat
   page,
 }) => {
   let requests = 0;
+  let askingRequests = 0;
   await page.route("**/api/v1/runs", async (route) => {
     requests += 1;
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({ runs: [run("succeeded")] }),
     });
+  });
+  await page.route("**/api/v1/askings", async (route) => {
+    askingRequests += 1;
+    await route.continue();
   });
 
   await page.goto(launch());
@@ -68,4 +73,5 @@ test("stops authenticated Daemon polling after every Run reaches a terminal stat
   await page.waitForTimeout(3_400);
 
   expect(requests).toBe(1);
+  expect(askingRequests).toBeLessThanOrEqual(2);
 });

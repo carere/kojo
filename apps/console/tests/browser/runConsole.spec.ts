@@ -297,10 +297,20 @@ test("requires the exact Action ID, reason, and possible-duplication acknowledge
   const actionId = "action_exact_publish";
   let authorized = false;
   await page.route("**/api/v1/runs/run-uncertain/actions/retry-uncertain", async (route) => {
-    const body = route.request().postDataJSON() as Record<string, unknown>;
-    expect(body.actionId).toBe(actionId);
-    expect(body.reason).toBe("The provider has no result lookup.");
-    expect(body.possibleDuplicationAcknowledged).toBe(true);
+    const body = route.request().postDataJSON() as {
+      readonly operation: string;
+      readonly target: { readonly kind: string; readonly parts: ReadonlyArray<string> };
+      readonly arguments: { readonly reason: string };
+      readonly preconditions: { readonly possibleDuplicationAcknowledged: boolean };
+    };
+    expect(body.operation).toBe("retryUncertainAction");
+    expect(body.target).toEqual({
+      identityVersion: 1,
+      kind: "runAction",
+      parts: ["run-uncertain", actionId],
+    });
+    expect(body.arguments.reason).toBe("The provider has no result lookup.");
+    expect(body.preconditions.possibleDuplicationAcknowledged).toBe(true);
     authorized = true;
     await route.fulfill({
       contentType: "application/json",

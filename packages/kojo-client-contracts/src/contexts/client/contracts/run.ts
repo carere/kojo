@@ -1,4 +1,5 @@
 import type { JsonValue } from "../../shared/codecs/json.ts";
+import type { RollbackOutcome } from "./rollback.ts";
 
 export type RunExecutionState =
   | "queued"
@@ -36,7 +37,7 @@ export interface RunPhaseDocument {
   };
   readonly breaches?: ReadonlyArray<{
     readonly path: string;
-    readonly outcome: { readonly _tag: string };
+    readonly outcome: RollbackOutcome;
   }>;
   readonly verification?: {
     readonly envelope: string;

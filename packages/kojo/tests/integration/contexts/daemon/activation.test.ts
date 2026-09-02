@@ -31,6 +31,7 @@ import type { DaemonUpgradeControl } from "../../../../src/contexts/daemon/ports
 import type { ManagedReleaseSelection } from "../../../../src/contexts/daemon/ports/ManagedReleaseSelection.ts";
 import { UpgradeActivationController } from "../../../../src/contexts/daemon/services/UpgradeActivationController.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
+import { sendPreparedMutation } from "../../../support/daemon/preparedMutation.ts";
 
 const removeTree = (path: string): void => {
   if (!existsSync(path)) return;
@@ -98,12 +99,23 @@ describe("recoverable managed upgrade activation", () => {
       );
 
       sourceDaemon = startDaemon(paths, { automaticRefresh: false });
-      const checkResponse = await fetch("http://localhost/api/v1/daemon/upgrade-check", {
-        unix: sourceDaemon.endpoint.socketPath,
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ candidateReleaseId: candidate.releaseId }),
-      } as RequestInit & { readonly unix: string });
+      const checkResponse = await sendPreparedMutation(
+        sourceDaemon,
+        "/api/v1/daemon/upgrade-check",
+        {
+          mutationVersion: 1,
+          requestId: "upgrade-activation-check",
+          dataIdentity: sourceDaemon.endpoint.dataIdentity,
+          operation: "checkDaemonUpgrade",
+          target: {
+            identityVersion: 1,
+            kind: "daemonData",
+            parts: [sourceDaemon.endpoint.dataIdentity],
+          },
+          arguments: { candidateReleaseId: candidate.releaseId },
+          preconditions: {},
+        },
+      );
       const checked = (await checkResponse.json()) as {
         readonly report: { readonly outcome: string; readonly retainedSetHash: string };
       };

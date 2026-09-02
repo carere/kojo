@@ -43,6 +43,7 @@ import type { DaemonLifecycleControl } from "../ports/DaemonLifecycleControl.ts"
 import type { DaemonUpgradeControl } from "../ports/DaemonUpgradeControl.ts";
 import { activeConsoleRelease } from "./activeConsoleRelease.ts";
 import { browserAuthority } from "./browserAuthority.ts";
+import { ClientMutationBoundary } from "./ClientMutationBoundary.ts";
 import { ConfigurationApi } from "./ConfigurationApi.ts";
 import { DaemonLifecycleApi } from "./DaemonLifecycleApi.ts";
 import { DaemonMutationGate } from "./DaemonMutationGate.ts";
@@ -444,13 +445,19 @@ export const startDaemonComposition = (
       now,
       installation: hostManagedInstallation,
     });
+    const clientRequests = new ClientMutationBoundary({
+      dataIdentity,
+      now,
+      repository: new HostClientRequestRepository(
+        join(paths.dataRoot, "client-requests"),
+        dataIdentity,
+        now,
+      ),
+    });
     const projectApi = new ProjectApi({
       dataIdentity,
       instanceId,
-      journal: new HostClientRequestRepository(
-        join(paths.dataRoot, "client-requests"),
-        dataIdentity,
-      ),
+      journal: clientRequests,
       now,
       repository: projectRepository,
       dataRoot: paths.dataRoot,
@@ -611,6 +618,7 @@ export const startDaemonComposition = (
     const httpApplication = startDaemonHttpApplication({
       artifactRepository,
       authority,
+      clientRequests,
       configurationApi,
       ...(options.consolePort === undefined ? {} : { consolePort: options.consolePort }),
       dataIdentity,

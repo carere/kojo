@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { decodeRollbackOutcome } from "../../../../../src/contexts/client/contracts/rollback.ts";
 import { isTerminalRunUncertaintyResolved } from "../../../../../src/contexts/client/contracts/run.ts";
 
 const resultConfirmed = {
@@ -43,5 +44,23 @@ describe("terminal Run uncertainty", () => {
     expect(isTerminalRunUncertaintyResolved({ ...resultConfirmed, uncertaintyRevision: "0" })).toBe(
       false,
     );
+  });
+});
+
+describe("RollbackOutcome", () => {
+  it("accepts every domain outcome and keeps the NotUndone reason", () => {
+    for (const _tag of ["Deleted", "Restored", "LeftAsIs", "WorkLost"] as const) {
+      expect(decodeRollbackOutcome({ _tag })).toEqual({ ok: true, value: { _tag } });
+    }
+    expect(decodeRollbackOutcome({ _tag: "NotUndone", reason: "workspace refused" })).toEqual({
+      ok: true,
+      value: { _tag: "NotUndone", reason: "workspace refused" },
+    });
+  });
+
+  it("rejects primitive and unknown rollback outcomes", () => {
+    expect(decodeRollbackOutcome("WorkLost").ok).toBe(false);
+    expect(decodeRollbackOutcome({ _tag: "Preserved" }).ok).toBe(false);
+    expect(decodeRollbackOutcome({ _tag: "NotUndone" }).ok).toBe(false);
   });
 });

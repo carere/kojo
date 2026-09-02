@@ -18,11 +18,9 @@ import {
   hostManagedInstallation,
   removeManagedInstallation,
 } from "../../../../src/contexts/daemon/adapters/ManagedInstallation.ts";
+import { systemdUserService } from "../../../../src/contexts/daemon/adapters/SystemdUserService.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
-import type {
-  NativeService,
-  NativeServiceObservation,
-} from "../../../../src/contexts/daemon/ports/NativeService.ts";
+import type { NativeServiceObservation } from "../../../../src/contexts/daemon/ports/NativeService.ts";
 import { manageDaemon } from "../../../../src/contexts/daemon/services/manageDaemon.ts";
 import {
   observeManagedLauncherReadiness,
@@ -30,6 +28,47 @@ import {
 } from "../../../support/daemon/managedLauncherReadiness.ts";
 
 const roots: Array<string> = [];
+
+const managedNative = (options: {
+  readonly observation: () => NativeServiceObservation;
+  readonly calls?: Array<string>;
+  readonly supported?: boolean;
+  readonly onInstall?: () => void;
+}) =>
+  systemdUserService({
+    unit: "kojo-test.service",
+    uid: 1200,
+    home: "/tmp/kojo-test-home",
+    systemctl: (arguments_) => {
+      if (arguments_.includes("show-environment"))
+        return options.supported === false
+          ? { exitCode: 1, stdout: "", stderr: "unsupported Host" }
+          : { exitCode: 0, stdout: "", stderr: "" };
+      if (arguments_.includes("is-enabled"))
+        return {
+          exitCode: 0,
+          stdout: `${options.observation().automaticStart === "enabled" ? "enabled" : "disabled"}\n`,
+          stderr: "",
+        };
+      if (arguments_.includes("show")) {
+        const observation = options.observation();
+        return {
+          exitCode: 0,
+          stdout: `LoadState=${observation.manager === "loaded" ? "loaded" : "not-found"}\nActiveState=${observation.process === "running" ? "active" : "inactive"}\n`,
+          stderr: "",
+        };
+      }
+      if (arguments_.includes("enable") && arguments_.includes("--now")) {
+        options.calls?.push("install-and-start");
+        options.onInstall?.();
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+    loginctl: (arguments_) => {
+      if (arguments_.includes("enable-linger")) options.calls?.push("linger");
+      return { exitCode: 0, stdout: "no\n", stderr: "" };
+    },
+  });
 
 const waitFor = async (predicate: () => boolean, timeout = 10_000): Promise<void> => {
   const deadline = Date.now() + timeout;
@@ -90,11 +129,10 @@ describe("the managed Daemon installation", () => {
       loginLifetime: "test login lifetime",
       logoutPersistence: "disabled",
     };
-    const native: NativeService = {
-      serviceDocument: () => "test service definition\n",
-      assertSupported: () => {},
-      inspect: () => observation,
-      installAndStart: () => {
+    const native = managedNative({
+      observation: () => observation,
+      calls,
+      onInstall: () => {
         const data = lstatSync(paths.dataRoot);
         const configuration = lstatSync(paths.configurationRoot);
         expect(data.isDirectory()).toBe(true);
@@ -102,14 +140,8 @@ describe("the managed Daemon installation", () => {
         expect(data.mode & 0o777).toBe(0o700);
         expect(configuration.mode & 0o777).toBe(0o700);
         expect([data.dev, data.ino]).not.toEqual([configuration.dev, configuration.ino]);
-        calls.push("install-and-start");
       },
-      start: () => calls.push("start"),
-      stop: () => calls.push("stop"),
-      enable: () => calls.push("enable"),
-      disable: () => calls.push("disable"),
-      keepRunningAfterLogout: () => calls.push("linger"),
-    };
+    });
     const sourceRoot = new URL("../../../../", import.meta.url).pathname;
     const lifecycle = manageDaemon(paths, native, hostManagedInstallation, {
       sourceRoot,
@@ -270,25 +302,18 @@ describe("the managed Daemon installation", () => {
       mkdirSync(join(paths.dataRoot, ".."), { mode: 0o700, recursive: true });
       symlinkSync(target, paths.dataRoot);
       let serviceStarted = false;
-      const native: NativeService = {
-        serviceDocument: () => "test service definition\n",
-        assertSupported: () => undefined,
-        inspect: () => ({
+      const native = managedNative({
+        observation: () => ({
           automaticStart: "disabled",
           manager: "unloaded",
           process: "stopped",
           loginLifetime: "test login lifetime",
           logoutPersistence: "disabled",
         }),
-        installAndStart: () => {
+        onInstall: () => {
           serviceStarted = true;
         },
-        start: () => undefined,
-        stop: () => undefined,
-        enable: () => undefined,
-        disable: () => undefined,
-        keepRunningAfterLogout: () => undefined,
-      };
+      });
       const sourceRoot = new URL("../../../../", import.meta.url).pathname;
 
       await expect(
@@ -318,25 +343,16 @@ describe("the managed Daemon installation", () => {
       managedCli: join(installationRoot, "bin", "kojo"),
       managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
     };
-    const native: NativeService = {
-      serviceDocument: () => "must not be written",
-      assertSupported: () => {
-        throw new Error("unsupported Host");
-      },
-      inspect: () => ({
+    const native = managedNative({
+      supported: false,
+      observation: () => ({
         automaticStart: "unknown",
         manager: "unavailable",
         process: "unknown",
         loginLifetime: "unsupported",
         logoutPersistence: "unknown",
       }),
-      installAndStart: () => {},
-      start: () => {},
-      stop: () => {},
-      enable: () => {},
-      disable: () => {},
-      keepRunningAfterLogout: () => {},
-    };
+    });
 
     await expect(
       Effect.runPromise(manageDaemon(paths, native, hostManagedInstallation).install),

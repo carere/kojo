@@ -6,6 +6,7 @@ import { clientExit } from "../../../cli/ClientExit.ts";
 import { commandFailed } from "../../../cli/CommandFailed.ts";
 import { readDaemonEndpoint } from "../services/daemonStatus.ts";
 import { hostPaths } from "../services/hostPaths.ts";
+import { replayHostClientRequest } from "./HostClientRequestReplay.ts";
 
 const daemonRequest = <A>(
   path: string,
@@ -119,6 +120,14 @@ export const retry = Command.make(
   "retry",
   { request: Flag.string("request") },
   Effect.fn(function* ({ request }) {
+    const localReceipt = yield* Effect.tryPromise({
+      try: () => replayHostClientRequest(hostPaths(), request),
+      catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
+    }).pipe(Effect.catch(commandFailed));
+    if (localReceipt !== undefined) {
+      yield* Console.log(JSON.stringify(localReceipt));
+      return;
+    }
     const receipt = yield* daemonRequest<OperationReceipt>(
       `/api/v1/client-requests/${encodeURIComponent(request)}/retry`,
       { method: "POST", body: {} },

@@ -7,6 +7,7 @@ import type {
   DaemonDocument,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/browser";
 import type { RecordVerdictRequest } from "@carere/kojo-client-contracts/contexts/client/contracts/gate";
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import {
   decodeJsonValue,
   type JsonValue,
@@ -25,6 +26,7 @@ import type { DaemonEndpoint } from "../models/Endpoint.ts";
 import { LifecycleError } from "../models/LifecycleError.ts";
 import { activeConsoleRelease } from "../services/activeConsoleRelease.ts";
 import type { BrowserAuthority } from "../services/browserAuthority.ts";
+import type { ClientMutationBoundary } from "../services/ClientMutationBoundary.ts";
 import type { ConfigurationApi } from "../services/ConfigurationApi.ts";
 import {
   consoleAsset,
@@ -47,6 +49,7 @@ export interface DaemonHttpApplication {
 export const startDaemonHttpApplication = (options: {
   readonly artifactRepository: AtomicArtifactRepository;
   readonly authority: BrowserAuthority;
+  readonly clientRequests: ClientMutationBoundary;
   readonly configurationApi: ConfigurationApi;
   readonly consolePort?: number;
   readonly dataIdentity: string;
@@ -72,6 +75,7 @@ export const startDaemonHttpApplication = (options: {
   const {
     artifactRepository,
     authority,
+    clientRequests,
     configurationApi,
     dataIdentity,
     database,
@@ -94,6 +98,17 @@ export const startDaemonHttpApplication = (options: {
   } = options;
   let consoleServer: Bun.Server<unknown> | undefined;
   const ownerDatabase = database;
+  const mutationOf = async (
+    request: Request,
+    operation: string,
+    targetKind: string,
+  ): Promise<MutationEnvelope> =>
+    clientRequests.requireKind(await requestJson(request), operation, targetKind);
+
+  const resolveMutation = (requestId: string, result: Response): Response => {
+    if (result.status >= 200 && result.status < 300) clientRequests.resolve(requestId);
+    return result;
+  };
   const configurationResponse = async (
     request: Request,
     url: URL,
@@ -143,11 +158,22 @@ export const startDaemonHttpApplication = (options: {
       return problem(415, "json-required", "the configuration action requires JSON");
     }
     try {
-      const body = await requestJson(request);
-      if (body === null || typeof body !== "object" || Array.isArray(body)) {
-        return problem(400, "invalid-configuration", "the configuration request must be an object");
-      }
-      const record = body as Record<string, unknown>;
+      const value = await requestJson(request);
+      const decoded = clientRequests.decode(value);
+      const operation =
+        typeof decoded.arguments.confirm === "string"
+          ? "confirmDaemonConfiguration"
+          : target.scope === "daemon"
+            ? "configureDaemon"
+            : "configureProject";
+      const prepared = clientRequests.require(
+        value,
+        operation,
+        target.scope === "daemon"
+          ? { identityVersion: 1, kind: "daemonData", parts: [dataIdentity] }
+          : { identityVersion: 1, kind: "project", parts: [target.projectId] },
+      );
+      const record = prepared.arguments;
       if (typeof record.confirm === "string") {
         if (
           target.scope !== "daemon" ||
@@ -160,7 +186,10 @@ export const startDaemonHttpApplication = (options: {
             "confirmation must name one exact Daemon retention plan",
           );
         }
-        return noStoreJson(await Effect.runPromise(configurationApi.confirm(record.confirm)));
+        return resolveMutation(
+          prepared.requestId,
+          noStoreJson(await Effect.runPromise(configurationApi.confirm(record.confirm))),
+        );
       }
       if (
         Object.keys(record).some((key) => key !== "patch" && key !== "check") ||
@@ -177,7 +206,10 @@ export const startDaemonHttpApplication = (options: {
         record.check === true
           ? await Effect.runPromise(configurationApi.check(target, record.patch))
           : await Effect.runPromise(configurationApi.apply(target, record.patch));
-      return noStoreJson(result, record.check === true ? 200 : 202);
+      return resolveMutation(
+        prepared.requestId,
+        noStoreJson(result, record.check === true ? 200 : 202),
+      );
     } catch (cause) {
       const configuration = cause as { readonly code?: string; readonly message?: string };
       const invalid = configuration.code === "INVALID_CONFIGURATION_PATCH";
@@ -203,11 +235,8 @@ export const startDaemonHttpApplication = (options: {
       if (!isJson(request)) {
         return problem(415, "json-required", "managed upgrade check requires JSON");
       }
-      const value = await requestJson(request);
-      if (value === null || typeof value !== "object" || Array.isArray(value)) {
-        return problem(400, "invalid-upgrade-check", "the managed upgrade check body is invalid");
-      }
-      const body = value as Record<string, unknown>;
+      const prepared = await mutationOf(request, "checkDaemonUpgrade", "daemonData");
+      const body = prepared.arguments;
       if (
         Object.keys(body).some((key) => key !== "candidateReleaseId" && key !== "approvalToken") ||
         typeof body.candidateReleaseId !== "string" ||
@@ -231,15 +260,18 @@ export const startDaemonHttpApplication = (options: {
         .formatVersion;
       if (sourceFormat === 2) readCheckedManagedRelease(paths, release.releaseId);
       const candidate = readCheckedManagedRelease(paths, body.candidateReleaseId);
-      return noStoreJson(
-        await Effect.runPromise(
-          upgradePreflight.check({
-            candidate,
-            sourceReleaseId: release.releaseId,
-            ...(body.approvalToken === undefined
-              ? {}
-              : { approvalToken: body.approvalToken as string }),
-          }),
+      return resolveMutation(
+        prepared.requestId,
+        noStoreJson(
+          await Effect.runPromise(
+            upgradePreflight.check({
+              candidate,
+              sourceReleaseId: release.releaseId,
+              ...(body.approvalToken === undefined
+                ? {}
+                : { approvalToken: body.approvalToken as string }),
+            }),
+          ),
         ),
       );
     } catch (cause) {
@@ -290,29 +322,37 @@ export const startDaemonHttpApplication = (options: {
         );
       }
       if (request.method === "POST" && matched[4] === "repair") {
-        const body = await requestJson(request);
+        const prepared = await mutationOf(request, "repairRevision", "workflowRevision");
         if (
-          body === null ||
-          typeof body !== "object" ||
-          Array.isArray(body) ||
-          typeof (body as { readonly from?: unknown }).from !== "string"
+          prepared.target.parts[0] !== projectId ||
+          prepared.target.parts[1] !== revisionId ||
+          typeof prepared.arguments.from !== "string"
         ) {
           return problem(400, "invalid-repair", "exact revision repair requires one source path");
         }
-        return noStoreJson(
-          await Effect.runPromise(
-            revisionRepository.repairExact(
-              revisionId,
-              (body as { readonly from: string }).from,
-              new Date(now()).toISOString(),
+        return resolveMutation(
+          prepared.requestId,
+          noStoreJson(
+            await Effect.runPromise(
+              revisionRepository.repairExact(
+                revisionId,
+                prepared.arguments.from,
+                new Date(now()).toISOString(),
+              ),
             ),
           ),
         );
       }
       if (request.method === "POST" && matched[4] === "collect") {
-        return noStoreJson(
-          await Effect.runPromise(
-            revisionRepository.collect(revisionId, new Date(now()).toISOString()),
+        const prepared = await mutationOf(request, "collectRevision", "workflowRevision");
+        if (prepared.target.parts[0] !== projectId || prepared.target.parts[1] !== revisionId)
+          return problem(409, "target-mismatch", "the revision target does not match its route");
+        return resolveMutation(
+          prepared.requestId,
+          noStoreJson(
+            await Effect.runPromise(
+              revisionRepository.collect(revisionId, new Date(now()).toISOString()),
+            ),
           ),
         );
       }
@@ -332,23 +372,11 @@ export const startDaemonHttpApplication = (options: {
     clientSuppliesAnswerer: boolean,
   ): Promise<Response> => {
     let input: RecordVerdictRequest;
+    let prepared: MutationEnvelope;
     try {
-      const value = await requestJson(request);
-      if (value === null || typeof value !== "object" || Array.isArray(value))
-        return problem(400, "invalid-verdict", "the Verdict request must be a JSON object");
-      const record = value as Record<string, unknown>;
+      prepared = await mutationOf(request, "recordGateVerdict", "gate");
+      const record = prepared.arguments;
       if (
-        Object.keys(record).some(
-          (key) =>
-            key !== "requestId" &&
-            key !== "dataIdentity" &&
-            key !== "token" &&
-            key !== "choice" &&
-            key !== "reason" &&
-            key !== "answerer",
-        ) ||
-        typeof record.requestId !== "string" ||
-        typeof record.dataIdentity !== "string" ||
         typeof record.token !== "string" ||
         typeof record.choice !== "string" ||
         typeof record.reason !== "string" ||
@@ -357,8 +385,8 @@ export const startDaemonHttpApplication = (options: {
         return problem(400, "invalid-verdict", "the Verdict request has invalid fields");
       }
       input = {
-        requestId: record.requestId,
-        dataIdentity: record.dataIdentity,
+        requestId: prepared.requestId,
+        dataIdentity: prepared.dataIdentity,
         token: record.token,
         choice: record.choice,
         reason: record.reason,
@@ -370,7 +398,8 @@ export const startDaemonHttpApplication = (options: {
       return problem(400, "invalid-json", "the Verdict request body is invalid");
     }
     const result = await Effect.runPromiseExit(gateApi.record(input));
-    if (result._tag === "Success") return noStoreJson(result.value);
+    if (result._tag === "Success")
+      return resolveMutation(prepared.requestId, noStoreJson(result.value));
     const failure = Option.getOrUndefined(Cause.findErrorOption(result.cause)) as
       | { readonly code?: string; readonly message?: string }
       | undefined;
@@ -386,37 +415,29 @@ export const startDaemonHttpApplication = (options: {
     workflowName: string,
   ): Promise<Response> => {
     try {
-      const input = await requestJson(request);
-      if (input === null || typeof input !== "object" || Array.isArray(input)) {
-        return problem(400, "invalid-start", "the Start request must be a JSON object");
-      }
-      const record = input as Record<string, unknown>;
-      if (
-        Object.keys(record).some(
-          (key) => key !== "requestId" && key !== "dataIdentity" && key !== "payload",
-        ) ||
-        typeof record.requestId !== "string" ||
-        typeof record.dataIdentity !== "string"
-      ) {
-        return problem(400, "invalid-start", "the Start request has invalid fields");
-      }
+      const prepared = await mutationOf(request, "startWorkflow", "workflow");
+      if (prepared.target.parts[0] !== projectId || prepared.target.parts[1] !== workflowName)
+        return problem(409, "target-mismatch", "the Start target does not match its route");
       let payloadValue: JsonValue | undefined;
-      if ("payload" in record) {
-        const payload = decodeJsonValue(record.payload);
+      if ("payload" in prepared.arguments) {
+        const payload = decodeJsonValue(prepared.arguments.payload);
         if (!payload.ok) return problem(400, "invalid-payload", "the payload is not JSON");
         payloadValue = payload.value;
       }
-      return noStoreJson(
-        await Effect.runPromise(
-          runApi.startWorkflow({
-            projectId,
-            workflowName,
-            requestId: record.requestId,
-            dataIdentity: record.dataIdentity,
-            ...(payloadValue === undefined ? {} : { payload: payloadValue }),
-          }),
+      return resolveMutation(
+        prepared.requestId,
+        noStoreJson(
+          await Effect.runPromise(
+            runApi.startWorkflow({
+              projectId,
+              workflowName,
+              requestId: prepared.requestId,
+              dataIdentity: prepared.dataIdentity,
+              ...(payloadValue === undefined ? {} : { payload: payloadValue }),
+            }),
+          ),
+          202,
         ),
-        202,
       );
     } catch (cause) {
       return problem(
@@ -432,32 +453,25 @@ export const startDaemonHttpApplication = (options: {
     workflowName: string,
   ): Promise<Response> => {
     try {
-      const input = await requestJson(request);
-      if (input === null || typeof input !== "object" || Array.isArray(input)) {
-        return problem(400, "invalid-stop", "the Stop request must be a JSON object");
-      }
-      const record = input as Record<string, unknown>;
-      if (
-        Object.keys(record).some(
-          (key) => key !== "requestId" && key !== "dataIdentity" && key !== "force",
-        ) ||
-        typeof record.requestId !== "string" ||
-        typeof record.dataIdentity !== "string" ||
-        ("force" in record && typeof record.force !== "boolean")
-      ) {
+      const prepared = await mutationOf(request, "stopWorkflow", "workflow");
+      if (prepared.target.parts[0] !== projectId || prepared.target.parts[1] !== workflowName)
+        return problem(409, "target-mismatch", "the Stop target does not match its route");
+      if (prepared.arguments.force !== undefined && typeof prepared.arguments.force !== "boolean")
         return problem(400, "invalid-stop", "the Stop request has invalid fields");
-      }
-      return noStoreJson(
-        await Effect.runPromise(
-          runApi.stopWorkflow({
-            projectId,
-            workflowName,
-            requestId: record.requestId,
-            dataIdentity: record.dataIdentity,
-            ...(record.force === true ? { force: true } : {}),
-          }),
+      return resolveMutation(
+        prepared.requestId,
+        noStoreJson(
+          await Effect.runPromise(
+            runApi.stopWorkflow({
+              projectId,
+              workflowName,
+              requestId: prepared.requestId,
+              dataIdentity: prepared.dataIdentity,
+              ...(prepared.arguments.force === true ? { force: true } : {}),
+            }),
+          ),
+          202,
         ),
-        202,
       );
     } catch (cause) {
       return problem(
@@ -469,27 +483,21 @@ export const startDaemonHttpApplication = (options: {
   };
   const cancelRun = async (request: Request, runId: string): Promise<Response> => {
     try {
-      const input = await requestJson(request);
-      if (input === null || typeof input !== "object" || Array.isArray(input)) {
-        return problem(400, "invalid-cancel", "the cancellation request must be a JSON object");
-      }
-      const record = input as Record<string, unknown>;
-      if (
-        Object.keys(record).some((key) => key !== "requestId" && key !== "dataIdentity") ||
-        typeof record.requestId !== "string" ||
-        typeof record.dataIdentity !== "string"
-      ) {
-        return problem(400, "invalid-cancel", "the cancellation request has invalid fields");
-      }
-      return noStoreJson(
-        await Effect.runPromise(
-          runApi.cancelRun({
-            runId,
-            requestId: record.requestId,
-            dataIdentity: record.dataIdentity,
-          }),
+      const prepared = await mutationOf(request, "cancelRun", "run");
+      if (prepared.target.parts[0] !== runId)
+        return problem(409, "target-mismatch", "the Run target does not match its route");
+      return resolveMutation(
+        prepared.requestId,
+        noStoreJson(
+          await Effect.runPromise(
+            runApi.cancelRun({
+              runId,
+              requestId: prepared.requestId,
+              dataIdentity: prepared.dataIdentity,
+            }),
+          ),
+          202,
         ),
-        202,
       );
     } catch (cause) {
       return problem(
@@ -501,26 +509,14 @@ export const startDaemonHttpApplication = (options: {
   };
   const retryUncertainAction = async (request: Request, runId: string): Promise<Response> => {
     try {
-      const input = await requestJson(request);
-      if (input === null || typeof input !== "object" || Array.isArray(input)) {
-        return problem(400, "invalid-uncertain-retry", "the retry request must be a JSON object");
-      }
-      const record = input as Record<string, unknown>;
+      const prepared = await mutationOf(request, "retryUncertainAction", "runAction");
+      const record = prepared.arguments;
       if (
-        Object.keys(record).some(
-          (key) =>
-            key !== "requestId" &&
-            key !== "dataIdentity" &&
-            key !== "actionId" &&
-            key !== "reason" &&
-            key !== "possibleDuplicationAcknowledged",
-        ) ||
-        typeof record.requestId !== "string" ||
-        typeof record.dataIdentity !== "string" ||
-        typeof record.actionId !== "string" ||
+        prepared.target.parts[0] !== runId ||
+        typeof prepared.target.parts[1] !== "string" ||
         typeof record.reason !== "string" ||
         record.reason.trim() === "" ||
-        record.possibleDuplicationAcknowledged !== true
+        prepared.preconditions.possibleDuplicationAcknowledged !== true
       ) {
         return problem(
           400,
@@ -528,18 +524,21 @@ export const startDaemonHttpApplication = (options: {
           "retry requires the exact action ID, a reason, and possible-duplication acknowledgement",
         );
       }
-      return noStoreJson(
-        await Effect.runPromise(
-          runApi.retryUncertainAction({
-            runId,
-            requestId: record.requestId,
-            dataIdentity: record.dataIdentity,
-            actionId: record.actionId,
-            reason: record.reason,
-            possibleDuplicationAcknowledged: true,
-          }),
+      return resolveMutation(
+        prepared.requestId,
+        noStoreJson(
+          await Effect.runPromise(
+            runApi.retryUncertainAction({
+              runId,
+              requestId: prepared.requestId,
+              dataIdentity: prepared.dataIdentity,
+              actionId: prepared.target.parts[1],
+              reason: record.reason,
+              possibleDuplicationAcknowledged: true,
+            }),
+          ),
+          202,
         ),
-        202,
       );
     } catch (cause) {
       return problem(
@@ -549,7 +548,7 @@ export const startDaemonHttpApplication = (options: {
       );
     }
   };
-  const repairProjectRunner = async (projectId: string): Promise<Response> => {
+  const repairProjectRunner = async (request: Request, projectId: string): Promise<Response> => {
     const project = (await Effect.runPromise(projectRepository.projects)).find(
       (candidate) => candidate.projectId === projectId,
     );
@@ -557,7 +556,17 @@ export const startDaemonHttpApplication = (options: {
       return problem(404, "project-not-found", "the selected Project was not found");
     }
     try {
-      return noStoreJson(await Effect.runPromise(runApi.repairProject(projectId)), 202);
+      const prepared = await mutationOf(request, "repairProject", "project");
+      if (prepared.target.parts[0] !== projectId)
+        return problem(
+          409,
+          "target-mismatch",
+          "the Project repair target does not match its route",
+        );
+      return resolveMutation(
+        prepared.requestId,
+        noStoreJson(await Effect.runPromise(runApi.repairProject(projectId)), 202),
+      );
     } catch (cause) {
       return problem(
         409,
@@ -565,6 +574,80 @@ export const startDaemonHttpApplication = (options: {
         cause instanceof Error ? cause.message : "Project repair was refused",
       );
     }
+  };
+
+  const replayPrepared = async (requestId: string): Promise<Response> => {
+    const retained = clientRequests.lookup(requestId);
+    if (retained === undefined || retained.request === undefined) {
+      return Effect.runPromise(projectApi.retry(requestId));
+    }
+    const mutation = retained.request;
+    const requestFor = (path: string): Request =>
+      new Request(`http://localhost${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(mutation),
+      });
+    const replay = requestFor("/replay");
+    const first = mutation.target.parts[0];
+    const second = mutation.target.parts[1];
+    if (
+      mutation.operation === "startWorkflow" &&
+      typeof first === "string" &&
+      typeof second === "string"
+    )
+      return startRun(replay, first, second);
+    if (
+      mutation.operation === "stopWorkflow" &&
+      typeof first === "string" &&
+      typeof second === "string"
+    )
+      return stopWorkflow(replay, first, second);
+    if (mutation.operation === "cancelRun" && typeof first === "string")
+      return cancelRun(replay, first);
+    if (mutation.operation === "retryUncertainAction" && typeof first === "string")
+      return retryUncertainAction(replay, first);
+    if (mutation.operation === "recordGateVerdict") return recordGateAnswer(replay, true);
+    if (mutation.operation === "repairProject" && typeof first === "string")
+      return repairProjectRunner(replay, first);
+    if (
+      mutation.operation === "configureDaemon" ||
+      mutation.operation === "confirmDaemonConfiguration"
+    )
+      return (
+        (await configurationResponse(
+          requestFor("/api/v1/daemon/actions/configure"),
+          new URL("http://localhost/api/v1/daemon/actions/configure"),
+          true,
+        )) ?? problem(409, "replay-refused", "the Daemon configuration replay was refused")
+      );
+    if (mutation.operation === "configureProject" && typeof first === "string") {
+      const path = `/api/v1/projects/${encodeURIComponent(first)}/actions/configure`;
+      return (
+        (await configurationResponse(requestFor(path), new URL(`http://localhost${path}`), true)) ??
+        problem(409, "replay-refused", "the Project configuration replay was refused")
+      );
+    }
+    if (
+      (mutation.operation === "repairRevision" || mutation.operation === "collectRevision") &&
+      typeof first === "string" &&
+      typeof second === "string"
+    ) {
+      const action = mutation.operation === "repairRevision" ? "repair" : "collect";
+      const path = `/api/v1/projects/${encodeURIComponent(first)}/revisions/${encodeURIComponent(second)}/actions/${action}`;
+      return (
+        (await revisionResponse(requestFor(path), new URL(`http://localhost${path}`), true)) ??
+        problem(409, "replay-refused", "the Workflow Revision replay was refused")
+      );
+    }
+    if (mutation.operation === "checkDaemonUpgrade")
+      return (
+        (await upgradeResponse(
+          requestFor("/api/v1/daemon/upgrade-check"),
+          new URL("http://localhost/api/v1/daemon/upgrade-check"),
+        )) ?? problem(409, "replay-refused", "the upgrade check replay was refused")
+      );
+    return Effect.runPromise(projectApi.retry(requestId));
   };
 
   consoleServer = Bun.serve({
@@ -739,7 +822,7 @@ export const startDaemonHttpApplication = (options: {
             /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/actions\/repair$/,
           );
           if (request.method === "POST" && repairOneProject !== null) {
-            return repairProjectRunner(repairOneProject[1] ?? "invalid");
+            return repairProjectRunner(request, repairOneProject[1] ?? "invalid");
           }
           const projectAskings = url.pathname.match(
             /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/askings$/,
@@ -830,7 +913,7 @@ export const startDaemonHttpApplication = (options: {
               }
             }
             if (request.method === "POST" && clientRequest[2] === "/retry") {
-              return Effect.runPromise(projectApi.retry(requestId));
+              return replayPrepared(requestId);
             }
           }
           return problem(404, "not-found", "the requested API resource was not found");
@@ -929,7 +1012,7 @@ export const startDaemonHttpApplication = (options: {
         );
         if (request.method === "POST" && repairOneProject !== null) {
           if (!isJson(request)) return problem(415, "json-required", "Repair requires JSON");
-          return repairProjectRunner(repairOneProject[1] ?? "invalid");
+          return repairProjectRunner(request, repairOneProject[1] ?? "invalid");
         }
         const projectAskings = url.pathname.match(
           /^\/api\/v1\/projects\/([A-Za-z0-9_-]+)\/askings$/,
@@ -993,7 +1076,7 @@ export const startDaemonHttpApplication = (options: {
             }
           }
           if (request.method === "POST" && clientRequest[2] === "/retry") {
-            return Effect.runPromise(projectApi.retry(requestId));
+            return replayPrepared(requestId);
           }
         }
         return new Response("not found", { status: 404 });

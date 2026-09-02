@@ -25,6 +25,7 @@ import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonP
 import { SqliteProjectRepository } from "../../../../src/contexts/project/adapters/SqliteProjectRepository.ts";
 import { captureWorkflowRevision } from "../../../../src/contexts/workflow/services/captureRevision.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
+import { sendPreparedMutation } from "../../../support/daemon/preparedMutation.ts";
 import { linkEngine } from "../../../support/linkEngine.ts";
 
 const roots: string[] = [];
@@ -170,17 +171,17 @@ describe("real Project Runner cancellation", () => {
     });
     daemons.push(daemon);
     const projectId = registered.project.projectId;
-    const start = await call(
+    const start = await sendPreparedMutation(
       daemon,
       `/api/v1/projects/${projectId}/workflows/blocked/actions/start`,
       {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          requestId: "start-blocked",
-          dataIdentity: daemon.endpoint.dataIdentity,
-          payload: null,
-        }),
+        mutationVersion: 1,
+        requestId: "start-blocked",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation: "startWorkflow",
+        target: { identityVersion: 1, kind: "workflow", parts: [projectId, "blocked"] },
+        arguments: { payload: null },
+        preconditions: {},
       },
     );
     expect(start.status, await start.clone().text()).toBe(202);
@@ -201,14 +202,19 @@ describe("real Project Runner cancellation", () => {
     expect(alive(processEvidence.runnerPid)).toBe(true);
     expect(alive(processEvidence.childPid)).toBe(true);
 
-    const cancelled = await call(daemon, `/api/v1/runs/${admitted.runId}/actions/cancel`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+    const cancelled = await sendPreparedMutation(
+      daemon,
+      `/api/v1/runs/${admitted.runId}/actions/cancel`,
+      {
+        mutationVersion: 1,
         requestId: "cancel-blocked",
         dataIdentity: daemon.endpoint.dataIdentity,
-      }),
-    });
+        operation: "cancelRun",
+        target: { identityVersion: 1, kind: "run", parts: [admitted.runId] },
+        arguments: {},
+        preconditions: {},
+      },
+    );
     expect(cancelled.status, await cancelled.clone().text()).toBe(202);
     expect((await cancelled.json()) as CancelRunResult).toMatchObject({
       runId: admitted.runId,

@@ -238,17 +238,13 @@ const authorizedWrite = async <A>(
 const authorizedMutation = <A>(path: string, body: unknown): Promise<A> =>
   authorizedWrite<A>(path, "POST", body);
 
-const prepareAndMutate = async <A>(
-  path: string,
-  request: MutationEnvelope,
-  body: unknown,
-): Promise<A> => {
+const prepareAndMutate = async <A>(path: string, request: MutationEnvelope): Promise<A> => {
   await authorizedWrite(
     `/api/v1/client-requests/${encodeURIComponent(request.requestId)}`,
     "PUT",
     request,
   );
-  return authorizedMutation<A>(path, body);
+  return authorizedMutation<A>(path, request);
 };
 
 export const readDaemon = (): Promise<DaemonDocument> =>
@@ -281,12 +277,6 @@ export const changeProjectLocation = async (
 ): Promise<ProjectLocationResult> => {
   const bootstrap = await compatibility();
   const requestId = crypto.randomUUID();
-  const body = {
-    requestId,
-    dataIdentity: bootstrap.dataIdentity,
-    confirm: true,
-    ...(location === undefined ? {} : { location }),
-  };
   const receipt = await prepareAndMutate<OperationReceipt>(
     `/api/v1/projects/${encodeURIComponent(projectId)}/actions/${action}`,
     {
@@ -298,7 +288,6 @@ export const changeProjectLocation = async (
       arguments: { ...(location === undefined ? {} : { location }) },
       preconditions: { confirm: true },
     },
-    body,
   );
   return receipt.result as unknown as ProjectLocationResult;
 };
@@ -365,12 +354,6 @@ const workflowMutation = async <A>(
 ): Promise<A> => {
   const bootstrap = await compatibility();
   const requestId = crypto.randomUUID();
-  const body = {
-    requestId,
-    dataIdentity: bootstrap.dataIdentity,
-    ...(payload === undefined ? {} : { payload }),
-    ...(force ? { force: true } : {}),
-  };
   return prepareAndMutate<A>(
     `/api/v1/projects/${encodeURIComponent(projectId)}/workflows/${encodeURIComponent(workflowName)}/actions/${action}`,
     {
@@ -382,7 +365,6 @@ const workflowMutation = async <A>(
       arguments: { ...(payload === undefined ? {} : { payload }), ...(force ? { force } : {}) },
       preconditions: {},
     },
-    body,
   );
 };
 
@@ -412,7 +394,6 @@ export const forceStopWorkflow = (
 export const cancelRun = async (runId: string): Promise<CancelRunResult> => {
   const bootstrap = await compatibility();
   const requestId = crypto.randomUUID();
-  const body = { requestId, dataIdentity: bootstrap.dataIdentity };
   return prepareAndMutate<CancelRunResult>(
     `/api/v1/runs/${encodeURIComponent(runId)}/actions/cancel`,
     {
@@ -424,7 +405,6 @@ export const cancelRun = async (runId: string): Promise<CancelRunResult> => {
       arguments: {},
       preconditions: {},
     },
-    body,
   );
 };
 
@@ -436,13 +416,6 @@ export const retryUncertainAction = async (options: {
 }): Promise<RetryUncertainActionResult> => {
   const bootstrap = await compatibility();
   const requestId = crypto.randomUUID();
-  const body = {
-    requestId,
-    dataIdentity: bootstrap.dataIdentity,
-    actionId: options.actionId,
-    reason: options.reason,
-    possibleDuplicationAcknowledged: options.possibleDuplicationAcknowledged,
-  };
   return prepareAndMutate<RetryUncertainActionResult>(
     `/api/v1/runs/${encodeURIComponent(options.runId)}/actions/retry-uncertain`,
     {
@@ -454,7 +427,6 @@ export const retryUncertainAction = async (options: {
       arguments: { reason: options.reason },
       preconditions: { possibleDuplicationAcknowledged: true },
     },
-    body,
   );
 };
 
@@ -465,16 +437,12 @@ export const readAskings = (): Promise<AskingSnapshot> =>
 export const recordGateVerdict = (
   request: Omit<RecordVerdictRequest, "answerer">,
 ): Promise<RecordVerdictResult> =>
-  prepareAndMutate<RecordVerdictResult>(
-    "/api/v1/gate-answers",
-    {
-      mutationVersion: 1,
-      requestId: request.requestId,
-      dataIdentity: request.dataIdentity,
-      operation: "recordGateVerdict",
-      target: { identityVersion: 1, kind: "gate", parts: [request.requestId] },
-      arguments: { token: request.token, choice: request.choice, reason: request.reason },
-      preconditions: {},
-    },
-    request,
-  );
+  prepareAndMutate<RecordVerdictResult>("/api/v1/gate-answers", {
+    mutationVersion: 1,
+    requestId: request.requestId,
+    dataIdentity: request.dataIdentity,
+    operation: "recordGateVerdict",
+    target: { identityVersion: 1, kind: "gate", parts: [request.requestId] },
+    arguments: { token: request.token, choice: request.choice, reason: request.reason },
+    preconditions: {},
+  });

@@ -1,5 +1,6 @@
 import { join, resolve } from "node:path";
 import { Effect } from "effect";
+import { HostConsoleAccessService } from "../../../src/contexts/daemon/adapters/HostConsoleAccessService.ts";
 import type { DaemonPaths } from "../../../src/contexts/daemon/models/DaemonPaths.ts";
 import { launchConsole } from "../../../src/contexts/daemon/services/launchConsole.ts";
 
@@ -16,5 +17,7 @@ const paths: DaemonPaths = {
   managedCli: join(installationRoot, "bin", "kojo"),
   managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
 };
-const url = await Effect.runPromise(launchConsole(paths, { open: () => undefined }, true));
+const url = await Effect.runPromise(
+  launchConsole(new HostConsoleAccessService(paths), { open: () => undefined }, true),
+);
 process.stdout.write(url);

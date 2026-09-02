@@ -81,3 +81,14 @@ test("bounds stalled notification connection attempts before explicit Reconnect"
   await expect(page.locator("[data-daemon-mutation-scope]")).toHaveAttribute("disabled", "");
   await expect(page.getByText("2 total", { exact: true })).toBeVisible();
 });
+
+test("keeps a healthy established notification stream beyond the handshake deadline", async ({
+  page,
+}) => {
+  await page.goto(launch());
+  await page.goto("http://127.0.0.1:47242/");
+  await expect(page.getByText("2 total", { exact: true })).toBeVisible();
+  await page.waitForTimeout(5_500);
+  await expect(page.getByText("Reconnect to the Daemon", { exact: true })).toHaveCount(0);
+  await expect(page.locator("[data-daemon-mutation-scope]")).not.toHaveAttribute("disabled", "");
+});

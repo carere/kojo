@@ -20,7 +20,7 @@ import type {
   WorkflowSnapshot,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import { Effect } from "effect";
-import type { ClientRequestRepository } from "../../daemon/ports/ClientRequestRepository.ts";
+import type { ClientMutationBoundary } from "../../daemon/services/ClientMutationBoundary.ts";
 import type { FactoryRefreshObservation } from "../../workflow/models/FactoryRefresh.ts";
 import { RevisionCaptureError } from "../../workflow/models/RevisionCaptureError.ts";
 import type { ProjectRunControl } from "../../workflow/ports/RunControl.ts";
@@ -88,6 +88,13 @@ const preparedMutation = (request: MutationEnvelope, dataIdentity: string): void
     "cancelRun",
     "retryUncertainAction",
     "recordGateVerdict",
+    "configureDaemon",
+    "configureProject",
+    "confirmDaemonConfiguration",
+    "repairProject",
+    "repairRevision",
+    "collectRevision",
+    "checkDaemonUpgrade",
   ]);
   if (request.dataIdentity !== dataIdentity || !acceptedOperations.has(request.operation)) {
     throw invalid("The request does not match a supported Daemon mutation contract.");
@@ -115,7 +122,7 @@ export class ProjectApi {
   readonly #dataIdentity: string;
   readonly #dataRoot: string;
   readonly #instanceId: string;
-  readonly #journal: ClientRequestRepository;
+  readonly #journal: ClientMutationBoundary;
   readonly #now: () => number;
   readonly #repository: DaemonProjectRepository;
   readonly #runs: ProjectRunControl;
@@ -124,7 +131,7 @@ export class ProjectApi {
   constructor(options: {
     readonly dataIdentity: string;
     readonly instanceId: string;
-    readonly journal: ClientRequestRepository;
+    readonly journal: ClientMutationBoundary;
     readonly now: () => number;
     readonly repository: DaemonProjectRepository;
     readonly dataRoot: string;
@@ -197,30 +204,26 @@ export class ProjectApi {
     return Effect.promise(async () => {
       let requestId = "invalid";
       try {
-        if (input === null || typeof input !== "object" || Array.isArray(input)) {
-          throw invalid("The Project location request must be one JSON object.");
-        }
-        const body = input as Record<string, unknown>;
-        requestId = typeof body.requestId === "string" ? body.requestId : "invalid";
-        if (
-          Object.keys(body).some(
-            (key) => !["requestId", "dataIdentity", "location", "confirm"].includes(key),
-          ) ||
-          typeof body.requestId !== "string" ||
-          body.dataIdentity !== this.#dataIdentity
-        ) {
-          throw invalid("The Project location request does not match this Daemon data lifetime.");
-        }
+        const operation = `${action}Project`;
+        const retainedRequest = this.#journal.require(input, operation, {
+          identityVersion: 1,
+          kind: "project",
+          parts: [projectId],
+        });
+        requestId = retainedRequest.requestId;
         let requestedLocation: string | undefined;
         if (action !== "archive") {
-          if (typeof body.location !== "string") {
+          if (typeof retainedRequest.arguments.location !== "string") {
             throw invalid("Relocate and restore need one exact Git working-tree root.");
           }
-          requestedLocation = exactGitWorkingTree(body.location, this.#worktrees);
-          if (requestedLocation !== body.location) {
+          requestedLocation = exactGitWorkingTree(
+            retainedRequest.arguments.location,
+            this.#worktrees,
+          );
+          if (requestedLocation !== retainedRequest.arguments.location) {
             throw invalid("The Daemon resolved a different Project location.");
           }
-          if (body.confirm !== true) {
+          if (retainedRequest.preconditions.confirm !== true) {
             throw new ProjectStoreError({
               code: "PROJECT_LOCATION_CONFIRMATION_REQUIRED",
               message: "A Project location change needs explicit confirmation.",
@@ -230,7 +233,10 @@ export class ProjectApi {
                 "Confirm that Workflows become inactive while retained Runs keep their pinned revisions.",
             });
           }
-        } else if (body.location !== undefined || body.confirm !== true) {
+        } else if (
+          retainedRequest.arguments.location !== undefined ||
+          retainedRequest.preconditions.confirm !== true
+        ) {
           throw new ProjectStoreError({
             code: "PROJECT_ARCHIVE_CONFIRMATION_REQUIRED",
             message: "Archiving needs explicit confirmation and does not accept a location.",
@@ -241,19 +247,6 @@ export class ProjectApi {
           });
         }
         const changedAt = new Date(this.#now()).toISOString();
-        const retainedRequest: MutationEnvelope = {
-          mutationVersion: 1,
-          requestId,
-          dataIdentity: this.#dataIdentity,
-          operation: `${action}Project`,
-          target: { identityVersion: 1, kind: "project", parts: [projectId] },
-          arguments: {
-            confirm: true,
-            ...(requestedLocation === undefined ? {} : { location: requestedLocation }),
-          },
-          preconditions: {},
-        };
-        this.#journal.prepare(retainedRequest);
         const requestBody = JSON.stringify(retainedRequest);
         const accepted = await Effect.runPromise(
           this.#repository.beginLocationChange({
@@ -266,7 +259,10 @@ export class ProjectApi {
             changedAt,
           }),
         );
-        if (accepted.status === "committed") return response(accepted);
+        if (accepted.status === "committed") {
+          this.#journal.resolve(requestId);
+          return response(accepted);
+        }
         await Effect.runPromise(this.#runs.drainProject(projectId));
         await Effect.runPromise(
           this.#repository.commitLocationChange({
@@ -283,6 +279,7 @@ export class ProjectApi {
         );
         if (receipt === undefined)
           throw new Error("the committed Project receipt was not retained");
+        this.#journal.resolve(requestId);
         return response(receipt);
       } catch (cause) {
         return refusal(
@@ -391,11 +388,11 @@ export class ProjectApi {
         );
         const document: ClientRequestDocument = {
           subject: {
-            requestId: retained.request.requestId,
-            operation: retained.request.operation,
-            targetKind: retained.request.target.kind,
+            requestId: retained.requestId,
+            operation: retained.subject.operation,
+            targetKind: retained.subject.targetKind,
           },
-          status: receipt?.status ?? "accepted",
+          status: receipt?.status ?? retained.resolution?.status ?? "accepted",
         };
         return response(document);
       } catch (cause) {
@@ -414,15 +411,15 @@ export class ProjectApi {
         const requests = await Promise.all(
           this.#journal.list().map(async (retained): Promise<ClientRequestDocument> => {
             const receipt = await Effect.runPromise(
-              this.#repository.receipt(this.#dataIdentity, retained.request.requestId),
+              this.#repository.receipt(this.#dataIdentity, retained.requestId),
             );
             return {
               subject: {
-                requestId: retained.request.requestId,
-                operation: retained.request.operation,
-                targetKind: retained.request.target.kind,
+                requestId: retained.requestId,
+                operation: retained.subject.operation,
+                targetKind: retained.subject.targetKind,
               },
-              status: receipt?.status ?? "accepted",
+              status: receipt?.status ?? retained.resolution?.status ?? "accepted",
             };
           }),
         );
@@ -461,6 +458,17 @@ export class ProjectApi {
             this.#dataIdentity,
           );
         }
+        if (retained.request === undefined || retained.body === undefined) {
+          return response({
+            subject: {
+              requestId: retained.requestId,
+              operation: retained.subject.operation,
+              targetKind: retained.subject.targetKind,
+            },
+            status: retained.resolution?.status ?? "committed",
+            resultReference: retained.resolution?.resultReference,
+          });
+        }
         const locationOperation = retained.request.operation.match(
           /^(relocate|archive|restore)Project$/,
         );
@@ -473,14 +481,7 @@ export class ProjectApi {
             this.locationChange(
               retained.request.target.parts[0],
               locationOperation[1] as ProjectLocationAction,
-              {
-                requestId,
-                dataIdentity: this.#dataIdentity,
-                confirm: true,
-                ...(typeof retained.request.arguments.location === "string"
-                  ? { location: retained.request.arguments.location }
-                  : {}),
-              },
+              retained.request,
             ),
           );
         }
@@ -538,6 +539,7 @@ export class ProjectApi {
           this.#repository.receipt(this.#dataIdentity, requestId),
         );
         if (receipt === undefined) throw new Error("the committed receipt could not be read");
+        this.#journal.resolve(requestId);
         return response(receipt satisfies OperationReceipt);
       } catch (cause) {
         return refusal(

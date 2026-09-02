@@ -172,6 +172,27 @@ export class ManagedUpgradePreflight {
     return Effect.gen(function* () {
       const checkedAt = new Date(service.#now()).toISOString();
       const first = yield* service.#repository.capture(checkedAt);
+      const second = yield* service.#repository.capture(checkedAt);
+      return yield* service.checkEvidence(request, { checkedAt, first, second });
+    });
+  };
+
+  /** Evaluate two real retained-state snapshots taken across the preflight window. */
+  readonly checkEvidence = (
+    request: {
+      readonly candidate: CheckedManagedReleaseManifest;
+      readonly sourceReleaseId: string;
+      readonly approvalToken?: string;
+    },
+    evidence: {
+      readonly checkedAt: string;
+      readonly first: UpgradeEvidence;
+      readonly second: UpgradeEvidence;
+    },
+  ): Effect.Effect<UpgradeCheckResult, LifecycleError> => {
+    const service = this;
+    return Effect.gen(function* () {
+      const { checkedAt, first, second } = evidence;
       const compatibilityFaults: UpgradeCompatibilityFault[] = [];
       const migration = request.candidate.migration;
       if (!request.candidate.compatibility.dataFormats.includes(first.dataFormat)) {
@@ -194,7 +215,6 @@ export class ManagedUpgradePreflight {
         ),
       );
       const existing = existingFaults(first);
-      const second = yield* service.#repository.capture(checkedAt);
       if (second.retainedSetHash !== first.retainedSetHash) {
         compatibilityFaults.push({
           code: "RETAINED_SET_CHANGED",

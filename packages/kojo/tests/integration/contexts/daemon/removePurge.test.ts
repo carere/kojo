@@ -39,11 +39,9 @@ import {
   PurgeSafetyRecovery,
 } from "../../../../src/contexts/daemon/adapters/PurgeSafetyRecovery.ts";
 import { SqlitePurgeSafetyRepository } from "../../../../src/contexts/daemon/adapters/SqlitePurgeSafetyRepository.ts";
+import { systemdUserService } from "../../../../src/contexts/daemon/adapters/SystemdUserService.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
-import type {
-  NativeService,
-  NativeServiceObservation,
-} from "../../../../src/contexts/daemon/ports/NativeService.ts";
+import type { NativeServiceObservation } from "../../../../src/contexts/daemon/ports/NativeService.ts";
 
 const roots: string[] = [];
 
@@ -61,6 +59,60 @@ const canonical = (value: unknown): string =>
 
 const digest = (value: string): string =>
   new Bun.CryptoHasher("sha256").update(value).digest("hex");
+
+const managedNative = (initial: NativeServiceObservation) => {
+  let observation = { ...initial };
+  return systemdUserService({
+    unit: "kojo-test.service",
+    uid: 1200,
+    home: "/tmp/kojo-test-home",
+    systemctl: (arguments_) => {
+      if (arguments_.includes("show-environment")) {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (arguments_.includes("is-enabled")) {
+        return {
+          exitCode: 0,
+          stdout: `${observation.automaticStart === "enabled" ? "enabled" : "disabled"}\n`,
+          stderr: "",
+        };
+      }
+      if (arguments_.includes("show")) {
+        return {
+          exitCode: 0,
+          stdout: `LoadState=${observation.manager === "loaded" ? "loaded" : "not-found"}\nActiveState=${observation.process === "running" ? "active" : "inactive"}\n`,
+          stderr: "",
+        };
+      }
+      if (arguments_.includes("disable")) {
+        observation = {
+          ...observation,
+          automaticStart: "disabled",
+          ...(arguments_.includes("--now") ? { process: "stopped" as const } : {}),
+        };
+      }
+      if (arguments_.includes("stop")) observation = { ...observation, process: "stopped" };
+      if (arguments_.includes("start")) {
+        observation = { ...observation, manager: "loaded", process: "running" };
+      }
+      if (arguments_.includes("enable")) {
+        observation = { ...observation, automaticStart: "enabled" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+    loginctl: (arguments_) => {
+      if (arguments_.includes("enable-linger")) {
+        observation = { ...observation, logoutPersistence: "enabled" };
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      return {
+        exitCode: 0,
+        stdout: `${observation.logoutPersistence === "enabled" ? "yes" : "no"}\n`,
+        stderr: "",
+      };
+    },
+  });
+};
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { force: true, recursive: true });
@@ -103,17 +155,7 @@ const fixture = (
     "CREATE TABLE correctness_history (history_id TEXT PRIMARY KEY NOT NULL, detail TEXT NOT NULL) STRICT",
   );
   database.run("INSERT INTO correctness_history VALUES ('history-1', 'retained')");
-  const native: NativeService = {
-    serviceDocument: () => "test",
-    assertSupported: () => undefined,
-    inspect: () => observation,
-    installAndStart: () => undefined,
-    start: () => undefined,
-    stop: () => undefined,
-    enable: () => undefined,
-    disable: () => undefined,
-    keepRunningAfterLogout: () => undefined,
-  };
+  const native = managedNative(observation);
   const journal = new FileLifecycleJournalRepository(join(paths.dataRoot, "lifecycle"));
   journal.current();
   return { root, paths, database, native, journal, dataIdentity };

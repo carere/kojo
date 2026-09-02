@@ -29,6 +29,7 @@ import type { DaemonPaths } from "../../../src/contexts/daemon/models/DaemonPath
 import { SqliteProjectRepository } from "../../../src/contexts/project/adapters/SqliteProjectRepository.ts";
 import { captureWorkflowRevision } from "../../../src/contexts/workflow/services/captureRevision.ts";
 import { publishConsoleRelease } from "../../support/daemon/consoleRelease.ts";
+import { sendPreparedMutation } from "../../support/daemon/preparedMutation.ts";
 
 const gateCli = fileURLToPath(new URL("../../support/daemon/gateCli.ts", import.meta.url));
 const roots: string[] = [];
@@ -225,17 +226,21 @@ const harness = async (key: string, mode: "success" | "failure" | "second" = "su
 
   const daemon = startDaemon(hostPaths, { automaticRefresh: false });
   daemons.push(daemon);
-  const started = await call(
+  const started = await sendPreparedMutation(
     daemon,
     `/api/v1/projects/${registered.project.projectId}/workflows/gated/actions/start`,
     {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        requestId: `start-${key}`,
-        dataIdentity: daemon.endpoint.dataIdentity,
-        payload: { key, mode },
-      }),
+      mutationVersion: 1,
+      requestId: `start-${key}`,
+      dataIdentity: daemon.endpoint.dataIdentity,
+      operation: "startWorkflow",
+      target: {
+        identityVersion: 1,
+        kind: "workflow",
+        parts: [registered.project.projectId, "gated"],
+      },
+      arguments: { payload: { key, mode } },
+      preconditions: {},
     },
   );
   expect(started.status, await started.clone().text()).toBe(202);

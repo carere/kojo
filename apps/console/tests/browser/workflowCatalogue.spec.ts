@@ -51,8 +51,11 @@ test("filters Workflow state and proves safe Trigger Start, Stop, force, and Run
   page,
 }) => {
   await page.route("**/actions/stop", async (route) => {
-    const body = route.request().postDataJSON() as { readonly force?: boolean };
-    if (body.force !== true) {
+    const body = route.request().postDataJSON() as {
+      readonly operation?: string;
+      readonly arguments?: { readonly force?: boolean };
+    };
+    if (body.arguments?.force !== true) {
       await route.continue();
       return;
     }
@@ -164,7 +167,16 @@ test("validates JSON before a no-Trigger Start and submits one accepted Run payl
   });
   await page.route("**/api/v1/projects/*/workflows/available/actions/start", async (route) => {
     starts += 1;
-    expect(route.request().postDataJSON()).toMatchObject({ payload: { release: 7 } });
+    const body = route.request().postDataJSON() as {
+      readonly target: { readonly parts: ReadonlyArray<string> };
+    };
+    const projectId = new URL(route.request().url()).pathname.split("/")[4];
+    expect(body).toMatchObject({
+      operation: "startWorkflow",
+      target: { kind: "workflow", parts: [projectId, "available"] },
+      arguments: { payload: { release: 7 } },
+      preconditions: {},
+    });
     await route.fulfill({
       status: 202,
       contentType: "application/json",

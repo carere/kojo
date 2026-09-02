@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import type {
   RunDocument,
   RunSnapshot,
@@ -383,6 +384,24 @@ const call = (daemon: RunningDaemon, path: string, init: RequestInit = {}): Prom
     ...init,
   } as RequestInit & { readonly unix: string });
 
+const mutate = async (
+  daemon: RunningDaemon,
+  path: string,
+  mutation: MutationEnvelope,
+): Promise<Response> => {
+  const prepared = await call(daemon, `/api/v1/client-requests/${mutation.requestId}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(mutation),
+  });
+  expect(prepared.status, await prepared.clone().text()).toBe(201);
+  return call(daemon, path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(mutation),
+  });
+};
+
 const waitForRun = async (daemon: RunningDaemon, runId: string): Promise<RunDocument> => {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
@@ -736,19 +755,23 @@ describe("Daemon no-Trigger Run API", () => {
 
     const daemon = startDaemon(hostPaths, { automaticRefresh: false, runnerIdleMillis: 500 });
     daemons.push(daemon);
-    const startBody = {
+    const startBody: MutationEnvelope = {
+      mutationVersion: 1,
       requestId: "start-exact-null",
       dataIdentity: daemon.endpoint.dataIdentity,
-      payload: null,
+      operation: "startWorkflow",
+      target: {
+        identityVersion: 1,
+        kind: "workflow",
+        parts: [registered.project.projectId, "example"],
+      },
+      arguments: { payload: null },
+      preconditions: {},
     };
-    const response = await call(
+    const response = await mutate(
       daemon,
       `/api/v1/projects/${registered.project.projectId}/workflows/example/actions/start`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(startBody),
-      },
+      startBody,
     );
     expect(response.status, await response.clone().text()).toBe(202);
     const admitted = (await response.json()) as StartRunResult;
@@ -816,13 +839,21 @@ describe("Daemon no-Trigger Run API", () => {
       "current-workflow",
       "retained-run",
     ]);
-    const repairResponse = await call(
+    const repairResponse = await mutate(
       daemon,
       `/api/v1/projects/${registered.project.projectId}/revisions/${captured.revisionId}/actions/repair`,
       {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ from: captured.publishedPath }),
+        mutationVersion: 1,
+        requestId: "repair-exact-revision",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation: "repairRevision",
+        target: {
+          identityVersion: 1,
+          kind: "workflowRevision",
+          parts: [registered.project.projectId, captured.revisionId],
+        },
+        arguments: { from: captured.publishedPath },
+        preconditions: {},
       },
     );
     expect(repairResponse.status, await repairResponse.clone().text()).toBe(200);
@@ -835,14 +866,10 @@ describe("Daemon no-Trigger Run API", () => {
     ).json()) as RunSnapshot;
     expect(scoped.runs).toEqual([run]);
 
-    const duplicate = await call(
+    const duplicate = await mutate(
       daemon,
       `/api/v1/projects/${registered.project.projectId}/workflows/example/actions/start`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...startBody, requestId: "start-same-key" }),
-      },
+      { ...startBody, requestId: "start-same-key" },
     );
     expect(duplicate.status).toBe(202);
     expect(await duplicate.json()).toMatchObject({ runId: run.runId, duplicate: true });
@@ -926,17 +953,21 @@ describe("Daemon no-Trigger Run API", () => {
 
         const daemon = startDaemon(hostPaths, { automaticRefresh: false, runnerIdleMillis: 500 });
         daemons.push(daemon);
-        const response = await call(
+        const response = await mutate(
           daemon,
           `/api/v1/projects/${registered.project.projectId}/workflows/example/actions/start`,
           {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              requestId: "start-shutdown-run",
-              dataIdentity: daemon.endpoint.dataIdentity,
-              payload: null,
-            }),
+            mutationVersion: 1,
+            requestId: "start-shutdown-run",
+            dataIdentity: daemon.endpoint.dataIdentity,
+            operation: "startWorkflow",
+            target: {
+              identityVersion: 1,
+              kind: "workflow",
+              parts: [registered.project.projectId, "example"],
+            },
+            arguments: { payload: null },
+            preconditions: {},
           },
         );
         expect(response.status, await response.clone().text()).toBe(202);
@@ -1006,13 +1037,18 @@ describe("Daemon no-Trigger Run API", () => {
     const daemon = startDaemon(hostPaths, { automaticRefresh: false, runnerIdleMillis: 100 });
     daemons.push(daemon);
     const startPath = `/api/v1/projects/${registered.project.projectId}/workflows/tickets/actions/start`;
-    const start = await call(daemon, startPath, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        requestId: "start-trigger",
-        dataIdentity: daemon.endpoint.dataIdentity,
-      }),
+    const start = await mutate(daemon, startPath, {
+      mutationVersion: 1,
+      requestId: "start-trigger",
+      dataIdentity: daemon.endpoint.dataIdentity,
+      operation: "startWorkflow",
+      target: {
+        identityVersion: 1,
+        kind: "workflow",
+        parts: [registered.project.projectId, "tickets"],
+      },
+      arguments: {},
+      preconditions: {},
     });
     expect(start.status, await start.clone().text()).toBe(202);
     expect(await start.json()).toMatchObject({
@@ -1020,13 +1056,18 @@ describe("Daemon no-Trigger Run API", () => {
       activity: "active",
       pollerStarted: true,
     });
-    const repeated = await call(daemon, startPath, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        requestId: "repeat-trigger",
-        dataIdentity: daemon.endpoint.dataIdentity,
-      }),
+    const repeated = await mutate(daemon, startPath, {
+      mutationVersion: 1,
+      requestId: "repeat-trigger",
+      dataIdentity: daemon.endpoint.dataIdentity,
+      operation: "startWorkflow",
+      target: {
+        identityVersion: 1,
+        kind: "workflow",
+        parts: [registered.project.projectId, "tickets"],
+      },
+      arguments: {},
+      preconditions: {},
     });
     expect(repeated.status).toBe(202);
     expect(await repeated.json()).toMatchObject({ pollerStarted: false });
@@ -1049,14 +1090,20 @@ describe("Daemon no-Trigger Run API", () => {
       `/api/v1/runs/${firstAcknowledgement.run?.runId ?? "missing"}`,
     );
     expect(durableRun.status).toBe(200);
+    await Bun.sleep(250);
 
-    const stop = await call(daemon, `${startPath.replace("/start", "/stop")}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        requestId: "stop-trigger",
-        dataIdentity: daemon.endpoint.dataIdentity,
-      }),
+    const stop = await mutate(daemon, `${startPath.replace("/start", "/stop")}`, {
+      mutationVersion: 1,
+      requestId: "stop-trigger",
+      dataIdentity: daemon.endpoint.dataIdentity,
+      operation: "stopWorkflow",
+      target: {
+        identityVersion: 1,
+        kind: "workflow",
+        parts: [registered.project.projectId, "tickets"],
+      },
+      arguments: {},
+      preconditions: {},
     });
     expect(stop.status, await stop.clone().text()).toBe(202);
     await Bun.sleep(700);

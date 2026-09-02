@@ -83,7 +83,7 @@ test("uses filtered Zaidan lists for Phases, Artifacts, and detail resources", a
           corrections: 1,
           correctable: true,
         },
-        breaches: [{ path: ".kojo/factory.json", outcome: { _tag: "Preserved" } }],
+        breaches: [{ path: ".kojo/factory.json", outcome: { _tag: "WorkLost" } }],
       },
     ],
     gates: [

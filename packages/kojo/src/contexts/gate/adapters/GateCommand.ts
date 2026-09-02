@@ -4,6 +4,7 @@ import type {
   RecordVerdictRequest,
   RecordVerdictResult,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/gate";
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import { Console, Data, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { clientExit } from "../../../cli/ClientExit.ts";
@@ -92,8 +93,7 @@ const recordVerdict = (
   Effect.tryPromise({
     try: async () => {
       const endpoint = daemonEndpoint(paths);
-      const body: RecordVerdictRequest = { ...input, dataIdentity: endpoint.dataIdentity };
-      prepareHostClientRequest(paths(), {
+      const mutation: MutationEnvelope = {
         mutationVersion: 1,
         requestId: input.requestId,
         dataIdentity: endpoint.dataIdentity,
@@ -106,12 +106,13 @@ const recordVerdict = (
           ...(input.answerer === undefined ? {} : { answerer: input.answerer }),
         },
         preconditions: {},
-      });
+      };
+      prepareHostClientRequest(paths(), mutation);
       const response = await fetch("http://localhost/api/v1/gate-answers", {
         unix: endpoint.socketPath,
         method: "POST",
         headers: { accept: "application/json", "content-type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(mutation),
       } as RequestInit & { readonly unix: string });
       if (!response.ok) {
         const problem = await problemOf(response);

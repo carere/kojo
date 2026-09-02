@@ -18,6 +18,7 @@ import { daemonConfigurationDefaults } from "../../../../src/contexts/daemon/mod
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
 import { LifecycleError } from "../../../../src/contexts/daemon/models/LifecycleError.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
+import { sendPreparedMutation } from "../../../support/daemon/preparedMutation.ts";
 
 const roots: Array<string> = [];
 
@@ -219,18 +220,34 @@ describe("one idle Daemon owns one data root", () => {
         scope: "daemon",
         restartRequired: false,
       });
-      const invalid = await request("/api/v1/daemon/actions/configure", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ patch: { set: { secret: "not-allowed" } } }),
+      const invalid = await sendPreparedMutation(daemon, "/api/v1/daemon/actions/configure", {
+        mutationVersion: 1,
+        requestId: "configure-invalid",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation: "configureDaemon",
+        target: {
+          identityVersion: 1,
+          kind: "daemonData",
+          parts: [daemon.endpoint.dataIdentity],
+        },
+        arguments: { patch: { set: { secret: "not-allowed" } } },
+        preconditions: {},
       });
       expect(invalid.status).toBe(400);
       expect(await invalid.json()).toMatchObject({ code: "INVALID_CONFIGURATION_PATCH" });
 
-      const applied = await request("/api/v1/daemon/actions/configure", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ patch: { set: { limits: { executingRuns: 2 } } } }),
+      const applied = await sendPreparedMutation(daemon, "/api/v1/daemon/actions/configure", {
+        mutationVersion: 1,
+        requestId: "configure-limits",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation: "configureDaemon",
+        target: {
+          identityVersion: 1,
+          kind: "daemonData",
+          parts: [daemon.endpoint.dataIdentity],
+        },
+        arguments: { patch: { set: { limits: { executingRuns: 2 } } } },
+        preconditions: {},
       });
       expect(applied.status).toBe(202);
       const result = (await applied.json()) as {

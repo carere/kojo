@@ -5,6 +5,7 @@ import type {
   ProjectLocationResult,
   ProjectSnapshot,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
+import { decodeJsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Console, Data, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { clientExit } from "../../../cli/ClientExit.ts";
@@ -207,12 +208,7 @@ const runLocationChange = (
       `/api/v1/projects/${encodeURIComponent(projectId)}/actions/${action}`,
       {
         method: "POST",
-        body: {
-          requestId: id,
-          dataIdentity: endpoint.dataIdentity,
-          confirm: true,
-          ...(location === undefined ? {} : { location }),
-        },
+        body: mutation,
       },
     ).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
     const result = receipt.result as unknown as ProjectLocationResult;
@@ -340,9 +336,24 @@ const configure = Command.make(
       catch: (cause) =>
         `configuration file is not valid JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
     }).pipe(Effect.catch((message) => clientExit(2, message)));
+    const decodedPatch = decodeJsonValue(patch);
+    if (!decodedPatch.ok) return yield* clientExit(2, "configuration file is not JSON");
+    const paths = productionPaths();
+    const endpoint = readDaemonEndpoint(paths);
+    if (endpoint === undefined) return yield* commandFailed("the Daemon is not ready");
+    const mutation: MutationEnvelope = {
+      mutationVersion: 1,
+      requestId: crypto.randomUUID(),
+      dataIdentity: endpoint.dataIdentity,
+      operation: "configureProject",
+      target: { identityVersion: 1, kind: "project", parts: [project] },
+      arguments: { patch: decodedPatch.value, ...(check ? { check: true } : {}) },
+      preconditions: {},
+    };
+    prepareHostClientRequest(paths, mutation);
     const result = yield* daemonRequest<ConfigurationCheck | ConfigurationApplyResult>(
       `/api/v1/projects/${encodeURIComponent(project)}/actions/configure`,
-      { method: "POST", body: { patch, ...(check ? { check: true } : {}) } },
+      { method: "POST", body: mutation },
     ).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
     if (json) yield* Console.log(JSON.stringify(result));
     else {
@@ -365,6 +376,19 @@ const repair = Command.make(
   },
   Effect.fn(function* ({ project, revision, from }) {
     if (Option.isNone(revision) && Option.isNone(from)) {
+      const paths = productionPaths();
+      const endpoint = readDaemonEndpoint(paths);
+      if (endpoint === undefined) return yield* commandFailed("the Daemon is not ready");
+      const mutation: MutationEnvelope = {
+        mutationVersion: 1,
+        requestId: crypto.randomUUID(),
+        dataIdentity: endpoint.dataIdentity,
+        operation: "repairProject",
+        target: { identityVersion: 1, kind: "project", parts: [project] },
+        arguments: {},
+        preconditions: {},
+      };
+      prepareHostClientRequest(paths, mutation);
       const recovery = yield* daemonRequest<{
         readonly state: "healthy" | "recovering" | "held";
         readonly cycle: number;
@@ -372,7 +396,7 @@ const repair = Command.make(
         readonly safety: "safe" | "pending" | "uncertain";
       }>(`/api/v1/projects/${encodeURIComponent(project)}/actions/repair`, {
         method: "POST",
-        body: {},
+        body: mutation,
       }).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
       yield* Console.log(
         recovery.state === "healthy"
@@ -384,9 +408,26 @@ const repair = Command.make(
     if (Option.isNone(revision) || Option.isNone(from)) {
       return yield* commandFailed("exact-content repair requires both --revision and --from");
     }
+    const paths = productionPaths();
+    const endpoint = readDaemonEndpoint(paths);
+    if (endpoint === undefined) return yield* commandFailed("the Daemon is not ready");
+    const mutation: MutationEnvelope = {
+      mutationVersion: 1,
+      requestId: crypto.randomUUID(),
+      dataIdentity: endpoint.dataIdentity,
+      operation: "repairRevision",
+      target: {
+        identityVersion: 1,
+        kind: "workflowRevision",
+        parts: [project, revision.value],
+      },
+      arguments: { from: from.value },
+      preconditions: {},
+    };
+    prepareHostClientRequest(paths, mutation);
     const document = yield* daemonRequest<RevisionDetails>(
       `/api/v1/projects/${encodeURIComponent(project)}/revisions/${encodeURIComponent(revision.value)}/actions/repair`,
-      { method: "POST", body: { from: from.value } },
+      { method: "POST", body: mutation },
     ).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
     yield* Console.log(`Repaired exact Workflow Revision ${document.revisionId}.`);
     yield* Console.log(

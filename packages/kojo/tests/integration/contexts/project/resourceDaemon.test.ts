@@ -27,6 +27,7 @@ import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonP
 import { SqliteProjectRepository } from "../../../../src/contexts/project/adapters/SqliteProjectRepository.ts";
 import { captureWorkflowRevision } from "../../../../src/contexts/workflow/services/captureRevision.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
+import { sendPreparedMutation } from "../../../support/daemon/preparedMutation.ts";
 import { linkEngine } from "../../../support/linkEngine.ts";
 import { findProcessAncestor, type ProcessRow } from "../../../support/processTree.ts";
 
@@ -296,17 +297,21 @@ console.log(JSON.stringify({ answer: "controlled" }));
             : {}),
         });
         daemons.push(daemon);
-        const response = await call(
+        const response = await sendPreparedMutation(
           daemon,
           `/api/v1/projects/${registered.project.projectId}/workflows/resource/actions/start`,
           {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              requestId: "start-resource",
-              dataIdentity: daemon.endpoint.dataIdentity,
-              payload: { gate: crashMode === "gate" },
-            }),
+            mutationVersion: 1,
+            requestId: "start-resource",
+            dataIdentity: daemon.endpoint.dataIdentity,
+            operation: "startWorkflow",
+            target: {
+              identityVersion: 1,
+              kind: "workflow",
+              parts: [registered.project.projectId, "resource"],
+            },
+            arguments: { payload: { gate: crashMode === "gate" } },
+            preconditions: {},
           },
         );
         expect(response.status, await response.clone().text()).toBe(202);
@@ -322,16 +327,18 @@ console.log(JSON.stringify({ answer: "controlled" }));
             if (token === undefined) await Bun.sleep(20);
           }
           expect(token).toBeDefined();
-          const answered = await call(daemon, "/api/v1/gate-answers", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              requestId: "answer-resource-gate",
-              dataIdentity: daemon.endpoint.dataIdentity,
-              token,
+          const answered = await sendPreparedMutation(daemon, "/api/v1/gate-answers", {
+            mutationVersion: 1,
+            requestId: "answer-resource-gate",
+            dataIdentity: daemon.endpoint.dataIdentity,
+            operation: "recordGateVerdict",
+            target: { identityVersion: 1, kind: "gate", parts: ["answer-resource-gate"] },
+            arguments: {
+              token: token as string,
               choice: "continue",
               reason: "prove the next physical acquisition",
-            }),
+            },
+            preconditions: {},
           });
           expect(answered.status, await answered.clone().text()).toBe(200);
         }

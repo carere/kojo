@@ -24,7 +24,7 @@ import {
 import { SqliteUpgradePreflightRepository } from "../../../../src/contexts/daemon/adapters/SqliteUpgradePreflightRepository.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
 import type { CheckedManagedReleaseManifest } from "../../../../src/contexts/daemon/models/ManagedRelease.ts";
-import type { UpgradePreflightRepository } from "../../../../src/contexts/daemon/ports/UpgradePreflightRepository.ts";
+import type { RunningDaemon } from "../../../../src/contexts/daemon/services/DaemonComposition.ts";
 import { ManagedUpgradePreflight } from "../../../../src/contexts/daemon/services/ManagedUpgradePreflight.ts";
 import { SqliteProjectRepository } from "../../../../src/contexts/project/adapters/SqliteProjectRepository.ts";
 import { SqliteRevisionRepository } from "../../../../src/contexts/workflow/adapters/SqliteRevisionRepository.ts";
@@ -35,6 +35,7 @@ import {
   sha256Text,
 } from "../../../../src/contexts/workflow/services/canonicalJson.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
+import { sendPreparedMutation } from "../../../support/daemon/preparedMutation.ts";
 
 const removeTree = (path: string): void => {
   if (!existsSync(path)) return;
@@ -51,6 +52,29 @@ const removeTree = (path: string): void => {
   }
   rmSync(path, { recursive: true, force: true });
 };
+
+const checkUpgrade = (
+  daemon: RunningDaemon,
+  requestId: string,
+  candidateReleaseId: string,
+  approvalToken?: string,
+): Promise<Response> =>
+  sendPreparedMutation(daemon, "/api/v1/daemon/upgrade-check", {
+    mutationVersion: 1,
+    requestId,
+    dataIdentity: daemon.endpoint.dataIdentity,
+    operation: "checkDaemonUpgrade",
+    target: {
+      identityVersion: 1,
+      kind: "daemonData",
+      parts: [daemon.endpoint.dataIdentity],
+    },
+    arguments: {
+      candidateReleaseId,
+      ...(approvalToken === undefined ? {} : { approvalToken }),
+    },
+    preconditions: {},
+  });
 
 const write = (path: string, value: string, mode = 0o600): void => {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -185,12 +209,7 @@ describe("managed release staging", () => {
       );
       const daemon = startDaemon(paths, { automaticRefresh: false });
       try {
-        const checked = await fetch("http://localhost/api/v1/daemon/upgrade-check", {
-          unix: daemon.endpoint.socketPath,
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ candidateReleaseId: staged.releaseId }),
-        } as RequestInit & { readonly unix: string });
+        const checked = await checkUpgrade(daemon, "check-initial", staged.releaseId);
         expect(checked.status).toBe(200);
         const initial = (await checked.json()) as {
           readonly approvalToken: string;
@@ -218,15 +237,12 @@ describe("managed release staging", () => {
         expect(repeated.createdAt).toBe(staged.createdAt);
         removeTree(source);
 
-        const approved = await fetch("http://localhost/api/v1/daemon/upgrade-check", {
-          unix: daemon.endpoint.socketPath,
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            candidateReleaseId: repeated.releaseId,
-            approvalToken: initial.approvalToken,
-          }),
-        } as RequestInit & { readonly unix: string });
+        const approved = await checkUpgrade(
+          daemon,
+          "check-approved",
+          repeated.releaseId,
+          initial.approvalToken,
+        );
         expect(approved.status).toBe(200);
         expect(await approved.json()).toMatchObject({
           report: {
@@ -235,15 +251,12 @@ describe("managed release staging", () => {
             rollbackApproval: "approved",
           },
         });
-        const replayedApproval = await fetch("http://localhost/api/v1/daemon/upgrade-check", {
-          unix: daemon.endpoint.socketPath,
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            candidateReleaseId: repeated.releaseId,
-            approvalToken: initial.approvalToken,
-          }),
-        } as RequestInit & { readonly unix: string });
+        const replayedApproval = await checkUpgrade(
+          daemon,
+          "check-replayed-approval",
+          repeated.releaseId,
+          initial.approvalToken,
+        );
         expect(await replayedApproval.json()).toMatchObject({
           report: {
             outcome: "staged",
@@ -251,12 +264,7 @@ describe("managed release staging", () => {
             rollbackApproval: "approved",
           },
         });
-        const repeatedCheck = await fetch("http://localhost/api/v1/daemon/upgrade-check", {
-          unix: daemon.endpoint.socketPath,
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ candidateReleaseId: repeated.releaseId }),
-        } as RequestInit & { readonly unix: string });
+        const repeatedCheck = await checkUpgrade(daemon, "check-repeated", repeated.releaseId);
         const repeatedResult = (await repeatedCheck.json()) as {
           readonly approvalToken?: string;
           readonly report: { readonly outcome: string; readonly rollbackApproval: string };
@@ -274,12 +282,7 @@ describe("managed release staging", () => {
         });
 
         write(join(paths.installationRoot, "active-release"), `${staged.releaseId}\n`);
-        const changedSource = await fetch("http://localhost/api/v1/daemon/upgrade-check", {
-          unix: daemon.endpoint.socketPath,
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ candidateReleaseId: staged.releaseId }),
-        } as RequestInit & { readonly unix: string });
+        const changedSource = await checkUpgrade(daemon, "check-changed-source", staged.releaseId);
         expect(changedSource.status).toBe(409);
         expect(await changedSource.json()).toMatchObject({ code: "ACTIVE_RELEASE_CHANGED" });
         write(join(paths.installationRoot, "active-release"), "kojo-test\n");
@@ -429,36 +432,25 @@ describe("real retained upgrade evidence", () => {
         revisionId,
       ]);
 
-      let captures = 0;
-      const changing: UpgradePreflightRepository = {
-        capture: (observedAt) =>
-          repository.capture(observedAt).pipe(
-            Effect.tap(() =>
-              Effect.sync(() => {
-                captures += 1;
-                if (captures === 1) {
-                  database?.run(
-                    `INSERT INTO workflow_runs
-                       (run_id, project_id, workflow_name, idempotency_key, payload_json, revision_id,
-                        package_graph_id, state, admission_sequence, admitted_at, finished_at)
-                     VALUES ('run-added', 'project', 'review', 'added', '{}', ?, 'graph',
-                             'failed', 2, 'now', 'now')`,
-                    [revisionId],
-                  );
-                }
-              }),
-            ),
-          ),
-        issueNoRollbackPlan: repository.issueNoRollbackPlan,
-        approveNoRollbackPlan: repository.approveNoRollbackPlan,
-        record: repository.record,
-        latest: repository.latest,
-      };
+      const checkedAt = "2026-09-01T12:00:02.000Z";
+      const beforeChange = await Effect.runPromise(repository.capture(checkedAt));
+      database.run(
+        `INSERT INTO workflow_runs
+           (run_id, project_id, workflow_name, idempotency_key, payload_json, revision_id,
+            package_graph_id, state, admission_sequence, admitted_at, finished_at)
+         VALUES ('run-added', 'project', 'review', 'added', '{}', ?, 'graph',
+                 'failed', 2, 'now', 'now')`,
+        [revisionId],
+      );
+      const afterChange = await Effect.runPromise(repository.capture(checkedAt));
       const result = await Effect.runPromise(
-        new ManagedUpgradePreflight(changing).check({
-          candidate: candidate(),
-          sourceReleaseId: "source-release",
-        }),
+        new ManagedUpgradePreflight(repository).checkEvidence(
+          {
+            candidate: candidate(),
+            sourceReleaseId: "source-release",
+          },
+          { checkedAt, first: beforeChange, second: afterChange },
+        ),
       );
       expect(result.report.outcome).toBe("incompatible");
       expect(result.report.compatibilityFaults).toContainEqual(

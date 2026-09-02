@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import { Console, Duration, Effect, Option } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { clientExit } from "../../../cli/ClientExit.ts";
@@ -13,6 +14,7 @@ import {
   readCheckedManagedRelease,
   stageManagedRelease,
 } from "../adapters/ManagedInstallation.ts";
+import { prepareHostClientRequest } from "../adapters/prepareHostClientRequest.ts";
 import { systemdUserService } from "../adapters/SystemdUserService.ts";
 import type { DaemonPaths } from "../models/DaemonPaths.ts";
 import { LifecycleError } from "../models/LifecycleError.ts";
@@ -114,14 +116,24 @@ const upgradeRequest = (
           "the Daemon is not ready; start it before managed upgrade preflight",
         );
       }
+      const mutation: MutationEnvelope = {
+        mutationVersion: 1,
+        requestId: crypto.randomUUID(),
+        dataIdentity: endpoint.dataIdentity,
+        operation: "checkDaemonUpgrade",
+        target: { identityVersion: 1, kind: "daemonData", parts: [endpoint.dataIdentity] },
+        arguments: {
+          candidateReleaseId,
+          ...(approvalToken === undefined ? {} : { approvalToken }),
+        },
+        preconditions: {},
+      };
+      prepareHostClientRequest(paths, mutation);
       const response = await fetch("http://localhost/api/v1/daemon/upgrade-check", {
         unix: endpoint.socketPath,
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          candidateReleaseId,
-          ...(approvalToken === undefined ? {} : { approvalToken }),
-        }),
+        body: JSON.stringify(mutation),
       } as RequestInit & { readonly unix: string });
       const value = (await response.json()) as unknown;
       if (!response.ok) {

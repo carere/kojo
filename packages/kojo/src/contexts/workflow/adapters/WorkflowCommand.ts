@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import type {
   RunDocument,
   StartRunResult,
@@ -141,7 +142,7 @@ const startRun = Command.make(
         if (endpoint === undefined)
           throw new Error("the Daemon is not ready; run `kojo daemon start`");
         const requestId = crypto.randomUUID();
-        prepareHostClientRequest(productionPaths(), {
+        const mutation: MutationEnvelope = {
           mutationVersion: 1,
           requestId,
           dataIdentity: endpoint.dataIdentity,
@@ -149,17 +150,14 @@ const startRun = Command.make(
           target: { identityVersion: 1, kind: "workflow", parts: [projectId, workflowName] },
           arguments: parsed === undefined ? {} : { payload: parsed as JsonValue },
           preconditions: {},
-        });
+        };
+        prepareHostClientRequest(productionPaths(), mutation);
         const path = `/api/v1/projects/${encodeURIComponent(projectId)}/workflows/${encodeURIComponent(workflowName)}/actions/start`;
         const response = await fetch(`http://localhost${path}`, {
           unix: endpoint.socketPath,
           method: "POST",
           headers: { accept: "application/json", "content-type": "application/json" },
-          body: JSON.stringify({
-            requestId,
-            dataIdentity: endpoint.dataIdentity,
-            ...(parsed === undefined ? {} : { payload: parsed }),
-          }),
+          body: JSON.stringify(mutation),
         } as RequestInit & { readonly unix: string });
         if (!response.ok) {
           const body = (await response.json().catch(() => ({}))) as { readonly message?: string };
@@ -250,7 +248,7 @@ const stopWorkflow = Command.make(
         if (endpoint === undefined)
           throw new Error("the Daemon is not ready; run `kojo daemon start`");
         const requestId = crypto.randomUUID();
-        prepareHostClientRequest(productionPaths(), {
+        const mutation: MutationEnvelope = {
           mutationVersion: 1,
           requestId,
           dataIdentity: endpoint.dataIdentity,
@@ -258,17 +256,14 @@ const stopWorkflow = Command.make(
           target: { identityVersion: 1, kind: "workflow", parts: [projectId, workflowName] },
           arguments: { ...(force ? { force } : {}) },
           preconditions: {},
-        });
+        };
+        prepareHostClientRequest(productionPaths(), mutation);
         const path = `/api/v1/projects/${encodeURIComponent(projectId)}/workflows/${encodeURIComponent(workflowName)}/actions/stop`;
         const response = await fetch(`http://localhost${path}`, {
           unix: endpoint.socketPath,
           method: "POST",
           headers: { accept: "application/json", "content-type": "application/json" },
-          body: JSON.stringify({
-            requestId,
-            dataIdentity: endpoint.dataIdentity,
-            ...(force ? { force: true } : {}),
-          }),
+          body: JSON.stringify(mutation),
         } as RequestInit & { readonly unix: string });
         if (!response.ok) {
           const body = (await response.json().catch(() => ({}))) as { readonly message?: string };

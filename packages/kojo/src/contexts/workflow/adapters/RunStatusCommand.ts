@@ -1,3 +1,4 @@
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import type {
   CancelRunResult,
   RetryUncertainActionResult,
@@ -200,7 +201,7 @@ const cancel = Command.make(
         if (endpoint === undefined)
           throw new Error("the Daemon is not ready; run `kojo daemon start`");
         const requestId = crypto.randomUUID();
-        prepareHostClientRequest(productionPaths(), {
+        const mutation: MutationEnvelope = {
           mutationVersion: 1,
           requestId,
           dataIdentity: endpoint.dataIdentity,
@@ -208,17 +209,15 @@ const cancel = Command.make(
           target: { identityVersion: 1, kind: "run", parts: [runId] },
           arguments: {},
           preconditions: {},
-        });
+        };
+        prepareHostClientRequest(productionPaths(), mutation);
         const response = await fetch(
           `http://localhost/api/v1/runs/${encodeURIComponent(runId)}/actions/cancel`,
           {
             unix: endpoint.socketPath,
             method: "POST",
             headers: { accept: "application/json", "content-type": "application/json" },
-            body: JSON.stringify({
-              requestId,
-              dataIdentity: endpoint.dataIdentity,
-            }),
+            body: JSON.stringify(mutation),
           } as RequestInit & { readonly unix: string },
         );
         if (!response.ok) {
@@ -294,7 +293,7 @@ const resume = Command.make(
         if (endpoint === undefined)
           throw new Error("the Daemon is not ready; run `kojo daemon start`");
         const requestId = crypto.randomUUID();
-        prepareHostClientRequest(productionPaths(), {
+        const mutation: MutationEnvelope = {
           mutationVersion: 1,
           requestId,
           dataIdentity: endpoint.dataIdentity,
@@ -302,20 +301,15 @@ const resume = Command.make(
           target: { identityVersion: 1, kind: "runAction", parts: [runId, actionId] },
           arguments: { reason },
           preconditions: { possibleDuplicationAcknowledged: true },
-        });
+        };
+        prepareHostClientRequest(productionPaths(), mutation);
         const response = await fetch(
           `http://localhost/api/v1/runs/${encodeURIComponent(runId)}/actions/retry-uncertain`,
           {
             unix: endpoint.socketPath,
             method: "POST",
             headers: { accept: "application/json", "content-type": "application/json" },
-            body: JSON.stringify({
-              requestId,
-              dataIdentity: endpoint.dataIdentity,
-              actionId,
-              reason,
-              possibleDuplicationAcknowledged: true,
-            }),
+            body: JSON.stringify(mutation),
           } as RequestInit & { readonly unix: string },
         );
         if (!response.ok) {

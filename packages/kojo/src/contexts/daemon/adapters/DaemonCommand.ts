@@ -1,5 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
+import {
+  decodeJsonValue,
+  type JsonValue,
+} from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Console, Duration, Effect, Option } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { clientExit } from "../../../cli/ClientExit.ts";
@@ -15,6 +20,7 @@ import {
   removeManagedInstallation,
 } from "../adapters/ManagedInstallation.ts";
 import { PurgeSafetyRecovery } from "../adapters/PurgeSafetyRecovery.ts";
+import { prepareHostClientRequest } from "../adapters/prepareHostClientRequest.ts";
 import { systemdUserService } from "../adapters/SystemdUserService.ts";
 import type {
   ConfigurationApplyResult,
@@ -28,12 +34,7 @@ import type {
   LifecycleOperationKind,
   LifecycleOperationStatus,
 } from "../models/LifecycleOperation.ts";
-import {
-  decodeUpgradeCheckReport,
-  decodeUpgradeCheckResult,
-  type UpgradeCheckReport,
-  type UpgradeCheckResult,
-} from "../models/ManagedUpgrade.ts";
+import { decodeUpgradeCheckReport, type UpgradeCheckReport } from "../models/ManagedUpgrade.ts";
 import type { NativeService } from "../ports/NativeService.ts";
 import { readDaemonEndpoint } from "../services/daemonStatus.ts";
 import { hostPaths } from "../services/hostPaths.ts";
@@ -152,10 +153,15 @@ export const daemonStatusConfiguration = <A>(
 ): Effect.Effect<Option.Option<A>, string> =>
   details && ready ? request().pipe(Effect.map(Option.some)) : Effect.succeed(Option.none());
 
-const readConfigurationPatch = (file: string): Effect.Effect<unknown, string> =>
+const readConfigurationPatch = (file: string): Effect.Effect<JsonValue, string> =>
   Effect.tryPromise({
-    try: async () =>
-      JSON.parse(file === "-" ? await Bun.stdin.text() : readFileSync(file, "utf8")) as unknown,
+    try: async () => {
+      const decoded = decodeJsonValue(
+        JSON.parse(file === "-" ? await Bun.stdin.text() : readFileSync(file, "utf8")),
+      );
+      if (!decoded.ok) throw new Error("the configuration patch is not JSON");
+      return decoded.value;
+    },
     catch: (cause) =>
       `configuration file is not valid JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
   });
@@ -195,49 +201,6 @@ const lifecycleTryPromise = <A>(body: () => Promise<A>): Effect.Effect<A, Lifecy
         ? cause
         : new LifecycleError(
             "LIFECYCLE_FAILED",
-            cause instanceof Error ? cause.message : String(cause),
-            cause,
-          ),
-  });
-
-const _upgradeRequest = (
-  paths: DaemonPaths,
-  candidateReleaseId: string,
-  approvalToken?: string,
-): Effect.Effect<UpgradeCheckResult, LifecycleError> =>
-  Effect.tryPromise({
-    try: async () => {
-      const endpoint = readDaemonEndpoint(paths);
-      if (endpoint === undefined) {
-        throw new LifecycleError(
-          "DAEMON_NOT_READY",
-          "the Daemon is not ready; start it before managed upgrade preflight",
-        );
-      }
-      const response = await fetch("http://localhost/api/v1/daemon/upgrade-check", {
-        unix: endpoint.socketPath,
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          candidateReleaseId,
-          ...(approvalToken === undefined ? {} : { approvalToken }),
-        }),
-      } as RequestInit & { readonly unix: string });
-      const value = (await response.json()) as unknown;
-      if (!response.ok) {
-        const fault = value as { readonly code?: unknown; readonly message?: unknown };
-        throw new LifecycleError(
-          typeof fault.code === "string" ? fault.code : "UPGRADE_PREFLIGHT_FAILED",
-          typeof fault.message === "string" ? fault.message : "managed upgrade preflight failed",
-        );
-      }
-      return decodeUpgradeCheckResult(value);
-    },
-    catch: (cause) =>
-      cause instanceof LifecycleError
-        ? cause
-        : new LifecycleError(
-            "UPGRADE_PREFLIGHT_FAILED",
             cause instanceof Error ? cause.message : String(cause),
             cause,
           ),
@@ -491,9 +454,22 @@ const configure = Command.make(
       if (Option.isSome(file) || check) {
         return yield* clientExit(2, "--confirm cannot be combined with --file or --check");
       }
+      const paths = hostPaths();
+      const endpoint = readDaemonEndpoint(paths);
+      if (endpoint === undefined) return yield* commandFailed("the Daemon is not ready");
+      const mutation: MutationEnvelope = {
+        mutationVersion: 1,
+        requestId: crypto.randomUUID(),
+        dataIdentity: endpoint.dataIdentity,
+        operation: "confirmDaemonConfiguration",
+        target: { identityVersion: 1, kind: "daemonData", parts: [endpoint.dataIdentity] },
+        arguments: { confirm: confirm.value },
+        preconditions: {},
+      };
+      prepareHostClientRequest(paths, mutation);
       const applied = yield* privateDaemonRequest<ConfigurationApplyResult>(
         "/api/v1/daemon/actions/configure",
-        { method: "POST", body: { confirm: confirm.value } },
+        { method: "POST", body: mutation },
       ).pipe(Effect.catch((message) => commandFailed(message)));
       if (json) yield* Console.log(JSON.stringify(applied));
       else
@@ -505,9 +481,22 @@ const configure = Command.make(
     const patch = yield* readConfigurationPatch(file.value).pipe(
       Effect.catch((message) => clientExit(2, message)),
     );
+    const paths = hostPaths();
+    const endpoint = readDaemonEndpoint(paths);
+    if (endpoint === undefined) return yield* commandFailed("the Daemon is not ready");
+    const mutation: MutationEnvelope = {
+      mutationVersion: 1,
+      requestId: crypto.randomUUID(),
+      dataIdentity: endpoint.dataIdentity,
+      operation: "configureDaemon",
+      target: { identityVersion: 1, kind: "daemonData", parts: [endpoint.dataIdentity] },
+      arguments: { patch, ...(check ? { check: true } : {}) },
+      preconditions: {},
+    };
+    prepareHostClientRequest(paths, mutation);
     const result = yield* privateDaemonRequest<ConfigurationCheck | ConfigurationApplyResult>(
       "/api/v1/daemon/actions/configure",
-      { method: "POST", body: { patch, ...(check ? { check: true } : {}) } },
+      { method: "POST", body: mutation },
     ).pipe(Effect.catch((message) => commandFailed(message)));
     if (json) yield* Console.log(JSON.stringify(result));
     else {
@@ -672,9 +661,30 @@ const repair = Command.make(
       });
       const recovery = new PurgeSafetyRecovery({ paths, journal, nativeService: service });
       if (Option.isSome(apply)) {
+        const dataIdentity = offlineDataIdentity(paths);
+        const requestId = crypto.randomUUID();
+        const requests = prepareHostClientRequest(paths, {
+          mutationVersion: 1,
+          requestId,
+          dataIdentity,
+          operation: "repairPurgeSafety",
+          target: { identityVersion: 1, kind: "daemonData", parts: [dataIdentity] },
+          arguments: { planToken: apply.value },
+          preconditions: {},
+        });
+        yield* Console.log(`request ${requestId}`);
         const result = yield* lifecycleTryPromise(() => recovery.apply(apply.value)).pipe(
           Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
         );
+        requests.resolve(requestId, {
+          resolvedAt: new Date().toISOString(),
+          status: "committed",
+          resultReference: {
+            identityVersion: 1,
+            kind: "clientRequestResult",
+            parts: [requestId],
+          },
+        });
         if (json) yield* Console.log(JSON.stringify({ formatVersion: 1, purgeSafety: result }));
         else yield* Console.log(`Recovered purge safety evidence: ${result.evidenceId}.`);
       } else {
@@ -692,6 +702,27 @@ const repair = Command.make(
       return;
     }
     const supervision = new ManagedDaemonSupervision(paths.dataRoot);
+    let preparedSupervision:
+      | {
+          readonly requestId: string;
+          readonly requests: ReturnType<typeof prepareHostClientRequest>;
+        }
+      | undefined;
+    if (Option.isSome(apply)) {
+      const dataIdentity = offlineDataIdentity(paths);
+      const requestId = crypto.randomUUID();
+      const requests = prepareHostClientRequest(paths, {
+        mutationVersion: 1,
+        requestId,
+        dataIdentity,
+        operation: "repairDaemonSupervision",
+        target: { identityVersion: 1, kind: "daemonData", parts: [dataIdentity] },
+        arguments: { planToken: apply.value },
+        preconditions: {},
+      });
+      preparedSupervision = { requestId, requests };
+      yield* Console.log(`request ${requestId}`);
+    }
     const result = yield* lifecycleTry(() =>
       Option.isSome(apply) ? supervision.applyRepair(apply.value) : supervision.checkRepair(),
     ).pipe(Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)));
@@ -709,6 +740,17 @@ const repair = Command.make(
           "the native manager cannot prove the faulted managed launcher is running or stopped",
         );
       }
+    }
+    if (preparedSupervision !== undefined) {
+      preparedSupervision.requests.resolve(preparedSupervision.requestId, {
+        resolvedAt: new Date().toISOString(),
+        status: "committed",
+        resultReference: {
+          identityVersion: 1,
+          kind: "clientRequestResult",
+          parts: [preparedSupervision.requestId],
+        },
+      });
     }
     if (json) yield* Console.log(JSON.stringify({ formatVersion: 1, supervision: result }));
     else for (const statusLine of supervisionLines(result)) yield* Console.log(statusLine);

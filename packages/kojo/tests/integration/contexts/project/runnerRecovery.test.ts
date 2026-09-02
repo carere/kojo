@@ -26,6 +26,7 @@ import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonP
 import { SqliteProjectRepository } from "../../../../src/contexts/project/adapters/SqliteProjectRepository.ts";
 import { captureWorkflowRevision } from "../../../../src/contexts/workflow/services/captureRevision.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
+import { sendPreparedMutation } from "../../../support/daemon/preparedMutation.ts";
 import { linkEngine } from "../../../support/linkEngine.ts";
 
 const roots: string[] = [];
@@ -177,17 +178,21 @@ describe("real Project Runner recovery", () => {
     chmodSync(databasePath, 0o600);
     const daemon = startDaemon(paths, { automaticRefresh: false, runnerIdleMillis: 50 });
     daemons.push(daemon);
-    const response = await call(
+    const response = await sendPreparedMutation(
       daemon,
       `/api/v1/projects/${registered.project.projectId}/workflows/recover/actions/start`,
       {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          requestId: "start-recovery",
-          dataIdentity: daemon.endpoint.dataIdentity,
-          payload: null,
-        }),
+        mutationVersion: 1,
+        requestId: "start-recovery",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation: "startWorkflow",
+        target: {
+          identityVersion: 1,
+          kind: "workflow",
+          parts: [registered.project.projectId, "recover"],
+        },
+        arguments: { payload: null },
+        preconditions: {},
       },
     );
     expect(response.status, await response.clone().text()).toBe(202);
@@ -222,13 +227,17 @@ describe("real Project Runner recovery", () => {
     const beforeRepair = (await (
       await call(daemon, `/api/v1/projects/${registered.project.projectId}/workflows`)
     ).json()) as WorkflowSnapshot;
-    const repair = await call(
+    const repair = await sendPreparedMutation(
       daemon,
       `/api/v1/projects/${registered.project.projectId}/actions/repair`,
       {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "{}",
+        mutationVersion: 1,
+        requestId: "repair-recovery-project",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation: "repairProject",
+        target: { identityVersion: 1, kind: "project", parts: [registered.project.projectId] },
+        arguments: {},
+        preconditions: {},
       },
     );
     expect(repair.status, await repair.clone().text()).toBe(202);
@@ -283,17 +292,21 @@ describe("real Project Runner recovery", () => {
 
     const firstOwner = startDaemon(paths, { automaticRefresh: false, runnerIdleMillis: 50 });
     daemons.push(firstOwner);
-    const response = await call(
+    const response = await sendPreparedMutation(
       firstOwner,
       `/api/v1/projects/${registered.project.projectId}/workflows/recover/actions/start`,
       {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          requestId: "start-restart-recovery",
-          dataIdentity: firstOwner.endpoint.dataIdentity,
-          payload: null,
-        }),
+        mutationVersion: 1,
+        requestId: "start-restart-recovery",
+        dataIdentity: firstOwner.endpoint.dataIdentity,
+        operation: "startWorkflow",
+        target: {
+          identityVersion: 1,
+          kind: "workflow",
+          parts: [registered.project.projectId, "recover"],
+        },
+        arguments: { payload: null },
+        preconditions: {},
       },
     );
     const admitted = (await response.json()) as StartRunResult;
@@ -383,17 +396,21 @@ describe("real Project Runner recovery", () => {
       now: () => Date.now() + clockOffset,
     });
     daemons.push(daemon);
-    const response = await call(
+    const response = await sendPreparedMutation(
       daemon,
       `/api/v1/projects/${registered.project.projectId}/workflows/recover/actions/start`,
       {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          requestId: "start-stall-recovery",
-          dataIdentity: daemon.endpoint.dataIdentity,
-          payload: null,
-        }),
+        mutationVersion: 1,
+        requestId: "start-stall-recovery",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation: "startWorkflow",
+        target: {
+          identityVersion: 1,
+          kind: "workflow",
+          parts: [registered.project.projectId, "recover"],
+        },
+        arguments: { payload: null },
+        preconditions: {},
       },
     );
     const admitted = (await response.json()) as StartRunResult;

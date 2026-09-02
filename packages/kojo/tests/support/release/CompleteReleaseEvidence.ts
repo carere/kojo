@@ -212,8 +212,8 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
       },
       {
         tier: "kojo-unit",
-        path: "packages/kojo/tests/unit/contexts/workflow/admission.test.ts",
-        name: "refuses changed content under one request identity",
+        path: "packages/kojo/tests/unit/contexts/daemon/services/ClientMutationBoundary.test.ts",
+        name: "refuses replacement operation, target, arguments, or preconditions for one prepared ID",
       },
       {
         tier: "kojo-integration",
@@ -961,9 +961,9 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
   check(
     "CLIENT-02",
     6,
-    "retired request evidence cannot become fresh work and old identity blocks purge",
-    "packages/kojo/tests/integration/contexts/daemon/removePurge.test.ts",
-    "refuses an old mutation envelope in the fresh post-purge data lifetime",
+    "resolved full requests retain for 30 days then compact without becoming fresh work",
+    "packages/kojo/tests/integration/contexts/daemon/HostClientRequestRepository.test.ts",
+    "keeps full resolved content for 30 days then atomically compacts to identity and result references",
     ["kojo-unit", "kojo-integration"],
     [
       {
