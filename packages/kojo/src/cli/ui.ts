@@ -1,8 +1,8 @@
 import { Console, Effect } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { macBrowser } from "../contexts/daemon/adapters/MacBrowser.ts";
+import { hostPaths } from "../contexts/daemon/services/hostPaths.ts";
 import { launchConsole } from "../contexts/daemon/services/launchConsole.ts";
-import { macPaths } from "../contexts/daemon/services/macPaths.ts";
 import { commandFailed } from "./CommandFailed.ts";
 
 export const ui = Command.make(
@@ -13,7 +13,7 @@ export const ui = Command.make(
     ),
   },
   Effect.fn(function* ({ noOpen }) {
-    const line = yield* launchConsole(macPaths(), macBrowser(), noOpen).pipe(
+    const line = yield* launchConsole(hostPaths(), macBrowser(), noOpen).pipe(
       Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
     );
     yield* Console.log(line);
