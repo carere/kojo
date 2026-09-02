@@ -7,6 +7,7 @@ package_directory=${3:?usage: systemd-shipped-user-evidence.sh WORKSPACE EVIDENC
 helper=$workspace/packages/kojo/tests/release/support/shippedFactory.ts
 registry_helper=$workspace/packages/kojo/tests/release/support/shippedPackageRegistry.ts
 workflow_observation_helper=$workspace/packages/kojo/tests/support/release/ShippedWorkflowObservation.ts
+run_evidence_helper=$workspace/packages/kojo/tests/support/release/ShippedRunEvidence.ts
 candidate_tools=$HOME/.kojo-evidence-global-tools
 project=$HOME/kojo-shipped-project
 candidate_bun=$candidate_tools/bin/bun
@@ -310,20 +311,9 @@ token=$(jq -er --arg run "$run_id" \
 "$candidate_kojo" run status "$run_id" --details --json \
   >"$evidence_directory/run-succeeded.json"
 jq -e '.run.state == "succeeded"' "$evidence_directory/run-succeeded.json" >/dev/null
-jq -e '.run.phases | length >= 2' "$evidence_directory/run-succeeded.json" >/dev/null
-jq -e '.run.sandboxes | length >= 2' "$evidence_directory/run-succeeded.json" >/dev/null
-jq -e '.run.gates | length >= 1' "$evidence_directory/run-succeeded.json" >/dev/null
-jq -e '.run.artifacts | length >= 1' "$evidence_directory/run-succeeded.json" >/dev/null
-jq -e '
-  .run |
-  (has("queueReason") | not) and
-  (has("executionFault") | not) and
-  (has("cancellation") | not) and
-  (has("recovery") | not) and
-  (has("cleanup") | not) and
-  (has("uncertainty") | not) and
-  all(.phases[]; has("errorTag") | not)
-' "$evidence_directory/run-succeeded.json" >/dev/null
+"$candidate_bun" "$run_evidence_helper" "$evidence_directory/run-succeeded.json" \
+  >"$evidence_directory/run-succeeded-validation.json"
+jq -e '.valid == true' "$evidence_directory/run-succeeded-validation.json" >/dev/null
 jq -e '.asking.state == "applied"' "$evidence_directory/gate-applied.json" >/dev/null
 
 gate_name=$(jq -er '.run.gates[0].gate' "$evidence_directory/run-succeeded.json")
