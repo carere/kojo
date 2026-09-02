@@ -21,7 +21,10 @@ import type {
   NativeServiceObservation,
 } from "../../../../src/contexts/daemon/ports/NativeService.ts";
 import { manageDaemon } from "../../../../src/contexts/daemon/services/manageDaemon.ts";
-import { observeManagedLauncherReadiness } from "../../../support/daemon/managedLauncherReadiness.ts";
+import {
+  observeManagedLauncherReadiness,
+  waitForManagedLauncherExit,
+} from "../../../support/daemon/managedLauncherReadiness.ts";
 
 const roots: Array<string> = [];
 
@@ -218,18 +221,18 @@ describe("the managed Daemon installation", () => {
     } catch (cause) {
       if (launcher.exitCode === null) signalFailure = { cause };
     }
-    const exitedGracefully = await Promise.race([
-      launcher.exited.then(() => true),
-      Bun.sleep(5_000).then(async () => {
+    const exitedGracefully = await waitForManagedLauncherExit({
+      exited: launcher.exited,
+      timeoutMillis: 5_000,
+      onTimeout: async () => {
         try {
           process.kill(-launcher.pid, "SIGKILL");
         } catch {
           // The managed process group completed its planned stop before the forced bound.
         }
         await launcher.exited;
-        return false;
-      }),
-    ]);
+      },
+    });
     await waitFor(() => !existsSync(endpointPath));
     expect(processGroupExists(launcher.pid)).toBe(false);
     if (readinessFailure !== undefined) throw readinessFailure.cause;
