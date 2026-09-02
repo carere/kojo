@@ -19,13 +19,17 @@ const workflow = (overrides: Record<string, unknown> = {}): Record<string, unkno
   ...overrides,
 });
 
-const snapshot = (workflowRows: ReadonlyArray<Record<string, unknown>>): string =>
+const snapshot = (
+  workflowRows: ReadonlyArray<Record<string, unknown>>,
+  overrides: Record<string, unknown> = {},
+): string =>
   JSON.stringify({
     observationVersion: 1,
     instanceId: "instance-a",
     dataIdentity: "data-a",
     refreshAfterMillis: 1_000,
     workflows: workflowRows,
+    ...overrides,
   });
 
 describe("shipped Linux Workflow observation", () => {
@@ -86,7 +90,7 @@ describe("shipped Linux Workflow observation", () => {
     });
   });
 
-  it("resets stability across the seventh-run current to pending watcher transition", () => {
+  it("resets stability when Factory Refresh becomes pending", () => {
     const current = shippedWorkflowObservation(snapshot([workflow()]), projectId, "review");
     const pending = shippedWorkflowObservation(
       snapshot([workflow({ refreshState: "pending" })]),
@@ -112,10 +116,46 @@ describe("shipped Linux Workflow observation", () => {
     });
   });
 
-  it("restarts stability when the authoritative revision changes", () => {
+  it.each([
+    {
+      field: "Daemon instance identity",
+      changed: snapshot([workflow()], { instanceId: "instance-b" }),
+    },
+    {
+      field: "Data identity",
+      changed: snapshot([workflow()], { dataIdentity: "data-b" }),
+    },
+    {
+      field: "Workflow revision identity",
+      changed: snapshot([workflow({ currentRevisionId: "revision-b" })]),
+    },
+    {
+      field: "Package Graph identity",
+      changed: snapshot([workflow({ currentPackageGraphId: "package-graph-b" })]),
+    },
+  ])("restarts Factory Refresh stability when $field changes", ({ changed }) => {
     const first = shippedWorkflowObservation(snapshot([workflow()]), projectId, "review");
+    const next = shippedWorkflowObservation(changed, projectId, "review");
+
+    const initial = advanceShippedWorkflowStability(undefined, first, 0);
+    const restarted = advanceShippedWorkflowStability(initial, next, 7_000);
+
+    expect(restarted).toMatchObject({
+      accepted: false,
+      consecutiveCurrent: 1,
+      stableForMillis: 0,
+      fact: "candidate-started",
+    });
+  });
+
+  it("compares structured Factory Refresh identity without delimiter collisions", () => {
+    const first = shippedWorkflowObservation(
+      snapshot([workflow()], { instanceId: "instance/a", dataIdentity: "data" }),
+      projectId,
+      "review",
+    );
     const changed = shippedWorkflowObservation(
-      snapshot([workflow({ currentRevisionId: "revision-b" })]),
+      snapshot([workflow()], { instanceId: "instance", dataIdentity: "a/data" }),
       projectId,
       "review",
     );

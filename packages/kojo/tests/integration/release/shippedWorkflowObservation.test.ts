@@ -154,4 +154,57 @@ describe("the shipped Workflow observation bound", () => {
     });
     expect(readFileSync(summaryPath, "utf8")).toContain("FactoryRefreshReadiness=observer-failed");
   });
+
+  it("writes explicit unavailable stability when failure has no partial final record", () => {
+    const root = mkdtempSync(join(tmpdir(), "kojo-shipped-observation-"));
+    roots.push(root);
+
+    replaceFailedShippedWorkflowObservation({
+      evidenceDirectory: root,
+      readiness: "observer-failed",
+      observerExitCode: 1,
+    });
+
+    expect(
+      JSON.parse(
+        readFileSync(join(root, "bounded-factory-refresh-observation-final.json"), "utf8"),
+      ),
+    ).toMatchObject({
+      readiness: "observer-failed",
+      stability: {
+        consecutiveCurrent: 0,
+        stableForMillis: 0,
+        accepted: false,
+        fact: "unavailable",
+      },
+    });
+  });
+
+  it("writes explicit unavailable stability when the bound permits no attempt", async () => {
+    const root = mkdtempSync(join(tmpdir(), "kojo-shipped-observation-"));
+    roots.push(root);
+
+    const result = await observeShippedWorkflow({
+      command: [process.execPath, "-e", "process.exit(0)"],
+      evidenceDirectory: root,
+      projectId: "project-id",
+      workflowName: "review",
+      timeoutMillis: 0,
+    });
+
+    expect(result).toMatchObject({ ready: false, attempts: 0 });
+    expect(
+      JSON.parse(
+        readFileSync(join(root, "bounded-factory-refresh-observation-final.json"), "utf8"),
+      ),
+    ).toMatchObject({
+      readiness: "timed-out",
+      stability: {
+        consecutiveCurrent: 0,
+        stableForMillis: 0,
+        accepted: false,
+        fact: "unavailable",
+      },
+    });
+  });
 });

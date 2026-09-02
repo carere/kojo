@@ -1,6 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { FACTORY_INVENTORY_SCAN_MILLIS } from "../../../src/contexts/workflow/models/FactoryRefresh.ts";
+import { FACTORY_INPUT_SCAN_INTERVAL_MILLIS } from "../../../src/contexts/workflow/models/FactoryRefresh.ts";
 
 export interface ShippedWorkflowObservation {
   readonly ready: boolean;
@@ -16,13 +16,18 @@ export interface ShippedWorkflowObservation {
 }
 
 export interface ShippedWorkflowStability {
-  readonly candidateKey?: string;
+  readonly identity?: {
+    readonly instanceId: string;
+    readonly dataIdentity: string;
+    readonly revisionId: string;
+    readonly packageGraphId: string;
+  };
   readonly currentSinceMillis?: number;
   readonly consecutiveCurrent: number;
   readonly stableForMillis: number;
   readonly requiredStableMillis: number;
   readonly accepted: boolean;
-  readonly fact: "not-current" | "candidate-started" | "candidate-continuing";
+  readonly fact: "not-current" | "candidate-started" | "candidate-continuing" | "unavailable";
 }
 
 interface BoundedCommandResult {
@@ -74,6 +79,14 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const writeJson = (path: string, value: unknown): void =>
   writeFileSync(path, `${JSON.stringify(value, undefined, 2)}\n`);
 
+const unavailableShippedWorkflowStability = (): ShippedWorkflowStability => ({
+  consecutiveCurrent: 0,
+  stableForMillis: 0,
+  requiredStableMillis: FACTORY_INPUT_SCAN_INTERVAL_MILLIS,
+  accepted: false,
+  fact: "unavailable",
+});
+
 export const replaceFailedShippedWorkflowObservation = (
   failure: FailedShippedWorkflowObservation,
 ): void => {
@@ -96,12 +109,17 @@ export const replaceFailedShippedWorkflowObservation = (
       partialFinal = { invalidJson: raw };
     }
   }
+  const stability =
+    isRecord(partialFinal) && isRecord(partialFinal.stability)
+      ? partialFinal.stability
+      : unavailableShippedWorkflowStability();
   writeJson(finalPath, {
     kind: "bounded-read-only-factory-refresh",
     readiness: failure.readiness,
     strictOperationBoundMillis: 120_000,
     observerExitCode: failure.observerExitCode,
     noRepairReregisterRestartOrStart: true,
+    stability,
     partialFinal,
   });
   writeFileSync(
@@ -189,19 +207,29 @@ export const shippedWorkflowObservation = (
 const nonEmptyString = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0;
 
-const candidateKey = (candidate: NonNullable<ShippedWorkflowObservation["candidate"]>): string =>
-  [
-    candidate.instanceId,
-    candidate.dataIdentity,
-    candidate.revisionId,
-    candidate.packageGraphId,
-  ].join("/");
+const candidateIdentity = (
+  candidate: NonNullable<ShippedWorkflowObservation["candidate"]>,
+): NonNullable<ShippedWorkflowStability["identity"]> => ({
+  instanceId: candidate.instanceId,
+  dataIdentity: candidate.dataIdentity,
+  revisionId: candidate.revisionId,
+  packageGraphId: candidate.packageGraphId,
+});
+
+const sameCandidate = (
+  left: ShippedWorkflowStability["identity"],
+  right: NonNullable<ShippedWorkflowStability["identity"]>,
+): boolean =>
+  left?.instanceId === right.instanceId &&
+  left.dataIdentity === right.dataIdentity &&
+  left.revisionId === right.revisionId &&
+  left.packageGraphId === right.packageGraphId;
 
 export const advanceShippedWorkflowStability = (
   prior: ShippedWorkflowStability | undefined,
   observation: ShippedWorkflowObservation,
   observedAtMillis: number,
-  requiredStableMillis = FACTORY_INVENTORY_SCAN_MILLIS +
+  requiredStableMillis = FACTORY_INPUT_SCAN_INTERVAL_MILLIS +
     (observation.candidate?.refreshAfterMillis ?? 0),
 ): ShippedWorkflowStability => {
   if (!observation.ready || observation.candidate === undefined) {
@@ -213,13 +241,14 @@ export const advanceShippedWorkflowStability = (
       fact: "not-current",
     };
   }
-  const key = candidateKey(observation.candidate);
-  const continuing = prior?.candidateKey === key && prior.currentSinceMillis !== undefined;
+  const identity = candidateIdentity(observation.candidate);
+  const continuing =
+    sameCandidate(prior?.identity, identity) && prior?.currentSinceMillis !== undefined;
   const currentSinceMillis = continuing ? prior.currentSinceMillis : observedAtMillis;
   const consecutiveCurrent = continuing ? prior.consecutiveCurrent + 1 : 1;
   const stableForMillis = Math.max(0, observedAtMillis - currentSinceMillis);
   return {
-    candidateKey: key,
+    identity,
     currentSinceMillis,
     consecutiveCurrent,
     stableForMillis,
@@ -323,7 +352,7 @@ export const observeShippedWorkflow = async (
       readiness,
       Date.now(),
       options.stabilityWindowMillis ??
-        FACTORY_INVENTORY_SCAN_MILLIS + (readiness.candidate?.refreshAfterMillis ?? 0),
+        FACTORY_INPUT_SCAN_INTERVAL_MILLIS + (readiness.candidate?.refreshAfterMillis ?? 0),
     );
     writeFileSync(snapshotPath, result.stdout);
     writeFileSync(stderrPath, result.stderr);
@@ -393,7 +422,7 @@ export const observeShippedWorkflow = async (
     attempts,
     noRepairReregisterRestartOrStart: true,
     lastAttempt,
-    stability,
+    stability: stability ?? unavailableShippedWorkflowStability(),
   });
   if (lastSnapshotPath !== undefined) {
     copyFileSync(lastSnapshotPath, join(options.evidenceDirectory, "workflow-list.json"));

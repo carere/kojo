@@ -37,7 +37,7 @@ import { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRep
 import { SqliteExternalActionRepository } from "../../workflow/adapters/SqliteExternalActionRepository.ts";
 import { SqliteRevisionRepository } from "../../workflow/adapters/SqliteRevisionRepository.ts";
 import { SqliteRunRepository } from "../../workflow/adapters/SqliteRunRepository.ts";
-import { FACTORY_INVENTORY_SCAN_MILLIS } from "../../workflow/models/FactoryRefresh.ts";
+import { FACTORY_INPUT_SCAN_INTERVAL_MILLIS } from "../../workflow/models/FactoryRefresh.ts";
 import { RevisionCaptureError } from "../../workflow/models/RevisionCaptureError.ts";
 import { RunApi, type RunnerMutationFault } from "../../workflow/services/RunApi.ts";
 import { refreshFactory } from "../../workflow/services/refreshFactory.ts";
@@ -1326,7 +1326,7 @@ export const startDaemon = (
       void inspectProjectInventories(true);
       refreshInventoryTimer = setInterval(() => {
         if (!refreshCoordinatorStopped) void inspectProjectInventories(false);
-      }, FACTORY_INVENTORY_SCAN_MILLIS);
+      }, FACTORY_INPUT_SCAN_INTERVAL_MILLIS);
     };
     backgroundWriterActivators.push(startRefreshInventoryTimer);
     if (!restrictedUpgrade) startRefreshInventoryTimer();
