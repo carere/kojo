@@ -93,6 +93,64 @@ sha256sum "$candidate_bun" "$managed_bun" >"$evidence_directory/managed-bun-sha2
 [[ $(awk 'NR == 1 { print $1 }' "$evidence_directory/managed-bun-sha256.log") == \
   "$(awk 'NR == 2 { print $1 }' "$evidence_directory/managed-bun-sha256.log")" ]]
 test -f "$XDG_CONFIG_HOME/systemd/user/kojo.service"
+
+# Install promises to enable and start the service. It reports the status observed at that instant;
+# readiness is a later Daemon fact. Observe that fact without a repair, restart, or second Start.
+readiness_observations=$evidence_directory/managed-readiness-observations.jsonl
+readiness_current=$evidence_directory/managed-readiness-current.json
+readiness_final=$evidence_directory/managed-readiness-final.json
+readiness_stderr=$evidence_directory/managed-readiness-status.stderr.log
+: >"$readiness_observations"
+: >"$readiness_current"
+: >"$readiness_stderr"
+daemon_ready=no
+for observation in $(seq 1 120); do
+  printf 'Observation=%s\n' "$observation" >>"$readiness_stderr"
+  if PATH=/usr/bin:/bin "$managed_kojo" daemon status --json \
+    >"$readiness_current" 2>>"$readiness_stderr"; then
+    jq -c --argjson observation "$observation" \
+      '{ observation: $observation, status: . }' "$readiness_current" \
+      >>"$readiness_observations"
+    if jq -e '
+      .formatVersion == 1 and
+      .daemon.installed == true and
+      .daemon.manager == "loaded" and
+      .daemon.process == "running" and
+      .daemon.responsiveness == "responsive" and
+      .daemon.ready == true
+    ' "$readiness_current" >/dev/null; then
+      cp "$readiness_current" "$readiness_final"
+      daemon_ready=yes
+      break
+    fi
+  else
+    status_exit=$?
+    jq -cn --argjson observation "$observation" --argjson statusCommandExit "$status_exit" \
+      '{ observation: $observation, statusCommandExit: $statusCommandExit }' \
+      >>"$readiness_observations"
+  fi
+  sleep 1
+done
+if [[ $daemon_ready != yes ]]; then
+  {
+    echo "ManagedReadyObservation=timed-out"
+    echo "ObservationLimit=120"
+    echo "NoRepairOrRestart=yes"
+    echo "LastManagedStatus:"
+    cat "$readiness_current"
+    echo "NativeServiceStatus:"
+    systemctl --user show kojo.service \
+      --property=Type,KillMode,ControlGroup,MainPID,ActiveState,SubState || true
+  } >"$evidence_directory/managed-readiness-failure.log"
+  exit 1
+fi
+jq -e '
+  .daemon.installed == true and
+  .daemon.manager == "loaded" and
+  .daemon.process == "running" and
+  .daemon.responsiveness == "responsive" and
+  .daemon.ready == true
+' "$readiness_final" >/dev/null
 test -S "$socket"
 test -f "$endpoint"
 
