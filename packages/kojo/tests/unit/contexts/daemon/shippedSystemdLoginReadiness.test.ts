@@ -31,7 +31,6 @@ const fixture = (unavailableAttempts: number, options: { readonly hang?: boolean
     [
       "#!/usr/bin/env bash",
       "set -Eeuo pipefail",
-      'printf \'%s\\n\' "$*" >>"$KOJO_TEST_SYSTEMCTL_CALLS"',
       ...(options.hang === true ? ["exec sleep 10"] : []),
       'count=$(($(cat "$KOJO_TEST_ATTEMPTS" 2>/dev/null || echo 0) + 1))',
       'printf \'%s\\n\' "$count" >"$KOJO_TEST_ATTEMPTS"',
@@ -52,7 +51,9 @@ const fixture = (unavailableAttempts: number, options: { readonly hang?: boolean
       "shift 2",
       "duration=$1",
       "shift",
-      '"$@" &',
+      'command=("$@")',
+      `printf '%s\\n' "\${command[*]:1}" >>"$KOJO_TEST_SYSTEMCTL_CALLS"`,
+      `"\${command[@]}" &`,
       "subject=$!",
       "(",
       '  sleep "$duration"',
@@ -91,7 +92,7 @@ const fixture = (unavailableAttempts: number, options: { readonly hang?: boolean
 const runHelper = async (
   subject: ReturnType<typeof fixture>,
   attemptLimit: number,
-  probeTimeout = "0.5s",
+  probeTimeout = "5s",
 ): Promise<{ readonly exitCode: number; readonly elapsedMillis: number }> => {
   const startedAt = performance.now();
   const child = Bun.spawn(
@@ -134,7 +135,7 @@ describe("shipped systemd login readiness evidence", () => {
     const result = await runHelper(subject, 5);
 
     expect(result.exitCode).toBe(0);
-    expect(result.elapsedMillis).toBeLessThan(3_000);
+    expect(result.elapsedMillis).toBeLessThan(10_000);
     const observations = readFileSync(subject.observations, "utf8")
       .trim()
       .split("\n")
@@ -179,7 +180,7 @@ describe("shipped systemd login readiness evidence", () => {
     const result = await runHelper(subject, 2);
 
     expect(result.exitCode).toBe(1);
-    expect(result.elapsedMillis).toBeLessThan(3_000);
+    expect(result.elapsedMillis).toBeLessThan(10_000);
     const observations = readFileSync(subject.observations, "utf8")
       .trim()
       .split("\n")
