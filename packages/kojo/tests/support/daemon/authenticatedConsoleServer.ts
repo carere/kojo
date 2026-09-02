@@ -241,6 +241,8 @@ if (fixture === "gates") {
   const expiredDeadline = new Date(fixtureNow - 1_000).toISOString();
   const recordedAt = new Date(fixtureNow - 30 * 60 * 1_000).toISOString();
   const appliedAt = new Date(fixtureNow - 29 * 60 * 1_000).toISOString();
+  const unableAt = new Date(fixtureNow - 28 * 60 * 1_000).toISOString();
+  const expiryAppliedAt = new Date(fixtureNow).toISOString();
   const fixtures = [
     { name: "unanswered", state: "unanswered", runState: "suspended" },
     { name: "answerable", state: "unanswered", runState: "suspended" },
@@ -257,6 +259,14 @@ if (fixture === "gates") {
   for (const [index, gate] of fixtures.entries()) {
     const runId = `run-${gate.name}`;
     const deadline = gate.state === "expired" ? expiredDeadline : openDeadline;
+    const finishedAt =
+      gate.state === "applied"
+        ? appliedAt
+        : gate.state === "expired"
+          ? expiryAppliedAt
+          : "terminalInability" in gate
+            ? unableAt
+            : null;
     database.run(
       `INSERT INTO workflow_runs (
          run_id, project_id, workflow_name, idempotency_key, payload_json,
@@ -271,7 +281,7 @@ if (fixture === "gates") {
         index + 1,
         createdAt,
         createdAt,
-        gate.runState === "succeeded" || gate.runState === "failed" ? createdAt : null,
+        finishedAt,
       ],
     );
     const hasVerdict = gate.state === "recorded" || gate.state === "applied";
@@ -300,7 +310,7 @@ if (fixture === "gates") {
         hasVerdict ? recordedAt : null,
         gate.state === "applied" ? appliedAt : null,
         gate.state === "expired" ? deadline : null,
-        gate.state === "expired" ? new Date(fixtureNow).toISOString() : null,
+        gate.state === "expired" ? expiryAppliedAt : null,
         "terminalInability" in gate ? gate.terminalInability : null,
       ],
     );
