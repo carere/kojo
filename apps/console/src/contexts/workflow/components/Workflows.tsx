@@ -1,7 +1,7 @@
 import type { WorkflowDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { createColumnHelper, createTable, tableFeatures } from "@tanstack/solid-table";
-import { createEffect, createMemo, createSignal, type JSX, Match, Switch } from "solid-js";
+import { createMemo, createSignal, type JSX, Match, Switch } from "solid-js";
 import {
   ConsoleAccessError,
   forceStopWorkflow,
@@ -14,7 +14,8 @@ import { Badge, type BadgeTone } from "../../shared/components/Badge.tsx";
 import { ConsoleNavigation } from "../../shared/components/ConsoleNavigation.tsx";
 import { DataGrid } from "../../shared/components/data-grid/DataGrid.tsx";
 import { DataGridTable } from "../../shared/components/data-grid/DataGridTable.tsx";
-import { Pagination, resourcePage } from "../../shared/components/data-grid/Pagination.tsx";
+import { Pagination } from "../../shared/components/data-grid/Pagination.tsx";
+import { usePaginationState } from "../../shared/hooks/usePaginationState.ts";
 import { useWorkflows } from "../hooks/useWorkflows.ts";
 import { type WorkflowFilterState, WorkflowFilters } from "./WorkflowFilters.tsx";
 
@@ -241,9 +242,6 @@ export const Workflows = (props: { readonly projectId: string }): JSX.Element =>
   const noticeKey = (workflow: WorkflowDocument): string =>
     `${workflow.projectId}:${workflow.workflowName}`;
   const [filters, setFilters] = createSignal(filterFromUrl());
-  const [cursor, setCursor] = createSignal(
-    Math.max(0, Number(new URLSearchParams(window.location.search).get("cursor") ?? 0) || 0),
-  );
   const rows = createMemo(() => {
     const query = filters();
     const text = query.text.trim().toLocaleLowerCase();
@@ -259,16 +257,18 @@ export const Workflows = (props: { readonly projectId: string }): JSX.Element =>
       );
     });
   });
-  const visibleRows = createMemo(() => resourcePage(rows(), cursor()));
-  createEffect(() => {
+  const {
+    cursor,
+    page: visibleRows,
+    setCursor,
+    reset: resetPage,
+  } = usePaginationState(rows, () => {
     const query = filters();
-    const url = new URL(window.location.href);
-    url.search = "";
-    if (query.text !== "") url.searchParams.set("q", query.text);
-    if (query.availability !== "all") url.searchParams.set("workflow", query.availability);
-    if (query.activity !== "all") url.searchParams.set("activity", query.activity);
-    if (cursor() > 0) url.searchParams.set("cursor", String(cursor()));
-    window.history.replaceState(window.history.state, "", url);
+    return {
+      q: query.text,
+      workflow: query.availability === "all" ? undefined : query.availability,
+      activity: query.activity === "all" ? undefined : query.activity,
+    };
   });
   const table = createTable({
     features,
@@ -301,7 +301,7 @@ export const Workflows = (props: { readonly projectId: string }): JSX.Element =>
             filters={filters()}
             onChange={(next) => {
               setFilters(next);
-              setCursor(0);
+              resetPage();
             }}
           />
         </header>

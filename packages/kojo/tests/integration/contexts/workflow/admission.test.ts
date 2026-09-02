@@ -3,6 +3,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 import { SqliteProjectRepository } from "../../../../src/contexts/project/adapters/SqliteProjectRepository.ts";
 import { SqliteRunRepository } from "../../../../src/contexts/workflow/adapters/SqliteRunRepository.ts";
+import { runIdOf } from "../../../../src/contexts/workflow/services/runIdentity.ts";
 
 const databaseWithRevision = (): Database => {
   const database = new Database(":memory:", { strict: true });
@@ -55,6 +56,41 @@ describe("SQLite Run admission", () => {
         finishedAt: "2026-09-01T10:00:01.000Z",
       });
       expect(database.query("SELECT * FROM workflow_queue").all()).toHaveLength(0);
+      database.close(false);
+    }),
+  );
+
+  it.effect("refuses a Run-tuple collision without admitting a second Run", () =>
+    Effect.gen(function* () {
+      const database = databaseWithRevision();
+      const repository = new SqliteRunRepository(database);
+      const collidingRunId = runIdOf("project-1", "example", "target");
+      database.run(
+        `INSERT INTO workflow_runs (
+           run_id, project_id, workflow_name, idempotency_key, payload_json,
+           revision_id, package_graph_id, state, admission_sequence, admitted_at
+         ) VALUES (?, 'project-1', 'example', 'different', 'null', ?, ?, 'queued', 1, ?)`,
+        [collidingRunId, "a".repeat(64), "b".repeat(64), "2026-09-01T10:00:00.000Z"],
+      );
+
+      const refused = yield* Effect.flip(
+        repository.admit({
+          dataIdentity: "data-1",
+          requestId: "request-collision",
+          canonicalRequest: "null",
+          projectId: "project-1",
+          workflowName: "example",
+          idempotencyKey: "target",
+          payload: null,
+          revisionId: "a".repeat(64),
+          packageGraphId: "b".repeat(64),
+          admittedAt: "2026-09-01T10:00:01.000Z",
+        }),
+      );
+
+      expect(refused.code).toBe("DEDUP_COLLISION");
+      expect(database.query("SELECT * FROM workflow_runs").all()).toHaveLength(1);
+      expect(database.query("SELECT * FROM workflow_admission_receipts").all()).toHaveLength(0);
       database.close(false);
     }),
   );

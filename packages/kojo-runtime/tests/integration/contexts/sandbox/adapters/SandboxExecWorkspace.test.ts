@@ -2,27 +2,15 @@
 // behind it, and AGENTS.md forbids barrel imports repo-wide.
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, FileSystem, Layer, Option, Result, Schema } from "effect";
+import { Effect, FileSystem, Option, Result } from "effect";
 import * as BindMountWorkspace from "../../../../../src/contexts/sandbox/adapters/BindMountWorkspace.ts";
 import { acquireSandbox } from "../../../../../src/contexts/sandbox/adapters/boundary.ts";
 import * as SandboxExecWorkspace from "../../../../../src/contexts/sandbox/adapters/SandboxExecWorkspace.ts";
 import type { AcquiredSandbox } from "../../../../../src/contexts/sandbox/models/SandboxHandle.ts";
-import { WorkspaceError } from "../../../../../src/contexts/sandbox/models/WorkspaceError.ts";
 import { Workspace } from "../../../../../src/contexts/sandbox/ports/Workspace.ts";
 import { defaultTrunk } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
-import * as InMemoryTracer from "../../../../../src/contexts/trace/adapters/InMemoryTracer.ts";
-import { code } from "../../../../../src/contexts/workflow/services/phase/code.ts";
-import { workflow } from "../../../../../src/contexts/workflow/services/workflow.ts";
-import {
-  layer as inMemoryExecutionServices,
-  sandboxResourcesAt,
-} from "../../../../support/InMemoryExecutionServices.ts";
-import {
-  inMemoryWorkflowEngine,
-  selfContainedTestLayer,
-  serviceFreeWorkflowEffect,
-} from "../../../../support/inMemoryWorkflowEngine.ts";
 import { localIsolated } from "../../../../support/localIsolatedProvider.ts";
+import { sandboxResourcesAt } from "../../../../support/sandboxResources.ts";
 
 const seed = Effect.gen(function* () {
   const workspace = yield* Workspace;
@@ -109,80 +97,6 @@ const lane = Effect.gen(function* () {
     tracked: tracked.stdout.split("\n").filter((line) => line !== ""),
   };
 });
-
-class Built extends Schema.Class<Built>("Built")({
-  file: Schema.String,
-  content: Schema.String,
-}) {}
-
-/**
- * A workflow of two code phases, both acting only through the port.
- *
- * Written the way an author writes one — a phase that changes the tree, then a phase that grades
- * it — and nothing in it mentions a sandbox. That is the point: the same program is what runs over
- * a bind mount.
- */
-const factory = workflow(
-  {
-    name: "isolated-lane",
-    payload: { file: Schema.String },
-    success: Built,
-    error: WorkspaceError,
-    idempotencyKey: (payload) => `isolated-lane/${payload.file}`,
-  },
-  (payload) =>
-    Effect.gen(function* () {
-      const workspace = yield* Workspace;
-
-      yield* code(
-        {
-          name: "build",
-          description: "Write the module the check will grade",
-          success: Schema.Void,
-          error: WorkspaceError,
-        },
-        workspace.write(payload.file, "export const built = true\n"),
-      );
-
-      return yield* code(
-        {
-          name: "check",
-          description: "Read back what the build phase claims it wrote",
-          success: Built,
-          error: WorkspaceError,
-        },
-        workspace
-          .read(payload.file)
-          .pipe(Effect.map((content) => new Built({ file: payload.file, content }))),
-      );
-    }),
-);
-
-const runFactory = (sandbox: AcquiredSandbox) =>
-  Effect.gen(function* () {
-    const outcome = yield* serviceFreeWorkflowEffect(
-      factory.definition.execute({ file: "src/built.ts" }),
-    ).pipe(Effect.result);
-    const trace = yield* InMemoryTracer.RecordedTrace;
-    return { outcome, phases: yield* trace.phases };
-  }).pipe(
-    Effect.provide(
-      selfContainedTestLayer(
-        factory.layer.pipe(
-          Layer.provideMerge(
-            Layer.mergeAll(
-              // The trace sink is in memory because the durable one is a later ticket. The adapter
-              // under test — the workspace — is the real one, over a real sandbox.
-              InMemoryTracer.layer,
-              inMemoryWorkflowEngine,
-              inMemoryExecutionServices,
-              SandboxExecWorkspace.layer(sandbox),
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
 
 describe("the workspace an isolated provider gives", () => {
   it.effect("has no host path, because there is no host tree to name", () =>
@@ -280,30 +194,30 @@ describe("the workspace an isolated provider gives", () => {
     ),
   );
 
-  it.effect("runs a lane end to end, and leaves the host repository alone", () =>
-    isolated((sandbox) =>
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const { outcome, phases } = yield* runFactory(sandbox);
+  it.effect(
+    "runs sequential build and check operations, and leaves the host repository alone",
+    () =>
+      isolated((sandbox) =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const content = yield* Effect.gen(function* () {
+            const workspace = yield* Workspace;
+            yield* workspace.write("src/built.ts", "export const built = true\n");
+            return yield* workspace.read("src/built.ts");
+          }).pipe(Effect.provide(SandboxExecWorkspace.layer(sandbox)));
 
-        expect(Result.isSuccess(outcome)).toBe(true);
-        expect(Result.isSuccess(outcome) && outcome.success.content).toBe(
-          "export const built = true\n",
-        );
-        expect(phases.map((phase) => phase.name)).toEqual(["build", "check"]);
-        expect(phases.map((phase) => phase.outcome)).toEqual(["succeeded", "succeeded"]);
-        expect(phases.map((phase) => phase.kind)).toEqual(["code", "code"]);
+          expect(content).toBe("export const built = true\n");
 
-        // Where the phase wrote, asked of the sandbox directly rather than of the port that put it
-        // there. Reading it back through `read` alone would agree with any consistent mistake about
-        // the root; `git status` runs where Sandcastle says the repo is.
-        const pending = yield* sandbox.exec("git status --porcelain");
-        expect(pending.stdout.trim()).toBe("?? src/built.ts");
+          // Where the phase wrote, asked of the sandbox directly rather than of the port that put it
+          // there. Reading it back through `read` alone would agree with any consistent mistake about
+          // the root; `git status` runs where Sandcastle says the repo is.
+          const pending = yield* sandbox.exec("git status --porcelain");
+          expect(pending.stdout.trim()).toBe("?? src/built.ts");
 
-        // And the file lives in the sandbox alone. Sandcastle's staging worktree on the host never
-        // saw it, which is what "no host filesystem" means in practice.
-        expect(yield* fileSystem.exists(`${sandbox.worktreePath}/src/built.ts`)).toBe(false);
-      }),
-    ),
+          // And the file lives in the sandbox alone. Sandcastle's staging worktree on the host never
+          // saw it, which is what "no host filesystem" means in practice.
+          expect(yield* fileSystem.exists(`${sandbox.worktreePath}/src/built.ts`)).toBe(false);
+        }),
+      ),
   );
 });

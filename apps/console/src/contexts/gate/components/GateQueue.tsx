@@ -1,8 +1,8 @@
 import { Link } from "@tanstack/solid-router";
-import { createEffect, createMemo, createSignal, For, type JSX, Show } from "solid-js";
+import { createMemo, createSignal, For, type JSX, Show } from "solid-js";
 import { Badge } from "../../shared/components/Badge.tsx";
 import { ConsoleNavigation } from "../../shared/components/ConsoleNavigation.tsx";
-import { Pagination, resourcePage } from "../../shared/components/data-grid/Pagination.tsx";
+import { Pagination } from "../../shared/components/data-grid/Pagination.tsx";
 import { Notice } from "../../shared/components/Notice.tsx";
 import {
   Table,
@@ -13,6 +13,7 @@ import {
   TableRow,
 } from "../../shared/components/Table.tsx";
 import { retrying, settled } from "../../shared/hooks/settled.ts";
+import { usePaginationState } from "../../shared/hooks/usePaginationState.ts";
 import { useNow } from "../../shared/ports/Now.tsx";
 import { useRuns } from "../../trace/hooks/useRuns.ts";
 import { allSettled } from "../../trace/models/RunLine.ts";
@@ -47,7 +48,6 @@ export const GateQueue = (): JSX.Element => {
   const search = new URLSearchParams(window.location.search);
   const [text, setText] = createSignal(search.get("q") ?? "");
   const [state, setState] = createSignal(search.get("state") ?? "all");
-  const [cursor, setCursor] = createSignal(Math.max(0, Number(search.get("cursor") ?? 0) || 0));
   const filteredRows = createMemo(() => {
     const query = text().trim().toLocaleLowerCase();
     return rows().filter(
@@ -59,21 +59,20 @@ export const GateQueue = (): JSX.Element => {
             .includes(query)),
     );
   });
-  const visibleRows = createMemo(() => resourcePage(filteredRows(), cursor()));
-
-  createEffect(() => {
-    const url = new URL(window.location.href);
-    url.search = "";
-    if (text() !== "") url.searchParams.set("q", text());
-    if (state() !== "all") url.searchParams.set("state", state());
-    if (cursor() > 0) url.searchParams.set("cursor", String(cursor()));
-    window.history.replaceState(window.history.state, "", url);
-  });
+  const {
+    cursor,
+    page: visibleRows,
+    setCursor,
+    reset: resetPage,
+  } = usePaginationState(filteredRows, () => ({
+    q: text(),
+    state: state() === "all" ? undefined : state(),
+  }));
 
   return (
     <div class="mx-auto grid min-h-screen max-w-7xl gap-8 p-4 lg:grid-cols-[13rem_1fr] lg:p-8">
       <ConsoleNavigation current="Gate" />
-      <main class="flex min-w-0 flex-col gap-4">
+      <main class="flex min-w-0 flex-col gap-4" data-list-composition="custom-grouped-table">
         <header class="flex flex-col gap-1">
           <h1 class="text-xl font-semibold">What waits on a human</h1>
           <p class="text-muted-foreground text-xs">
@@ -89,7 +88,7 @@ export const GateQueue = (): JSX.Element => {
                 value={text()}
                 onInput={(event) => {
                   setText(event.currentTarget.value);
-                  setCursor(0);
+                  resetPage();
                 }}
               />
             </label>
@@ -101,7 +100,7 @@ export const GateQueue = (): JSX.Element => {
                 value={state()}
                 onChange={(event) => {
                   setState(event.currentTarget.value);
-                  setCursor(0);
+                  resetPage();
                 }}
               >
                 <option value="all">All states</option>

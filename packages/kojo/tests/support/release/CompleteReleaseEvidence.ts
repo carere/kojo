@@ -1,3 +1,9 @@
+import {
+  type Issue64CheckId,
+  type Issue64Tier,
+  issue64RequiredTierAllocation,
+} from "./Issue64TierAllocation.ts";
+
 export type EvidenceTier =
   | "contract-runtime"
   | "kojo-unit"
@@ -30,14 +36,16 @@ export interface RequiredObservation {
   readonly tier: EvidenceTier;
   readonly path: string;
   readonly name: string;
+  readonly issueTiers?: ReadonlyArray<Issue64Tier>;
 }
 
 export interface RequiredReleaseCheck {
-  readonly checkId: string;
+  readonly checkId: Issue64CheckId;
   readonly stage: number;
   readonly expected: string;
   readonly testPath: string;
   readonly testName: string;
+  /** Log receipts needed to load the exact leaves. This is not issue #64's U/I/H/B/R allocation. */
   readonly tiers: ReadonlyArray<EvidenceTier>;
   readonly observations: ReadonlyArray<RequiredObservation>;
 }
@@ -56,7 +64,7 @@ export interface CompleteEvidenceInput {
 }
 
 const check = (
-  checkId: string,
+  checkId: Issue64CheckId,
   stage: number,
   expected: string,
   testPath: string,
@@ -64,6 +72,8 @@ const check = (
   tiers: ReadonlyArray<EvidenceTier>,
   additionalObservations: ReadonlyArray<RequiredObservation> = [],
 ): RequiredReleaseCheck => {
+  const allocatedTiers = issue64RequiredTierAllocation[checkId];
+  if (allocatedTiers === undefined) throw new Error(`${checkId} has no issue #64 tier allocation`);
   const coreTier: EvidenceTier | undefined = testPath.startsWith("apps/console/tests/browser/")
     ? "console-browser"
     : testPath.startsWith("packages/kojo-runtime/tests/")
@@ -78,11 +88,17 @@ const check = (
   const observations: ReadonlyArray<RequiredObservation> =
     checkId === "RELEASE-01"
       ? [
-          { tier: "shipped-systemd", path: "evidence.json", name: "printed-fresh-install" },
+          {
+            tier: "shipped-systemd",
+            path: "evidence.json",
+            name: "printed-fresh-install",
+            issueTiers: ["R", "H"],
+          },
           {
             tier: "shipped-macos",
             path: "RELEASE-01/evidence-manifest.json",
             name: "fresh shipped install",
+            issueTiers: ["R", "H"],
           },
         ]
       : checkId === "RELEASE-02"
@@ -96,17 +112,44 @@ const check = (
           ]
         : checkId === "RELEASE-03"
           ? [
-              { tier: "shipped-systemd", path: "evidence.json", name: "global-tool-independence" },
+              {
+                tier: "shipped-systemd",
+                path: "evidence.json",
+                name: "global-tool-independence",
+                issueTiers: ["R", "H"],
+              },
               {
                 tier: "shipped-macos",
                 path: "RELEASE-03/evidence-manifest.json",
                 name: "managed tools after global removal",
+                issueTiers: ["R", "H"],
               },
             ]
-          : coreTier === undefined
-            ? additionalObservations
-            : [{ tier: coreTier, path: testPath, name: testName }, ...additionalObservations];
+          : checkId === "RELEASE-04" && coreTier !== undefined
+            ? [
+                { tier: coreTier, path: testPath, name: testName },
+                {
+                  tier: "shipped-systemd",
+                  path: "evidence.json",
+                  name: "printed-fresh-install",
+                  issueTiers: ["R"],
+                },
+                ...additionalObservations,
+              ]
+            : coreTier === undefined
+              ? additionalObservations
+              : [{ tier: coreTier, path: testPath, name: testName }, ...additionalObservations];
   return { checkId, stage, expected, testPath, testName, tiers, observations };
+};
+
+const issueTiersForObservation = (observation: RequiredObservation): ReadonlyArray<Issue64Tier> => {
+  if (observation.issueTiers !== undefined) return observation.issueTiers;
+  if (observation.path.includes("/tests/unit/")) return ["U"];
+  if (observation.path.includes("/tests/integration/")) return ["I"];
+  if (observation.path.includes("/tests/browser/")) return ["B"];
+  if (observation.path.includes("/tests/host/")) return ["H"];
+  if (observation.tier === "shipped-systemd" || observation.tier === "shipped-macos") return ["R"];
+  return [];
 };
 
 /**
@@ -130,7 +173,14 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "one exact physical Effect peer is used and a mismatch makes the Factory invalid",
     "packages/kojo-runtime/tests/integration/contexts/workflow/packageContract.test.ts",
     "has one exact physical Effect peer",
-    ["contract-runtime"],
+    ["contract-runtime", "kojo-integration"],
+    [
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/scaffold/validation.test.ts",
+        name: "marks the Factory Invalid when authored code resolves a second physical Effect",
+      },
+    ],
   ),
   check(
     "PKG-03",
@@ -164,6 +214,11 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         tier: "kojo-unit",
         path: "packages/kojo/tests/unit/contexts/workflow/admission.test.ts",
         name: "refuses changed content under one request identity",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/workflow/admission.test.ts",
+        name: "refuses a Run-tuple collision without admitting a second Run",
       },
     ],
   ),
@@ -264,6 +319,13 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "packages/kojo-runtime/tests/integration/contexts/project/handshake.test.ts",
     "does not import Factory code before the Project and graph binding agrees",
     ["contract-runtime"],
+    [
+      {
+        tier: "contract-runtime",
+        path: "packages/kojo-runtime/tests/integration/contexts/project/handshake.test.ts",
+        name: "refuses wrong protocol, graph, and scope before any Factory import",
+      },
+    ],
   ),
   check(
     "RUNNER-02",
@@ -280,6 +342,13 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "packages/kojo-runtime/tests/integration/contexts/workflow/replay.test.ts",
     "keeps the Daemon Run ID and does not repeat a committed code Phase",
     ["contract-runtime"],
+    [
+      {
+        tier: "contract-runtime",
+        path: "packages/kojo-runtime/tests/unit/contexts/workflow/services/sandboxed.test.ts",
+        name: "replays past the phases it already ran, and only rebuilds the sandbox",
+      },
+    ],
   ),
   check(
     "RUNNER-04",
@@ -307,7 +376,14 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "an uncertain external action stays held with durable intent and actual-count evidence",
     "packages/kojo/tests/integration/contexts/workflow/uncertainAction.test.ts",
     "holds an arbitrary action after its effect result is lost and consumes one exact retry authorization",
-    ["kojo-integration"],
+    ["kojo-unit", "kojo-integration"],
+    [
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/project/recovery.test.ts",
+        name: "does not let repair convert uncertain termination into safe evidence",
+      },
+    ],
   ),
   check(
     "RECOVER-02",
@@ -315,7 +391,14 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "only exact uncertainty authorization can retry and no result is invented",
     "packages/kojo/tests/integration/contexts/workflow/uncertainAction.test.ts",
     "uses accepted result or not-performed evidence without duplicating the controlled effect",
-    ["kojo-integration"],
+    ["kojo-unit", "kojo-integration"],
+    [
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/workflow/adapters/RunStatusCommand.test.ts",
+        name: "requires the exact action ID, reason, and possible-duplication acknowledgement",
+      },
+    ],
   ),
   check(
     "RECOVER-03",
@@ -329,6 +412,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         tier: "kojo-unit",
         path: "packages/kojo/tests/unit/contexts/project/adapters/InMemoryResourceLeaseRepository.test.ts",
         name: "keeps the acquisition identity inspectable after a lost reply",
+        issueTiers: [],
       },
       {
         tier: "kojo-integration",
@@ -348,12 +432,17 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "unsafe worktrees and sessions are preserved and hold the Project",
     "packages/kojo/tests/integration/contexts/project/adapters/SqliteResourceLeaseRepository.test.ts",
     "fences a stale holder and preserves dirty and unresolved Resources",
-    ["kojo-integration"],
+    ["kojo-integration", "native-systemd"],
     [
       {
         tier: "kojo-integration",
         path: "packages/kojo/tests/integration/contexts/project/adapters/SqliteResourceLeaseRepository.test.ts",
         name: "requires the exact durable termination proof before bounded recovery",
+      },
+      {
+        tier: "native-systemd",
+        path: "packages/kojo/tests/host/contexts/daemon/service.test.ts",
+        name: "uses an isolated unit for one idle Daemon and stops its complete process group",
       },
     ],
   ),
@@ -404,6 +493,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         tier: "kojo-unit",
         path: "packages/kojo/tests/unit/contexts/workflow/cancel.test.ts",
         name: "freezes the forced Stop target set before a later Start",
+        issueTiers: [],
       },
       {
         tier: "kojo-integration",
@@ -471,12 +561,17 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "missing or corrupt exact content holds dependents and repair refuses different bytes",
     "packages/kojo/tests/integration/contexts/workflow/revisionRepair.test.ts",
     "refuses identity or package substitution and restores only verified exact bytes",
-    ["kojo-integration"],
+    ["kojo-unit", "kojo-integration"],
     [
       {
         tier: "kojo-integration",
         path: "packages/kojo/tests/integration/contexts/workflow/revisionRepair.test.ts",
         name: "keeps one damaged shared object fault local to dependent revisions",
+      },
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/workflow/scheduling.test.ts",
+        name: "holds only the Run that needs damaged pinned content",
       },
     ],
   ),
@@ -517,6 +612,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         tier: "kojo-unit",
         path: "packages/kojo/tests/unit/contexts/workflow/scheduling.test.ts",
         name: "keeps the older graph-switch Run ahead of newer matching-graph work",
+        issueTiers: [],
       },
       {
         tier: "kojo-integration",
@@ -551,7 +647,14 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "Factory Refresh isolates faults and never admits stale Workflow content",
     "packages/kojo/tests/integration/contexts/workflow/discovery.test.ts",
     "isolates invalid siblings, holds admission, and keeps Removed revision history",
-    ["kojo-integration"],
+    ["kojo-unit", "kojo-integration"],
+    [
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/workflow/shippedLinuxWorkflowObservation.test.ts",
+        name: "waits while the controlled Workflow Factory Refresh is pending",
+      },
+    ],
   ),
   check(
     "PROJECT-01",
@@ -594,7 +697,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
       {
         tier: "native-systemd",
         path: "packages/kojo/tests/host/contexts/daemon/service.test.ts",
-        name: "uses an isolated unit for one idle Daemon and stops its complete process group",
+        name: "persists and exhausts the native launcher restart budget across owner reconstruction",
       },
       {
         tier: "kojo-integration",
@@ -616,11 +719,17 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "uses an isolated unit for one idle Daemon and stops its complete process group",
     ["native-systemd", "shipped-systemd", "shipped-macos"],
     [
-      { tier: "shipped-systemd", path: "evidence.json", name: "replacement-and-access" },
+      {
+        tier: "shipped-systemd",
+        path: "evidence.json",
+        name: "replacement-and-access",
+        issueTiers: [],
+      },
       {
         tier: "shipped-macos",
         path: "RELEASE-01/evidence-manifest.json",
         name: "native lifecycle",
+        issueTiers: [],
       },
     ],
   ),
@@ -642,11 +751,17 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         path: "packages/kojo/tests/integration/contexts/daemon/lifecycleControlTransport.test.ts",
         name: "reconnects one operation after endpoint loss and observes the replacement owner",
       },
-      { tier: "shipped-systemd", path: "evidence.json", name: "replacement-and-access" },
+      {
+        tier: "shipped-systemd",
+        path: "evidence.json",
+        name: "replacement-and-access",
+        issueTiers: ["H"],
+      },
       {
         tier: "shipped-macos",
         path: "RELEASE-01/evidence-manifest.json",
         name: "native lifecycle",
+        issueTiers: ["H"],
       },
     ],
   ),
@@ -656,7 +771,14 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "one lifecycle controller keeps the operation through endpoint and owner loss",
     "packages/kojo/tests/integration/contexts/daemon/lifecycleControlTransport.test.ts",
     "reconnects one operation after endpoint loss and observes the replacement owner",
-    ["kojo-integration"],
+    ["kojo-integration", "native-systemd"],
+    [
+      {
+        tier: "native-systemd",
+        path: "packages/kojo/tests/host/contexts/daemon/service.test.ts",
+        name: "uses an isolated unit for one idle Daemon and stops its complete process group",
+      },
+    ],
   ),
   check(
     "LIFE-04",
@@ -678,11 +800,13 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         tier: "kojo-unit",
         path: "packages/kojo/tests/unit/contexts/daemon/services/ManagedUpgradePreflight.test.ts",
         name: "refuses a candidate protocol regression and keeps a corrupt retained fault scoped",
+        issueTiers: [],
       },
       {
         tier: "kojo-unit",
         path: "packages/kojo/tests/unit/contexts/daemon/services/ManagedUpgradePreflight.test.ts",
         name: "refuses unknown evidence and recorded Bun or Host regressions",
+        issueTiers: [],
       },
     ],
   ),
@@ -692,17 +816,24 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "readiness and rollback outcomes stay distinct and recoverable",
     "packages/kojo/tests/integration/contexts/daemon/activation.test.ts",
     "holds ordinary mutations, verifies backup, migrates restricted, and activates without Workflow execution",
-    ["kojo-unit", "kojo-integration"],
+    ["kojo-unit", "kojo-integration", "native-systemd"],
     [
       {
         tier: "kojo-unit",
         path: "packages/kojo/tests/unit/contexts/daemon/services/UpgradeActivationController.test.ts",
         name: "uses one exact-source rollback before activation",
+        issueTiers: [],
       },
       {
         tier: "kojo-unit",
         path: "packages/kojo/tests/unit/contexts/daemon/services/UpgradeActivationController.test.ts",
         name: "requires repair when current evidence cannot prove rollback safe",
+        issueTiers: [],
+      },
+      {
+        tier: "native-systemd",
+        path: "packages/kojo/tests/host/contexts/daemon/service.test.ts",
+        name: "uses an isolated unit for one idle Daemon and stops its complete process group",
       },
     ],
   ),
@@ -729,11 +860,17 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "retains Kojo, Bun, Console, a stable CLI, and a stable launcher without reinstall side effects",
     ["kojo-integration", "shipped-systemd", "shipped-macos"],
     [
-      { tier: "shipped-systemd", path: "evidence.json", name: "shipped-managed-content" },
+      {
+        tier: "shipped-systemd",
+        path: "evidence.json",
+        name: "shipped-managed-content",
+        issueTiers: ["H"],
+      },
       {
         tier: "shipped-macos",
         path: "RELEASE-01/evidence-manifest.json",
         name: "native lifecycle",
+        issueTiers: ["H"],
       },
     ],
   ),
@@ -754,6 +891,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         tier: "shipped-macos",
         path: "RELEASE-01/evidence-manifest.json",
         name: "native lifecycle",
+        issueTiers: [],
       },
     ],
   ),
@@ -764,6 +902,13 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "packages/kojo/tests/integration/contexts/daemon/browserSession.test.ts",
     "requires the exact Host, Origin, JSON body, and one-use grant",
     ["kojo-integration"],
+    [
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/daemon/browserSession.test.ts",
+        name: "serves only bootstrap and active-release assets without session authority",
+      },
+    ],
   ),
   check(
     "ACCESS-03",
@@ -777,6 +922,11 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         tier: "kojo-integration",
         path: "packages/kojo/tests/integration/contexts/daemon/browserSession.test.ts",
         name: "revokes old grants and sessions when a replacement reuses the port",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/daemon/browserSession.test.ts",
+        name: "expires a grant after 60 seconds",
       },
     ],
   ),
@@ -809,7 +959,14 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "retired request evidence cannot become fresh work and old identity blocks purge",
     "packages/kojo/tests/integration/contexts/daemon/removePurge.test.ts",
     "refuses an old mutation envelope in the fresh post-purge data lifetime",
-    ["kojo-integration"],
+    ["kojo-unit", "kojo-integration"],
+    [
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/workflow/admission.test.ts",
+        name: "refuses changed content under one request identity",
+      },
+    ],
   ),
   check(
     "CLIENT-03",
@@ -958,8 +1115,8 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "UI-03",
     6,
     "the Console uses its Zaidan grids and filters at browser seams",
-    "apps/console/tests/browser/workflowCatalogue.spec.ts",
-    "filters Workflow state and proves safe Trigger Start, Stop, force, and Run links",
+    "apps/console/tests/browser/daemonComponents.spec.ts",
+    "keeps Zaidan composition keyboard-operable on narrow layouts and exposes documented custom gaps",
     ["console-browser"],
   ),
   check(
@@ -992,7 +1149,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "old execution, storage, and spend paths are absent and guidance matches the shipped contract",
     "packages/kojo/tests/integration/release/contractCutover.test.ts",
     "ships no legacy execution path or client fallback",
-    ["kojo-integration"],
+    ["kojo-integration", "shipped-systemd"],
     [
       {
         tier: "kojo-integration",
@@ -1099,14 +1256,27 @@ export const completeReleaseEvidence = (input: CompleteEvidenceInput) => {
     if (ids.has(required.checkId)) fail(`duplicate required check ${required.checkId}`);
     ids.add(required.checkId);
     if (required.observations.length === 0) fail(`${required.checkId} has no named observation`);
-    const requiredTiers = new Set(required.tiers);
-    const observedTiers = new Set(required.observations.map((observation) => observation.tier));
+    const allocated = issue64RequiredTierAllocation[required.checkId];
+    if (allocated === undefined) fail(`${required.checkId} has no immutable issue #64 allocation`);
+    const declaredEvidenceTiers = new Set(required.tiers);
+    const observedEvidenceTiers = new Set(
+      required.observations.map((observation) => observation.tier),
+    );
     if (
-      requiredTiers.size !== required.tiers.length ||
+      declaredEvidenceTiers.size !== required.tiers.length ||
+      observedEvidenceTiers.size !== declaredEvidenceTiers.size ||
+      [...declaredEvidenceTiers].some((tier) => !observedEvidenceTiers.has(tier))
+    ) {
+      fail(`${required.checkId} does not declare exact observations for every evidence log`);
+    }
+    const requiredTiers = new Set<Issue64Tier>(allocated);
+    const observedTiers = new Set(required.observations.flatMap(issueTiersForObservation));
+    if (
+      requiredTiers.size !== allocated.length ||
       observedTiers.size !== requiredTiers.size ||
       [...requiredTiers].some((tier) => !observedTiers.has(tier))
     ) {
-      fail(`${required.checkId} does not declare exact observations for every required tier`);
+      fail(`${required.checkId} does not declare exact observations for its issue #64 allocation`);
     }
     const observationKeys = required.observations.map(
       (observation) => `${observation.tier}\0${observation.path}\0${observation.name}`,
@@ -1174,6 +1344,10 @@ export const completeReleaseEvidence = (input: CompleteEvidenceInput) => {
       namedSkips: evidence.flatMap((receipt) => receipt.namedSkips),
     } as const;
   });
+  const allocatedIds = Object.keys(issue64RequiredTierAllocation);
+  if (allocatedIds.length !== ids.size || allocatedIds.some((checkId) => !ids.has(checkId))) {
+    fail("the immutable issue #64 allocation and required checks differ");
+  }
   return {
     formatVersion: 1,
     kind: "complete-breaking-release-evidence",

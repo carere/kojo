@@ -9,7 +9,6 @@ import {
 } from "@tanstack/solid-table";
 import {
   type Accessor,
-  createEffect,
   createMemo,
   createSignal,
   type JSX,
@@ -22,8 +21,9 @@ import { Badge, type BadgeTone } from "../../shared/components/Badge.tsx";
 import { ConsoleNavigation } from "../../shared/components/ConsoleNavigation.tsx";
 import { DataGrid } from "../../shared/components/data-grid/DataGrid.tsx";
 import { DataGridTable } from "../../shared/components/data-grid/DataGridTable.tsx";
-import { Pagination, resourcePage } from "../../shared/components/data-grid/Pagination.tsx";
+import { Pagination } from "../../shared/components/data-grid/Pagination.tsx";
 import { Filters, type ProjectFilters } from "../../shared/components/filters/Filters.tsx";
+import { usePaginationState } from "../../shared/hooks/usePaginationState.ts";
 import { useProjects } from "../hooks/useProjects.ts";
 
 const filterFromUrl = (): ProjectFilters => {
@@ -115,9 +115,6 @@ const projectColumns = (
 export const Projects = (): JSX.Element => {
   const projects = useProjects();
   const [filters, setFilters] = createSignal(filterFromUrl());
-  const [cursor, setCursor] = createSignal(
-    Math.max(0, Number(new URLSearchParams(window.location.search).get("cursor") ?? 0) || 0),
-  );
   const [selection, setSelection] = createSignal<RowSelectionState>(selectionFromUrl());
   const columns = projectColumns(selection, setSelection);
   const rows = createMemo(() => {
@@ -133,21 +130,19 @@ export const Projects = (): JSX.Element => {
             .includes(text)),
     );
   });
-  const visibleRows = createMemo(() => resourcePage(rows(), cursor()));
-
-  createEffect(() => {
+  const {
+    cursor,
+    page: visibleRows,
+    setCursor,
+    reset: resetPage,
+  } = usePaginationState(rows, () => {
     const query = filters();
-    const selected = selection();
-    const url = new URL(window.location.href);
-    url.search = "";
-    if (query.text !== "") url.searchParams.set("q", query.text);
-    if (query.project !== "all") url.searchParams.set("project", query.project);
-    if (query.factory !== "all") url.searchParams.set("factory", query.factory);
-    if (cursor() > 0) url.searchParams.set("cursor", String(cursor()));
-    for (const projectId of Object.keys(selected).sort()) {
-      url.searchParams.append("selected", projectId);
-    }
-    window.history.replaceState(window.history.state, "", url);
+    return {
+      q: query.text,
+      project: query.project === "all" ? undefined : query.project,
+      factory: query.factory === "all" ? undefined : query.factory,
+      selected: Object.keys(selection()).sort(),
+    };
   });
 
   const table = createTable({
@@ -181,7 +176,7 @@ export const Projects = (): JSX.Element => {
             filters={filters()}
             onChange={(next) => {
               setFilters(next);
-              setCursor(0);
+              resetPage();
             }}
           />
         </header>

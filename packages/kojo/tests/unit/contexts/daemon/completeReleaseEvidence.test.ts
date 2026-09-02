@@ -7,6 +7,10 @@ import {
   loadedTestsFromLog,
   requiredReleaseChecks,
 } from "../../../support/release/CompleteReleaseEvidence.ts";
+import {
+  type Issue64Tier,
+  issue64RequiredTierAllocation,
+} from "../../../support/release/Issue64TierAllocation.ts";
 
 const revision = "a".repeat(40);
 const tierNames: ReadonlyArray<EvidenceTier> = [
@@ -139,7 +143,7 @@ describe("complete breaking release evidence", () => {
     ).toThrow("did not pass");
   });
 
-  it("refuses a broad substring or a missing required tier observation", () => {
+  it("refuses a broad substring and keeps the issue allocation immutable", () => {
     const subject = input();
     const unit = subject.tiers["kojo-unit"] as LoadedTestEvidence;
     const required = requiredReleaseChecks.find((check) => check.checkId === "STATE-01");
@@ -157,9 +161,24 @@ describe("complete breaking release evidence", () => {
       }),
     ).toThrow("did not load named observation");
 
+    expect(Object.isFrozen(issue64RequiredTierAllocation)).toBe(true);
+    for (const allocation of Object.values(issue64RequiredTierAllocation)) {
+      expect(Object.isFrozen(allocation)).toBe(true);
+    }
+    const observedIssueTiers = (check: (typeof requiredReleaseChecks)[number]) =>
+      new Set<Issue64Tier>(
+        check.observations.flatMap((observation) => {
+          if (observation.issueTiers !== undefined) return observation.issueTiers;
+          if (observation.path.includes("/tests/unit/")) return ["U" as const];
+          if (observation.path.includes("/tests/integration/")) return ["I" as const];
+          if (observation.path.includes("/tests/browser/")) return ["B" as const];
+          if (observation.path.includes("/tests/host/")) return ["H" as const];
+          return ["R" as const];
+        }),
+      );
     for (const check of requiredReleaseChecks) {
-      expect(new Set(check.observations.map((observation) => observation.tier))).toEqual(
-        new Set(check.tiers),
+      expect(observedIssueTiers(check)).toEqual(
+        new Set(issue64RequiredTierAllocation[check.checkId]),
       );
     }
   });

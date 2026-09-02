@@ -3,6 +3,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { macLaunchAgent } from "../../../../src/contexts/daemon/adapters/MacLaunchAgent.ts";
+import { ManagedDaemonSupervision } from "../../../../src/contexts/daemon/adapters/ManagedDaemonSupervision.ts";
 import { systemdUserService } from "../../../../src/contexts/daemon/adapters/SystemdUserService.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
 import { launchAgentDocument } from "../../../../src/contexts/daemon/services/launchAgentDocument.ts";
@@ -19,6 +20,36 @@ const waitFor = async (predicate: () => boolean, timeout = 60_000): Promise<void
     await Bun.sleep(50);
   }
 };
+
+describe("the native launcher restart budget", () => {
+  it("persists and exhausts the native launcher restart budget across owner reconstruction", () => {
+    const root = mkdtempSync(join(tmpdir(), "kojo-native-restart-budget-"));
+    let time = Date.parse("2026-09-01T10:00:00.000Z");
+    try {
+      const startAndFail = (expectedDelay: number): void => {
+        const owner = new ManagedDaemonSupervision(root, { now: () => time });
+        const prepared = owner.prepareAttempt();
+        expect(prepared).toMatchObject({ outcome: "scheduled", delayMs: expectedDelay });
+        if (prepared.outcome !== "scheduled") throw new Error("restart was not scheduled");
+        time += prepared.delayMs;
+        owner.startAttempt(prepared.attemptId);
+        owner.finishAttempt(prepared.attemptId, { detail: "native launcher failure" });
+      };
+
+      startAndFail(0);
+      for (const delay of [1_000, 2_000, 4_000, 8_000, 16_000]) startAndFail(delay);
+
+      expect(new ManagedDaemonSupervision(root, { now: () => time }).status()).toMatchObject({
+        state: "exhausted",
+        repairRequired: true,
+        nextRestartIndex: 5,
+        restartAttemptsRemaining: 0,
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe.skipIf(process.platform !== "darwin")("the native macOS Daemon lifecycle", () => {
   it("starts one isolated idle LaunchAgent and preserves stop and enablement as separate states", async () => {

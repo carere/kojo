@@ -10,6 +10,18 @@ browser reads the Daemon HTTP API.
 - Gate queue and answer form.
 - Daemon health and actionable faults.
 
+## Resource list composition
+
+Projects and Workflows use the local Zaidan Data Grid and Filters composition. Their row models use
+TanStack Table. Native controls keep the filters, row selection, links, actions, and pagination in
+the keyboard order. The table wrapper owns horizontal overflow on narrow layouts; the document does
+not scroll sideways.
+
+Two deliberate custom gaps remain. Runs use a status table because their waiting reason and live
+state are already one ordered projection. Gate uses a grouped table because waiting and settled
+Askings must remain separate while they share one filter and page. Both gaps use the same Zaidan
+table primitives, filter shape, pagination state, keyboard controls, and narrow-layout overflow.
+
 The Console does not serve files from a terminal-owned application. It does not open SQLite and
 does not execute or resume Runs.
 

@@ -6,19 +6,18 @@ import * as SandcastleAgentInvoker from "../../../../../src/contexts/agent/adapt
 import * as YamlRoster from "../../../../../src/contexts/agent/adapters/YamlRoster.ts";
 import type { AgentSessionId } from "../../../../../src/contexts/agent/models/AgentSessionId.ts";
 import { AgentInvoker } from "../../../../../src/contexts/agent/ports/AgentInvoker.ts";
+import * as DaemonResourceLeaseClient from "../../../../../src/contexts/project/adapters/DaemonResourceLeaseClient.ts";
 import { acquireSandbox } from "../../../../../src/contexts/sandbox/adapters/boundary.ts";
 import { noSandbox } from "../../../../../src/contexts/sandbox/adapters/providers.ts";
 import type { SandboxHandle } from "../../../../../src/contexts/sandbox/models/SandboxHandle.ts";
 import { Sandbox } from "../../../../../src/contexts/sandbox/ports/Sandbox.ts";
 import { decodeUnknown } from "../../../../../src/contexts/shared/lib/decode.ts";
 import { makeSandboxId } from "../../../../../src/contexts/shared/models/SandboxId.ts";
+import * as DaemonArtifactPublisher from "../../../../../src/contexts/trace/adapters/DaemonArtifactPublisher.ts";
 import { EnvelopeBase } from "../../../../../src/contexts/workflow/models/Envelope.ts";
 import { EnvelopeParseError } from "../../../../../src/contexts/workflow/models/EnvelopeParseError.ts";
 import { withCorrections } from "../../../../../src/contexts/workflow/services/corrections.ts";
-import {
-  layerAt as inMemoryExecutionServicesAt,
-  sandboxResourcesAt,
-} from "../../../../support/InMemoryExecutionServices.ts";
+import { sandboxResourcesAt } from "../../../../support/sandboxResources.ts";
 import { throwawayRepo } from "../../../../support/throwawayRepo.ts";
 
 /**
@@ -124,6 +123,34 @@ interface Fixture {
   readonly agent: AgentInvoker["Service"];
 }
 
+/** The concrete private-channel adapters, with their transport kept inside this fixture. */
+const daemonExecutionAdaptersAt = (root: string) => {
+  const field = (body: unknown, name: string): string => {
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      throw new Error(`the ${name} field is absent from the private-channel request`);
+    }
+    const value = (body as Record<string, unknown>)[name];
+    if (typeof value !== "string") {
+      throw new Error(`the ${name} field is absent from the private-channel request`);
+    }
+    return value;
+  };
+  return Layer.merge(
+    DaemonResourceLeaseClient.layer(async (kind, body) =>
+      kind === "BeginResourceAcquisition"
+        ? {
+            acquisitionKey: field(body, "acquisitionKey"),
+            providerIdentity: `process:${field(body, "kind")}:${field(body, "acquisitionKey")}`,
+            inspectionLocator: `${root}/.kojo-test-registry/${encodeURIComponent(field(body, "acquisitionKey"))}.json`,
+          }
+        : {},
+    ),
+    DaemonArtifactPublisher.layer("run-scripted", async (kind, body) =>
+      kind === "FinishArtifact" ? { artifactId: `artifact:${field(body, "transferId")}` } : {},
+    ),
+  );
+};
+
 const withScriptedAgent = <A, E>(
   script: (log: string) => string,
   use: (fixture: Fixture) => Effect.Effect<A, E, FileSystem.FileSystem | Path.Path>,
@@ -155,7 +182,7 @@ const withScriptedAgent = <A, E>(
         }).pipe(Layer.provide(BunServices.layer)),
       ),
       Layer.provide(Layer.succeed(Sandbox, sandbox)),
-      Layer.provide(inMemoryExecutionServicesAt(repo.root)),
+      Layer.provide(daemonExecutionAdaptersAt(repo.root)),
       Layer.orDie,
     );
 

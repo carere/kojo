@@ -56,6 +56,9 @@ the assertions: `.kojo/artifacts` is protected, Resource identity variables cros
 boundary, compensation follows the current replay result, and `.kojo/data` is tested only as a
 barred historic Project path. The restored in-memory adapter suites retain script exhaustion,
 resume refusal, unsafe-command refusal, traversal safety, write, stat, and unlink coverage.
+`SandcastleAgentInvoker.test.ts` now supplies the concrete private-channel Resource and Artifact
+adapters. `SandboxExecWorkspace.test.ts` performs its sequential build and check directly through
+the real sandbox Workspace. Neither integration suite composes an in-memory service.
 
 The current CLI command suites are also retained. Their pure command and formatting behavior moved
 from `tests/integration/cli` to mirrored `tests/unit/contexts/{daemon,gate,project,scaffold,shared,
@@ -63,6 +66,10 @@ workflow}/adapters`, where they use in-memory dependencies. `gateAndResume.test.
 integration test because it uses a real Daemon, SQLite, private HTTP, and a child CLI process.
 `cliContract.test.ts` adds the same real boundary for selectors, JSON and JSON Lines, waits,
 uncertainty retries, privacy, and exit codes 0 through 4.
+
+The obsolete `integration/cli/duplicateEffect.test.ts` is not restored as a CLI suite. Its current
+contract is retained as a focused validation integration leaf: a real second physical Effect copy
+makes Factory Refresh report the Factory as Invalid before it executes a Workflow.
 
 One superseded current suite was removed:
 `packages/kojo-runtime/tests/integration/contexts/agent/adapters/kojoPi.test.ts`. Its only process

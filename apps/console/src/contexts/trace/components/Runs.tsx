@@ -1,10 +1,11 @@
 import { Link } from "@tanstack/solid-router";
-import { createEffect, createMemo, createSignal, type JSX, Show } from "solid-js";
+import { createMemo, createSignal, type JSX, Show } from "solid-js";
 import { useAskings } from "../../gate/hooks/useAskings.ts";
 import { ConsoleNavigation } from "../../shared/components/ConsoleNavigation.tsx";
-import { Pagination, resourcePage } from "../../shared/components/data-grid/Pagination.tsx";
+import { Pagination } from "../../shared/components/data-grid/Pagination.tsx";
 import { Notice } from "../../shared/components/Notice.tsx";
 import { retrying, settled } from "../../shared/hooks/settled.ts";
+import { usePaginationState } from "../../shared/hooks/usePaginationState.ts";
 import { useNow } from "../../shared/ports/Now.tsx";
 import { useRuns } from "../hooks/useRuns.ts";
 import { allSettled } from "../models/RunLine.ts";
@@ -35,7 +36,6 @@ export const Runs = (): JSX.Element => {
   const search = new URLSearchParams(window.location.search);
   const [text, setText] = createSignal(search.get("q") ?? "");
   const [status, setStatus] = createSignal(search.get("status") ?? "all");
-  const [cursor, setCursor] = createSignal(Math.max(0, Number(search.get("cursor") ?? 0) || 0));
   const filteredRows = createMemo(() => {
     const query = text().trim().toLocaleLowerCase();
     return rows().filter(
@@ -47,16 +47,15 @@ export const Runs = (): JSX.Element => {
             .includes(query)),
     );
   });
-  const visibleRows = createMemo(() => resourcePage(filteredRows(), cursor()));
-
-  createEffect(() => {
-    const url = new URL(window.location.href);
-    url.search = "";
-    if (text() !== "") url.searchParams.set("q", text());
-    if (status() !== "all") url.searchParams.set("status", status());
-    if (cursor() > 0) url.searchParams.set("cursor", String(cursor()));
-    window.history.replaceState(window.history.state, "", url);
-  });
+  const {
+    cursor,
+    page: visibleRows,
+    setCursor,
+    reset: resetPage,
+  } = usePaginationState(filteredRows, () => ({
+    q: text(),
+    status: status() === "all" ? undefined : status(),
+  }));
 
   const unreachable = () => retrying(runs) || retrying(askings);
   /**
@@ -71,7 +70,7 @@ export const Runs = (): JSX.Element => {
   return (
     <div class="mx-auto grid min-h-screen max-w-7xl gap-8 p-4 lg:grid-cols-[13rem_1fr] lg:p-8">
       <ConsoleNavigation current="Runs" />
-      <main class="flex min-w-0 flex-col gap-4">
+      <main class="flex min-w-0 flex-col gap-4" data-list-composition="custom-status-table">
         <header class="flex flex-col gap-1">
           <div class="flex flex-wrap items-baseline justify-between gap-2">
             <h1 class="text-xl font-semibold">Runs</h1>
@@ -94,7 +93,7 @@ export const Runs = (): JSX.Element => {
                 value={text()}
                 onInput={(event) => {
                   setText(event.currentTarget.value);
-                  setCursor(0);
+                  resetPage();
                 }}
               />
             </label>
@@ -106,7 +105,7 @@ export const Runs = (): JSX.Element => {
                 value={status()}
                 onChange={(event) => {
                   setStatus(event.currentTarget.value);
-                  setCursor(0);
+                  resetPage();
                 }}
               >
                 <option value="all">All states</option>

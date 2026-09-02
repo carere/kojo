@@ -11,7 +11,7 @@ import { acquireSandbox } from "../../../../../src/contexts/sandbox/adapters/bou
 import { noSandbox } from "../../../../../src/contexts/sandbox/adapters/providers.ts";
 import { Workspace } from "../../../../../src/contexts/sandbox/ports/Workspace.ts";
 import { defaultTrunk } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
-import { sandboxResourcesAt } from "../../../../support/InMemoryExecutionServices.ts";
+import { sandboxResourcesAt } from "../../../../support/sandboxResources.ts";
 
 const seed = Effect.gen(function* () {
   const workspace = yield* Workspace;

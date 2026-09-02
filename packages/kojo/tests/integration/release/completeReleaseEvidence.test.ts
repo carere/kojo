@@ -77,7 +77,7 @@ describe("the complete breaking release evidence executable", () => {
         "Bun=1.4.0",
         "Moon=2.5.0",
         `TestedRevision=${revision}`,
-        "HostTests=1 passed, 1 skipped, 2 loaded",
+        "HostTests=2 passed, 1 skipped, 3 loaded",
         "NamedSkip=the native macOS Daemon lifecycle",
       ].join("\n"),
     );
@@ -85,8 +85,9 @@ describe("the complete breaking release evidence executable", () => {
       join(input, "native-systemd", "host-tests.log"),
       [
         " ✓ packages/kojo/tests/host/contexts/daemon/service.test.ts > uses an isolated unit for one idle Daemon and stops its complete process group",
+        " ✓ packages/kojo/tests/host/contexts/daemon/service.test.ts > persists and exhausts the native launcher restart budget across owner reconstruction",
         " ↓ packages/kojo/tests/host/contexts/daemon/service.test.ts > the native macOS Daemon lifecycle",
-        " Tests  1 passed | 1 skipped (2)",
+        " Tests  2 passed | 1 skipped (3)",
       ].join("\n"),
     );
     writeJson(join(input, "shipped-systemd", "evidence.json"), {

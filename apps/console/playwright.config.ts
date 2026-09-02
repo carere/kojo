@@ -13,6 +13,7 @@ export default defineConfig({
     "gateVerdict.spec.ts",
     "artifact.spec.ts",
     "reconnect.spec.ts",
+    "daemonComponents.spec.ts",
   ],
   fullyParallel: true,
   reporter: [["list"]],

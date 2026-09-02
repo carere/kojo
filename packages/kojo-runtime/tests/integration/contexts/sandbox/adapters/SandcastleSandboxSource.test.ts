@@ -19,7 +19,7 @@ import {
 import { defaultTrunk } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
 import type { RunId } from "../../../../../src/contexts/shared/models/RunId.ts";
 import { makeSandboxId } from "../../../../../src/contexts/shared/models/SandboxId.ts";
-import { sandboxResourcesAt } from "../../../../support/InMemoryExecutionServices.ts";
+import { sandboxResourcesAt } from "../../../../support/sandboxResources.ts";
 
 const runId = "run-integration" as RunId;
 const branch = "kojo/source";
