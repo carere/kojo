@@ -44,7 +44,9 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
   set +e
   properties=$(LC_ALL=C "$timeout_command" --signal=TERM --kill-after=1s "$probe_timeout" \
     "$loginctl_command" show-user "$evidence_uid" \
-    --property=Sessions,Linger,State 2>"$probe_error_file")
+    --property=Sessions \
+    --property=Linger \
+    --property=State 2>"$probe_error_file")
   status=$?
   set -e
   probe_error=$(<"$probe_error_file")
@@ -75,7 +77,7 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
     classification=probe-timed-out
   elif [[ $status -ne 0 ]]; then
     classification=probe-failed
-  elif [[ $linger == "$expected_linger" && $sessions_match == true ]]; then
+  elif [[ $linger == "$expected_linger" && $sessions_match == true && -n $state ]]; then
     classification=login-state-matched
     accepted=true
   fi
@@ -94,7 +96,8 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
         classification: "login-state-matched",
         statusCommandExit: 0,
         linger: $expectedLinger,
-        sessions: $expectedSessions
+        sessions: $expectedSessions,
+        state: "present"
       },
       actual: {
         classification: $classification,
@@ -138,7 +141,8 @@ jq -s \
       classification: "login-state-matched-within-bound",
       statusCommandExit: 0,
       linger: $expectedLinger,
-      sessions: $expectedSessions
+      sessions: $expectedSessions,
+      state: "present"
     },
     actual: {
       classification: $classification,

@@ -57,7 +57,9 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
   manager_status=$?
   login_properties=$(LC_ALL=C "$timeout_command" --signal=TERM --kill-after=1s "$probe_timeout" \
     "$loginctl_command" show-user "$evidence_user" \
-    --property=Sessions,Linger,State 2>"$login_error_file")
+    --property=Sessions \
+    --property=Linger \
+    --property=State 2>"$login_error_file")
   login_status=$?
   set -e
   manager_error=$(<"$manager_error_file")

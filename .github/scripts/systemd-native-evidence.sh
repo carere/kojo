@@ -9,6 +9,31 @@ fixture=packages/kojo/tests/support/daemon/systemdLogoutFixture.ts
 unit=kojo-native-logout-evidence.service
 key=/tmp/kojo-native-evidence-key
 policy=/etc/polkit-1/rules.d/49-kojo-native-evidence.rules
+login_state_evidence_script=$workspace/.github/scripts/systemd-shipped-login-state-evidence.sh
+logout_readiness_script=$workspace/.github/scripts/systemd-shipped-logout-readiness.sh
+
+assert_login_state_receipt() {
+  local receipt=$1
+  local expected_linger=$2
+  local expected_sessions=$3
+  jq -e \
+    --arg linger "$expected_linger" \
+    --arg sessions "$expected_sessions" \
+    '.accepted == true and
+      .expected.classification == "login-state-matched-within-bound" and
+      .expected.statusCommandExit == 0 and
+      .expected.linger == $linger and
+      .expected.sessions == $sessions and
+      .expected.state == "present" and
+      .actual.classification == "login-state-matched-within-bound" and
+      .actual.statusCommandExit == 0 and
+      .actual.linger == $linger and
+      (($sessions == "present" and (.actual.sessions | length) > 0) or
+        ($sessions == "absent" and .actual.sessions == "")) and
+      (.actual.state | length) > 0 and
+      .readOnly == true' \
+    "$receipt" >/dev/null
+}
 
 if [[ $(id -u) -ne 0 ]]; then
   echo "This controller must run in a separate root control session." >&2
@@ -36,6 +61,7 @@ evidence_uid=$(id -u "$evidence_user")
 evidence_home=$(getent passwd "$evidence_user" | cut -d: -f6)
 runtime_directory=/run/user/$evidence_uid
 endpoint=$runtime_directory/kojo-native-logout-evidence/endpoint.json
+bus=$runtime_directory/bus
 chown -R "$evidence_user:$evidence_user" "$workspace"
 chmod o+x /home/runner /home/runner/work "$(dirname "$workspace")"
 
@@ -69,7 +95,7 @@ ssh_arguments=(
 remote_prefix="cd '$workspace' && export PATH=/usr/local/bin:/usr/bin:/bin CI=1 NO_COLOR=1 HOME='$evidence_home' XDG_RUNTIME_DIR='$runtime_directory' XDG_CONFIG_HOME='$evidence_home/.config' XDG_DATA_HOME='$evidence_home/.local/share' XDG_STATE_HOME='$evidence_home/.local/state' XDG_CACHE_HOME='$evidence_home/.cache' DBUS_SESSION_BUS_ADDRESS='unix:path=$runtime_directory/bus'"
 
 ssh "${ssh_arguments[@]}" \
-  "$remote_prefix && id && stat -c 'RuntimeDirectory=%n Owner=%u Mode=%a' '$runtime_directory' && test -S '$runtime_directory/bus' && /usr/bin/systemctl --user import-environment HOME XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME && /usr/bin/systemctl --user show-environment && loginctl show-user '$evidence_user' --property=Sessions,Linger,State" \
+  "$remote_prefix && id && stat -c 'RuntimeDirectory=%n Owner=%u Mode=%a' '$runtime_directory' && test -S '$bus' && /usr/bin/systemctl --user import-environment HOME XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME && /usr/bin/systemctl --user show-environment" \
   >"$evidence_directory/pam-session.log"
 
 ssh "${ssh_arguments[@]}" \
@@ -82,40 +108,60 @@ grep -E "Tests[[:space:]]+1 passed[[:space:]]+\|[[:space:]]+1 skipped \(2\)" \
   "$evidence_directory/host-tests.log" >/dev/null
 
 ssh "${ssh_arguments[@]}" \
-  "$remote_prefix && bun '$fixture' install" \
-  >"$evidence_directory/no-linger-install.json"
+  "$remote_prefix && bun '$fixture' install >'$evidence_directory/no-linger-install.json' && bash '$login_state_evidence_script' '$evidence_directory/no-linger-live-login-state.json' '$evidence_directory/no-linger-live-login-state.stderr.log' '$evidence_user' '$evidence_uid' no present 1 0s"
 no_linger_child=$(jq -er .childProcessId "$evidence_directory/no-linger-install.json")
-[[ $(loginctl show-user "$evidence_user" --property=Linger --value) == no ]]
-
-for _ in $(seq 1 90); do
-  if ! systemctl is-active --quiet "user@$evidence_uid.service" && \
-    [[ ! -e "$endpoint" ]] && ! kill -0 "$no_linger_child" 2>/dev/null; then
-    no_linger_stopped=yes
-    break
-  fi
-  sleep 1
-done
-[[ ${no_linger_stopped:-no} == yes ]]
+assert_login_state_receipt "$evidence_directory/no-linger-live-login-state.json" no present
+bash "$logout_readiness_script" \
+  "$evidence_directory/no-linger-logout-readiness-observations.jsonl" \
+  "$evidence_directory/no-linger-logout-readiness-final.json" \
+  "$evidence_directory/no-linger-logout-readiness.stderr.log" \
+  "$evidence_user" \
+  "$evidence_uid" \
+  "$endpoint" \
+  "$bus" \
+  90 \
+  1s
+jq -e '
+  .accepted == true and
+  .actual.managerActiveState == "inactive" and
+  .actual.managerSubState == "dead" and
+  .actual.managerJobPresent == false and
+  .actual.managerCgroupPopulated == false and
+  .actual.loginUserPresent == false and
+  .actual.endpointPresent == false and
+  .actual.busPresent == false and
+  .noServiceStartRepairOrLingerChange == true
+' "$evidence_directory/no-linger-logout-readiness-final.json" >/dev/null
+! kill -0 "$no_linger_child" 2>/dev/null
 {
   echo "Linger=no"
   echo "UserManager=stopped"
   echo "Endpoint=removed"
   echo "ChildProcessGroup=stopped"
+  echo "LiveLoginStateEvidence=no-linger-live-login-state.json"
+  echo "FinalLogoutEvidence=no-linger-logout-readiness-final.json"
 } >"$evidence_directory/final-logout-without-linger.log"
 
 ssh "${ssh_arguments[@]}" \
-  "$remote_prefix && bun '$fixture' install >'$evidence_directory/linger-install.json' && bun packages/kojo/src/main.ts daemon keep-running-after-logout >'$evidence_directory/keep-running-after-logout.log' && bun '$fixture' inspect >'$evidence_directory/linger-inspect.json'"
+  "$remote_prefix && bun '$fixture' install >'$evidence_directory/linger-install.json' && bun packages/kojo/src/main.ts daemon keep-running-after-logout >'$evidence_directory/keep-running-after-logout.log' && bash '$login_state_evidence_script' '$evidence_directory/linger-live-login-state.json' '$evidence_directory/linger-live-login-state.stderr.log' '$evidence_user' '$evidence_uid' yes present 1 0s && bun '$fixture' inspect >'$evidence_directory/linger-inspect.json'"
 linger_child=$(jq -er .childProcessId "$evidence_directory/linger-inspect.json")
+assert_login_state_receipt "$evidence_directory/linger-live-login-state.json" yes present
 
 grep -F "This changes linger for the complete OS user. All user services can then run after logout." \
   "$evidence_directory/keep-running-after-logout.log" >/dev/null
 grep -F "Keep running after logout: enabled." \
   "$evidence_directory/keep-running-after-logout.log" >/dev/null
-[[ $(loginctl show-user "$evidence_user" --property=Linger --value) == yes ]]
-
-sleep 5
+bash "$login_state_evidence_script" \
+  "$evidence_directory/linger-final-login-state.json" \
+  "$evidence_directory/linger-final-login-state.stderr.log" \
+  "$evidence_user" \
+  "$evidence_uid" \
+  yes \
+  absent \
+  30 \
+  1s
+assert_login_state_receipt "$evidence_directory/linger-final-login-state.json" yes absent
 systemctl is-active --quiet "user@$evidence_uid.service"
-[[ -z $(loginctl show-user "$evidence_user" --property=Sessions --value) ]]
 [[ -e "$endpoint" ]]
 kill -0 "$linger_child"
 runuser -u "$evidence_user" -- env \
@@ -128,12 +174,23 @@ runuser -u "$evidence_user" -- env \
   echo "Daemon=running"
   echo "Endpoint=present"
   echo "ChildProcessGroup=running"
+  echo "LiveLoginStateEvidence=linger-live-login-state.json"
+  echo "FinalLoginStateEvidence=linger-final-login-state.json"
 } >"$evidence_directory/final-logout-with-linger.log"
 
 ssh "${ssh_arguments[@]}" \
   "$remote_prefix && bun '$fixture' remove" \
   >"$evidence_directory/removal.json"
-[[ $(loginctl show-user "$evidence_user" --property=Linger --value) == yes ]]
+bash "$login_state_evidence_script" \
+  "$evidence_directory/removal-login-state.json" \
+  "$evidence_directory/removal-login-state.stderr.log" \
+  "$evidence_user" \
+  "$evidence_uid" \
+  yes \
+  absent \
+  30 \
+  1s
+assert_login_state_receipt "$evidence_directory/removal-login-state.json" yes absent
 if runuser -u "$evidence_user" -- env \
   XDG_RUNTIME_DIR="$runtime_directory" \
   DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_directory/bus" \
@@ -148,7 +205,10 @@ removed_load_state=$(runuser -u "$evidence_user" -- env \
 [[ $removed_load_state == not-found ]]
 [[ ! -e "$endpoint" ]]
 ! kill -0 "$linger_child" 2>/dev/null
-echo "LingerAfterRemoval=yes" >"$evidence_directory/removal-preserves-linger.log"
+{
+  echo "LingerAfterRemoval=yes"
+  echo "LoginStateEvidence=removal-login-state.json"
+} >"$evidence_directory/removal-preserves-linger.log"
 
 {
   . /etc/os-release

@@ -14,7 +14,9 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { force: true, recursive: true });
 });
 
-const fixture = (mode: "no-present" | "yes-absent" | "unexpected" | "error" | "timeout") => {
+const fixture = (
+  mode: "no-present" | "yes-absent" | "unexpected" | "missing-state" | "error" | "timeout",
+) => {
   const root = mkdtempSync(join(tmpdir(), "kojo-systemd-login-state-"));
   roots.push(root);
   const loginctl = join(root, "loginctl");
@@ -30,13 +32,23 @@ const fixture = (mode: "no-present" | "yes-absent" | "unexpected" | "error" | "t
       ? ["Sessions=42", "Linger=no", "State=active"]
       : mode === "yes-absent"
         ? ["Sessions=", "Linger=yes", "State=lingering"]
-        : ["Sessions=42", "Linger=yes", "State=active"];
+        : mode === "missing-state"
+          ? ["Sessions=42", "Linger=no", "State="]
+          : ["Sessions=42", "Linger=yes", "State=active"];
   writeFileSync(
     loginctl,
     [
       "#!/usr/bin/env bash",
       "set -Eeuo pipefail",
       `printf '%s\\n' "$*" >>"$KOJO_TEST_LOGINCTL_CALLS"`,
+      "if (( $# != 5 )); then",
+      "  echo 'Unexpected loginctl arguments.' >&2",
+      "  exit 64",
+      "fi",
+      "if [[ $1 != show-user || $2 != 1234 || $3 != --property=Sessions || $4 != --property=Linger || $5 != --property=State ]]; then",
+      "  echo 'Unexpected loginctl arguments.' >&2",
+      "  exit 64",
+      "fi",
       ...(mode === "error"
         ? ["echo 'Failed to connect to bus: Connection refused' >&2", "exit 1"]
         : properties.map((property) => `echo '${property}'`)),
@@ -107,6 +119,29 @@ const runHelper = async (
 };
 
 describe("shipped systemd login-state evidence", () => {
+  it("makes the fake loginctl refuse the unsupported comma form before property output", async () => {
+    const subject = fixture("no-present");
+    const child = Bun.spawn(
+      [subject.loginctl, "show-user", "1234", "--property=Sessions,Linger,State"],
+      {
+        env: {
+          ...process.env,
+          KOJO_TEST_LOGINCTL_CALLS: subject.loginctlCalls,
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const stdout = await new Response(child.stdout).text();
+
+    expect(await child.exited).toBe(64);
+    expect(stdout).toBe("");
+    expect(readFileSync(subject.loginctlCalls, "utf8").trim()).toBe(
+      "show-user 1234 --property=Sessions,Linger,State",
+    );
+  });
+
   it("accepts expected no linger with a live SSH session", async () => {
     const subject = fixture("no-present");
 
@@ -123,6 +158,7 @@ describe("shipped systemd login-state evidence", () => {
         statusCommandExit: 0,
         linger: "no",
         sessions: "present",
+        state: "present",
       },
       actual: {
         classification: "login-state-matched-within-bound",
@@ -135,10 +171,10 @@ describe("shipped systemd login-state evidence", () => {
       accepted: true,
     });
     expect(readFileSync(subject.loginctlCalls, "utf8").trim()).toBe(
-      "show-user 1234 --property=Sessions,Linger,State",
+      "show-user 1234 --property=Sessions --property=Linger --property=State",
     );
     expect(readFileSync(subject.timeoutCalls, "utf8").trim()).toBe(
-      `--signal=TERM --kill-after=1s 1s ${subject.loginctl} show-user 1234 --property=Sessions,Linger,State`,
+      `--signal=TERM --kill-after=1s 1s ${subject.loginctl} show-user 1234 --property=Sessions --property=Linger --property=State`,
     );
   });
 
@@ -165,6 +201,25 @@ describe("shipped systemd login-state evidence", () => {
         statusCommandExit: 0,
         linger: "yes",
       },
+      accepted: false,
+    });
+  });
+
+  it("fails closed when loginctl omits the requested State value", async () => {
+    const subject = fixture("missing-state");
+
+    expect(await runHelper(subject, "no", "present")).toBe(1);
+
+    expect(JSON.parse(readFileSync(subject.receipt, "utf8"))).toMatchObject({
+      expected: { state: "present" },
+      actual: {
+        classification: "login-state-not-matched-within-bound",
+        statusCommandExit: 0,
+        linger: "no",
+        sessions: "42",
+        state: "",
+      },
+      observations: [{ actual: { classification: "login-state-mismatch", state: "" } }],
       accepted: false,
     });
   });

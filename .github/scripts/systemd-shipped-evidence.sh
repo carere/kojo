@@ -56,11 +56,13 @@ assert_login_state_receipt() {
       .expected.statusCommandExit == 0 and
       .expected.linger == $linger and
       .expected.sessions == $sessions and
+      .expected.state == "present" and
       .actual.classification == "login-state-matched-within-bound" and
       .actual.statusCommandExit == 0 and
       .actual.linger == $linger and
       (($sessions == "present" and (.actual.sessions | length) > 0) or
         ($sessions == "absent" and .actual.sessions == "")) and
+      (.actual.state | length) > 0 and
       .readOnly == true' \
     "$receipt" >/dev/null
 }

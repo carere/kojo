@@ -80,6 +80,14 @@ const fixture = (
       "#!/usr/bin/env bash",
       "set -Eeuo pipefail",
       `printf '%s\\n' "$*" >>"$KOJO_TEST_LOGINCTL_CALLS"`,
+      "if (( $# != 5 )); then",
+      "  echo 'Unexpected loginctl arguments.' >&2",
+      "  exit 64",
+      "fi",
+      "if [[ $1 != show-user || $2 != kojo-shipped-evidence || $3 != --property=Sessions || $4 != --property=Linger || $5 != --property=State ]]; then",
+      "  echo 'Unexpected loginctl arguments.' >&2",
+      "  exit 64",
+      "fi",
       'count=$(cat "$KOJO_TEST_ATTEMPTS")',
       "if [[ $count -lt $KOJO_TEST_COMPLETE_AFTER ]]; then",
       "  echo 'Sessions='",
@@ -199,6 +207,14 @@ const predicateFixture = (options: PredicateOptions = {}) => {
       "#!/usr/bin/env bash",
       "set -Eeuo pipefail",
       `printf '%s\\n' "$*" >>"$KOJO_TEST_LOGINCTL_CALLS"`,
+      "if (( $# != 5 )); then",
+      "  echo 'Unexpected loginctl arguments.' >&2",
+      "  exit 64",
+      "fi",
+      "if [[ $1 != show-user || $2 != kojo-shipped-evidence || $3 != --property=Sessions || $4 != --property=Linger || $5 != --property=State ]]; then",
+      "  echo 'Unexpected loginctl arguments.' >&2",
+      "  exit 64",
+      "fi",
       ...(login === "present"
         ? ["echo 'Sessions=99'", "echo 'Linger=no'", "echo 'State=active'"]
         : login === "error"
@@ -334,9 +350,9 @@ describe("shipped systemd final-logout readiness evidence", () => {
       "show user@1234.service --property=ActiveState,SubState,Job,ControlGroup",
     ]);
     expect(readFileSync(subject.loginctlCalls, "utf8").trim().split("\n")).toEqual([
-      "show-user kojo-shipped-evidence --property=Sessions,Linger,State",
-      "show-user kojo-shipped-evidence --property=Sessions,Linger,State",
-      "show-user kojo-shipped-evidence --property=Sessions,Linger,State",
+      "show-user kojo-shipped-evidence --property=Sessions --property=Linger --property=State",
+      "show-user kojo-shipped-evidence --property=Sessions --property=Linger --property=State",
+      "show-user kojo-shipped-evidence --property=Sessions --property=Linger --property=State",
     ]);
     expect(readFileSync(subject.sleepCalls, "utf8").trim().split("\n")).toEqual(["0.1s", "0.1s"]);
     const timeoutCalls = readFileSync(subject.timeoutCalls, "utf8").trim().split("\n");
@@ -457,7 +473,7 @@ describe("shipped systemd final-logout readiness evidence", () => {
       "show user@1234.service --property=ActiveState,SubState,Job,ControlGroup",
     );
     expect(readFileSync(subject.loginctlCalls, "utf8").trim()).toBe(
-      "show-user kojo-shipped-evidence --property=Sessions,Linger,State",
+      "show-user kojo-shipped-evidence --property=Sessions --property=Linger --property=State",
     );
     expect(existsSync(subject.sleepCalls)).toBe(false);
   });
