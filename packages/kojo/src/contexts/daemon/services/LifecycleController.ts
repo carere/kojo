@@ -320,14 +320,15 @@ export class LifecycleController {
         const ownedProcessesStopped = operation;
         operation = yield* Effect.gen(function* () {
           yield* controller.#sync(controller.#nativeService.stop);
-          const observation = yield* controller.#sync(controller.#nativeService.inspect);
-          if (observation.process !== "stopped") {
-            return yield* Effect.fail(
-              new LifecycleError(
-                "LIFECYCLE_STOP_UNCONFIRMED",
-                "the native manager did not confirm that the Daemon stopped",
-              ),
+          while (true) {
+            const observation = yield* controller.#sync(controller.#nativeService.inspect);
+            const observedDaemonInstanceId = yield* controller.#sync(
+              controller.#observedDaemonInstanceId,
             );
+            if (observation.process === "stopped" && observedDaemonInstanceId === undefined) {
+              break;
+            }
+            yield* Effect.sleep(controller.#pollIntervalMillis);
           }
           return yield* controller.#advance(ownedProcessesStopped, "process-stopped");
         }).pipe(

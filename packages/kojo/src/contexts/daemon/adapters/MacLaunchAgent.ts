@@ -63,11 +63,15 @@ export const macLaunchAgent = (
       };
     }
 
-    const state = /\bstate\s*=\s*running\b/.test(printed.stdout) ? "running" : "stopped";
+    const activeCount = /\bactive count\s*=\s*(\d+)\b/.exec(printed.stdout)?.[1];
+    const ownsActiveProcess =
+      /\bstate\s*=\s*running\b/.test(printed.stdout) ||
+      (activeCount !== undefined && Number(activeCount) > 0) ||
+      /^\s*pid\s*=\s*\d+\s*$/m.test(printed.stdout);
     return {
       automaticStart,
       manager: "loaded",
-      process: state,
+      process: ownsActiveProcess ? "running" : "stopped",
       loginLifetime: "macOS GUI login session",
       logoutPersistence: "unsupported",
     };

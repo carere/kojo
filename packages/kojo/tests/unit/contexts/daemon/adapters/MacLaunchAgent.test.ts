@@ -25,6 +25,20 @@ describe("the macOS LaunchAgent adapter", () => {
     });
   });
 
+  it("reports a SIGTERMed LaunchAgent with an active process as running", () => {
+    const launchctl: Launchctl = (arguments_) =>
+      arguments_[0] === "print-disabled"
+        ? result("{}")
+        : result("active count = 1\nstate = SIGTERMed\npid = 9759\n");
+
+    expect(macLaunchAgent({ label: "dev.kojo.test", uid: 501, launchctl }).inspect()).toMatchObject(
+      {
+        manager: "loaded",
+        process: "running",
+      },
+    );
+  });
+
   it("does not start when enable is the requested operation", () => {
     const calls: Array<ReadonlyArray<string>> = [];
     const launchctl: Launchctl = (arguments_) => {
