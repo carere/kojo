@@ -181,7 +181,7 @@ class EvidenceRecorder {
   }
 }
 
-const controlledWorkflow = (
+export const shippedMacosControlledWorkflow = (
   project: string,
 ): string => `import { Duration, Effect, Schema } from "effect";
 import { fail } from "@carere/kojo-runtime/contexts/gate/models/OnExpiry";
@@ -196,7 +196,7 @@ import { workflow } from "@carere/kojo-runtime/contexts/workflow/services/workfl
 export const releaseEvidence = workflow(
   {
     name: "release-evidence",
-    payload: Schema.Struct({ message: Schema.String }),
+    payload: { message: Schema.String },
     success: Schema.String,
     error: Schema.Unknown,
     idempotencyKey: (payload) => payload.message,
@@ -310,37 +310,54 @@ const prepareProject = async (
     ],
     { cwd: project, env: environment },
   );
-  // README tells the Factory author to complete the generated placeholders. The evidence Workflow
-  // is authored after init, before install and doctor, and is not a repair of a failed fixture.
-  writeFileSync(join(project, ".kojo", "commands.ts"), commands);
-  writeFileSync(
-    join(project, ".kojo", "workflows", "release-evidence.ts"),
-    controlledWorkflow(project),
-  );
-  recorder.write("factory-authorship.json", {
-    sequence: "after kojo init and before bun install",
-    authored: [".kojo/commands.ts", ".kojo/workflows/release-evidence.ts"],
-    providerExecution: "none; the selected Workflow has no agent phase or AgentInvoker",
-  });
   await recorder.run("printed-bun-install", [bun, "install"], {
     cwd: project,
     env: environment,
     timeout: 120_000,
   });
+  // The printed second step tells the Factory author to replace the generated placeholders. This
+  // controlled Workflow is authored before the printed first commit, not as repair after doctor.
+  writeFileSync(join(project, ".kojo", "commands.ts"), commands);
+  writeFileSync(
+    join(project, ".kojo", "workflows", "release-evidence.ts"),
+    shippedMacosControlledWorkflow(project),
+  );
+  recorder.write("factory-authorship.json", {
+    sequence: "after printed bun install and before printed first commit",
+    authored: [".kojo/commands.ts", ".kojo/workflows/release-evidence.ts"],
+    providerExecution: "none; the selected Workflow has no agent phase or AgentInvoker",
+  });
+  await recorder.run("printed-git-add-all", ["/usr/bin/git", "add", "--all"], {
+    cwd: project,
+    env: environment,
+  });
+  await recorder.run(
+    "printed-git-commit-factory",
+    ["/usr/bin/git", "commit", "--message", "add a kojo factory"],
+    { cwd: project, env: environment },
+  );
   await recorder.run("printed-kojo-doctor", [kojo, "doctor"], {
     cwd: project,
     env: environment,
     timeout: 60_000,
   });
-  await recorder.run("git-add-factory", ["/usr/bin/git", "-C", project, "add", "."]);
-  await recorder.run("git-commit-factory", [
-    "/usr/bin/git",
-    "-C",
-    project,
-    "commit",
-    "-m",
-    "test: add controlled release Factory",
-  ]);
+  recorder.write("printed-instruction-sequence.json", {
+    source: "printed-kojo-init",
+    followedInOrder: [
+      { step: 1, instruction: "bun install", evidence: "steps/09-printed-bun-install.log" },
+      {
+        step: 2,
+        instruction: "write real Factory commands and the controlled Workflow",
+        evidence: "records/factory-authorship.json",
+      },
+      {
+        step: 3,
+        instruction: "git add --all && git commit --message 'add a kojo factory'",
+        evidence: ["steps/10-printed-git-add-all.log", "steps/11-printed-git-commit-factory.log"],
+      },
+      { step: 4, instruction: "kojo doctor", evidence: "steps/12-printed-kojo-doctor.log" },
+    ],
+  });
 };
 
 const endpoint = (): EndpointRecord => {

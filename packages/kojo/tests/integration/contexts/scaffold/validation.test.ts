@@ -6,6 +6,7 @@ import { Effect } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 import { standaloneValidation } from "../../../../src/contexts/scaffold/services/standaloneValidation.ts";
 import { linkEngine } from "../../../support/linkEngine.ts";
+import { shippedMacosControlledWorkflow } from "../../../support/release/ShippedMacosEvidence.ts";
 
 const packageRoot = new URL("../../../../", import.meta.url).pathname.replace(/\/$/, "");
 const roots: Array<string> = [];
@@ -73,5 +74,23 @@ describe("standalone Project validation", () => {
     expect(diagnostics[0]?.standing).toBe("failed");
     expect(diagnostics[0]?.detail).toContain("Project-local validator could not run");
     expect(diagnostics[0]?.remedy).toContain("@carere/kojo-runtime");
+  });
+
+  it("accepts the controlled shipped macOS Workflow contract without running it", async () => {
+    const fixture = await project();
+    await writeFile(
+      join(fixture.root, ".kojo", "workflows", "release-evidence.ts"),
+      shippedMacosControlledWorkflow(fixture.root),
+    );
+
+    const diagnostics = await Effect.runPromise(standaloneValidation(fixture.root));
+
+    expect(diagnostics.find((finding) => finding.subject === "workflow:release-evidence")).toEqual({
+      subject: "workflow:release-evidence",
+      standing: "ok",
+      detail: "declaration, Layer, payload, and key are valid",
+      triggerDeclared: false,
+    });
+    expect(existsSync(fixture.executed)).toBe(false);
   });
 });
