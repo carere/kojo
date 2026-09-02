@@ -106,7 +106,11 @@ describe("shipped Linux Workflow observation", () => {
 
     expect(first).toMatchObject({ accepted: false, consecutiveCurrent: 1 });
     expect(premature).toMatchObject({ accepted: false, stableForMillis: 1_000 });
-    expect(reset).toMatchObject({ accepted: false, consecutiveCurrent: 0, fact: "not-current" });
+    expect(reset).toMatchObject({
+      accepted: false,
+      consecutiveCurrent: 0,
+      classification: "not-current",
+    });
     expect(restarted).toMatchObject({ accepted: false, consecutiveCurrent: 1 });
     expect(stable).toMatchObject({
       accepted: true,
@@ -144,11 +148,11 @@ describe("shipped Linux Workflow observation", () => {
       accepted: false,
       consecutiveCurrent: 1,
       stableForMillis: 0,
-      fact: "candidate-started",
+      classification: "stability-started",
     });
   });
 
-  it("compares structured Factory Refresh identity without delimiter collisions", () => {
+  it("compares structured stability observation fields without delimiter collisions", () => {
     const first = shippedWorkflowObservation(
       snapshot([workflow()], { instanceId: "instance/a", dataIdentity: "data" }),
       projectId,
@@ -167,7 +171,7 @@ describe("shipped Linux Workflow observation", () => {
       accepted: false,
       consecutiveCurrent: 1,
       stableForMillis: 0,
-      fact: "candidate-started",
+      classification: "stability-started",
     });
   });
 });

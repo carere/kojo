@@ -6,7 +6,7 @@ export interface ShippedWorkflowObservation {
   readonly ready: boolean;
   readonly diagnostic: string;
   readonly snapshot?: Record<string, unknown>;
-  readonly candidate?: {
+  readonly stabilityObservation?: {
     readonly instanceId: string;
     readonly dataIdentity: string;
     readonly revisionId: string;
@@ -16,7 +16,7 @@ export interface ShippedWorkflowObservation {
 }
 
 export interface ShippedWorkflowStability {
-  readonly identity?: {
+  readonly observationIdentity?: {
     readonly instanceId: string;
     readonly dataIdentity: string;
     readonly revisionId: string;
@@ -27,7 +27,11 @@ export interface ShippedWorkflowStability {
   readonly stableForMillis: number;
   readonly requiredStableMillis: number;
   readonly accepted: boolean;
-  readonly fact: "not-current" | "candidate-started" | "candidate-continuing" | "unavailable";
+  readonly classification:
+    | "not-current"
+    | "stability-started"
+    | "stability-continuing"
+    | "unavailable";
 }
 
 interface BoundedCommandResult {
@@ -84,7 +88,7 @@ const unavailableShippedWorkflowStability = (): ShippedWorkflowStability => ({
   stableForMillis: 0,
   requiredStableMillis: FACTORY_INPUT_SCAN_INTERVAL_MILLIS,
   accepted: false,
-  fact: "unavailable",
+  classification: "unavailable",
 });
 
 export const replaceFailedShippedWorkflowObservation = (
@@ -176,7 +180,7 @@ export const shippedWorkflowObservation = (
     `Factory Refresh ${String(workflow.refreshState)}`,
     `Workflow ${String(workflow.availability)}`,
   ].join(", ");
-  const candidate =
+  const stabilityObservation =
     nonEmptyString(decoded.instanceId) &&
     nonEmptyString(decoded.dataIdentity) &&
     Number.isSafeInteger(decoded.refreshAfterMillis) &&
@@ -197,28 +201,28 @@ export const shippedWorkflowObservation = (
       workflow.factoryState === "available" &&
       workflow.refreshState === "current" &&
       workflow.availability === "available" &&
-      candidate !== undefined,
+      stabilityObservation !== undefined,
     diagnostic,
     snapshot: decoded,
-    ...(candidate === undefined ? {} : { candidate }),
+    ...(stabilityObservation === undefined ? {} : { stabilityObservation }),
   };
 };
 
 const nonEmptyString = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0;
 
-const candidateIdentity = (
-  candidate: NonNullable<ShippedWorkflowObservation["candidate"]>,
-): NonNullable<ShippedWorkflowStability["identity"]> => ({
-  instanceId: candidate.instanceId,
-  dataIdentity: candidate.dataIdentity,
-  revisionId: candidate.revisionId,
-  packageGraphId: candidate.packageGraphId,
+const stabilityObservationIdentity = (
+  observation: NonNullable<ShippedWorkflowObservation["stabilityObservation"]>,
+): NonNullable<ShippedWorkflowStability["observationIdentity"]> => ({
+  instanceId: observation.instanceId,
+  dataIdentity: observation.dataIdentity,
+  revisionId: observation.revisionId,
+  packageGraphId: observation.packageGraphId,
 });
 
-const sameCandidate = (
-  left: ShippedWorkflowStability["identity"],
-  right: NonNullable<ShippedWorkflowStability["identity"]>,
+const sameObservationIdentity = (
+  left: ShippedWorkflowStability["observationIdentity"],
+  right: NonNullable<ShippedWorkflowStability["observationIdentity"]>,
 ): boolean =>
   left?.instanceId === right.instanceId &&
   left.dataIdentity === right.dataIdentity &&
@@ -230,31 +234,32 @@ export const advanceShippedWorkflowStability = (
   observation: ShippedWorkflowObservation,
   observedAtMillis: number,
   requiredStableMillis = FACTORY_INPUT_SCAN_INTERVAL_MILLIS +
-    (observation.candidate?.refreshAfterMillis ?? 0),
+    (observation.stabilityObservation?.refreshAfterMillis ?? 0),
 ): ShippedWorkflowStability => {
-  if (!observation.ready || observation.candidate === undefined) {
+  if (!observation.ready || observation.stabilityObservation === undefined) {
     return {
       consecutiveCurrent: 0,
       stableForMillis: 0,
       requiredStableMillis,
       accepted: false,
-      fact: "not-current",
+      classification: "not-current",
     };
   }
-  const identity = candidateIdentity(observation.candidate);
+  const observationIdentity = stabilityObservationIdentity(observation.stabilityObservation);
   const continuing =
-    sameCandidate(prior?.identity, identity) && prior?.currentSinceMillis !== undefined;
+    sameObservationIdentity(prior?.observationIdentity, observationIdentity) &&
+    prior?.currentSinceMillis !== undefined;
   const currentSinceMillis = continuing ? prior.currentSinceMillis : observedAtMillis;
   const consecutiveCurrent = continuing ? prior.consecutiveCurrent + 1 : 1;
   const stableForMillis = Math.max(0, observedAtMillis - currentSinceMillis);
   return {
-    identity,
+    observationIdentity,
     currentSinceMillis,
     consecutiveCurrent,
     stableForMillis,
     requiredStableMillis,
     accepted: consecutiveCurrent >= 2 && stableForMillis >= requiredStableMillis,
-    fact: continuing ? "candidate-continuing" : "candidate-started",
+    classification: continuing ? "stability-continuing" : "stability-started",
   };
 };
 
@@ -352,7 +357,8 @@ export const observeShippedWorkflow = async (
       readiness,
       Date.now(),
       options.stabilityWindowMillis ??
-        FACTORY_INPUT_SCAN_INTERVAL_MILLIS + (readiness.candidate?.refreshAfterMillis ?? 0),
+        FACTORY_INPUT_SCAN_INTERVAL_MILLIS +
+          (readiness.stabilityObservation?.refreshAfterMillis ?? 0),
     );
     writeFileSync(snapshotPath, result.stdout);
     writeFileSync(stderrPath, result.stderr);
@@ -409,7 +415,7 @@ export const observeShippedWorkflow = async (
       return { ready: true, attempts, elapsedMillis: Date.now() - startedAt };
     }
     const delay = Math.min(
-      options.delayMillis ?? readiness.candidate?.refreshAfterMillis ?? 1_000,
+      options.delayMillis ?? readiness.stabilityObservation?.refreshAfterMillis ?? 1_000,
       Math.max(0, deadline - Date.now() - hardKillAfterMillis - finalizationReserveMillis),
     );
     if (delay > 0) await Bun.sleep(delay);

@@ -175,7 +175,7 @@ describe("the shipped Workflow observation bound", () => {
         consecutiveCurrent: 0,
         stableForMillis: 0,
         accepted: false,
-        fact: "unavailable",
+        classification: "unavailable",
       },
     });
   });
@@ -203,7 +203,7 @@ describe("the shipped Workflow observation bound", () => {
         consecutiveCurrent: 0,
         stableForMillis: 0,
         accepted: false,
-        fact: "unavailable",
+        classification: "unavailable",
       },
     });
   });
