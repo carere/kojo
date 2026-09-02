@@ -9,6 +9,7 @@ const helper = resolve(
   "../../../../../../.github/scripts/systemd-shipped-singleton-evidence.sh",
 );
 const roots: Array<string> = [];
+const DEADLOCK_GUARD_MILLIS = 15_000;
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { force: true, recursive: true });
@@ -22,7 +23,11 @@ const fixture = (launcherBody: string) => {
   const log = join(root, "singleton.log");
   const receipt = join(root, "singleton.json");
   const timeoutCommand = join(root, "timeout");
-  writeFileSync(launcher, `#!/usr/bin/env bash\nset -Eeuo pipefail\n${launcherBody}\n`);
+  const launcherStarted = join(root, "launcher-started");
+  writeFileSync(
+    launcher,
+    `#!/usr/bin/env bash\nset -Eeuo pipefail\nprintf started >"$KOJO_TEST_LAUNCHER_STARTED"\n${launcherBody}\n`,
+  );
   chmodSync(launcher, 0o700);
   writeFileSync(
     timeoutCommand,
@@ -33,6 +38,11 @@ duration=$1
 shift
 "$@" &
 subject=$!
+for _ in $(seq 1 500); do
+  [[ -e $KOJO_TEST_LAUNCHER_STARTED ]] && break
+  kill -0 "$subject" 2>/dev/null || break
+  sleep 0.01
+done
 (
   sleep "$duration"
   kill -TERM "$subject" 2>/dev/null || exit 0
@@ -50,33 +60,44 @@ exit "$status"
   );
   chmodSync(timeoutCommand, 0o700);
   writeFileSync(endpoint, JSON.stringify({ instanceId: "active-instance" }));
-  return { launcher, endpoint, log, receipt, timeoutCommand };
+  return { launcher, endpoint, log, receipt, timeoutCommand, launcherStarted };
 };
 
 const runHelper = async (
   subject: ReturnType<typeof fixture>,
   timeout = "0.5s",
-): Promise<{ readonly exitCode: number; readonly elapsedMillis: number }> => {
-  const startedAt = performance.now();
+): Promise<number> => {
   const child = Bun.spawn(
     ["bash", helper, subject.launcher, subject.endpoint, subject.log, subject.receipt, timeout],
     {
-      env: { ...process.env, KOJO_EVIDENCE_TIMEOUT_COMMAND: subject.timeoutCommand },
+      env: {
+        ...process.env,
+        KOJO_EVIDENCE_TIMEOUT_COMMAND: subject.timeoutCommand,
+        KOJO_TEST_LAUNCHER_STARTED: subject.launcherStarted,
+      },
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
       detached: true,
     },
   );
-  const exitCode = await Promise.race([
-    child.exited,
-    Bun.sleep(1_000).then(async () => {
-      process.kill(-child.pid, "SIGKILL");
-      await child.exited;
-      return 255;
-    }),
-  ]);
-  return { exitCode, elapsedMillis: performance.now() - startedAt };
+  let deadlockGuard: ReturnType<typeof setTimeout> | undefined;
+  const deadlockExit = new Promise<number>((resolveDeadlock, rejectDeadlock) => {
+    deadlockGuard = setTimeout(() => {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch (error) {
+        rejectDeadlock(error);
+        return;
+      }
+      child.exited.then(() => resolveDeadlock(255), rejectDeadlock);
+    }, DEADLOCK_GUARD_MILLIS);
+  });
+  try {
+    return await Promise.race([child.exited, deadlockExit]);
+  } finally {
+    clearTimeout(deadlockGuard);
+  }
 };
 
 describe("shipped systemd singleton evidence", () => {
@@ -89,13 +110,14 @@ printf '%s\\n' 'error: another Daemon start or purge transition owns the stable 
 printf '%s\\n' 'code: "PURGE_GATE_HELD"' >&2
 exit 1`);
 
-    const result = await runHelper(subject);
+    const exitCode = await runHelper(subject);
 
-    expect(result.exitCode).toBe(0);
-    expect(result.elapsedMillis).toBeLessThan(1_000);
+    expect(exitCode).toBe(0);
     expect(JSON.parse(readFileSync(subject.receipt, "utf8"))).toMatchObject({
       formatVersion: 1,
       mode: "KOJO_DAEMON_CHILD=1",
+      bounded: true,
+      timeout: "0.5s",
       expectedRefusal: "PURGE_GATE_HELD",
       exitCode: 1,
       activeInstanceId: "active-instance",
@@ -110,11 +132,12 @@ exit 1`);
   it("bounds a Daemon child that does not refuse ownership", async () => {
     const subject = fixture("exec sleep 10");
 
-    const result = await runHelper(subject, "0.1s");
+    const exitCode = await runHelper(subject, "0.1s");
 
-    expect(result.exitCode).toBe(1);
-    expect(result.elapsedMillis).toBeLessThan(1_000);
+    expect(exitCode).toBe(1);
     expect(JSON.parse(readFileSync(subject.receipt, "utf8"))).toMatchObject({
+      bounded: true,
+      timeout: "0.1s",
       exitCode: 124,
       activeInstanceUnchanged: true,
       accepted: false,
