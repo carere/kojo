@@ -144,16 +144,17 @@ describe("the managed Daemon installation", () => {
     expect(command.exitCode).toBe(0);
     expect(command.stdout.toString().trim()).not.toBe("");
 
+    const managedEnvironment = {
+      ...process.env,
+      HOME: root,
+      KOJO_MANAGED_INSTALLATION: paths.installationRoot,
+      KOJO_DAEMON_DATA: paths.dataRoot,
+      KOJO_DAEMON_RUNTIME: paths.runtimeRoot,
+      KOJO_DAEMON_CONFIG: paths.configurationRoot,
+      KOJO_DAEMON_CACHE: paths.cacheRoot,
+    };
     const launcher = Bun.spawn([paths.managedLauncher], {
-      env: {
-        ...process.env,
-        HOME: root,
-        KOJO_MANAGED_INSTALLATION: paths.installationRoot,
-        KOJO_DAEMON_DATA: paths.dataRoot,
-        KOJO_DAEMON_RUNTIME: paths.runtimeRoot,
-        KOJO_DAEMON_CONFIG: paths.configurationRoot,
-        KOJO_DAEMON_CACHE: paths.cacheRoot,
-      },
+      env: managedEnvironment,
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -178,6 +179,27 @@ describe("the managed Daemon installation", () => {
           `the installed managed launcher did not publish ${endpointPath} within ${readiness.timeoutMillis}ms; launcher process is still ${readiness.process} at pid ${launcher.pid}`,
         );
       }
+      const duplicate = Bun.spawn([paths.managedLauncher], {
+        env: { ...managedEnvironment, KOJO_DAEMON_CHILD: "1" },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const duplicateOutput = new Response(duplicate.stdout).text();
+      const duplicateError = new Response(duplicate.stderr).text();
+      const duplicateExit = await Promise.race([
+        duplicate.exited,
+        Bun.sleep(5_000).then(async () => {
+          duplicate.kill("SIGKILL");
+          await duplicate.exited;
+          throw new Error("the duplicate shipped Daemon did not reject singleton ownership");
+        }),
+      ]);
+      expect(duplicateExit, await duplicateOutput).toBe(1);
+      expect(await duplicateError).toContain(
+        "another Daemon start or purge transition owns the stable lifecycle gate",
+      );
+      expect(await duplicateError).toContain("PURGE_GATE_HELD");
     } catch (cause) {
       readinessFailure = { cause };
     }

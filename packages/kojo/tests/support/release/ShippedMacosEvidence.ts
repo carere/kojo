@@ -21,6 +21,23 @@ interface CommandResult {
   readonly stderr: string;
 }
 
+export const assertShippedSingletonEvidence = (
+  result: CommandResult,
+  activeInstanceId: string,
+  observedInstanceId: string,
+): void => {
+  if (
+    result.exitCode !== 1 ||
+    !result.stderr.includes(
+      "another Daemon start or purge transition owns the stable lifecycle gate",
+    ) ||
+    !result.stderr.includes("PURGE_GATE_HELD") ||
+    observedInstanceId !== activeInstanceId
+  ) {
+    throw new Error("a duplicate shipped Daemon did not preserve the active Daemon owner");
+  }
+};
+
 interface EndpointRecord {
   readonly formatVersion: number;
   readonly instanceId: string;
@@ -1129,13 +1146,23 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
     });
     recorder.write("console-after-native-replacement.txt", replacementRender.text);
     const duplicate = await recorder.run(
-      "singleton-duplicate-launch",
+      "singleton-duplicate-daemon",
       [join(defaultInstallation, "bin", "kojo-launcher")],
-      { env: managedEnvironment, accept: [1] },
+      {
+        env: { ...managedEnvironment, KOJO_DAEMON_CHILD: "1" },
+        accept: [1],
+      },
     );
-    if (duplicate.exitCode === 0 || endpoint().instanceId !== afterRestart.instanceId) {
-      throw new Error("a duplicate managed launcher displaced the active Daemon owner");
-    }
+    const singletonInstanceId = endpoint().instanceId;
+    assertShippedSingletonEvidence(duplicate, afterRestart.instanceId, singletonInstanceId);
+    recorder.write("singleton-duplicate.json", {
+      executable: join(defaultInstallation, "bin", "kojo-launcher"),
+      mode: "KOJO_DAEMON_CHILD=1",
+      expectedRefusal: "PURGE_GATE_HELD",
+      exitCode: duplicate.exitCode,
+      activeInstanceId: afterRestart.instanceId,
+      observedInstanceId: singletonInstanceId,
+    });
     await recorder.run("native-launchctl-final", ["/bin/launchctl", "print", serviceTarget]);
     await recordManagedProcesses(recorder, "process-group-final");
 
