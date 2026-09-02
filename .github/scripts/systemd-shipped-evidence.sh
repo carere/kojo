@@ -11,6 +11,7 @@ key=/tmp/kojo-shipped-evidence-key
 policy=/etc/polkit-1/rules.d/49-kojo-shipped-evidence.rules
 user_script=.github/scripts/systemd-shipped-user-evidence.sh
 login_readiness_script=.github/scripts/systemd-shipped-login-readiness.sh
+login_state_evidence_script=.github/scripts/systemd-shipped-login-state-evidence.sh
 logout_readiness_script=.github/scripts/systemd-shipped-logout-readiness.sh
 playwright_cli=$workspace/apps/console/node_modules/@playwright/test/cli.js
 diagnostic=$evidence_directory/controller-diagnostic.log
@@ -41,6 +42,27 @@ record_failure() {
   diagnostic_line=$2
   diagnostic_command=$3
   return "$exit_code"
+}
+
+assert_login_state_receipt() {
+  local receipt=$1
+  local expected_linger=$2
+  local expected_sessions=$3
+  jq -e \
+    --arg linger "$expected_linger" \
+    --arg sessions "$expected_sessions" \
+    '.accepted == true and
+      .expected.classification == "login-state-matched-within-bound" and
+      .expected.statusCommandExit == 0 and
+      .expected.linger == $linger and
+      .expected.sessions == $sessions and
+      .actual.classification == "login-state-matched-within-bound" and
+      .actual.statusCommandExit == 0 and
+      .actual.linger == $linger and
+      (($sessions == "present" and (.actual.sessions | length) > 0) or
+        ($sessions == "absent" and .actual.sessions == "")) and
+      .readOnly == true' \
+    "$receipt" >/dev/null
 }
 
 cleanup() {
@@ -115,14 +137,7 @@ ssh "${ssh_arguments[@]}" \
   "$remote_prefix && id && stat -c 'RuntimeDirectory=%n Owner=%u Mode=%a' '$runtime_directory' && test -S '$runtime_directory/bus' && systemctl --user import-environment HOME XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME && systemctl --user show-environment && bash '$user_script' '$workspace' '$evidence_directory' '$package_directory'" \
   >"$evidence_directory/user-flow.log" 2>"$evidence_directory/user-flow.stderr.log"
 
-jq -e '
-  .accepted == true and
-  .expected.statusCommandExit == 0 and
-  .expected.linger == "no" and
-  .actual.statusCommandExit == 0 and
-  .actual.linger == "no" and
-  .readOnly == true
-' "$evidence_directory/pre-logout-linger.json" >/dev/null
+assert_login_state_receipt "$evidence_directory/pre-logout-login-state.json" no present
 diagnostic_step=no-linger-lifetime
 bash "$logout_readiness_script" \
   "$evidence_directory/logout-readiness-observations.jsonl" \
@@ -163,13 +178,13 @@ jq -e '
 managed_kojo=$evidence_home/.local/share/kojo/bin/kojo
 diagnostic_step=linger-authorization
 ssh "${ssh_arguments[@]}" \
-  "$remote_prefix && bash '$login_readiness_script' '$evidence_directory/login-readiness-observations.jsonl' '$evidence_directory/login-readiness-final.json' '$evidence_directory/login-readiness.stderr.log' 20 0.25s && PATH=/usr/bin:/bin '$managed_kojo' daemon start >'$evidence_directory/managed-start-after-login.log' 2>'$evidence_directory/managed-start-after-login.stderr.log' && if PATH=/usr/bin:/bin '$managed_kojo' daemon keep-running-after-logout >'$evidence_directory/keep-running-refusal.log' 2>&1; then echo 'Linger unexpectedly changed without authority.' >&2; exit 90; fi"
+  "$remote_prefix && bash '$login_readiness_script' '$evidence_directory/login-readiness-observations.jsonl' '$evidence_directory/login-readiness-final.json' '$evidence_directory/login-readiness.stderr.log' 20 0.25s && PATH=/usr/bin:/bin '$managed_kojo' daemon start >'$evidence_directory/managed-start-after-login.log' 2>'$evidence_directory/managed-start-after-login.stderr.log' && if PATH=/usr/bin:/bin '$managed_kojo' daemon keep-running-after-logout >'$evidence_directory/keep-running-refusal.log' 2>&1; then echo 'Linger unexpectedly changed without authority.' >&2; exit 90; fi && bash '$login_state_evidence_script' '$evidence_directory/post-refusal-login-state.json' '$evidence_directory/post-refusal-login-state.stderr.log' '$evidence_user' '$evidence_uid' no present 1 0s"
 jq -e '
   .accepted == true and
   .managerReady == true and
   .noServiceStartRepairOrLingerChange == true
 ' "$evidence_directory/login-readiness-final.json" >/dev/null
-[[ $(loginctl show-user "$evidence_user" --property=Linger --value) == no ]]
+assert_login_state_receipt "$evidence_directory/post-refusal-login-state.json" no present
 
 install -d -m 0755 /etc/polkit-1/rules.d
 cat >"$policy" <<EOF
@@ -182,16 +197,24 @@ polkit.addRule(function(action, subject) {
 EOF
 
 ssh "${ssh_arguments[@]}" \
-  "$remote_prefix && PATH=/usr/bin:/bin '$managed_kojo' daemon keep-running-after-logout >'$evidence_directory/keep-running-after-logout.log'"
+  "$remote_prefix && PATH=/usr/bin:/bin '$managed_kojo' daemon keep-running-after-logout >'$evidence_directory/keep-running-after-logout.log' && bash '$login_state_evidence_script' '$evidence_directory/authorized-live-login-state.json' '$evidence_directory/authorized-live-login-state.stderr.log' '$evidence_user' '$evidence_uid' yes present 1 0s"
 grep -F "This changes linger for the complete OS user. All user services can then run after logout." \
   "$evidence_directory/keep-running-after-logout.log" >/dev/null
 grep -F "Keep running after logout: enabled." \
   "$evidence_directory/keep-running-after-logout.log" >/dev/null
-[[ $(loginctl show-user "$evidence_user" --property=Linger --value) == yes ]]
+assert_login_state_receipt "$evidence_directory/authorized-live-login-state.json" yes present
 
-sleep 5
+bash "$login_state_evidence_script" \
+  "$evidence_directory/authorized-final-login-state.json" \
+  "$evidence_directory/authorized-final-login-state.stderr.log" \
+  "$evidence_user" \
+  "$evidence_uid" \
+  yes \
+  absent \
+  20 \
+  0.25s
+assert_login_state_receipt "$evidence_directory/authorized-final-login-state.json" yes absent
 systemctl is-active --quiet "user@$evidence_uid.service"
-[[ -z $(loginctl show-user "$evidence_user" --property=Sessions --value) ]]
 [[ -e $endpoint ]]
 [[ -S $socket ]]
 runuser -u "$evidence_user" -- env \
@@ -219,7 +242,16 @@ diagnostic_step=managed-removal
 ssh "${ssh_arguments[@]}" \
   "$remote_prefix && PATH=/usr/bin:/bin '$managed_kojo' daemon remove --timeout 60s >'$evidence_directory/managed-removal.log'"
 diagnostic_step=removal-verification
-[[ $(loginctl show-user "$evidence_user" --property=Linger --value) == yes ]]
+bash "$login_state_evidence_script" \
+  "$evidence_directory/removal-login-state.json" \
+  "$evidence_directory/removal-login-state.stderr.log" \
+  "$evidence_user" \
+  "$evidence_uid" \
+  yes \
+  absent \
+  20 \
+  0.25s
+assert_login_state_receipt "$evidence_directory/removal-login-state.json" yes absent
 if runuser -u "$evidence_user" -- env \
   XDG_RUNTIME_DIR="$runtime_directory" \
   DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_directory/bus" \
@@ -300,8 +332,8 @@ jq -n \
       { name: "authenticated-browser", expected: "one authenticated browser inspects the actual encoded wire and renders persisted records and Artifact", actual: "passed", evidence: "browser-tests.log" },
       { name: "global-tool-independence", expected: "managed status and repair work after candidate global Kojo and Bun removal", actual: "passed", evidence: "global-removal.log; managed-status-after-global-removal.log; managed-repair-after-global-removal.log" },
       { name: "replacement-and-access", expected: "the Type=exec control group contains the replacement MainPID; old process and browser authority are revoked; another OS user is refused", actual: "passed", evidence: "cgroup-before-replacement.log; replacement-access.log; final-logout-with-linger.log" },
-      { name: "login-lifetime", expected: "final logout stops the Daemon without linger and preserves it only after explicit authorized linger", actual: "passed", evidence: "pre-logout-linger.json; pre-logout-linger.stderr.log; logout-readiness-observations.jsonl; logout-readiness-final.json; logout-readiness.stderr.log; final-logout-without-linger.log; login-readiness-observations.jsonl; login-readiness-final.json; login-readiness.stderr.log; keep-running-refusal.log; keep-running-after-logout.log; final-logout-with-linger.log" },
-      { name: "removal-preserves-linger", expected: "shipped removal never disables user linger", actual: "passed", evidence: "managed-removal.log; removal-preserves-linger.log" }
+      { name: "login-lifetime", expected: "final logout stops the Daemon without linger and preserves it only after explicit authorized linger", actual: "passed", evidence: "pre-logout-login-state.json; pre-logout-login-state.stderr.log; logout-readiness-observations.jsonl; logout-readiness-final.json; logout-readiness.stderr.log; final-logout-without-linger.log; login-readiness-observations.jsonl; login-readiness-final.json; login-readiness.stderr.log; post-refusal-login-state.json; post-refusal-login-state.stderr.log; keep-running-refusal.log; keep-running-after-logout.log; authorized-live-login-state.json; authorized-live-login-state.stderr.log; authorized-final-login-state.json; authorized-final-login-state.stderr.log; final-logout-with-linger.log" },
+      { name: "removal-preserves-linger", expected: "shipped removal never disables user linger", actual: "passed", evidence: "managed-removal.log; removal-login-state.json; removal-login-state.stderr.log; removal-preserves-linger.log" }
     ],
     noHiddenRepairs: {
       actual: true,
