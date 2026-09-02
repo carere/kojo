@@ -17,7 +17,6 @@ const launchUrl = (): string => {
 test("shows Unanswered, Recorded, Applied, Expired, and terminal inability without merging them", async ({
   page,
 }) => {
-  await page.addInitScript("window.__KOJO_NOW__ = 1788256800000");
   await page.goto(launchUrl());
 
   const open = async (run: string) => {
@@ -67,13 +66,12 @@ test("shows Unanswered, Recorded, Applied, Expired, and terminal inability witho
 });
 
 test("records a Verdict with the Daemon OS user as Answerer", async ({ page }) => {
-  await page.addInitScript("window.__KOJO_NOW__ = 1788256800000");
   await page.goto(launchUrl());
-  await page.locator('[data-queued="run-unanswered"] [data-queued-open]').click();
+  await page.locator('[data-queued="run-answerable"] [data-queued-open]').click();
   const panel = page.locator("[data-detail-panel]");
   await panel.locator('[data-gate-choice="approve"]').click();
   await expect(panel.locator("[data-answering-verdict]")).toContainText(userInfo().username);
-  // The retained revision applies the Verdict and completes the Run. The answer control returns to
-  // idle after that bounded continuation finishes.
+  // This fixture has no Runner continuation. Keep Recorded separate from Applied after the Daemon
+  // attributes the Verdict.
   await expect(panel.locator("[data-answering]")).toHaveAttribute("data-answering", "idle");
 });

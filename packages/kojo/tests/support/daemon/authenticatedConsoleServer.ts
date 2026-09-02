@@ -235,10 +235,15 @@ if (fixture === "gates") {
   database.run("PRAGMA foreign_keys = OFF");
   const revision = "c".repeat(64);
   const graph = "d".repeat(64);
-  const createdAt = "2026-09-01T10:00:00.000Z";
-  const deadline = "2026-09-02T10:00:00.000Z";
+  const fixtureNow = Date.now();
+  const createdAt = new Date(fixtureNow - 60 * 60 * 1_000).toISOString();
+  const openDeadline = new Date(fixtureNow + 60 * 60 * 1_000).toISOString();
+  const expiredDeadline = new Date(fixtureNow - 1_000).toISOString();
+  const recordedAt = new Date(fixtureNow - 30 * 60 * 1_000).toISOString();
+  const appliedAt = new Date(fixtureNow - 29 * 60 * 1_000).toISOString();
   const fixtures = [
     { name: "unanswered", state: "unanswered", runState: "suspended" },
+    { name: "answerable", state: "unanswered", runState: "suspended" },
     { name: "recorded", state: "recorded", runState: "suspended" },
     { name: "applied", state: "applied", runState: "succeeded" },
     { name: "expired", state: "expired", runState: "succeeded" },
@@ -251,6 +256,7 @@ if (fixture === "gates") {
   ] as const;
   for (const [index, gate] of fixtures.entries()) {
     const runId = `run-${gate.name}`;
+    const deadline = gate.state === "expired" ? expiredDeadline : openDeadline;
     database.run(
       `INSERT INTO workflow_runs (
          run_id, project_id, workflow_name, idempotency_key, payload_json,
@@ -291,10 +297,10 @@ if (fixture === "gates") {
         hasVerdict ? "approve" : null,
         hasVerdict ? "verified" : null,
         hasVerdict ? "fixture-operator" : null,
-        hasVerdict ? "2026-09-01T10:05:00.000Z" : null,
-        gate.state === "applied" ? "2026-09-01T10:06:00.000Z" : null,
+        hasVerdict ? recordedAt : null,
+        gate.state === "applied" ? appliedAt : null,
         gate.state === "expired" ? deadline : null,
-        gate.state === "expired" ? "2026-09-02T10:00:01.000Z" : null,
+        gate.state === "expired" ? new Date(fixtureNow).toISOString() : null,
         "terminalInability" in gate ? gate.terminalInability : null,
       ],
     );
