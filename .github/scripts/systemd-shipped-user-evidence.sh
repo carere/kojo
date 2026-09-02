@@ -230,41 +230,36 @@ timeout --signal=TERM --kill-after=1s 119s \
   2>"$evidence_directory/bounded-factory-refresh-observer.stderr.log"
 factory_refresh_status=$?
 set -e
-if [[ ! -f $factory_refresh_final ]]; then
-  factory_refresh_failure=observer-failed
-  if [[ $factory_refresh_status -eq 124 || $factory_refresh_status -eq 137 ]]; then
-    factory_refresh_failure=observer-hard-timeout
-  fi
-  jq -n \
-    --arg readiness "$factory_refresh_failure" \
-    --argjson observerExitCode "$factory_refresh_status" \
-    '{
-      kind: "bounded-read-only-factory-refresh",
-      readiness: $readiness,
-      strictOperationBoundMillis: 120000,
-      observerExitCode: $observerExitCode,
-      noRepairReregisterRestartOrStart: true
-    }' >"$factory_refresh_final"
-fi
-if [[ ! -f $factory_refresh_summary ]]; then
-  {
-    echo "FactoryRefreshObservation=bounded-read-only"
-    echo "FactoryRefreshReadiness=$factory_refresh_failure"
-    echo "StrictOperationBoundMillis=120000"
-    echo "NoRepairReregisterRestartOrStart=yes"
-    echo "FinalEvidence=$factory_refresh_final"
-  } >"$factory_refresh_summary"
+factory_refresh_failure=observer-failed
+if [[ $factory_refresh_status -eq 124 || $factory_refresh_status -eq 137 ]]; then
+  factory_refresh_failure=observer-hard-timeout
 fi
 if [[ $factory_refresh_status -ne 0 ]]; then
+  timeout --signal=TERM --kill-after=1s 4s \
+    "$candidate_bun" "$workflow_observation_helper" classify-failure \
+    "$evidence_directory" "$factory_refresh_failure" "$factory_refresh_status"
   echo "The controlled Workflow did not become available after a current Factory Refresh." >&2
   exit 1
 fi
-jq -e '
+factory_refresh_validation=0
+if [[ ! -f $factory_refresh_final || ! -f $factory_refresh_summary ]]; then
+  factory_refresh_failure=observer-incomplete-evidence
+  factory_refresh_validation=1
+elif ! jq -e '
   .kind == "bounded-read-only-factory-refresh" and
   .readiness == "current" and
   .noRepairReregisterRestartOrStart == true and
   .finalAttempt.readiness.ready == true
-' "$factory_refresh_final" >/dev/null
+' "$factory_refresh_final" >/dev/null; then
+  factory_refresh_failure=observer-invalid-success
+  factory_refresh_validation=1
+fi
+if [[ $factory_refresh_validation -ne 0 ]]; then
+  "$candidate_bun" "$workflow_observation_helper" classify-failure \
+    "$evidence_directory" "$factory_refresh_failure" "$factory_refresh_validation"
+  echo "The Factory Refresh observer did not write valid complete success evidence." >&2
+  exit 1
+fi
 
 "$candidate_kojo" workflow start "$project_id" review \
   --payload '{"request":"native-release-evidence"}' --json \

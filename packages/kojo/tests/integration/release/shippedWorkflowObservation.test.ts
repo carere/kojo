@@ -1,8 +1,11 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { observeShippedWorkflow } from "../../support/release/ShippedWorkflowObservation.ts";
+import {
+  observeShippedWorkflow,
+  replaceFailedShippedWorkflowObservation,
+} from "../../support/release/ShippedWorkflowObservation.ts";
 
 const roots: Array<string> = [];
 
@@ -88,5 +91,53 @@ describe("the shipped Workflow observation bound", () => {
       readiness: "timed-out",
       lastAttempt: { terminationSent: true, hardKillSent: true },
     });
+  });
+
+  it("replaces a current final record when observer finalization fails before the summary", async () => {
+    const root = mkdtempSync(join(tmpdir(), "kojo-shipped-observation-"));
+    roots.push(root);
+    mkdirSync(join(root, "workflow-list.json"));
+    const output = JSON.stringify({
+      workflows: [
+        {
+          projectId: "project-id",
+          projectState: "available",
+          factoryState: "available",
+          refreshState: "current",
+          workflowName: "review",
+          availability: "available",
+        },
+      ],
+    });
+
+    await expect(
+      observeShippedWorkflow({
+        command: [process.execPath, "-e", `console.log(${JSON.stringify(output)})`],
+        evidenceDirectory: root,
+        projectId: "project-id",
+        workflowName: "review",
+        timeoutMillis: 1_000,
+        commandTimeoutMillis: 250,
+        hardKillAfterMillis: 50,
+        finalizationReserveMillis: 50,
+      }),
+    ).rejects.toThrow();
+    const finalPath = join(root, "bounded-factory-refresh-observation-final.json");
+    const summaryPath = join(root, "bounded-factory-refresh-observation.log");
+    expect(JSON.parse(readFileSync(finalPath, "utf8"))).toMatchObject({ readiness: "current" });
+    expect(existsSync(summaryPath)).toBe(false);
+
+    replaceFailedShippedWorkflowObservation({
+      evidenceDirectory: root,
+      readiness: "observer-failed",
+      observerExitCode: 1,
+    });
+
+    expect(JSON.parse(readFileSync(finalPath, "utf8"))).toMatchObject({
+      readiness: "observer-failed",
+      observerExitCode: 1,
+      partialFinal: { readiness: "current" },
+    });
+    expect(readFileSync(summaryPath, "utf8")).toContain("FactoryRefreshReadiness=observer-failed");
   });
 });

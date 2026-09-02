@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export interface ShippedWorkflowObservation {
@@ -34,11 +34,64 @@ export interface ObserveShippedWorkflowResult {
   readonly elapsedMillis: number;
 }
 
+export interface FailedShippedWorkflowObservation {
+  readonly evidenceDirectory: string;
+  readonly readiness: string;
+  readonly observerExitCode: number;
+}
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 const writeJson = (path: string, value: unknown): void =>
   writeFileSync(path, `${JSON.stringify(value, undefined, 2)}\n`);
+
+export const replaceFailedShippedWorkflowObservation = (
+  failure: FailedShippedWorkflowObservation,
+): void => {
+  const finalPath = join(
+    failure.evidenceDirectory,
+    "bounded-factory-refresh-observation-final.json",
+  );
+  const partialFinalPath = join(
+    failure.evidenceDirectory,
+    "bounded-factory-refresh-observer-partial-final.json",
+  );
+  const summaryPath = join(failure.evidenceDirectory, "bounded-factory-refresh-observation.log");
+  let partialFinal: unknown;
+  if (existsSync(finalPath)) {
+    const raw = readFileSync(finalPath, "utf8");
+    writeFileSync(partialFinalPath, raw);
+    try {
+      partialFinal = JSON.parse(raw);
+    } catch {
+      partialFinal = { invalidJson: raw };
+    }
+  }
+  writeJson(finalPath, {
+    kind: "bounded-read-only-factory-refresh",
+    readiness: failure.readiness,
+    strictOperationBoundMillis: 120_000,
+    observerExitCode: failure.observerExitCode,
+    noRepairReregisterRestartOrStart: true,
+    partialFinal,
+  });
+  writeFileSync(
+    summaryPath,
+    [
+      "FactoryRefreshObservation=bounded-read-only",
+      `FactoryRefreshReadiness=${failure.readiness}`,
+      "StrictOperationBoundMillis=120000",
+      `ObserverExitCode=${failure.observerExitCode}`,
+      "NoRepairReregisterRestartOrStart=yes",
+      `FinalEvidence=${finalPath}`,
+      partialFinal === undefined ? undefined : `PartialFinalEvidence=${partialFinalPath}`,
+      "",
+    ]
+      .filter((line): line is string => line !== undefined)
+      .join("\n"),
+  );
+};
 
 export const shippedWorkflowObservation = (
   output: string,
@@ -256,6 +309,26 @@ export const observeShippedWorkflow = async (
 
 if (import.meta.main) {
   const operation = process.argv[2];
+  if (operation === "classify-failure") {
+    const evidenceDirectory = process.argv[3];
+    const readiness = process.argv[4];
+    const observerExitCode = Number(process.argv[5]);
+    if (
+      evidenceDirectory === undefined ||
+      readiness === undefined ||
+      !Number.isSafeInteger(observerExitCode)
+    ) {
+      throw new Error(
+        "usage: ShippedWorkflowObservation.ts classify-failure EVIDENCE_DIRECTORY READINESS OBSERVER_EXIT_CODE",
+      );
+    }
+    replaceFailedShippedWorkflowObservation({
+      evidenceDirectory,
+      readiness,
+      observerExitCode,
+    });
+    process.exit(0);
+  }
   const command = process.argv[3];
   const evidenceDirectory = process.argv[4];
   const projectId = process.argv[5];
