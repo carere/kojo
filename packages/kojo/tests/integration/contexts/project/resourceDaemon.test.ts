@@ -28,6 +28,7 @@ import { SqliteProjectRepository } from "../../../../src/contexts/project/adapte
 import { captureWorkflowRevision } from "../../../../src/contexts/workflow/services/captureRevision.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
 import { linkEngine } from "../../../support/linkEngine.ts";
+import { findProcessAncestor, type ProcessRow } from "../../../support/processTree.ts";
 
 const roots: string[] = [];
 const daemons: RunningDaemon[] = [];
@@ -344,9 +345,13 @@ console.log(JSON.stringify({ answer: "controlled" }));
             readonly cwd: string;
             readonly key: string;
           };
-          const processes = execFileSync("/bin/ps", ["-axo", "pid=,ppid=,command="], {
-            encoding: "utf8",
-          })
+          const processes: ReadonlyArray<ProcessRow> = execFileSync(
+            "/bin/ps",
+            ["-axo", "pid=,ppid=,command="],
+            {
+              encoding: "utf8",
+            },
+          )
             .trim()
             .split("\n")
             .map((line) => {
@@ -356,18 +361,26 @@ console.log(JSON.stringify({ answer: "controlled" }));
                 : { pid: Number(match[1]), parent: Number(match[2]), command: match[3] ?? "" };
             })
             .filter((row) => row !== undefined);
-          const runner = processes.find((row) => row.pid === evidence.parent);
+          const runner = findProcessAncestor(processes, evidence.parent, (process) =>
+            process.command.includes("runner/main"),
+          );
           expect(
             runner,
-            JSON.stringify(processes.filter((row) => row.pid === evidence.pid)),
+            JSON.stringify({
+              evidence,
+              processes: processes.filter(
+                (process) => process.pid === evidence.pid || process.pid === evidence.parent,
+              ),
+            }),
           ).toBeDefined();
-          expect(runner?.command).toContain("runner/main");
+          if (runner === undefined) throw new Error("the Project Runner ancestor is absent");
+          expect(runner.command).toContain("runner/main");
           if (crashMode === "unreadable") {
             renameSync(join(evidence.cwd, ".git"), join(evidence.cwd, ".git-preserved"));
             const anchor = join(evidence.cwd, "..", "..", "..");
             renameSync(join(anchor, ".git"), join(anchor, ".git-preserved"));
           }
-          process.kill(evidence.parent, "SIGKILL");
+          process.kill(runner.pid, "SIGKILL");
           if (crashMode === "restart" || crashMode === "bounded") {
             const pauseDeadline = Date.now() + 10_000;
             while (!recoveryPaused && Date.now() < pauseDeadline) await Bun.sleep(10);
