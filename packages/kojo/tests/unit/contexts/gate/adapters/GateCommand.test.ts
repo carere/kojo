@@ -4,13 +4,13 @@ import type {
 } from "@carere/kojo-client-contracts/contexts/client/contracts/gate";
 import { describe, expect, it } from "@effect/vitest";
 import { Runtime } from "effect";
-import { ClientExit } from "../../../src/cli/ClientExit.ts";
+import { ClientExit } from "../../../../../src/cli/ClientExit.ts";
 import {
   askingLine,
   gateWaitExit,
   validateGateAnswerFlags,
   visibleAskings,
-} from "../../../src/cli/gate.ts";
+} from "../../../../../src/contexts/gate/adapters/GateCommand.ts";
 
 const asking = (
   state: AskingDocument["state"],

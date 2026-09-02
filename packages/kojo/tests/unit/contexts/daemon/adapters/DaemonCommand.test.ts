@@ -1,13 +1,13 @@
 import { describe, it as effectIt, expect, it } from "@effect/vitest";
 import { Effect, Option } from "effect";
-import { daemonStatusConfiguration } from "../../../src/contexts/daemon/adapters/DaemonCommand.ts";
+import { daemonStatusConfiguration } from "../../../../../src/contexts/daemon/adapters/DaemonCommand.ts";
 import {
   daemonStatusLines,
   upgradeStatusLines,
-} from "../../../src/contexts/daemon/adapters/DaemonCommandPresentation.ts";
-import { InMemoryLifecycleJournalRepository } from "../../../src/contexts/daemon/adapters/InMemoryLifecycleJournalRepository.ts";
-import { decodeUpgradeCheckResult } from "../../../src/contexts/daemon/models/ManagedUpgrade.ts";
-import { plannedLifecycleResume } from "../../../src/contexts/daemon/use-cases/resumeLifecycleOperation.ts";
+} from "../../../../../src/contexts/daemon/adapters/DaemonCommandPresentation.ts";
+import { InMemoryLifecycleJournalRepository } from "../../../../../src/contexts/daemon/adapters/InMemoryLifecycleJournalRepository.ts";
+import { decodeUpgradeCheckResult } from "../../../../../src/contexts/daemon/models/ManagedUpgrade.ts";
+import { plannedLifecycleResume } from "../../../../../src/contexts/daemon/use-cases/resumeLifecycleOperation.ts";
 
 describe("daemon status text", () => {
   effectIt.effect("keeps detailed status offline when the stopped Daemon has no endpoint", () =>

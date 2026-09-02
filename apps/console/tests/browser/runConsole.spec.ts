@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
 
+test.describe.configure({ mode: "serial" });
+
 const root = "/tmp/kojo-ticket-69-browser";
 const origin = "http://127.0.0.1:47241";
 const grantScript = new URL(
@@ -13,6 +15,44 @@ const launch = (): string => {
   if (result.status !== 0) throw new Error("the Run fixture Daemon did not issue a grant");
   return result.stdout;
 };
+
+test("paginates and filters the complete Run table with durable URL state", async ({ page }) => {
+  await page.route("**/api/v1/runs", async (route) => {
+    const response = await route.fetch();
+    const snapshot = (await response.json()) as { runs: ReadonlyArray<Record<string, unknown>> };
+    const template = {
+      runId: "run-page-template",
+      projectId: "project-browser-fixture",
+      workflowName: "compile",
+      revisionId: "c".repeat(64),
+      packageGraphId: "d".repeat(64),
+      state: "succeeded",
+      admittedAt: "2026-09-01T00:00:00.000Z",
+      startedAt: "2026-09-01T00:00:01.000Z",
+      finishedAt: "2026-09-01T00:00:02.000Z",
+    };
+    const runs = Array.from({ length: 51 }, (_, index) => ({
+      ...template,
+      runId: `run-page-${String(index + 1).padStart(2, "0")}`,
+      workflowName: `workflow-page-${String(index + 1).padStart(2, "0")}`,
+      state: "succeeded",
+    }));
+    await route.fulfill({
+      response,
+      contentType: "application/json",
+      body: JSON.stringify({ ...snapshot, runs }),
+    });
+  });
+  await page.goto(launch());
+  await page.goto(`${origin}/runs`);
+  await expect(page.locator("[data-run]")).toHaveCount(50);
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.locator("[data-run]")).toHaveCount(1);
+  await expect(page).toHaveURL(/cursor=50/);
+  await page.getByLabel("Find Runs").fill("run-page-51");
+  await expect(page.locator("[data-run]")).toHaveCount(1);
+  await expect(page).not.toHaveURL(/cursor=/);
+});
 
 test("shows a Daemon Run and builds its initial Waterfall only from completed Phase records", async ({
   page,
@@ -324,4 +364,35 @@ test("requires the exact Action ID, reason, and possible-duplication acknowledge
     page.getByText(`Retry authorization is durable for exact Action ${actionId}.`, { exact: true }),
   ).toBeVisible();
   await expect(page.getByText("External action uncertainty: retry-authorized")).toBeVisible();
+});
+
+test("shows an interrupted sibling as recovery and never as the cancelled target", async ({
+  page,
+}) => {
+  await page.route("**/api/v1/runs/run-interrupted-sibling", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        runId: "run-interrupted-sibling",
+        projectId: "project-browser-fixture",
+        workflowName: "publish-sibling",
+        revisionId: "a".repeat(64),
+        packageGraphId: "b".repeat(64),
+        state: "held",
+        admittedAt: "2026-09-01T00:00:00.000Z",
+        phases: [],
+        recovery: {
+          state: "interrupted-sibling",
+          detail: "the forced Stop targeted another Run; this sibling can resume after recovery",
+        },
+        cleanup: { state: "pending" },
+      }),
+    });
+  });
+  await page.goto(launch());
+  await page.goto(`${origin}/runs/run-interrupted-sibling`);
+  await expect(page.getByText("Interrupted sibling recovery", { exact: true })).toBeVisible();
+  await expect(page.getByText(/forced Stop targeted another Run/)).toBeVisible();
+  await expect(page.getByText("Resource cleanup: pending", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Cancellation requested/)).toHaveCount(0);
 });

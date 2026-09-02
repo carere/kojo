@@ -1,6 +1,10 @@
 import type { WorkflowSnapshot } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import { describe, expect, it } from "vitest";
-import { decodePayloadText, timeoutMillis, workflowLines } from "../../../src/cli/workflow.ts";
+import {
+  decodePayloadText,
+  timeoutMillis,
+  workflowLines,
+} from "../../../../../src/contexts/workflow/adapters/WorkflowCommand.ts";
 
 describe("Workflow CLI view", () => {
   it("keeps scalar, array, object, and null JSON payloads unchanged", () => {

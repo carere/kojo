@@ -139,6 +139,13 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "packages/kojo/tests/integration/contexts/scaffold/validation.test.ts",
     "returns plain diagnostics without executing a Workflow",
     ["kojo-integration"],
+    [
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/scaffold/validation.test.ts",
+        name: "diagnoses a missing Project runtime without a Daemon",
+      },
+    ],
   ),
   check(
     "STATE-01",
@@ -164,9 +171,21 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "STATE-02",
     2,
     "request receipts and domain transitions survive interruption as one durable result",
-    "packages/kojo/tests/integration/contexts/project/registration.test.ts",
-    "keeps exact worktree identity, duplicates, atomic receipts, and Factory states",
+    "packages/kojo/tests/integration/contexts/daemon/atomicReceipts.test.ts",
+    "kills before commit and reopens with neither a receipt nor a Run transition",
     ["kojo-integration"],
+    [
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/daemon/atomicReceipts.test.ts",
+        name: "kills after commit but before reply and reopens the receipt with its full Run transition",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/daemon/atomicReceipts.test.ts",
+        name: "kills after reply and reopens the same atomic receipt and Run transition",
+      },
+    ],
   ),
   check(
     "STATE-03",
@@ -210,6 +229,16 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         tier: "kojo-unit",
         path: "packages/kojo/tests/unit/contexts/gate/deadline.test.ts",
         name: "before the Deadline: records the Verdict and keeps it valid",
+      },
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/gate/deadline.test.ts",
+        name: "refuses exactly at the Deadline and schedules the declared expiry",
+      },
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/gate/deadline.test.ts",
+        name: "refuses after the Deadline and schedules the declared expiry",
       },
     ],
   ),
@@ -258,12 +287,17 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "replacement keeps the Run identity, wake-up, and original Deadline",
     "packages/kojo/tests/integration/cli/gateAndResume.test.ts",
     "resumes the same Run where it stopped, and re-runs nothing",
-    ["kojo-integration"],
+    ["contract-runtime", "kojo-integration"],
     [
       {
         tier: "kojo-integration",
         path: "packages/kojo/tests/integration/contexts/project/runnerRecovery.test.ts",
         name: "keeps the absolute replacement delay when a fresh Daemon owner restores the Run",
+      },
+      {
+        tier: "contract-runtime",
+        path: "packages/kojo-runtime/tests/integration/contexts/workflow/replay.test.ts",
+        name: "replays an Applied Deferred after owner loss before Run completion without repeating work",
       },
     ],
   ),
@@ -351,6 +385,11 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         path: "packages/kojo/tests/unit/contexts/workflow/cancel.test.ts",
         name: "keeps cancellation intent distinct until the executing authority has stopped",
       },
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/workflow/cancel.test.ts",
+        name: "cancels queued and suspended Runs without another Workflow execution",
+      },
     ],
   ),
   check(
@@ -359,7 +398,19 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "forced Stop targets the accepted Workflow set and recovers siblings",
     "packages/kojo/tests/integration/contexts/workflow/forcedStop.test.ts",
     "force-stops the owned process group after the cooperative deadline and confirms before reply",
-    ["kojo-integration"],
+    ["kojo-unit", "kojo-integration"],
+    [
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/workflow/cancel.test.ts",
+        name: "freezes the forced Stop target set before a later Start",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/workflow/cancel.test.ts",
+        name: "cancels the target, recovers an interrupted sibling, and fences old writes",
+      },
+    ],
   ),
   check(
     "REV-01",
@@ -388,9 +439,9 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "REV-03",
     4,
     "retained execution does not substitute current Factory or registry content",
-    "packages/kojo-runtime/tests/integration/contexts/workflow/replay.test.ts",
-    "replays an Applied Deferred after owner loss before Run completion without repeating work",
-    ["contract-runtime", "kojo-integration"],
+    "packages/kojo/tests/integration/contexts/workflow/runApi.test.ts",
+    "executes one retained effect with the current Factory and packages removed and the registry unavailable",
+    ["kojo-integration"],
     [
       {
         tier: "kojo-integration",
@@ -421,6 +472,13 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "packages/kojo/tests/integration/contexts/workflow/revisionRepair.test.ts",
     "refuses identity or package substitution and restores only verified exact bytes",
     ["kojo-integration"],
+    [
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/workflow/revisionRepair.test.ts",
+        name: "keeps one damaged shared object fault local to dependent revisions",
+      },
+    ],
   ),
   check(
     "SCHED-01",
@@ -429,6 +487,23 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "packages/kojo/tests/unit/contexts/workflow/scheduling.test.ts",
     "rotates Projects and enforces four Daemon and one Project execution slots",
     ["kojo-unit"],
+    [
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/workflow/scheduling.test.ts",
+        name: "keeps the accepted scheduling limits explicit",
+      },
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/workflow/scheduling.test.ts",
+        name: "serves three oldest continuations and then one oldest new Run",
+      },
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/workflow/scheduling.test.ts",
+        name: "releases the Project slot when a Run suspends",
+      },
+    ],
   ),
   check(
     "SCHED-02",
@@ -436,7 +511,19 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "package switching follows order and restores only current Trigger polling",
     "packages/kojo/tests/integration/contexts/project/packageSwitch.test.ts",
     "stops polling and confirms the old process before it loads the selected graph",
-    ["kojo-integration"],
+    ["kojo-unit", "kojo-integration"],
+    [
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/workflow/scheduling.test.ts",
+        name: "keeps the older graph-switch Run ahead of newer matching-graph work",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/workflow/runApi.test.ts",
+        name: "stops all current Trigger polling before historical import and restores all checkpoints in one Runner",
+      },
+    ],
   ),
   check(
     "SCHED-03",
@@ -450,6 +537,11 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         tier: "kojo-unit",
         path: "packages/kojo/tests/unit/contexts/project/services/runnerIdle.test.ts",
         name: "keeps execution, refresh, recovery, wake-up, and current Trigger polling busy",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/workflow/activity.test.ts",
+        name: "ordinary Stop closes the poller and keeps an admitted Run eligible",
       },
     ],
   ),
@@ -483,6 +575,13 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "packages/kojo/tests/integration/contexts/project/runnerChannel.test.ts",
     "backpressures a real slow peer while critical control keeps separate bounded capacity",
     ["kojo-integration"],
+    [
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/project/runnerChannel.test.ts",
+        name: "terminates only the malformed connection before oversized allocation",
+      },
+    ],
   ),
   check(
     "LOAD-02",
@@ -490,12 +589,22 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "restart budgets persist and reset only after readiness and operation success",
     "packages/kojo/tests/integration/contexts/daemon/managedDaemonSupervision.test.ts",
     "persists five failed automatic attempts and exhaustion across launcher replacement",
-    ["kojo-integration", "native-systemd"],
+    ["kojo-unit", "kojo-integration", "native-systemd"],
     [
       {
         tier: "native-systemd",
         path: "packages/kojo/tests/host/contexts/daemon/service.test.ts",
         name: "uses an isolated unit for one idle Daemon and stops its complete process group",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/daemon/managedDaemonSupervision.test.ts",
+        name: "resets only after continuous recorded readiness, not process lifetime",
+      },
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/project/recovery.test.ts",
+        name: "resets only after healthy time and a previously failed operation succeeds",
       },
     ],
   ),
@@ -570,6 +679,11 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         path: "packages/kojo/tests/unit/contexts/daemon/services/ManagedUpgradePreflight.test.ts",
         name: "refuses a candidate protocol regression and keeps a corrupt retained fault scoped",
       },
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/daemon/services/ManagedUpgradePreflight.test.ts",
+        name: "refuses unknown evidence and recorded Bun or Host regressions",
+      },
     ],
   ),
   check(
@@ -578,7 +692,19 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "readiness and rollback outcomes stay distinct and recoverable",
     "packages/kojo/tests/integration/contexts/daemon/activation.test.ts",
     "holds ordinary mutations, verifies backup, migrates restricted, and activates without Workflow execution",
-    ["kojo-integration"],
+    ["kojo-unit", "kojo-integration"],
+    [
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/daemon/services/UpgradeActivationController.test.ts",
+        name: "uses one exact-source rollback before activation",
+      },
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/daemon/services/UpgradeActivationController.test.ts",
+        name: "requires repair when current evidence cannot prove rollback safe",
+      },
+    ],
   ),
   check(
     "LIFE-07",
@@ -587,6 +713,13 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "packages/kojo/tests/integration/contexts/daemon/activation.test.ts",
     "holds ordinary mutations, verifies backup, migrates restricted, and activates without Workflow execution",
     ["kojo-integration"],
+    [
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/daemon/upgradeActivationReceipt.test.ts",
+        name: "commits the migration and its checkpoint in one transaction",
+      },
+    ],
   ),
   check(
     "LIFE-08",
@@ -690,39 +823,29 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "CLI-01",
     6,
     "supported selectors, JSON modes, waits, retries, and exit codes remain stable",
-    "packages/kojo/tests/integration/cli/workflow.test.ts",
-    "keeps Project, Factory, refresh, activity, availability, source, revision, and Trigger separate",
+    "packages/kojo/tests/integration/contexts/daemon/cliContract.test.ts",
+    "applies full Project selectors and JSON input while keeping output free of private payloads",
     ["kojo-integration"],
     [
       {
         tier: "kojo-integration",
-        path: "packages/kojo/tests/integration/cli/runStatus.test.ts",
-        name: "writes one versioned object per JSON snapshot without the payload",
+        path: "packages/kojo/tests/integration/contexts/daemon/cliContract.test.ts",
+        name: "streams one versioned JSON Line per changed state through a real follow command",
       },
       {
         tier: "kojo-integration",
-        path: "packages/kojo/tests/integration/cli/gate.test.ts",
-        name: "accepts a wait timeout and refuses a timeout without --wait as usage exit 2",
+        path: "packages/kojo/tests/integration/contexts/daemon/cliContract.test.ts",
+        name: "returns exact usage, failure, wait-timeout, and success exits from real processes",
       },
       {
         tier: "kojo-integration",
-        path: "packages/kojo/tests/integration/cli/runStatus.test.ts",
-        name: "requires the exact action ID, reason, and possible-duplication acknowledgement",
+        path: "packages/kojo/tests/integration/contexts/daemon/cliContract.test.ts",
+        name: "authorizes only the exact uncertain Action through the real retry command",
       },
       {
         tier: "kojo-integration",
-        path: "packages/kojo/tests/integration/cli/runStatus.test.ts",
-        name: "maps API faults to 1 and interruption to 130 without a server mutation",
-      },
-      {
-        tier: "kojo-integration",
-        path: "packages/kojo/tests/integration/cli/gateAndResume.test.ts",
-        name: "exits non-zero and names terminal inability when the answer ends in failure",
-      },
-      {
-        tier: "kojo-integration",
-        path: "packages/kojo/tests/integration/cli/gateAndResume.test.ts",
-        name: "exits 0 when the answer is Applied and the Run succeeds",
+        path: "packages/kojo/tests/integration/contexts/daemon/cliContract.test.ts",
+        name: "returns exit 4 when Gate mutation transport fails after endpoint discovery",
       },
     ],
   ),
@@ -746,23 +869,97 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     6,
     "flat navigation and filtered Project, Workflow, Run, and Gate tables preserve links",
     "apps/console/tests/browser/projectCatalogue.spec.ts",
-    "filters an authoritative Project grid and keeps stable URL selection",
+    "keeps flat resource navigation and durable links out of every Project row",
     ["console-browser"],
+    [
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/projectCatalogue.spec.ts",
+        name: "filters an authoritative Project grid and keeps stable URL selection",
+      },
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/projectCatalogue.spec.ts",
+        name: "paginates fifty filtered Projects and keeps the cursor in the URL",
+      },
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/workflowCatalogue.spec.ts",
+        name: "filters Workflow state and proves safe Trigger Start, Stop, force, and Run links",
+      },
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/workflowCatalogue.spec.ts",
+        name: "paginates the complete Workflow table and keeps its cursor in the URL",
+      },
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/runConsole.spec.ts",
+        name: "paginates and filters the complete Run table with durable URL state",
+      },
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/gateVerdict.spec.ts",
+        name: "defaults the Gate table to every status and keeps complete review links and states",
+      },
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/gateVerdict.spec.ts",
+        name: "paginates and filters every Gate state with durable URL state",
+      },
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/gateVerdict.spec.ts",
+        name: "records a Verdict with the Daemon OS user as Answerer",
+      },
+    ],
   ),
   check(
     "UI-02",
     6,
     "safe Daemon actions keep stale and Recorded or Applied states distinct",
     "apps/console/tests/browser/gateVerdict.spec.ts",
-    "shows Unanswered, Recorded, Applied, Expired, and terminal inability without merging them",
+    "defaults the Gate table to every status and keeps complete review links and states",
     ["console-browser"],
+    [
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/workflowCatalogue.spec.ts",
+        name: "filters Workflow state and proves safe Trigger Start, Stop, force, and Run links",
+      },
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/workflowCatalogue.spec.ts",
+        name: "validates JSON before a no-Trigger Start and submits one accepted Run payload",
+      },
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/reconnect.spec.ts",
+        name: "bounds reconnect attempts, preserves the snapshot, and disables all mutations",
+      },
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/runConsole.spec.ts",
+        name: "requires acknowledgement and separates durable cancellation intent from confirmation",
+      },
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/runConsole.spec.ts",
+        name: "requires the exact Action ID, reason, and possible-duplication acknowledgement",
+      },
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/runConsole.spec.ts",
+        name: "shows an interrupted sibling as recovery and never as the cancelled target",
+      },
+    ],
   ),
   check(
     "UI-03",
     6,
     "the Console uses its Zaidan grids and filters at browser seams",
     "apps/console/tests/browser/workflowCatalogue.spec.ts",
-    "shows separate Workflow state in a Project-scoped Zaidan grid",
+    "filters Workflow state and proves safe Trigger Start, Stop, force, and Run links",
     ["console-browser"],
   ),
   check(
@@ -796,6 +993,13 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "packages/kojo/tests/integration/release/contractCutover.test.ts",
     "ships no legacy execution path or client fallback",
     ["kojo-integration"],
+    [
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/release/contractCutover.test.ts",
+        name: "keeps public guidance and package entry points on the one-Daemon release",
+      },
+    ],
   ),
 ];
 

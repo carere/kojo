@@ -14,6 +14,7 @@ import { Badge, type BadgeTone } from "../../shared/components/Badge.tsx";
 import { ConsoleNavigation } from "../../shared/components/ConsoleNavigation.tsx";
 import { DataGrid } from "../../shared/components/data-grid/DataGrid.tsx";
 import { DataGridTable } from "../../shared/components/data-grid/DataGridTable.tsx";
+import { Pagination, resourcePage } from "../../shared/components/data-grid/Pagination.tsx";
 import { useWorkflows } from "../hooks/useWorkflows.ts";
 import { type WorkflowFilterState, WorkflowFilters } from "./WorkflowFilters.tsx";
 
@@ -240,6 +241,9 @@ export const Workflows = (props: { readonly projectId: string }): JSX.Element =>
   const noticeKey = (workflow: WorkflowDocument): string =>
     `${workflow.projectId}:${workflow.workflowName}`;
   const [filters, setFilters] = createSignal(filterFromUrl());
+  const [cursor, setCursor] = createSignal(
+    Math.max(0, Number(new URLSearchParams(window.location.search).get("cursor") ?? 0) || 0),
+  );
   const rows = createMemo(() => {
     const query = filters();
     const text = query.text.trim().toLocaleLowerCase();
@@ -255,6 +259,7 @@ export const Workflows = (props: { readonly projectId: string }): JSX.Element =>
       );
     });
   });
+  const visibleRows = createMemo(() => resourcePage(rows(), cursor()));
   createEffect(() => {
     const query = filters();
     const url = new URL(window.location.href);
@@ -262,6 +267,7 @@ export const Workflows = (props: { readonly projectId: string }): JSX.Element =>
     if (query.text !== "") url.searchParams.set("q", query.text);
     if (query.availability !== "all") url.searchParams.set("workflow", query.availability);
     if (query.activity !== "all") url.searchParams.set("activity", query.activity);
+    if (cursor() > 0) url.searchParams.set("cursor", String(cursor()));
     window.history.replaceState(window.history.state, "", url);
   });
   const table = createTable({
@@ -272,7 +278,7 @@ export const Workflows = (props: { readonly projectId: string }): JSX.Element =>
         setNotices((current) => ({ ...current, [noticeKey(workflow)]: notice })),
     ),
     get data() {
-      return rows();
+      return visibleRows();
     },
     getRowId: (row) => `${row.projectId}:${row.workflowName}`,
   });
@@ -291,7 +297,13 @@ export const Workflows = (props: { readonly projectId: string }): JSX.Element =>
             <h1 class="font-semibold text-3xl">Workflows</h1>
             <p class="font-mono text-muted-foreground text-xs">{props.projectId}</p>
           </div>
-          <WorkflowFilters filters={filters()} onChange={setFilters} />
+          <WorkflowFilters
+            filters={filters()}
+            onChange={(next) => {
+              setFilters(next);
+              setCursor(0);
+            }}
+          />
         </header>
         <ProjectLocation projectId={props.projectId} />
         <Switch>
@@ -325,6 +337,7 @@ export const Workflows = (props: { readonly projectId: string }): JSX.Element =>
                   }
                   table={table}
                 />
+                <Pagination cursor={cursor()} matchedCount={rows().length} onChange={setCursor} />
               </DataGrid>
             )}
           </Match>

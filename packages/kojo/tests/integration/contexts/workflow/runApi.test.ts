@@ -603,7 +603,7 @@ describe("Daemon no-Trigger Run API", () => {
     expect(new Set(resumedPids.map(({ pid }) => pid)).size).toBe(1);
   });
 
-  it("executes one retained effect in a fresh offline Runner without the current Factory or packages", async () => {
+  it("executes one retained effect with the current Factory and packages removed and the registry unavailable", async () => {
     const hostPaths = paths();
     const root = roots[0] ?? "";
     const effectJournal = join(root, "effects.txt");
@@ -664,23 +664,30 @@ describe("Daemon no-Trigger Run API", () => {
     rmSync(join(subject.location, "node_modules"), { recursive: true, force: true });
     rmSync(subject.localPackage, { recursive: true, force: true });
 
-    const daemon = startDaemon(hostPaths, { automaticRefresh: false, runnerIdleMillis: 50 });
-    daemons.push(daemon);
-    const run = await waitForRun(daemon, admission.run.runId);
-    expect(run.state).toBe("succeeded");
-    expect(readFileSync(effectJournal, "utf8")).toBe("source-a:package-a\n");
-    expect(existsSync(installMarker)).toBe(false);
-    expect(existsSync(join(subject.location, ".kojo"))).toBe(false);
-    expect(existsSync(join(subject.location, "node_modules"))).toBe(false);
+    const priorRegistry = process.env.BUN_CONFIG_REGISTRY;
+    process.env.BUN_CONFIG_REGISTRY = "http://127.0.0.1:1/registry-is-unavailable";
+    try {
+      const daemon = startDaemon(hostPaths, { automaticRefresh: false, runnerIdleMillis: 50 });
+      daemons.push(daemon);
+      const run = await waitForRun(daemon, admission.run.runId);
+      expect(run.state).toBe("succeeded");
+      expect(readFileSync(effectJournal, "utf8")).toBe("source-a:package-a\n");
+      expect(existsSync(installMarker)).toBe(false);
+      expect(existsSync(join(subject.location, ".kojo"))).toBe(false);
+      expect(existsSync(join(subject.location, "node_modules"))).toBe(false);
 
-    await Effect.runPromise(daemon.stop);
-    daemons.splice(daemons.indexOf(daemon), 1);
-    const restarted = startDaemon(hostPaths, { automaticRefresh: false, runnerIdleMillis: 50 });
-    daemons.push(restarted);
-    await Bun.sleep(250);
-    expect(readFileSync(effectJournal, "utf8")).toBe("source-a:package-a\n");
-    const restored = await waitForRun(restarted, admission.run.runId);
-    expect(restored.state).toBe("succeeded");
+      await Effect.runPromise(daemon.stop);
+      daemons.splice(daemons.indexOf(daemon), 1);
+      const restarted = startDaemon(hostPaths, { automaticRefresh: false, runnerIdleMillis: 50 });
+      daemons.push(restarted);
+      await Bun.sleep(250);
+      expect(readFileSync(effectJournal, "utf8")).toBe("source-a:package-a\n");
+      const restored = await waitForRun(restarted, admission.run.runId);
+      expect(restored.state).toBe("succeeded");
+    } finally {
+      if (priorRegistry === undefined) delete process.env.BUN_CONFIG_REGISTRY;
+      else process.env.BUN_CONFIG_REGISTRY = priorRegistry;
+    }
   });
 
   it("admits an exact retained revision and seals its stopped Runner cache for removal", async () => {

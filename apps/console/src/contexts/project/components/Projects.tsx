@@ -22,6 +22,7 @@ import { Badge, type BadgeTone } from "../../shared/components/Badge.tsx";
 import { ConsoleNavigation } from "../../shared/components/ConsoleNavigation.tsx";
 import { DataGrid } from "../../shared/components/data-grid/DataGrid.tsx";
 import { DataGridTable } from "../../shared/components/data-grid/DataGridTable.tsx";
+import { Pagination, resourcePage } from "../../shared/components/data-grid/Pagination.tsx";
 import { Filters, type ProjectFilters } from "../../shared/components/filters/Filters.tsx";
 import { useProjects } from "../hooks/useProjects.ts";
 
@@ -114,6 +115,9 @@ const projectColumns = (
 export const Projects = (): JSX.Element => {
   const projects = useProjects();
   const [filters, setFilters] = createSignal(filterFromUrl());
+  const [cursor, setCursor] = createSignal(
+    Math.max(0, Number(new URLSearchParams(window.location.search).get("cursor") ?? 0) || 0),
+  );
   const [selection, setSelection] = createSignal<RowSelectionState>(selectionFromUrl());
   const columns = projectColumns(selection, setSelection);
   const rows = createMemo(() => {
@@ -129,6 +133,7 @@ export const Projects = (): JSX.Element => {
             .includes(text)),
     );
   });
+  const visibleRows = createMemo(() => resourcePage(rows(), cursor()));
 
   createEffect(() => {
     const query = filters();
@@ -138,6 +143,7 @@ export const Projects = (): JSX.Element => {
     if (query.text !== "") url.searchParams.set("q", query.text);
     if (query.project !== "all") url.searchParams.set("project", query.project);
     if (query.factory !== "all") url.searchParams.set("factory", query.factory);
+    if (cursor() > 0) url.searchParams.set("cursor", String(cursor()));
     for (const projectId of Object.keys(selected).sort()) {
       url.searchParams.append("selected", projectId);
     }
@@ -148,7 +154,7 @@ export const Projects = (): JSX.Element => {
     features,
     columns,
     get data() {
-      return rows();
+      return visibleRows();
     },
     getRowId: (project) => project.projectId,
     enableRowSelection: true,
@@ -171,7 +177,13 @@ export const Projects = (): JSX.Element => {
             <p class="text-muted-foreground text-sm">Project catalogue</p>
             <h1 class="font-semibold text-3xl">Projects</h1>
           </div>
-          <Filters filters={filters()} onChange={setFilters} />
+          <Filters
+            filters={filters()}
+            onChange={(next) => {
+              setFilters(next);
+              setCursor(0);
+            }}
+          />
         </header>
         <Switch>
           <Match when={projects.isPending}>
@@ -220,6 +232,7 @@ export const Projects = (): JSX.Element => {
                     }
                     table={table}
                   />
+                  <Pagination cursor={cursor()} matchedCount={rows().length} onChange={setCursor} />
                 </DataGrid>
               </>
             )}

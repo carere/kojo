@@ -1,6 +1,8 @@
 import { Link } from "@tanstack/solid-router";
-import { For, type JSX, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, type JSX, Show } from "solid-js";
 import { Badge } from "../../shared/components/Badge.tsx";
+import { ConsoleNavigation } from "../../shared/components/ConsoleNavigation.tsx";
+import { Pagination, resourcePage } from "../../shared/components/data-grid/Pagination.tsx";
 import { Notice } from "../../shared/components/Notice.tsx";
 import {
   Table,
@@ -42,64 +44,120 @@ export const GateQueue = (): JSX.Element => {
   const askings = useAskings(() => !allSettled(settled(runs) ?? []));
 
   const rows = () => queueRows({ askings: settled(askings) ?? [], now: now() });
+  const search = new URLSearchParams(window.location.search);
+  const [text, setText] = createSignal(search.get("q") ?? "");
+  const [state, setState] = createSignal(search.get("state") ?? "all");
+  const [cursor, setCursor] = createSignal(Math.max(0, Number(search.get("cursor") ?? 0) || 0));
+  const filteredRows = createMemo(() => {
+    const query = text().trim().toLocaleLowerCase();
+    return rows().filter(
+      (row) =>
+        (state() === "all" || row.state === state()) &&
+        (query === "" ||
+          `${row.runId}\n${row.gate}\n${row.actor}\n${row.description}\n${row.answerer ?? ""}`
+            .toLocaleLowerCase()
+            .includes(query)),
+    );
+  });
+  const visibleRows = createMemo(() => resourcePage(filteredRows(), cursor()));
+
+  createEffect(() => {
+    const url = new URL(window.location.href);
+    url.search = "";
+    if (text() !== "") url.searchParams.set("q", text());
+    if (state() !== "all") url.searchParams.set("state", state());
+    if (cursor() > 0) url.searchParams.set("cursor", String(cursor()));
+    window.history.replaceState(window.history.state, "", url);
+  });
 
   return (
-    <main class="mx-auto flex w-full max-w-5xl flex-col gap-4 px-6 py-8">
-      <nav class="text-muted-foreground text-xs">
-        <Link to="/" class="hover:underline">
-          ← every run
-        </Link>
-      </nav>
+    <div class="mx-auto grid min-h-screen max-w-7xl gap-8 p-4 lg:grid-cols-[13rem_1fr] lg:p-8">
+      <ConsoleNavigation current="Gate" />
+      <main class="flex min-w-0 flex-col gap-4">
+        <header class="flex flex-col gap-1">
+          <h1 class="text-xl font-semibold">What waits on a human</h1>
+          <p class="text-muted-foreground text-xs">
+            Worst first: overdue above waiting, and the longest wait above the rest.
+          </p>
+          <div class="flex flex-wrap gap-2" data-slot="filters">
+            <label class="grid gap-1 text-muted-foreground text-xs">
+              Find
+              <input
+                aria-label="Find Gates"
+                class="min-w-56 rounded-md border border-border bg-background px-3 py-2 text-foreground text-sm"
+                type="search"
+                value={text()}
+                onInput={(event) => {
+                  setText(event.currentTarget.value);
+                  setCursor(0);
+                }}
+              />
+            </label>
+            <label class="grid gap-1 text-muted-foreground text-xs">
+              State
+              <select
+                aria-label="Gate state"
+                class="rounded-md border border-border bg-background px-3 py-2 text-foreground text-sm"
+                value={state()}
+                onChange={(event) => {
+                  setState(event.currentTarget.value);
+                  setCursor(0);
+                }}
+              >
+                <option value="all">All states</option>
+                <option value="unanswered">Unanswered</option>
+                <option value="recorded">Recorded</option>
+                <option value="applied">Applied</option>
+                <option value="expired">Expired</option>
+              </select>
+            </label>
+          </div>
+        </header>
 
-      <header class="flex flex-col gap-1">
-        <h1 class="text-xl font-semibold">What waits on a human</h1>
-        <p class="text-muted-foreground text-xs">
-          Worst first: overdue above waiting, and the longest wait above the rest.
-        </p>
-      </header>
+        <Show when={retrying(askings) || retrying(runs)}>
+          <Notice tone="retrying" title="Cannot reach the Console API. Retrying…">
+            <p class="mt-1">What is on screen is the last answer this Console received.</p>
+          </Notice>
+        </Show>
 
-      <Show when={retrying(askings) || retrying(runs)}>
-        <Notice tone="retrying" title="Cannot reach the Console API. Retrying…">
-          <p class="mt-1">What is on screen is the last answer this Console received.</p>
-        </Notice>
-      </Show>
-
-      <Show
-        when={settled(askings)}
-        fallback={<p class="text-muted-foreground text-sm">Loading the queue…</p>}
-      >
         <Show
-          when={waitingRows(rows()).length > 0}
-          fallback={
-            <Notice tone="empty" title="Nothing is waiting on a human.">
-              <p class="mt-1">
-                No run in this factory has stopped at a gate. Nothing has gone wrong.
-              </p>
-            </Notice>
-          }
+          when={settled(askings)}
+          fallback={<p class="text-muted-foreground text-sm">Loading the queue…</p>}
         >
-          <QueueTable rows={waitingRows(rows())} />
-        </Show>
+          <Show
+            when={waitingRows(visibleRows()).length > 0}
+            fallback={
+              <Notice tone="empty" title="Nothing is waiting on a human.">
+                <p class="mt-1">
+                  No run in this factory has stopped at a gate. Nothing has gone wrong.
+                </p>
+              </Notice>
+            }
+          >
+            <QueueTable rows={waitingRows(visibleRows())} />
+          </Show>
 
-        {/*
-         * Settled — answered or expired — and never claimed to have been applied. This page reads
-         * one list across every run and has no run document to check, so it says what it knows
-         * and points at the run, which can prove the rest. The one exception is *expired*, which
-         * the run itself wrote down: that fact needs no document.
-         */}
-        <Show when={settledRows(rows()).length > 0}>
-          <section class="flex flex-col gap-2" data-queue="recorded">
-            <h2 class="text-sm font-semibold">Settled</h2>
-            <p class="text-muted-foreground text-xs">
-              Answered, or expired. A verdict written down here is recorded, not applied — whether a
-              runner has applied it is on the run, open one to see. An expired asking cannot be
-              answered any more.
-            </p>
-            <QueueTable rows={settledRows(rows())} />
-          </section>
+          {/*
+           * Settled — answered or expired — and never claimed to have been applied. This page reads
+           * one list across every run and has no run document to check, so it says what it knows
+           * and points at the run, which can prove the rest. The one exception is *expired*, which
+           * the run itself wrote down: that fact needs no document.
+           */}
+          <Show when={settledRows(visibleRows()).length > 0}>
+            <section class="flex flex-col gap-2" data-queue="recorded">
+              <h2 class="text-sm font-semibold">Settled</h2>
+              <p class="text-muted-foreground text-xs">
+                Answered, or expired. A verdict written down here is recorded, not applied — whether
+                a runner has applied it is on the run, open one to see. An expired asking cannot be
+                answered any more.
+              </p>
+              <QueueTable rows={settledRows(visibleRows())} />
+            </section>
+          </Show>
         </Show>
-      </Show>
-    </main>
+        <Pagination cursor={cursor()} matchedCount={filteredRows().length} onChange={setCursor} />
+      </main>
+    </div>
   );
 };
 

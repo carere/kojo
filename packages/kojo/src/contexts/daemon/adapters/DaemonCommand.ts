@@ -4,7 +4,7 @@ import { Console, Duration, Effect, Option } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { clientExit } from "../../../cli/ClientExit.ts";
 import { commandFailed } from "../../../cli/CommandFailed.ts";
-import { timeoutMillis as parseTimeoutMillis } from "../../../cli/workflow.ts";
+import { timeoutMillis as parseTimeoutMillis } from "../../workflow/adapters/WorkflowCommand.ts";
 import { acquireDaemonStartGate, DaemonDataPurger } from "../adapters/DaemonDataPurger.ts";
 import { FileLifecycleJournalRepository } from "../adapters/FileLifecycleJournalRepository.ts";
 import { SocketDaemonLifecycleControl } from "../adapters/LifecycleControlTransport.ts";

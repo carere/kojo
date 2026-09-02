@@ -1,14 +1,14 @@
 import { Command } from "effect/unstable/cli";
 import { daemon } from "../contexts/daemon/adapters/DaemonCommand.ts";
+import { ui } from "../contexts/daemon/adapters/UiCommand.ts";
+import { gate } from "../contexts/gate/adapters/GateCommand.ts";
+import { project } from "../contexts/project/adapters/ProjectCommand.ts";
+import { doctor } from "../contexts/scaffold/adapters/DoctorCommand.ts";
+import { init } from "../contexts/scaffold/adapters/InitCommand.ts";
 import { thisEngine } from "../contexts/shared/services/resolvePackage.ts";
-import { doctor } from "./doctor.ts";
-import { gate } from "./gate.ts";
-import { init } from "./init.ts";
-import { project } from "./project.ts";
+import { run } from "../contexts/workflow/adapters/RunCommand.ts";
+import { workflow } from "../contexts/workflow/adapters/WorkflowCommand.ts";
 import { root } from "./root.ts";
-import { run } from "./run.ts";
-import { ui } from "./ui.ts";
-import { workflow } from "./workflow.ts";
 
 /**
  * The whole command tree.

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { revisionLines } from "../../../src/cli/project.ts";
-import type { RevisionDetails } from "../../../src/contexts/workflow/models/RevisionMaintenance.ts";
+import { revisionLines } from "../../../../../src/contexts/project/adapters/ProjectCommand.ts";
+import type { RevisionDetails } from "../../../../../src/contexts/workflow/models/RevisionMaintenance.ts";
 
 const revisionId = "a".repeat(64);
 const packageGraphId = "b".repeat(64);

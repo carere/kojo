@@ -1,15 +1,15 @@
 import type { RunDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 import { describe, expect, it } from "@effect/vitest";
 import { Runtime } from "effect";
-import { ClientExit } from "../../../src/cli/ClientExit.ts";
-import { CommandFailed } from "../../../src/cli/CommandFailed.ts";
+import { ClientExit } from "../../../../../src/cli/ClientExit.ts";
+import { CommandFailed } from "../../../../../src/cli/CommandFailed.ts";
 import {
   requestedRunExitCode,
   runStatusLine,
   runStatusRequest,
   validateRunStatusFlags,
   validateUncertainRetry,
-} from "../../../src/cli/runStatus.ts";
+} from "../../../../../src/contexts/workflow/adapters/RunStatusCommand.ts";
 
 const run = (state: RunDocument["state"]): RunDocument => ({
   runId: "run-one",

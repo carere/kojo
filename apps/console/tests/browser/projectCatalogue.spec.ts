@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
 
+test.describe.configure({ mode: "serial" });
+
 const root = "/tmp/kojo-ticket-70-browser";
 const grantScript = new URL(
   "../../../../packages/kojo/tests/support/daemon/consoleGrant.ts",
@@ -37,6 +39,61 @@ test("filters an authoritative Project grid and keeps stable URL selection", asy
   const navigation = page.getByRole("navigation", { name: "Console" });
   await expect(navigation.getByRole("link")).toHaveCount(4);
   await expect(navigation.getByText("project-missing")).toHaveCount(0);
+});
+
+test("keeps flat resource navigation and durable links out of every Project row", async ({
+  page,
+}) => {
+  await page.goto(launch());
+  await page.goto("http://127.0.0.1:47242/");
+  const navigation = page.getByRole("navigation", { name: "Console" });
+  await expect(navigation.getByRole("link")).toHaveText(["Projects", "Runs", "Gate", "Daemon"]);
+  await expect(navigation.getByRole("link", { name: "Projects" })).toHaveAttribute("href", "/");
+  await expect(navigation.getByRole("link", { name: "Runs" })).toHaveAttribute("href", "/runs");
+  await expect(navigation.getByRole("link", { name: "Gate" })).toHaveAttribute("href", "/gates");
+  await expect(navigation.getByRole("link", { name: "Daemon" })).toHaveAttribute("href", "/daemon");
+  await expect(page.getByRole("link", { name: "project-missing", exact: true })).toHaveAttribute(
+    "href",
+    /^\/projects\/[^/]+$/,
+  );
+});
+
+test("paginates fifty filtered Projects and keeps the cursor in the URL", async ({ page }) => {
+  await page.route("**/api/v1/projects", async (route) => {
+    const response = await route.fetch();
+    const snapshot = (await response.json()) as {
+      projects: ReadonlyArray<Record<string, unknown>>;
+      counts: Record<string, number>;
+    };
+    const template = snapshot.projects[0];
+    if (template === undefined) throw new Error("the Project fixture has no pagination template");
+    const projects = Array.from({ length: 51 }, (_, index) => ({
+      ...template,
+      projectId: `project-page-${String(index + 1).padStart(2, "0")}`,
+      label: `project-page-${String(index + 1).padStart(2, "0")}`,
+      location: `/tmp/project-page-${String(index + 1).padStart(2, "0")}`,
+    }));
+    await route.fulfill({
+      response,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...snapshot,
+        projects,
+        counts: { ...snapshot.counts, total: projects.length },
+      }),
+    });
+  });
+  await page.goto(launch());
+  await page.goto("http://127.0.0.1:47242/");
+  await expect(page.locator("[data-project-id]")).toHaveCount(50);
+  await expect(page.getByText("1–50 of 51", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.locator("[data-project-id]")).toHaveCount(1);
+  await expect(page.getByText("51–51 of 51", { exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/cursor=50/);
+  await page.getByLabel("Find Projects").fill("project-page-51");
+  await expect(page.locator("[data-project-id]")).toHaveCount(1);
+  await expect(page).not.toHaveURL(/cursor=/);
 });
 
 test("shows Project location history, drain consequences, and explicit confirmation", async ({

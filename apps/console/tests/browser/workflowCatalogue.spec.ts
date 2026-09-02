@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
 
+test.describe.configure({ mode: "serial" });
+
 const root = "/tmp/kojo-ticket-71-browser";
 // A two-core CI host can render this catalogue while another Daemon fixture uses the other worker.
 // Keep its first-render bound below the 60-second test bound; later assertions keep Playwright's default.
@@ -16,7 +18,38 @@ const launch = (): string => {
   return result.stdout;
 };
 
-test("shows separate Workflow state in a Project-scoped Zaidan grid", async ({ page }) => {
+test("paginates the complete Workflow table and keeps its cursor in the URL", async ({ page }) => {
+  await page.route("**/api/v1/projects/*/workflows", async (route) => {
+    const response = await route.fetch();
+    const snapshot = (await response.json()) as {
+      workflows: ReadonlyArray<Record<string, unknown>>;
+    };
+    const template = snapshot.workflows[0];
+    if (template === undefined) throw new Error("the Workflow fixture has no pagination template");
+    const workflows = Array.from({ length: 51 }, (_, index) => ({
+      ...template,
+      workflowName: `workflow-page-${String(index + 1).padStart(2, "0")}`,
+    }));
+    await route.fulfill({
+      response,
+      contentType: "application/json",
+      body: JSON.stringify({ ...snapshot, workflows }),
+    });
+  });
+  await page.goto(launch());
+  await page.goto("http://127.0.0.1:47243/");
+  await page.getByRole("link", { name: "project-missing" }).click();
+  await expect(page.locator("[data-workflow-id]")).toHaveCount(50, {
+    timeout: catalogueNavigationTimeout,
+  });
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page.locator("[data-workflow-id]")).toHaveCount(1);
+  await expect(page).toHaveURL(/cursor=50/);
+});
+
+test("filters Workflow state and proves safe Trigger Start, Stop, force, and Run links", async ({
+  page,
+}) => {
   await page.route("**/actions/stop", async (route) => {
     const body = route.request().postDataJSON() as { readonly force?: boolean };
     if (body.force !== true) {
@@ -96,4 +129,64 @@ test("shows separate Workflow state in a Project-scoped Zaidan grid", async ({ p
   await page.getByRole("link", { name: "Current Runs (1)" }).click();
   await expect(page.getByRole("columnheader", { name: "Queue reason" })).toBeVisible();
   await expect(page.getByText("runner-starting", { exact: true })).toBeVisible();
+  await page.getByLabel("Find Runs").fill("runner-starting");
+  await page.getByLabel("Run status").selectOption("queued");
+  await expect(page.locator("[data-run]")).toHaveCount(1);
+  await expect(page).toHaveURL(/q=runner-starting.*status=queued/);
+});
+
+test("validates JSON before a no-Trigger Start and submits one accepted Run payload", async ({
+  page,
+}) => {
+  let starts = 0;
+  await page.route("**/api/v1/projects/*/workflows", async (route) => {
+    const response = await route.fetch();
+    const snapshot = (await response.json()) as {
+      readonly workflows: ReadonlyArray<Record<string, unknown>>;
+    };
+    await route.fulfill({
+      response,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...snapshot,
+        workflows: snapshot.workflows.map((workflow) =>
+          workflow.workflowName === "available"
+            ? {
+                ...workflow,
+                activity: "inactive",
+                currentRuns: [],
+                trigger: { state: "not-declared" },
+              }
+            : workflow,
+        ),
+      }),
+    });
+  });
+  await page.route("**/api/v1/projects/*/workflows/available/actions/start", async (route) => {
+    starts += 1;
+    expect(route.request().postDataJSON()).toMatchObject({ payload: { release: 7 } });
+    await route.fulfill({
+      status: 202,
+      contentType: "application/json",
+      body: JSON.stringify({
+        kind: "run",
+        runId: "run-browser-start",
+        revisionId: "a".repeat(64),
+        duplicate: false,
+      }),
+    });
+  });
+  await page.goto(launch());
+  await page.goto("http://127.0.0.1:47243/");
+  await page.getByRole("link", { name: "project-missing" }).click();
+  const row = page.locator("[data-workflow-id]").filter({ hasText: "available" }).first();
+  const payload = row.getByLabel("JSON payload for available");
+  await payload.fill("{");
+  await row.getByRole("button", { name: "Start Run" }).click();
+  await expect(row.getByRole("status")).toBeVisible();
+  expect(starts).toBe(0);
+  await payload.fill('{"release":7}');
+  await row.getByRole("button", { name: "Start Run" }).click();
+  await expect(row.getByRole("status")).toContainText("run-browser-start");
+  expect(starts).toBe(1);
 });

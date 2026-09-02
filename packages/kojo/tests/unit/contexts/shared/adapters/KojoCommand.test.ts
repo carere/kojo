@@ -4,7 +4,7 @@ import { Effect, FileSystem, Layer, Path, Result, Stdio, Terminal } from "effect
 import { TestConsole } from "effect/testing";
 import { Command } from "effect/unstable/cli";
 import { ChildProcessSpawner } from "effect/unstable/process";
-import { kojo, version } from "../../../src/cli/kojo.ts";
+import { kojo, version } from "../../../../../src/cli/kojo.ts";
 
 /**
  * Drives the real command with a fake environment, so the CLI is exercised end to end without
@@ -92,7 +92,7 @@ describe("the kojo command", () => {
    * release after the first is in.
    */
   it("prints the version the package.json beside it declares", () => {
-    const manifest = new URL("../../../package.json", import.meta.url);
+    const manifest = new URL("../../../../../package.json", import.meta.url);
     const declared = JSON.parse(readFileSync(manifest, "utf8")) as { readonly version: string };
 
     expect(version).toBe(declared.version);

@@ -2,8 +2,8 @@ import { describe, expect, it } from "@effect/vitest";
 import { Cause, Effect, Exit, Layer, Path, Result, Stdio, Terminal } from "effect";
 import { Command } from "effect/unstable/cli";
 import { ChildProcessSpawner } from "effect/unstable/process";
-import { kojo, version } from "../../../src/cli/kojo.ts";
-import { memoryFileSystem } from "../../support/memoryFileSystem.ts";
+import { kojo, version } from "../../../../../src/cli/kojo.ts";
+import { memoryFileSystem } from "../../../../support/memoryFileSystem.ts";
 
 /**
  * The CLI with a terminal that **dies if anybody reads from it**.
