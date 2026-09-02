@@ -14,6 +14,7 @@ candidate_bun=$candidate_tools/bin/bun
 candidate_kojo=$candidate_tools/bin/kojo
 managed_kojo=$XDG_DATA_HOME/kojo/bin/kojo
 managed_launcher=$XDG_DATA_HOME/kojo/bin/kojo-launcher
+singleton_evidence_script=$workspace/.github/scripts/systemd-shipped-singleton-evidence.sh
 endpoint=$XDG_RUNTIME_DIR/kojo/endpoint.json
 socket=$XDG_RUNTIME_DIR/kojo/daemon.sock
 
@@ -399,10 +400,17 @@ stat -c '%n Owner=%u Mode=%a Type=%F' \
 [[ $(stat -c %a "$endpoint") == 600 ]]
 [[ $(stat -c %a "$socket") == 600 ]]
 
-if PATH=/usr/bin:/bin "$managed_launcher" >"$evidence_directory/singleton-refusal.log" 2>&1; then
-  echo "A second shipped Daemon acquired ownership." >&2
+if ! bash "$singleton_evidence_script" \
+  "$managed_launcher" \
+  "$endpoint" \
+  "$evidence_directory/singleton-refusal.log" \
+  "$evidence_directory/singleton-duplicate.json" \
+  5s; then
+  echo "A duplicate shipped Daemon did not prove singleton refusal." >&2
   exit 1
 fi
+jq -e '.accepted == true and .activeInstanceUnchanged == true' \
+  "$evidence_directory/singleton-duplicate.json" >/dev/null
 
 PATH=/usr/bin:/bin "$managed_kojo" daemon restart --timeout 60s \
   >"$evidence_directory/managed-replacement.log"
