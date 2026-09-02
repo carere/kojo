@@ -37,6 +37,7 @@ tasks:
     command: bun node_modules/.bin/vitest run --project integration
     inputs:
       - src/**/*
+      - tests/fixtures/**/*
       - tests/integration/**/*
       - tests/support/**/*
       - vitest.config.ts

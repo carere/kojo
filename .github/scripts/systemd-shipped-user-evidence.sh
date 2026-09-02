@@ -202,104 +202,69 @@ if [[ -z $project_id ]]; then
 fi
 printf '%s\n' "$project_id" >"$evidence_directory/project-id"
 
-# Project registration starts a Factory Refresh. Observe one exact Project and Workflow row until
-# Project, Factory, Factory Refresh, and Workflow availability are all current. This bounded read
-# does not repair, re-register, restart, or start a Run.
+# Project registration starts a Factory Refresh. The helper observes one exact Project and Workflow
+# row until Project, Factory, Factory Refresh, and Workflow availability are all current. It writes
+# each raw and decoded attempt. Its internal deadline leaves time for final evidence. The outer GNU
+# timeout gives the complete operation a strict 120-second TERM-to-KILL bound.
 factory_refresh_observations=$evidence_directory/bounded-factory-refresh-observations
 factory_refresh_final=$evidence_directory/bounded-factory-refresh-observation-final.json
 factory_refresh_summary=$evidence_directory/bounded-factory-refresh-observation.log
-factory_refresh_timeout_seconds=120
-factory_refresh_deadline=$((SECONDS + factory_refresh_timeout_seconds))
 mkdir -p "$factory_refresh_observations"
-workflow_ready=no
-last_factory_refresh_attempt=
-observation=0
-while ((SECONDS < factory_refresh_deadline)); do
-  observation=$((observation + 1))
-  attempt=$(printf '%03d' "$observation")
-  workflow_snapshot=$factory_refresh_observations/$attempt-workflow-list.json
-  workflow_stderr=$factory_refresh_observations/$attempt-workflow-list.stderr.log
-  workflow_decoded=$factory_refresh_observations/$attempt-decoded.json
-  workflow_attempt=$factory_refresh_observations/$attempt-attempt.json
-  workflow_timeout_seconds=$((factory_refresh_deadline - SECONDS))
-  if ((workflow_timeout_seconds < 1)); then
-    workflow_timeout_seconds=1
+jq -n \
+  --arg bun "$candidate_bun" \
+  --arg helper "$workflow_observation_helper" \
+  --arg kojo "$candidate_kojo" \
+  --arg evidenceDirectory "$evidence_directory" \
+  --arg projectId "$project_id" \
+  '{
+    kind: "bounded-read-only-factory-refresh",
+    command: ["timeout", "--signal=TERM", "--kill-after=1s", "119s", $bun, $helper, "observe", $kojo, $evidenceDirectory, $projectId, "review", "115000"],
+    strictOperationBoundMillis: 120000,
+    noRepairReregisterRestartOrStart: true
+  }' >"$evidence_directory/bounded-factory-refresh-observer-command.json"
+set +e
+timeout --signal=TERM --kill-after=1s 119s \
+  "$candidate_bun" "$workflow_observation_helper" observe \
+  "$candidate_kojo" "$evidence_directory" "$project_id" review 115000 \
+  >"$evidence_directory/bounded-factory-refresh-observer.stdout.log" \
+  2>"$evidence_directory/bounded-factory-refresh-observer.stderr.log"
+factory_refresh_status=$?
+set -e
+if [[ ! -f $factory_refresh_final ]]; then
+  factory_refresh_failure=observer-failed
+  if [[ $factory_refresh_status -eq 124 || $factory_refresh_status -eq 137 ]]; then
+    factory_refresh_failure=observer-hard-timeout
   fi
-  if ((workflow_timeout_seconds > 10)); then
-    workflow_timeout_seconds=10
-  fi
-  set +e
-  timeout "${workflow_timeout_seconds}s" \
-    "$candidate_kojo" workflow list --project "$project_id" --json \
-    >"$workflow_snapshot" 2>"$workflow_stderr"
-  workflow_status=$?
-  set -e
-  "$candidate_bun" "$workflow_observation_helper" \
-    "$workflow_snapshot" "$project_id" review >"$workflow_decoded"
   jq -n \
-    --argjson observation "$observation" \
-    --arg kojo "$candidate_kojo" \
-    --arg projectId "$project_id" \
-    --argjson exitCode "$workflow_status" \
-    --argjson commandTimeoutSeconds "$workflow_timeout_seconds" \
-    --slurpfile readiness "$workflow_decoded" \
-    --rawfile stdout "$workflow_snapshot" \
-    --rawfile stderr "$workflow_stderr" \
+    --arg readiness "$factory_refresh_failure" \
+    --argjson observerExitCode "$factory_refresh_status" \
     '{
-      observation: $observation,
       kind: "bounded-read-only-factory-refresh",
-      command: ["timeout", ($commandTimeoutSeconds | tostring) + "s", $kojo, "workflow", "list", "--project", $projectId, "--json"],
-      exitCode: $exitCode,
-      noRepairReregisterRestartOrStart: true,
-      readiness: $readiness[0],
-      stdout: $stdout,
-      stderr: $stderr
-    }' >"$workflow_attempt"
-  last_factory_refresh_attempt=$workflow_attempt
-  if [[ $workflow_status -eq 0 ]] && jq -e '.ready == true' "$workflow_decoded" >/dev/null; then
-    cp "$workflow_attempt" "$factory_refresh_final"
-    cp "$workflow_snapshot" "$evidence_directory/workflow-list.json"
-    workflow_ready=yes
-    break
-  fi
-  if ((SECONDS < factory_refresh_deadline)); then
-    sleep 1
-  fi
-done
-if [[ $workflow_ready != yes ]]; then
-  jq -n \
-    --arg observation "bounded-read-only" \
-    --arg readiness "timed-out" \
-    --argjson timeoutSeconds "$factory_refresh_timeout_seconds" \
-    --argjson attempts "$observation" \
-    --slurpfile lastAttempt "$last_factory_refresh_attempt" \
-    '{
-      observation: $observation,
       readiness: $readiness,
-      timeoutSeconds: $timeoutSeconds,
-      attempts: $attempts,
-      noRepairReregisterRestartOrStart: true,
-      lastAttempt: $lastAttempt[0]
+      strictOperationBoundMillis: 120000,
+      observerExitCode: $observerExitCode,
+      noRepairReregisterRestartOrStart: true
     }' >"$factory_refresh_final"
-  cp "${last_factory_refresh_attempt%-attempt.json}-workflow-list.json" \
-    "$evidence_directory/workflow-list.json"
+fi
+if [[ ! -f $factory_refresh_summary ]]; then
   {
     echo "FactoryRefreshObservation=bounded-read-only"
-    echo "FactoryRefreshReadiness=timed-out"
-    echo "TimeoutSeconds=$factory_refresh_timeout_seconds"
-    echo "Attempts=$observation"
+    echo "FactoryRefreshReadiness=$factory_refresh_failure"
+    echo "StrictOperationBoundMillis=120000"
     echo "NoRepairReregisterRestartOrStart=yes"
     echo "FinalEvidence=$factory_refresh_final"
   } >"$factory_refresh_summary"
+fi
+if [[ $factory_refresh_status -ne 0 ]]; then
   echo "The controlled Workflow did not become available after a current Factory Refresh." >&2
   exit 1
 fi
-{
-  echo "FactoryRefreshObservation=bounded-read-only"
-  echo "FactoryRefreshReadiness=current"
-  echo "NoRepairReregisterRestartOrStart=yes"
-  echo "FinalEvidence=$factory_refresh_final"
-} >"$factory_refresh_summary"
+jq -e '
+  .kind == "bounded-read-only-factory-refresh" and
+  .readiness == "current" and
+  .noRepairReregisterRestartOrStart == true and
+  .finalAttempt.readiness.ready == true
+' "$factory_refresh_final" >/dev/null
 
 "$candidate_kojo" workflow start "$project_id" review \
   --payload '{"request":"native-release-evidence"}' --json \

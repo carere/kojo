@@ -1,0 +1,92 @@
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { observeShippedWorkflow } from "../../support/release/ShippedWorkflowObservation.ts";
+
+const roots: Array<string> = [];
+
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+describe("the shipped Workflow observation bound", () => {
+  it("records a complete exact-row observation before it reports current", async () => {
+    const root = mkdtempSync(join(tmpdir(), "kojo-shipped-observation-"));
+    roots.push(root);
+    const output = JSON.stringify({
+      observationVersion: 1,
+      workflows: [
+        {
+          projectId: "project-id",
+          projectState: "available",
+          factoryState: "available",
+          refreshState: "current",
+          workflowName: "review",
+          availability: "available",
+        },
+      ],
+    });
+
+    const result = await observeShippedWorkflow({
+      command: [process.execPath, "-e", `console.log(${JSON.stringify(output)})`],
+      evidenceDirectory: root,
+      projectId: "project-id",
+      workflowName: "review",
+      timeoutMillis: 1_000,
+      commandTimeoutMillis: 250,
+      hardKillAfterMillis: 50,
+      finalizationReserveMillis: 50,
+      delayMillis: 0,
+    });
+
+    expect(result.ready).toBe(true);
+    const final = JSON.parse(
+      readFileSync(join(root, "bounded-factory-refresh-observation-final.json"), "utf8"),
+    );
+    expect(final).toMatchObject({
+      readiness: "current",
+      noRepairReregisterRestartOrStart: true,
+      finalAttempt: {
+        exitCode: 0,
+        readiness: { ready: true },
+        stdout: `${output}\n`,
+        stderr: "",
+      },
+    });
+  });
+
+  it("hard-kills a Workflow command that ignores TERM and writes final timeout evidence", async () => {
+    const root = mkdtempSync(join(tmpdir(), "kojo-shipped-observation-"));
+    roots.push(root);
+    const fixture = new URL("../../fixtures/release/ignoreTermWorkflow.ts", import.meta.url)
+      .pathname;
+    const startedAt = Date.now();
+
+    const result = await observeShippedWorkflow({
+      command: [process.execPath, fixture],
+      evidenceDirectory: root,
+      projectId: "project-id",
+      workflowName: "review",
+      timeoutMillis: 700,
+      commandTimeoutMillis: 250,
+      hardKillAfterMillis: 50,
+      finalizationReserveMillis: 50,
+      delayMillis: 0,
+    });
+
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(result.ready).toBe(false);
+    expect(result.elapsedMillis).toBeLessThan(1_000);
+    const final = JSON.parse(
+      readFileSync(join(root, "bounded-factory-refresh-observation-final.json"), "utf8"),
+    ) as {
+      readonly readiness: string;
+      readonly lastAttempt: { readonly terminationSent: boolean; readonly hardKillSent: boolean };
+    };
+    expect(final).toMatchObject({
+      readiness: "timed-out",
+      lastAttempt: { terminationSent: true, hardKillSent: true },
+    });
+  });
+});
