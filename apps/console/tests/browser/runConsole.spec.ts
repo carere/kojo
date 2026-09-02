@@ -75,6 +75,7 @@ test("renders persisted Gate and Sandbox Trace records and accepts their absent 
   page,
 }) => {
   const runId = "run-persisted-trace";
+  const asking = "gate/release/approve/1";
   const sandboxId = `${runId}/release/1000-1`;
   await page.route(`**/api/v1/runs/${runId}`, async (route) => {
     await route.fulfill({
@@ -104,7 +105,7 @@ test("renders persisted Gate and Sandbox Trace records and accepts their absent 
         gates: [
           {
             gate: "approve",
-            asking: "approve-1",
+            asking,
             description: "Approve the release",
             actor: "release-manager",
             requestedAt: "2026-09-01T00:00:02.000Z",
@@ -137,7 +138,7 @@ test("renders persisted Gate and Sandbox Trace records and accepts their absent 
   await expect(page.locator('[data-scope="sandbox"]')).toHaveCount(1);
   await expect(page.locator('[data-stamp="branch"]')).toContainText("kojo/release");
 
-  await page.goto(`${origin}/runs/${runId}/gates/approve/approve-1`);
+  await page.goto(`${origin}/runs/${runId}/gates/approve/${encodeURIComponent(asking)}`);
   await expect(page.locator('[data-gate-outcome="expired"]')).toBeVisible();
   await expect(page.locator('[data-gate-from="trace"]')).toBeVisible();
 

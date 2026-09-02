@@ -58,7 +58,7 @@ test("renders actual shipped Daemon records through one authenticated browser se
   expect(phases.length).toBeGreaterThanOrEqual(2);
   expect(phases.every((phase) => !Object.hasOwn(phase, "errorTag"))).toBe(true);
 
-  await page.goto(`${origin}/runs/${runId}/gates/${gateName}/${asking}`);
+  await page.goto(`${origin}/runs/${runId}/gates/${gateName}/${encodeURIComponent(asking)}`);
   await expect(page.locator('[data-gate-outcome="answered"]')).toBeVisible();
   await expect(page.locator('[data-gate-from="trace"]')).toBeVisible();
 
