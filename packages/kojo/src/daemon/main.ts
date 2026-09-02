@@ -7,6 +7,7 @@ import { ManagedDaemonSupervision } from "../contexts/daemon/adapters/ManagedDae
 import { systemdUserService } from "../contexts/daemon/adapters/SystemdUserService.ts";
 import { LifecycleError } from "../contexts/daemon/models/LifecycleError.ts";
 import { hostPaths } from "../contexts/daemon/services/hostPaths.ts";
+import { listenForProcessStopSignals } from "../contexts/daemon/services/processStopSignals.ts";
 
 export const runDaemon = async (): Promise<void> => {
   const installationRoot = process.env.KOJO_MANAGED_INSTALLATION;
@@ -73,15 +74,21 @@ export const runDaemon = async (): Promise<void> => {
     stopping = true;
     void Effect.runPromise(daemon.stop);
   };
-  process.on("SIGTERM", stop);
-  process.on("SIGINT", stop);
+  const removeStopListeners = listenForProcessStopSignals(stop);
   try {
-    await Effect.runPromise(daemon.ready);
-  } catch (cause) {
-    await Effect.runPromise(daemon.stop);
-    throw cause;
+    try {
+      await Effect.runPromise(daemon.ready);
+    } catch (cause) {
+      await Effect.runPromise(daemon.stop);
+      throw cause;
+    }
+    await Effect.runPromise(daemon.stopped);
+  } finally {
+    removeStopListeners();
   }
-  await Effect.runPromise(daemon.stopped);
 };
 
-if (import.meta.main) await runDaemon();
+if (import.meta.main) {
+  await runDaemon();
+  process.exit(0);
+}

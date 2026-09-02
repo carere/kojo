@@ -1,6 +1,10 @@
 #!/usr/bin/env bun
 import { ManagedDaemonSupervision } from "../contexts/daemon/adapters/ManagedDaemonSupervision.ts";
 import { LifecycleError } from "../contexts/daemon/models/LifecycleError.ts";
+import {
+  listenForProcessStopSignals,
+  waitForProcessStopSignal,
+} from "../contexts/daemon/services/processStopSignals.ts";
 import { runDaemon } from "../daemon/main.ts";
 
 const childMode = process.env.KOJO_DAEMON_CHILD === "1";
@@ -41,8 +45,7 @@ const supervise = async (): Promise<void> => {
     child?.kill(signal);
     releaseStop?.();
   };
-  process.on("SIGTERM", () => stop("SIGTERM"));
-  process.on("SIGINT", () => stop("SIGINT"));
+  const removeStopListeners = listenForProcessStopSignals(stop);
 
   try {
     while (!stopping) {
@@ -79,6 +82,7 @@ const supervise = async (): Promise<void> => {
     );
     await stopped;
   } finally {
+    removeStopListeners();
     ownership.release();
   }
 };
@@ -87,14 +91,13 @@ const holdUnsafeLauncher = async (cause: unknown): Promise<void> => {
   console.error(
     `kojo: managed launcher could not enter supervision safely: ${cause instanceof Error ? cause.message : String(cause)}`,
   );
-  await new Promise<void>((resolve) => {
-    process.once("SIGTERM", resolve);
-    process.once("SIGINT", resolve);
-  });
+  await waitForProcessStopSignal();
 };
 
-if (childMode) await runDaemon();
-else {
+if (childMode) {
+  await runDaemon();
+  process.exit(0);
+} else {
   try {
     await supervise();
   } catch (cause) {
