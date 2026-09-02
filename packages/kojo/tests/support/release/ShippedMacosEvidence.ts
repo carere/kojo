@@ -13,6 +13,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { type Browser, chromium } from "@playwright/test";
+import { DAEMON_CLEANUP_MILLIS } from "../../../src/contexts/daemon/services/LifecycleController.ts";
 import { startShippedPackageRegistry } from "./ShippedPackageRegistry.ts";
 
 interface CommandResult {
@@ -20,6 +21,17 @@ interface CommandResult {
   readonly stdout: string;
   readonly stderr: string;
 }
+
+/** One internal cleanup interval plus one interval for sealing and managed removal. */
+export const SHIPPED_MACOS_REMOVAL_TIMEOUT_MILLIS = DAEMON_CLEANUP_MILLIS * 2;
+
+export const shippedMacosRemovalArguments = (managedKojo: string): string[] => [
+  managedKojo,
+  "daemon",
+  "remove",
+  "--timeout",
+  `${SHIPPED_MACOS_REMOVAL_TIMEOUT_MILLIS}ms`,
+];
 
 export const assertShippedSingletonEvidence = (
   result: CommandResult,
@@ -1283,11 +1295,23 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
     await browser?.close().catch(() => undefined);
     registry?.stop();
     if (ownsInstallation && existsSync(managedKojo)) {
-      const cleanup = Bun.spawnSync([managedKojo, "daemon", "remove", "--timeout", "30s"], {
+      const cleanupStartedAt = Date.now();
+      const cleanup = Bun.spawnSync(shippedMacosRemovalArguments(managedKojo), {
         env: { ...process.env, PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
       });
       recorder.write("cleanup-managed-remove.log", `${cleanup.stdout}${cleanup.stderr}`);
+      recorder.write("cleanup-managed-remove.json", {
+        timeoutMillis: SHIPPED_MACOS_REMOVAL_TIMEOUT_MILLIS,
+        elapsedMillis: Date.now() - cleanupStartedAt,
+        exitCode: cleanup.exitCode,
+      });
       if (cleanup.exitCode !== 0) {
+        if (existsSync(managedKojo)) {
+          const status = Bun.spawnSync([managedKojo, "daemon", "status", "--details", "--json"], {
+            env: { ...process.env, PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
+          });
+          recorder.write("cleanup-managed-remove-status.log", `${status.stdout}${status.stderr}`);
+        }
         cleanupFailures.push(`managed removal exited ${cleanup.exitCode}`);
       }
     }
