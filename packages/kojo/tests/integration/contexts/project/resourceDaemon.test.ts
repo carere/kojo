@@ -347,7 +347,7 @@ console.log(JSON.stringify({ answer: "controlled" }));
           };
           const processes: ReadonlyArray<ProcessRow> = execFileSync(
             "/bin/ps",
-            ["-axo", "pid=,ppid=,command="],
+            ["-ww", "-axo", "pid=,ppid=,command="],
             {
               encoding: "utf8",
             },
