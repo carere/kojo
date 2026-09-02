@@ -29,13 +29,28 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
     "$systemctl_command" --user show-environment >/dev/null 2>>"$stderr_log"
   last_status=$?
   set -e
+  actual_classification=manager-unavailable
   if [[ $last_status -eq 0 ]]; then manager_ready=true; fi
+  if [[ $manager_ready == true ]]; then
+    actual_classification=manager-ready
+  elif [[ $last_status -eq 124 || $last_status -eq 137 ]]; then
+    actual_classification=probe-timed-out
+  fi
   jq -cn \
     --argjson observation "$observation" \
     --argjson statusCommandExit "$last_status" \
     --argjson managerReady "$manager_ready" \
+    --arg actualClassification "$actual_classification" \
     '{
       observation: $observation,
+      expected: {
+        classification: "manager-ready",
+        statusCommandExit: 0
+      },
+      actual: {
+        classification: $actualClassification,
+        statusCommandExit: $statusCommandExit
+      },
       statusCommandExit: $statusCommandExit,
       managerReady: $managerReady
     }' >>"$observations"
@@ -43,6 +58,8 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
   if [[ $observation -lt $attempt_limit ]]; then "$sleep_command" "$interval"; fi
 done
 
+final_actual_classification=manager-not-ready-within-bound
+if [[ $manager_ready == true ]]; then final_actual_classification=manager-ready-within-bound; fi
 jq -n \
   --argjson attemptLimit "$attempt_limit" \
   --arg interval "$interval" \
@@ -50,6 +67,7 @@ jq -n \
   --argjson observationCount "$observation_count" \
   --argjson lastStatusCommandExit "$last_status" \
   --argjson managerReady "$manager_ready" \
+  --arg actualClassification "$final_actual_classification" \
   '{
     formatVersion: 1,
     kind: "bounded-systemd-login-readiness",
@@ -57,6 +75,15 @@ jq -n \
     interval: $interval,
     probeTimeout: $probeTimeout,
     observationCount: $observationCount,
+    expected: {
+      classification: "manager-ready-within-bound",
+      managerReady: true
+    },
+    actual: {
+      classification: $actualClassification,
+      managerReady: $managerReady,
+      lastStatusCommandExit: $lastStatusCommandExit
+    },
     lastStatusCommandExit: $lastStatusCommandExit,
     managerReady: $managerReady,
     noServiceStartRepairOrLingerChange: true,
