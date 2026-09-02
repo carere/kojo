@@ -21,6 +21,7 @@ import type {
   NativeServiceObservation,
 } from "../../../../src/contexts/daemon/ports/NativeService.ts";
 import { manageDaemon } from "../../../../src/contexts/daemon/services/manageDaemon.ts";
+import { observeManagedLauncherReadiness } from "../../../support/daemon/managedLauncherReadiness.ts";
 
 const roots: Array<string> = [];
 
@@ -160,30 +161,46 @@ describe("the managed Daemon installation", () => {
     });
     const output = new Response(launcher.stdout).text();
     const error = new Response(launcher.stderr).text();
+    const endpointPath = join(paths.runtimeRoot, "endpoint.json");
+    let readinessFailure: { readonly cause: unknown } | undefined;
     try {
-      await Promise.race([
-        waitFor(() => existsSync(join(paths.runtimeRoot, "endpoint.json"))),
-        launcher.exited.then(async (exitCode) => {
-          throw new Error(
-            `the installed managed launcher exited ${exitCode}: ${await error}${await output}`,
-          );
-        }),
-      ]);
-    } finally {
-      process.kill(-launcher.pid, "SIGTERM");
-      await Promise.race([
-        launcher.exited,
-        Bun.sleep(5_000).then(async () => {
-          try {
-            process.kill(-launcher.pid, "SIGKILL");
-          } catch {
-            // The managed process group completed its planned stop before the forced bound.
-          }
-          await launcher.exited;
-        }),
-      ]);
+      const readiness = await observeManagedLauncherReadiness({
+        endpointPresent: () => existsSync(endpointPath),
+        exitCode: () => launcher.exitCode,
+      });
+      if (readiness.state === "exited") {
+        throw new Error(
+          `the installed managed launcher exited ${readiness.exitCode} before it published ${endpointPath}: ${await error}${await output}`,
+        );
+      }
+      if (readiness.state === "timed-out") {
+        throw new Error(
+          `the installed managed launcher did not publish ${endpointPath} within ${readiness.timeoutMillis}ms; launcher process is still ${readiness.process} at pid ${launcher.pid}`,
+        );
+      }
+    } catch (cause) {
+      readinessFailure = { cause };
     }
-    await waitFor(() => !existsSync(join(paths.runtimeRoot, "endpoint.json")));
+    let signalFailure: { readonly cause: unknown } | undefined;
+    try {
+      process.kill(-launcher.pid, "SIGTERM");
+    } catch (cause) {
+      if (launcher.exitCode === null) signalFailure = { cause };
+    }
+    await Promise.race([
+      launcher.exited,
+      Bun.sleep(5_000).then(async () => {
+        try {
+          process.kill(-launcher.pid, "SIGKILL");
+        } catch {
+          // The managed process group completed its planned stop before the forced bound.
+        }
+        await launcher.exited;
+      }),
+    ]);
+    if (readinessFailure !== undefined) throw readinessFailure.cause;
+    if (signalFailure !== undefined) throw signalFailure.cause;
+    await waitFor(() => !existsSync(endpointPath));
   }, 60_000);
 
   it.each([
