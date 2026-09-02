@@ -137,7 +137,7 @@ jobs:
           sudo install -m 0755 "$moon_binary" /usr/local/bin/moon
 
       - name: Run native systemd Host evidence
-        run: sudo bash .github/scripts/systemd-native-evidence.sh "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/native-host-evidence"
+        run: sudo bash .github/scripts/systemd-native-evidence.sh "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/native-host-evidence" "$(git rev-parse HEAD)"
 
       - name: Upload native Host evidence
         if: always()

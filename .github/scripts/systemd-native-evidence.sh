@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-workspace=${1:?usage: systemd-native-evidence.sh WORKSPACE EVIDENCE_DIRECTORY}
-evidence_directory=${2:?usage: systemd-native-evidence.sh WORKSPACE EVIDENCE_DIRECTORY}
+workspace=${1:?usage: systemd-native-evidence.sh WORKSPACE EVIDENCE_DIRECTORY REVISION}
+evidence_directory=${2:?usage: systemd-native-evidence.sh WORKSPACE EVIDENCE_DIRECTORY REVISION}
+revision=${3:?usage: systemd-native-evidence.sh WORKSPACE EVIDENCE_DIRECTORY REVISION}
 workspace_owner=$(stat -c %u:%g "$workspace")
 evidence_user=kojo-native-evidence
 fixture=packages/kojo/tests/support/daemon/systemdLogoutFixture.ts
@@ -252,6 +253,7 @@ removed_load_state=$(runuser -u "$evidence_user" -- env \
   echo "EvidenceUser=$evidence_user"
   echo "EvidenceUid=$evidence_uid"
   echo "SessionTransport=OpenSSH with PAM"
+  echo "TestedRevision=$revision"
   echo "HostTests=1 passed, 1 skipped, 2 loaded"
   echo "NamedSkip=the native macOS Daemon lifecycle"
 } >"$evidence_directory/host-facts.log"
