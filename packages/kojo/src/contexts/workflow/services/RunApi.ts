@@ -19,7 +19,7 @@ import {
 import type { OperationReplyBody } from "@carere/kojo-runner-contracts/contexts/project/contracts/execution";
 import type { RunnerFrame } from "@carere/kojo-runner-contracts/contexts/project/contracts/frame";
 import { decodeTraceMutation } from "@carere/kojo-runner-contracts/contexts/project/contracts/trace";
-import { Data, Duration, Effect, Option } from "effect";
+import { Cause, Data, Duration, Effect, Exit, Option } from "effect";
 import type { SqliteDaemonGateRepository } from "../../gate/adapters/SqliteDaemonGateRepository.ts";
 import type { SqliteProjectRecoveryRepository } from "../../project/adapters/SqliteProjectRecoveryRepository.ts";
 import type {
@@ -344,6 +344,7 @@ export class RunApi {
   readonly #triggerProcesses = new Map<string, { readonly stop: () => Promise<void> }>();
   readonly #triggerGroups = new Map<string, ProjectTriggerGroup>();
   readonly #activeExecutions = new Map<string, ActiveExecutionControl>();
+  readonly #activeDispatches = new Set<Promise<void>>();
   readonly #activeDispatchRunIds = new Set<string>();
   readonly #projectDispatchHolds = new Set<string>();
   readonly #projectDispatches = new Map<string, number>();
@@ -351,7 +352,8 @@ export class RunApi {
     readonly timer: ReturnType<typeof setTimeout>;
     readonly resolve: (continueRecovery: boolean) => void;
   }>();
-  #pumping = false;
+  readonly #shutdownController = new AbortController();
+  #activePump: Promise<void> | undefined;
   #stopping = false;
   #daemonDispatchHeld: boolean;
 
@@ -906,6 +908,7 @@ export class RunApi {
     Effect.tryPromise({
       try: async () => {
         this.#stopping = true;
+        this.#shutdownController.abort();
         for (const wait of [...this.#recoveryWaits]) {
           clearTimeout(wait.timer);
           this.#recoveryWaits.delete(wait);
@@ -914,7 +917,17 @@ export class RunApi {
         await Promise.allSettled(
           Array.from(this.#triggerProcesses.values(), (process) => process.stop()),
         );
-        await Effect.runPromise(this.#runnerSupervisor.shutdown());
+        const pumpResults = await Promise.allSettled(
+          this.#activePump === undefined ? [] : [this.#activePump],
+        );
+        const [runnerResult, ...dispatchResults] = await Promise.allSettled([
+          Effect.runPromise(this.#runnerSupervisor.shutdown()),
+          ...this.#activeDispatches,
+        ]);
+        const failed = [...pumpResults, runnerResult, ...dispatchResults].find(
+          (result): result is PromiseRejectedResult => result.status === "rejected",
+        );
+        if (failed !== undefined) throw failed.reason;
       },
       catch: runApiFault,
     });
@@ -1007,12 +1020,18 @@ export class RunApi {
     }
   }
 
-  async #pump(): Promise<void> {
-    if (this.#pumping || this.#stopping || this.#daemonDispatchHeld) return;
-    this.#pumping = true;
+  #pump(): Promise<void> {
+    if (this.#activePump !== undefined) return this.#activePump;
+    if (this.#stopping || this.#daemonDispatchHeld) return Promise.resolve();
+    const active = this.#pumpRuns();
+    this.#activePump = active;
+    return active;
+  }
+
+  async #pumpRuns(): Promise<void> {
     try {
       while (true) {
-        if (this.#daemonDispatchHeld) break;
+        if (this.#stopping || this.#daemonDispatchHeld) break;
         const reservationId = crypto.randomUUID();
         const now = this.#now();
         const blockedProjectIds = new Set(
@@ -1036,7 +1055,7 @@ export class RunApi {
             blockedProjectIds.add(project.projectId);
           }
         }
-        if (this.#daemonDispatchHeld) break;
+        if (this.#stopping || this.#daemonDispatchHeld) break;
         const reserved = await Effect.runPromise(
           this.#runs.reserveNext(reservationId, new Date(now).toISOString(), blockedProjectIds),
         );
@@ -1046,16 +1065,19 @@ export class RunApi {
           reserved.run.projectId,
           (this.#projectDispatches.get(reserved.run.projectId) ?? 0) + 1,
         );
-        void this.#dispatch(reserved).finally(() => {
+        let dispatch: Promise<void>;
+        dispatch = this.#dispatch(reserved).finally(() => {
+          this.#activeDispatches.delete(dispatch);
           this.#activeDispatchRunIds.delete(reserved.run.runId);
           const remaining = (this.#projectDispatches.get(reserved.run.projectId) ?? 1) - 1;
           if (remaining === 0) this.#projectDispatches.delete(reserved.run.projectId);
           else this.#projectDispatches.set(reserved.run.projectId, remaining);
           void this.#pump();
         });
+        this.#activeDispatches.add(dispatch);
       }
     } finally {
-      this.#pumping = false;
+      this.#activePump = undefined;
     }
   }
 
@@ -1827,9 +1849,15 @@ export class RunApi {
 
   async #runResourceRecoveryBoundary(timeoutMillis: number): Promise<void> {
     if (this.#resourceRecoveryBoundary === undefined) return;
-    const outcome = await Effect.runPromise(
+    const exit = await Effect.runPromiseExit(
       this.#resourceRecoveryBoundary().pipe(Effect.timeoutOption(Duration.millis(timeoutMillis))),
+      { signal: this.#shutdownController.signal },
     );
+    if (Exit.isFailure(exit)) {
+      if (this.#shutdownController.signal.aborted && Cause.hasInterruptsOnly(exit.cause)) return;
+      throw Cause.squash(exit.cause);
+    }
+    const outcome = exit.value;
     if (Option.isNone(outcome)) {
       throw new Error(`Project Runner recovery check exceeded ${timeoutMillis} milliseconds`);
     }

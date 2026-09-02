@@ -17,7 +17,8 @@ import type {
   RunSnapshot,
   StartRunResult,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
-import { Effect } from "effect";
+import { it as effectIt } from "@effect/vitest";
+import { Data, Effect } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   type RunningDaemon,
@@ -34,6 +35,10 @@ import { linkEngine } from "../../../support/linkEngine.ts";
 const roots: string[] = [];
 const daemons: RunningDaemon[] = [];
 const packageRoot = new URL("../../../../", import.meta.url).pathname.replace(/\/$/, "");
+
+class RunApiTestFault extends Data.TaggedError("RunApiTestFault")<{
+  readonly cause: unknown;
+}> {}
 
 const paths = (): DaemonPaths => {
   const root = mkdtempSync(join(process.cwd(), ".kojo-run-api-"));
@@ -53,9 +58,15 @@ const paths = (): DaemonPaths => {
   return value;
 };
 
-const project = (root: string, runnerPid: string): string => {
+const project = (root: string, runnerPid: string, holdExecution = false): string => {
   const location = join(root, "project");
   mkdirSync(join(location, ".kojo", "workflows"), { recursive: true });
+  const execution = holdExecution
+    ? `Effect.sync(() => writeFileSync(${JSON.stringify(runnerPid)}, String(process.pid))).pipe(Effect.andThen(Effect.never))`
+    : `Effect.sync(() => {
+      writeFileSync(${JSON.stringify(runnerPid)}, String(process.pid));
+      return null;
+    })`;
   writeFileSync(
     join(location, "package.json"),
     JSON.stringify({ name: "run-api-fixture", private: true, type: "module" }),
@@ -86,10 +97,7 @@ export const example = workflow(
       success: Schema.Null,
       error: Schema.Never,
     },
-    Effect.sync(() => {
-      writeFileSync(${JSON.stringify(runnerPid)}, String(process.pid));
-      return null;
-    }),
+    ${execution},
   ),
 );
 `,
@@ -811,6 +819,86 @@ describe("Daemon no-Trigger Run API", () => {
     expect(duplicate.status).toBe(202);
     expect(await duplicate.json()).toMatchObject({ runId: run.runId, duplicate: true });
   }, 30_000);
+
+  effectIt.live("settles an active dispatch before Daemon storage closes", () =>
+    Effect.tryPromise({
+      try: async () => {
+        const hostPaths = paths();
+        const runnerPid = join(roots[0] ?? "", "shutdown-runner.pid");
+        const location = project(roots[0] ?? "", runnerPid, true);
+        mkdirSync(hostPaths.dataRoot, { recursive: true, mode: 0o700 });
+        const captured = captureWorkflowRevision({
+          project: location,
+          dataRoot: hostPaths.dataRoot,
+          workflowName: "example",
+        });
+        const databasePath = join(hostPaths.dataRoot, "kojo.db");
+        const database = new Database(databasePath, { create: true, strict: true });
+        database.run(
+          "CREATE TABLE daemon_metadata (name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT",
+        );
+        const projects = new SqliteProjectRepository(database);
+        const registered = await Effect.runPromise(
+          projects.register({
+            requestId: "seed-shutdown-project",
+            requestBody: "seed-shutdown-project",
+            dataIdentity: "seed-data",
+            location,
+            observedAt: "2026-09-01T00:00:00.000Z",
+            factory: {
+              state: "available",
+              refreshState: "current",
+              workflows: [
+                {
+                  workflowName: "example",
+                  availability: "available",
+                  source: join(location, ".kojo", "workflows", "example.ts"),
+                  revision: captured,
+                },
+              ],
+            },
+          }),
+        );
+        database.close(false);
+        chmodSync(databasePath, 0o600);
+
+        const daemon = startDaemon(hostPaths, { automaticRefresh: false, runnerIdleMillis: 500 });
+        daemons.push(daemon);
+        const response = await call(
+          daemon,
+          `/api/v1/projects/${registered.project.projectId}/workflows/example/actions/start`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              requestId: "start-shutdown-run",
+              dataIdentity: daemon.endpoint.dataIdentity,
+              payload: null,
+            }),
+          },
+        );
+        expect(response.status, await response.clone().text()).toBe(202);
+        const startedDeadline = Date.now() + 10_000;
+        while (!existsSync(runnerPid) && Date.now() < startedDeadline) await Bun.sleep(10);
+        expect(existsSync(runnerPid)).toBe(true);
+
+        const unhandled: unknown[] = [];
+        const captureUnhandled = (cause: unknown): void => {
+          unhandled.push(cause);
+        };
+        process.on("unhandledRejection", captureUnhandled);
+        try {
+          await Effect.runPromise(daemon.stop);
+          daemons.splice(daemons.indexOf(daemon), 1);
+          await Bun.sleep(100);
+        } finally {
+          process.off("unhandledRejection", captureUnhandled);
+        }
+        expect(unhandled).toEqual([]);
+      },
+      catch: (cause) => new RunApiTestFault({ cause }),
+    }),
+  );
 
   it("runs one authored Trigger poller, acknowledges after durable admission, and stops its boundary", async () => {
     const hostPaths = paths();
