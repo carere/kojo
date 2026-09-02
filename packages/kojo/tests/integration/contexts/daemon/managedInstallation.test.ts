@@ -48,6 +48,15 @@ const removeTree = (path: string): void => {
   rmSync(path, { recursive: true, force: true });
 };
 
+const processGroupExists = (processId: number): boolean => {
+  try {
+    process.kill(-processId, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 afterEach(() => {
   for (const root of roots.splice(0)) removeTree(root);
 });
@@ -209,8 +218,8 @@ describe("the managed Daemon installation", () => {
     } catch (cause) {
       if (launcher.exitCode === null) signalFailure = { cause };
     }
-    await Promise.race([
-      launcher.exited,
+    const exitedGracefully = await Promise.race([
+      launcher.exited.then(() => true),
       Bun.sleep(5_000).then(async () => {
         try {
           process.kill(-launcher.pid, "SIGKILL");
@@ -218,11 +227,16 @@ describe("the managed Daemon installation", () => {
           // The managed process group completed its planned stop before the forced bound.
         }
         await launcher.exited;
+        return false;
       }),
     ]);
+    await waitFor(() => !existsSync(endpointPath));
+    expect(processGroupExists(launcher.pid)).toBe(false);
     if (readinessFailure !== undefined) throw readinessFailure.cause;
     if (signalFailure !== undefined) throw signalFailure.cause;
-    await waitFor(() => !existsSync(endpointPath));
+    if (!exitedGracefully) {
+      throw new Error("the installed managed launcher did not stop its process group in 5000ms");
+    }
   }, 60_000);
 
   it.each([
