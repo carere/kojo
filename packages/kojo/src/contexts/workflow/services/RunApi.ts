@@ -911,10 +911,10 @@ export class RunApi {
           this.#recoveryWaits.delete(wait);
           wait.resolve(false);
         }
-        await Promise.allSettled([
-          ...Array.from(this.#triggerProcesses.values(), (process) => process.stop()),
-          Effect.runPromise(this.#runnerSupervisor.shutdown()),
-        ]);
+        await Promise.allSettled(
+          Array.from(this.#triggerProcesses.values(), (process) => process.stop()),
+        );
+        await Effect.runPromise(this.#runnerSupervisor.shutdown());
       },
       catch: runApiFault,
     });
@@ -2140,7 +2140,14 @@ export class RunApi {
             if (selected === undefined) throw new Error("the Runner reply has no pending command");
             pending.delete(body.operationRequestId as string);
             selected.resolve(frame);
-            if (frame.kind === "Stopped") return;
+            if (frame.kind === "Stopped") {
+              const stopped = new Error(
+                "the Project Runner stopped before all pending Trigger commands replied",
+              );
+              for (const command of pending.values()) command.reject(stopped);
+              pending.clear();
+              return;
+            }
             continue;
           }
           if (frame.kind === "Fault") {
