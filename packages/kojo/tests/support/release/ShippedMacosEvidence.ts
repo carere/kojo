@@ -278,6 +278,62 @@ export const shippedProjectId = (registeredOutput: string, listedOutput: string)
   return registeredId;
 };
 
+interface ShippedWorkflowObservation {
+  readonly ready: boolean;
+  readonly diagnostic: string;
+  readonly snapshot?: Record<string, unknown>;
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+export const shippedWorkflowObservation = (
+  output: string,
+  projectId: string,
+): ShippedWorkflowObservation => {
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(output);
+  } catch (cause) {
+    return {
+      ready: false,
+      diagnostic: `Workflow observation is not JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
+    };
+  }
+  if (!isRecord(decoded) || !Array.isArray(decoded.workflows)) {
+    return { ready: false, diagnostic: "Workflow observation has no Workflow collection" };
+  }
+  const matches = decoded.workflows.filter(
+    (workflow): workflow is Record<string, unknown> =>
+      isRecord(workflow) &&
+      workflow.projectId === projectId &&
+      workflow.workflowName === "release-evidence",
+  );
+  const workflow = matches[0];
+  if (matches.length !== 1 || workflow === undefined) {
+    return {
+      ready: false,
+      diagnostic: `expected one release-evidence Workflow for Project ${projectId}; observed ${matches.length}`,
+      snapshot: decoded,
+    };
+  }
+  const diagnostic = [
+    `Project ${String(workflow.projectState)}`,
+    `Factory ${String(workflow.factoryState)}`,
+    `Factory Refresh ${String(workflow.refreshState)}`,
+    `Workflow ${String(workflow.availability)}`,
+  ].join(", ");
+  return {
+    ready:
+      workflow.projectState === "available" &&
+      workflow.factoryState === "available" &&
+      workflow.refreshState === "current" &&
+      workflow.availability === "available",
+    diagnostic,
+    snapshot: decoded,
+  };
+};
+
 const commands = `import { isPlaceholder } from "@carere/kojo-runtime/contexts/workflow/models/Placeholder";
 
 export const commands = {
@@ -383,6 +439,74 @@ const prepareProject = async (
       { step: 4, instruction: "kojo doctor", evidence: "steps/12-printed-kojo-doctor.log" },
     ],
   });
+};
+
+const observeControlledWorkflow = async (
+  recorder: EvidenceRecorder,
+  project: string,
+  kojo: string,
+  projectId: string,
+  environment: Readonly<Record<string, string | undefined>>,
+): Promise<Record<string, unknown>> => {
+  const timeoutMillis = 120_000;
+  const deadline = Date.now() + timeoutMillis;
+  let attempt = 0;
+  let lastDiagnostic = "no Workflow observation completed";
+  while (Date.now() < deadline) {
+    attempt += 1;
+    const attemptName = String(attempt).padStart(3, "0");
+    const remaining = Math.max(1, deadline - Date.now());
+    try {
+      const result = await recorder.run(
+        `observe-controlled-workflow-${attemptName}`,
+        [kojo, "workflow", "list", "--project", projectId, "--json"],
+        {
+          cwd: project,
+          env: environment,
+          timeout: Math.min(10_000, remaining),
+          accept: [0, 1],
+        },
+      );
+      const observation =
+        result.exitCode === 0
+          ? shippedWorkflowObservation(result.stdout, projectId)
+          : {
+              ready: false,
+              diagnostic: `workflow list exited ${result.exitCode}: ${result.stderr.trim()}`,
+            };
+      lastDiagnostic = observation.diagnostic;
+      const evidence = {
+        attempt,
+        exitCode: result.exitCode,
+        readiness: observation,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      };
+      recorder.write(`workflow-observations/${attemptName}.json`, evidence);
+      if (observation.ready && observation.snapshot !== undefined) {
+        recorder.write("workflow-observation-final.json", evidence);
+        recorder.write("workflow-snapshot.json", observation.snapshot);
+        return observation.snapshot;
+      }
+    } catch (cause) {
+      lastDiagnostic = cause instanceof Error ? cause.message : String(cause);
+      recorder.write(`workflow-observations/${attemptName}.json`, {
+        attempt,
+        error: lastDiagnostic,
+      });
+    }
+    const delay = Math.min(1_000, deadline - Date.now());
+    if (delay > 0) await Bun.sleep(delay);
+  }
+  recorder.write("workflow-observation-final.json", {
+    attempts: attempt,
+    timeoutMillis,
+    readiness: "timed-out",
+    lastDiagnostic,
+  });
+  throw new Error(
+    `the controlled Workflow did not become available after a current Factory Refresh within ${timeoutMillis}ms; ${lastDiagnostic}; see records/workflow-observations and records/workflow-observation-final.json`,
+  );
 };
 
 const endpoint = (): EndpointRecord => {
@@ -723,24 +847,7 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
     });
     const projectId = shippedProjectId(registered.stdout, projects.stdout);
 
-    await waitFor(async () => {
-      const result = await recorder.run(
-        "wait-for-workflow",
-        [globalKojo, "workflow", "list", "--project", projectId, "--json"],
-        { cwd: project, env: environment, record: false, accept: [0, 1] },
-      );
-      if (result.exitCode !== 0) return undefined;
-      return result.stdout.includes('"workflowName":"release-evidence"') &&
-        result.stdout.includes('"availability":"available"')
-        ? result.stdout
-        : undefined;
-    }, "the actual Daemon did not discover the controlled Workflow");
-    const workflows = await recorder.run(
-      "printed-workflow-list",
-      [globalKojo, "workflow", "list", "--project", projectId, "--json"],
-      { cwd: project, env: environment },
-    );
-    recorder.write("workflow-snapshot.json", JSON.parse(workflows.stdout) as object);
+    await observeControlledWorkflow(recorder, project, globalKojo, projectId, environment);
 
     const started = await recorder.run(
       "printed-workflow-start",
