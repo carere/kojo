@@ -432,10 +432,12 @@ const packageGraph = (
   };
 };
 
-const copyCapturedFile = (source: string, destination: string, mode: number): void => {
+const copyCapturedFile = (source: string, destination: string): void => {
   mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
   copyFileSync(source, destination);
-  chmodSync(destination, mode);
+  // The manifest retains the authored executable mode. The Daemon store retains the same bytes
+  // privately, and `materializeRevision` restores that authored mode in the Runner cache.
+  chmodSync(destination, 0o600);
   const descriptor = openSync(destination, "r");
   fsyncSync(descriptor);
   closeSync(descriptor);
@@ -641,38 +643,25 @@ export const captureWorkflowRevision = (options: {
         (path, index) => [path, sources[index]] as const,
       )) {
         if (evidence !== undefined)
-          copyCapturedFile(
-            path,
-            join(stagedRevision, "factory", "sources", evidence.path),
-            evidence.mode,
-          );
+          copyCapturedFile(path, join(stagedRevision, "factory", "sources", evidence.path));
       }
       for (const [path, evidence] of assetPaths.map(
         (path, index) => [path, assets[index]] as const,
       )) {
         if (evidence !== undefined)
-          copyCapturedFile(
-            path,
-            join(stagedRevision, "factory", "assets", evidence.path),
-            evidence.mode,
-          );
+          copyCapturedFile(path, join(stagedRevision, "factory", "assets", evidence.path));
       }
       for (const [path, evidence] of sharedPaths.map(
         (path, index) => [path, shared[index]] as const,
       )) {
         if (evidence !== undefined)
-          copyCapturedFile(
-            path,
-            join(stagedRevision, "factory", "shared", evidence.path),
-            evidence.mode,
-          );
+          copyCapturedFile(path, join(stagedRevision, "factory", "shared", evidence.path));
       }
       for (const node of graph.nodes) {
         for (const file of node.files) {
           copyCapturedFile(
             file.source,
             join(stagedRevision, "packages", node.packageId, file.path),
-            file.mode,
           );
         }
       }

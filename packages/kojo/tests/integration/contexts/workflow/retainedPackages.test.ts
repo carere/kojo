@@ -1,7 +1,10 @@
 import {
   chmodSync,
+  existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -10,15 +13,34 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 import { Effect } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
-import { materializeRevision } from "../../../../src/contexts/project/services/materializeRevision.ts";
+import {
+  discardMaterializedRevisionCacheForPurge,
+  materializeRevision,
+} from "../../../../src/contexts/project/services/materializeRevision.ts";
 import { refreshFactory } from "../../../../src/contexts/workflow/services/refreshFactory.ts";
 import { linkEngine } from "../../../support/linkEngine.ts";
 
 const roots: string[] = [];
 const packageRoot = new URL("../../../../", import.meta.url).pathname.replace(/\/$/, "");
+
+const symbolicLinksUnder = (root: string): ReadonlyArray<string> => {
+  const links: string[] = [];
+  const visit = (path: string): void => {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) {
+      links.push(path);
+      return;
+    }
+    if (stat.isDirectory()) {
+      for (const child of readdirSync(path)) visit(join(path, child));
+    }
+  };
+  visit(root);
+  return links;
+};
 
 const fixture = (): {
   readonly root: string;
@@ -201,6 +223,20 @@ afterEach(() => {
 });
 
 describe("real Workflow Revision capture", () => {
+  it("refuses an unexpected cache link during purge preparation", () => {
+    const parent = mkdtempSync(join(tmpdir(), "kojo-materialized-purge-"));
+    roots.push(parent);
+    const executionRoot = join(parent, "runner-materialized");
+    const packageRoot = join(executionRoot, "graphs", "graph", "packages", "package");
+    mkdirSync(packageRoot, { recursive: true, mode: 0o700 });
+    symlinkSync(packageRoot, join(executionRoot, "unexpected-link"));
+
+    expect(() => discardMaterializedRevisionCacheForPurge(executionRoot)).toThrow(
+      "unexpected link",
+    );
+    expect(existsSync(executionRoot)).toBe(true);
+  });
+
   it("materializes exact source, assets, packages, links, resolution, and Effect evidence", async () => {
     const subject = fixture();
     const refreshed = await Effect.runPromise(
@@ -293,11 +329,16 @@ describe("real Workflow Revision capture", () => {
     expect(
       readFileSync(join(safe?.revision?.publishedPath ?? "", "manifest.json"), "utf8"),
     ).toContain(safe?.revision?.revisionId === undefined ? "never" : '"workflowName":"safe"');
-    expect(Bun.file(subject.marker).exists()).resolves.toBe(false);
+    expect(
+      statSync(join(safe?.revision?.publishedPath ?? "", "factory", "shared", "factory.json"))
+        .mode & 0o777,
+    ).toBe(0o600);
+    await expect(Bun.file(subject.marker).exists()).resolves.toBe(false);
 
+    const executionRoot = join(subject.dataRoot, "materialized");
     const materialized = materializeRevision({
       retainedRoot: safe?.revision?.publishedPath ?? "missing",
-      executionRoot: join(subject.dataRoot, "materialized"),
+      executionRoot,
       revisionId: safe?.revision?.revisionId ?? "missing",
       packageGraphId: safe?.revision?.packageGraphId ?? "missing",
     });
@@ -348,7 +389,7 @@ describe("real Workflow Revision capture", () => {
     ).toBe(realpathSync(join(retainedPackages, rightPeerId ?? "missing")));
     const secondMaterialized = materializeRevision({
       retainedRoot: safe?.revision?.publishedPath ?? "missing",
-      executionRoot: join(subject.dataRoot, "materialized"),
+      executionRoot,
       revisionId: safe?.revision?.revisionId ?? "missing",
       packageGraphId: safe?.revision?.packageGraphId ?? "missing",
     });
@@ -358,6 +399,15 @@ describe("real Workflow Revision capture", () => {
     expect(secondMaterialized.runner).toBe(materialized.runner);
     secondMaterialized.dispose();
     materialized.dispose();
+    expect(
+      symbolicLinksUnder(executionRoot).some(
+        (path) =>
+          path.includes(`${join("graphs", safe?.revision?.packageGraphId ?? "missing")}${sep}`) &&
+          path.includes(`${sep}node_modules${sep}`),
+      ),
+    ).toBe(true);
+    discardMaterializedRevisionCacheForPurge(executionRoot);
+    expect(existsSync(executionRoot)).toBe(false);
 
     writeFileSync(join(subject.root, ".kojo", "prompt.md"), "changed prompt bytes\n");
     const changed = await Effect.runPromise(

@@ -236,7 +236,7 @@ export class SqlitePurgeSafetyRepository implements PurgeSafetyRepository {
       ) {
         throw new LifecycleError(
           "PURGE_SCOPE_UNSAFE",
-          "Daemon data contains an unowned, public, or symbolic-link node",
+          `Daemon data contains an unowned, public, or symbolic-link node at ${inside.split(sep).join("/")}`,
         );
       }
       if (stat.isDirectory()) {

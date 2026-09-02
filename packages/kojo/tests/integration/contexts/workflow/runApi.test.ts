@@ -3,8 +3,10 @@ import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -394,6 +396,22 @@ const waitForRun = async (daemon: RunningDaemon, runId: string): Promise<RunDocu
   throw new Error("the exact Run did not reach a terminal state");
 };
 
+const symbolicLinksUnder = (root: string): ReadonlyArray<string> => {
+  const links: string[] = [];
+  const visit = (path: string): void => {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) {
+      links.push(path);
+      return;
+    }
+    if (stat.isDirectory()) {
+      for (const child of readdirSync(path)) visit(join(path, child));
+    }
+  };
+  visit(root);
+  return links;
+};
+
 afterEach(async () => {
   for (const daemon of daemons.splice(0)) await Effect.runPromise(daemon.stop);
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -666,8 +684,12 @@ describe("Daemon no-Trigger Run API", () => {
     expect(restored.state).toBe("succeeded");
   }, 30_000);
 
-  it("admits an exact retained revision, reports status, and exposes a real code Phase", async () => {
+  it("admits an exact retained revision and seals its stopped Runner cache for removal", async () => {
     const hostPaths = paths();
+    const release = join(hostPaths.installationRoot, "releases", "kojo-test");
+    mkdirSync(join(release, "runtime"), { recursive: true, mode: 0o700 });
+    writeFileSync(join(release, "runtime", "bun"), "test managed Bun\n", { mode: 0o700 });
+    writeFileSync(join(release, "launcher.js"), "test managed launcher\n", { mode: 0o600 });
     const runnerPid = join(roots[0] ?? "", "runner.pid");
     const location = project(roots[0] ?? "", runnerPid);
     mkdirSync(hostPaths.dataRoot, { recursive: true, mode: 0o700 });
@@ -818,6 +840,40 @@ describe("Daemon no-Trigger Run API", () => {
     );
     expect(duplicate.status).toBe(202);
     expect(await duplicate.json()).toMatchObject({ runId: run.runId, duplicate: true });
+
+    const executionRoot = join(hostPaths.dataRoot, "runner-materialized");
+    const retainedLinks = symbolicLinksUnder(executionRoot);
+    expect(retainedLinks.some((path) => path.includes("node_modules"))).toBe(true);
+    const operationId = "remove-after-retained-run";
+    const requestHash = "a".repeat(64);
+    await Effect.runPromise(
+      daemon.lifecycleControl.inspectPreflight(
+        operationId,
+        daemon.endpoint.dataIdentity,
+        requestHash,
+      ),
+    );
+    await Effect.runPromise(
+      daemon.lifecycleControl.beginDrain(operationId, daemon.endpoint.dataIdentity, requestHash),
+    );
+    const handoff = await Effect.runPromise(daemon.lifecycleControl.prepareHandoff(operationId));
+    await Effect.runPromise(
+      daemon.lifecycleControl.confirmControllerReady(operationId, handoff.digest),
+    );
+    const owner = await Effect.runPromise(
+      daemon.lifecycleControl.stopOwnedProcesses(operationId, 30_000, false),
+    );
+    expect(owner.runnerInstanceIds).toEqual([]);
+    const evidence = await Effect.runPromise(
+      daemon.lifecycleControl.sealPurgeSafety?.(operationId) ??
+        Effect.die("the production lifecycle has no purge safety owner"),
+    );
+    expect(existsSync(executionRoot)).toBe(false);
+    expect(
+      evidence.ownedScope.some(({ relativePath }) =>
+        relativePath.startsWith("runner-materialized"),
+      ),
+    ).toBe(false);
   }, 30_000);
 
   effectIt.live("settles an active dispatch before Daemon storage closes", () =>

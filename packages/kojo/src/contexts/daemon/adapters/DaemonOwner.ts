@@ -30,6 +30,7 @@ import { GateApi } from "../../gate/services/GateApi.ts";
 import { SqliteProjectRecoveryRepository } from "../../project/adapters/SqliteProjectRecoveryRepository.ts";
 import { SqliteProjectRepository } from "../../project/adapters/SqliteProjectRepository.ts";
 import { SqliteResourceLeaseRepository } from "../../project/adapters/SqliteResourceLeaseRepository.ts";
+import { discardMaterializedRevisionCacheForPurge } from "../../project/services/materializeRevision.ts";
 import { ProjectApi } from "../../project/services/ProjectApi.ts";
 import { AtomicArtifactRepository } from "../../trace/adapters/AtomicArtifactRepository.ts";
 import { SqliteTraceRepository } from "../../trace/adapters/SqliteTraceRepository.ts";
@@ -255,6 +256,7 @@ export const recoverPurgeSafety = async (
         dataIdentity,
         paths.dataRoot,
         paths.configurationRoot,
+        () => discardMaterializedRevisionCacheForPurge(join(paths.dataRoot, "runner-materialized")),
       ).seal(
         operationId,
         {
@@ -679,7 +681,10 @@ export const startDaemon = (
         dataIdentity,
         paths.dataRoot,
         paths.configurationRoot,
-        () => ensurePurgeRecoveryCapsule(paths, dataIdentity, release.releaseId),
+        () => {
+          ensurePurgeRecoveryCapsule(paths, dataIdentity, release.releaseId);
+          discardMaterializedRevisionCacheForPurge(join(paths.dataRoot, "runner-materialized"));
+        },
       ),
       now,
     });

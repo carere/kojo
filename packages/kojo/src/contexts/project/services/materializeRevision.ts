@@ -4,13 +4,14 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { RetainedContentFault } from "../../workflow/models/RetainedContentFault.ts";
 import type {
   RevisionFile,
@@ -162,6 +163,64 @@ const linkPackage = (target: string, packageRoot: string): void => {
     if (existsSync(target) && realpathSync(target) === realpathSync(packageRoot)) return;
     throw cause;
   }
+};
+
+/**
+ * Remove the reconstructible Runner cache after every Project Runner has stopped.
+ *
+ * Retained package identity needs internal directory links while a Runner is active. Purge safety
+ * cannot seal a tree that contains links, so the lifecycle owner discards this cache before it
+ * selects the final removal scope. The validation keeps that preparation narrow: only an
+ * owner-private cache with owner-held regular content and the internal links created by
+ * `materializeRevision` is removed. Package files retain their published modes inside that private
+ * cache, so their individual modes do not define Host access.
+ */
+export const discardMaterializedRevisionCacheForPurge = (executionRoot: string): void => {
+  const selectedRoot = resolve(executionRoot);
+  if (!existsSync(selectedRoot)) return;
+  if (lstatSync(selectedRoot).isSymbolicLink()) {
+    throw new Error("the materialized revision cache root is a symbolic link");
+  }
+  const root = realpathSync(selectedRoot);
+  const owner = process.getuid?.() ?? -1;
+  const graphs = join(root, "graphs");
+  const visit = (path: string): void => {
+    const stat = lstatSync(path);
+    const selected = relative(root, path);
+    if (
+      (selected !== "" && (selected === ".." || selected.startsWith(`..${sep}`))) ||
+      stat.uid !== owner ||
+      (selected === "" && (stat.mode & 0o077) !== 0)
+    ) {
+      throw new Error(`the materialized revision cache has an unsafe node at ${selected || "."}`);
+    }
+    if (stat.isSymbolicLink()) {
+      const segments = selected.split(sep);
+      const retainedPackages =
+        segments.at(-2) === ".kojo-retained" && segments.at(-1) === "packages";
+      const packageResolution = segments.includes("node_modules");
+      const target = realpathSync(path);
+      if (
+        (!retainedPackages && !packageResolution) ||
+        !inside(graphs, target) ||
+        !lstatSync(target).isDirectory()
+      ) {
+        throw new Error(
+          `the materialized revision cache has an unexpected link at ${selected} to ${target}`,
+        );
+      }
+      return;
+    }
+    if (stat.isDirectory()) {
+      for (const child of readdirSync(path)) visit(join(path, child));
+      return;
+    }
+    if (!stat.isFile() || stat.nlink !== 1) {
+      throw new Error(`the materialized revision cache has a special node at ${selected}`);
+    }
+  };
+  visit(root);
+  rmSync(root, { recursive: true, force: true });
 };
 
 /** Materialize one exact retained graph without a registry, install script, or live package link. */

@@ -608,7 +608,7 @@ export class SqliteRevisionRepository {
       } else if (
         !lstatSync(path).isFile() ||
         hash(readFileSync(path)) !== entry.file.sha256 ||
-        (statSync(path).mode & 0o777) !== entry.file.mode
+        ![0o600, entry.file.mode].includes(statSync(path).mode & 0o777)
       ) {
         faults.push({
           code: "CONTENT_CORRUPT",
@@ -722,7 +722,7 @@ export class SqliteRevisionRepository {
         !existsSync(path) ||
         !lstatSync(path).isFile() ||
         hash(readFileSync(path)) !== entry.file.sha256 ||
-        (statSync(path).mode & 0o777) !== entry.file.mode
+        ![0o600, entry.file.mode].includes(statSync(path).mode & 0o777)
       ) {
         throw new RevisionMaintenanceError({
           code: "EXACT_COPY_REFUSED",
@@ -733,10 +733,10 @@ export class SqliteRevisionRepository {
     return manifest;
   }
 
-  #copyExact(source: string, target: string, mode: number): void {
+  #copyExact(source: string, target: string): void {
     mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
     copyFileSync(source, target);
-    chmodSync(target, mode);
+    chmodSync(target, 0o600);
   }
 
   #repairExact(revisionId: string, source: string): void {
@@ -754,11 +754,7 @@ export class SqliteRevisionRepository {
     mkdirSync(stagedRevision, { recursive: true, mode: 0o700 });
     try {
       for (const entry of fileEntries(manifest)) {
-        this.#copyExact(
-          join(source, entry.retainedPath),
-          join(stagedRevision, entry.retainedPath),
-          entry.file.mode,
-        );
+        this.#copyExact(join(source, entry.retainedPath), join(stagedRevision, entry.retainedPath));
       }
       writeFileSync(join(stagedRevision, "manifest.json"), `${canonicalJson(manifest)}\n`, {
         mode: 0o600,
@@ -770,7 +766,7 @@ export class SqliteRevisionRepository {
         if (existsSync(objectPath) && hash(readFileSync(objectPath)) === entry.file.sha256)
           continue;
         const temporary = `${objectPath}.repair-${crypto.randomUUID()}`;
-        this.#copyExact(join(source, entry.retainedPath), temporary, 0o600);
+        this.#copyExact(join(source, entry.retainedPath), temporary);
         renameSync(temporary, objectPath);
       }
       syncDirectory(objects);
