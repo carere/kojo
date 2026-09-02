@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { startDaemon } from "../../../../src/contexts/daemon/adapters/DaemonOwner.ts";
 import { FileLifecycleJournalRepository } from "../../../../src/contexts/daemon/adapters/FileLifecycleJournalRepository.ts";
 import { SocketDaemonLifecycleControl } from "../../../../src/contexts/daemon/adapters/LifecycleControlTransport.ts";
+import { daemonConfigurationDefaults } from "../../../../src/contexts/daemon/models/Configuration.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
 import { LifecycleError } from "../../../../src/contexts/daemon/models/LifecycleError.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
@@ -99,6 +100,30 @@ describe("one idle Daemon owns one data root", () => {
       ).toMatchObject({ status: 200 });
       await expect(Effect.runPromise(daemon.ready)).rejects.toThrow("retained Run recovery failed");
       expect(recordedReady).toBe(0);
+    } finally {
+      await Effect.runPromise(daemon.stop);
+    }
+  });
+
+  it("records actual readiness with only the managed restart policy", async () => {
+    const hostPaths = paths();
+    const policies: Array<unknown> = [];
+    const daemon = startDaemon(hostPaths, {
+      managedSupervision: {
+        recordReady: (policy) => policies.push(policy),
+        recordPlannedStop: () => undefined,
+        activatePolicy: () => undefined,
+      },
+    });
+
+    try {
+      await Effect.runPromise(daemon.ready);
+      expect(policies).toEqual([
+        {
+          restartDelaysMs: daemonConfigurationDefaults.daemon.restartDelaysMs,
+          healthyResetMs: daemonConfigurationDefaults.daemon.healthyResetMs,
+        },
+      ]);
     } finally {
       await Effect.runPromise(daemon.stop);
     }

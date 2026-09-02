@@ -23,6 +23,14 @@ import { manageDaemon } from "../../../../src/contexts/daemon/services/manageDae
 
 const roots: Array<string> = [];
 
+const waitFor = async (predicate: () => boolean, timeout = 10_000): Promise<void> => {
+  const deadline = Date.now() + timeout;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("the managed Daemon did not become ready");
+    await Bun.sleep(25);
+  }
+};
+
 const removeTree = (path: string): void => {
   const stat = lstatSync(path);
   if (stat.isDirectory()) {
@@ -119,6 +127,48 @@ describe("the managed Daemon installation", () => {
     });
     expect(command.exitCode).toBe(0);
     expect(command.stdout.toString().trim()).not.toBe("");
+
+    const launcher = Bun.spawn([paths.managedLauncher], {
+      env: {
+        ...process.env,
+        HOME: root,
+        KOJO_MANAGED_INSTALLATION: paths.installationRoot,
+        KOJO_DAEMON_DATA: paths.dataRoot,
+        KOJO_DAEMON_RUNTIME: paths.runtimeRoot,
+        KOJO_DAEMON_CONFIG: paths.configurationRoot,
+        KOJO_DAEMON_CACHE: paths.cacheRoot,
+      },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      detached: true,
+    });
+    const output = new Response(launcher.stdout).text();
+    const error = new Response(launcher.stderr).text();
+    try {
+      await Promise.race([
+        waitFor(() => existsSync(join(paths.runtimeRoot, "endpoint.json"))),
+        launcher.exited.then(async (exitCode) => {
+          throw new Error(
+            `the installed managed launcher exited ${exitCode}: ${await error}${await output}`,
+          );
+        }),
+      ]);
+    } finally {
+      process.kill(-launcher.pid, "SIGTERM");
+      await Promise.race([
+        launcher.exited,
+        Bun.sleep(5_000).then(async () => {
+          try {
+            process.kill(-launcher.pid, "SIGKILL");
+          } catch {
+            // The managed process group completed its planned stop before the forced bound.
+          }
+          await launcher.exited;
+        }),
+      ]);
+    }
+    await waitFor(() => !existsSync(join(paths.runtimeRoot, "endpoint.json")));
   }, 60_000);
 
   it("refuses an unsupported Host before it writes managed content", async () => {

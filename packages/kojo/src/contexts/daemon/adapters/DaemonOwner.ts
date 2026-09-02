@@ -588,6 +588,13 @@ export const startDaemon = (
     if (!restrictedUpgrade) startRetentionCollectionTimer();
     let restoreFailure: unknown;
     let restorePromise: Promise<void> | undefined;
+    const daemonSupervisionPolicy = () => {
+      const daemon = configurationRepository.daemonConfiguration().daemon;
+      return {
+        restartDelaysMs: daemon.restartDelaysMs,
+        healthyResetMs: daemon.healthyResetMs,
+      };
+    };
     const restore = (): Promise<void> => {
       const restoration =
         options.runRestore?.(runApi) ??
@@ -599,11 +606,7 @@ export const startDaemon = (
             ),
           );
       restorePromise ??= Effect.runPromise(restoration)
-        .then(() =>
-          options.managedSupervision?.recordReady(
-            configurationRepository.daemonConfiguration().daemon,
-          ),
-        )
+        .then(() => options.managedSupervision?.recordReady(daemonSupervisionPolicy()))
         .catch((cause: unknown) => {
           restoreFailure = cause;
         });
@@ -632,9 +635,7 @@ export const startDaemon = (
     const activatePendingConfiguration = configurationRepository.activatePendingDaemon().pipe(
       Effect.tap(() =>
         Effect.sync(() => {
-          options.managedSupervision?.activatePolicy(
-            configurationRepository.daemonConfiguration().daemon,
-          );
+          options.managedSupervision?.activatePolicy(daemonSupervisionPolicy());
         }),
       ),
       Effect.asVoid,
@@ -694,9 +695,7 @@ export const startDaemon = (
         socketServer !== undefined && consoleServer !== undefined && lifecycleServer !== undefined,
       restricted: restrictedUpgrade,
       recordRestrictedReady: () =>
-        options.managedSupervision?.recordReady(
-          configurationRepository.daemonConfiguration().daemon,
-        ),
+        options.managedSupervision?.recordReady(daemonSupervisionPolicy()),
       resume: resumeRuntime,
       activate: resumeRuntime.pipe(Effect.andThen(activatePendingConfiguration)),
       ...(options.upgradeMigration === undefined ? {} : { migration: options.upgradeMigration }),
