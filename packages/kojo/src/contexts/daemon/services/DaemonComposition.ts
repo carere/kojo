@@ -447,7 +447,10 @@ export const startDaemonComposition = (
     const projectApi = new ProjectApi({
       dataIdentity,
       instanceId,
-      journal: new HostClientRequestRepository(join(paths.dataRoot, "client-requests")),
+      journal: new HostClientRequestRepository(
+        join(paths.dataRoot, "client-requests"),
+        dataIdentity,
+      ),
       now,
       repository: projectRepository,
       dataRoot: paths.dataRoot,

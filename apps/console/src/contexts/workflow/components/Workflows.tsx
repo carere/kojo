@@ -46,10 +46,11 @@ const WorkflowActions = (props: {
   readonly workflow: WorkflowDocument;
   readonly notice: () => string | undefined;
   readonly onNotice: (notice: string | undefined) => void;
+  readonly forceAcknowledged: () => boolean;
+  readonly onForceAcknowledged: (acknowledged: boolean) => void;
 }): JSX.Element => {
   const [payload, setPayload] = createSignal("{}");
   const [pending, setPending] = createSignal(false);
-  const [forceAcknowledged, setForceAcknowledged] = createSignal(false);
   const trigger = () => props.workflow.trigger.state !== "not-declared";
   const start = async (): Promise<void> => {
     setPending(true);
@@ -86,7 +87,7 @@ const WorkflowActions = (props: {
     }
   };
   const stopWithForce = async (): Promise<void> => {
-    if (!forceAcknowledged()) return;
+    if (!props.forceAcknowledged()) return;
     setPending(true);
     props.onNotice(undefined);
     try {
@@ -94,7 +95,7 @@ const WorkflowActions = (props: {
       props.onNotice(
         `Forced Stop accepted target set ${result.targetSetId ?? "unknown"}: ${result.targetedRunIds?.length ?? 0} Runs. Cancellation intent is separate from confirmed stop.`,
       );
-      setForceAcknowledged(false);
+      props.onForceAcknowledged(false);
     } catch (cause) {
       props.onNotice(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -130,7 +131,9 @@ const WorkflowActions = (props: {
         </button>
         <button
           type="button"
-          disabled={pending() || !forceAcknowledged() || props.workflow.currentRuns.length === 0}
+          disabled={
+            pending() || !props.forceAcknowledged() || props.workflow.currentRuns.length === 0
+          }
           class="rounded border border-red-700 px-2 py-1 text-xs text-red-700 dark:text-red-300"
           onClick={() => void stopWithForce()}
         >
@@ -146,8 +149,8 @@ const WorkflowActions = (props: {
       <label class="flex items-start gap-2 text-xs">
         <input
           type="checkbox"
-          checked={forceAcknowledged()}
-          onChange={(event) => setForceAcknowledged(event.currentTarget.checked)}
+          checked={props.forceAcknowledged()}
+          onChange={(event) => props.onForceAcknowledged(event.currentTarget.checked)}
         />
         <span>
           I understand that forced Stop records cancellation for the current nonterminal target set.
@@ -162,6 +165,8 @@ const WorkflowActions = (props: {
 const workflowColumns = (
   notice: (workflow: WorkflowDocument) => string | undefined,
   onNotice: (workflow: WorkflowDocument, value: string | undefined) => void,
+  forceAcknowledged: (workflow: WorkflowDocument) => boolean,
+  onForceAcknowledged: (workflow: WorkflowDocument, acknowledged: boolean) => void,
 ) =>
   helper.columns([
     helper.accessor("workflowName", { header: "Workflow" }),
@@ -231,6 +236,10 @@ const workflowColumns = (
           workflow={info.row.original}
           notice={() => notice(info.row.original)}
           onNotice={(value) => onNotice(info.row.original, value)}
+          forceAcknowledged={() => forceAcknowledged(info.row.original)}
+          onForceAcknowledged={(acknowledged) =>
+            onForceAcknowledged(info.row.original, acknowledged)
+          }
         />
       ),
     }),
@@ -239,6 +248,9 @@ const workflowColumns = (
 export const Workflows = (props: { readonly projectId: string }): JSX.Element => {
   const workflows = useWorkflows(props.projectId);
   const [notices, setNotices] = createSignal<Readonly<Record<string, string | undefined>>>({});
+  const [forceAcknowledgements, setForceAcknowledgements] = createSignal<
+    Readonly<Record<string, boolean>>
+  >({});
   const noticeKey = (workflow: WorkflowDocument): string =>
     `${workflow.projectId}:${workflow.workflowName}`;
   const [filters, setFilters] = createSignal(filterFromUrl());
@@ -276,6 +288,12 @@ export const Workflows = (props: { readonly projectId: string }): JSX.Element =>
       (workflow) => notices()[noticeKey(workflow)],
       (workflow, notice) =>
         setNotices((current) => ({ ...current, [noticeKey(workflow)]: notice })),
+      (workflow) => forceAcknowledgements()[noticeKey(workflow)] ?? false,
+      (workflow, acknowledged) =>
+        setForceAcknowledgements((current) => ({
+          ...current,
+          [noticeKey(workflow)]: acknowledged,
+        })),
     ),
     get data() {
       return visibleRows();

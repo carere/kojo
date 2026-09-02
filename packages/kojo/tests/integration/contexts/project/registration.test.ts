@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
 import {
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -103,6 +104,44 @@ afterEach(async () => {
 });
 
 describe("durable Project registration", () => {
+  it("prepares every Console mutation family but exposes only redacted subjects", async () => {
+    const hostPaths = paths();
+    const daemon = startDaemon(hostPaths);
+    daemons.push(daemon);
+    const operations = [
+      "relocateProject",
+      "archiveProject",
+      "restoreProject",
+      "startWorkflow",
+      "stopWorkflow",
+      "cancelRun",
+      "retryUncertainAction",
+      "recordGateVerdict",
+    ] as const;
+    for (const operation of operations) {
+      const requestId = `console-${operation}`;
+      const response = await prepare(daemon, {
+        mutationVersion: 1,
+        requestId,
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation,
+        target: { identityVersion: 1, kind: "resource", parts: [operation] },
+        arguments: { reason: "private-reason", token: "private-token" },
+        preconditions: { secret: "private-precondition" },
+      });
+      expect(response.status, await response.clone().text()).toBe(201);
+      expect(await response.json()).toEqual({
+        subject: { requestId, operation, targetKind: "resource" },
+        status: "accepted",
+      });
+    }
+    const recent = await (await call(daemon, "/api/v1/client-requests")).text();
+    for (const operation of operations) expect(recent).toContain(operation);
+    for (const privateValue of ["private-reason", "private-token", "private-precondition"])
+      expect(recent).not.toContain(privateValue);
+    expect(recent).not.toContain('"arguments"');
+  });
+
   it("keeps exact worktree identity, duplicates, atomic receipts, and Factory states", async () => {
     const hostPaths = paths();
     const daemon = startDaemon(hostPaths);
@@ -168,9 +207,16 @@ describe("durable Project registration", () => {
     expect(
       snapshot.projects.filter((project) => project.label.startsWith("same-name ·")),
     ).toHaveLength(2);
-    expect(
-      readFileSync(join(hostPaths.dataRoot, "client-requests", "request-one.json"), "utf8"),
-    ).toContain(`"location":"${missing}"`);
+    const retainedPath = join(
+      hostPaths.dataRoot,
+      "client-requests",
+      firstRequest.dataIdentity,
+      "request-one",
+      "request.json",
+    );
+    expect(readFileSync(retainedPath, "utf8")).toContain(`"location":"${missing}"`);
+    expect(lstatSync(retainedPath).mode & 0o077).toBe(0);
+    expect(lstatSync(join(retainedPath, "..")).mode & 0o077).toBe(0);
   });
 
   it("retains exact requests, receipts, and Recent changes across a Daemon replacement", async () => {
@@ -190,16 +236,19 @@ describe("durable Project registration", () => {
     const lookup = await call(replacement, `/api/v1/client-requests/${input.requestId}`);
     expect(lookup.status).toBe(200);
     expect(await lookup.json()).toMatchObject({
-      request: { requestId: input.requestId, arguments: { location: project } },
-      receipt: { status: "committed" },
+      subject: { requestId: input.requestId, operation: "registerProject" },
+      status: "committed",
     });
     const recent = (await (
       await call(replacement, "/api/v1/client-requests")
     ).json()) as ClientRequestSnapshot;
+    expect(JSON.stringify(recent)).not.toContain(project);
+    expect(JSON.stringify(recent)).not.toContain("arguments");
+    expect(JSON.stringify(recent)).not.toContain("preconditions");
     expect(recent.requests).toContainEqual(
       expect.objectContaining({
-        request: expect.objectContaining({ requestId: input.requestId }),
-        receipt: expect.objectContaining({ status: "committed" }),
+        subject: expect.objectContaining({ requestId: input.requestId }),
+        status: "committed",
       }),
     );
     expect((await retry(replacement, input.requestId)).status).toBe(200);
@@ -395,8 +444,8 @@ describe("durable Project registration", () => {
       await call(daemon, "/api/v1/client-requests/archive-original")
     ).json()) as ClientRequestDocument;
     expect(retainedArchive).toMatchObject({
-      request: { operation: "archiveProject", target: { kind: "project", parts: [originalId] } },
-      receipt: { status: "accepted" },
+      subject: { operation: "archiveProject", targetKind: "project" },
+      status: "accepted",
     });
     await Effect.runPromise(daemon.stop);
     daemons.splice(daemons.indexOf(daemon), 1);
@@ -406,7 +455,7 @@ describe("durable Project registration", () => {
       (await (
         await call(daemon, "/api/v1/client-requests/archive-original")
       ).json()) as ClientRequestDocument,
-    ).toMatchObject({ receipt: { status: "accepted" } });
+    ).toMatchObject({ status: "accepted" });
     await Effect.runPromise(
       resources.confirmAcquired(
         resourceAuthority,

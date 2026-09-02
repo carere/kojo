@@ -74,6 +74,26 @@ const registrationLocation = (request: MutationEnvelope, dataIdentity: string): 
   return request.arguments.location;
 };
 
+const preparedMutation = (request: MutationEnvelope, dataIdentity: string): void => {
+  if (request.operation === "registerProject") {
+    registrationLocation(request, dataIdentity);
+    return;
+  }
+  const acceptedOperations = new Set([
+    "relocateProject",
+    "archiveProject",
+    "restoreProject",
+    "startWorkflow",
+    "stopWorkflow",
+    "cancelRun",
+    "retryUncertainAction",
+    "recordGateVerdict",
+  ]);
+  if (request.dataIdentity !== dataIdentity || !acceptedOperations.has(request.operation)) {
+    throw invalid("The request does not match a supported Daemon mutation contract.");
+  }
+};
+
 const countsOf = (projects: ProjectSnapshot["projects"]): ProjectCounts => ({
   total: projects.length,
   available: projects.filter((project) => project.projectState === "available").length,
@@ -326,9 +346,19 @@ export class ProjectApi {
         );
       }
       try {
-        registrationLocation(decoded.value, this.#dataIdentity);
+        preparedMutation(decoded.value, this.#dataIdentity);
         this.#journal.prepare(decoded.value);
-        return response({ request: decoded.value } satisfies ClientRequestDocument, 201);
+        return response(
+          {
+            subject: {
+              requestId: decoded.value.requestId,
+              operation: decoded.value.operation,
+              targetKind: decoded.value.target.kind,
+            },
+            status: "accepted",
+          } satisfies ClientRequestDocument,
+          201,
+        );
       } catch (cause) {
         return refusal(
           cause instanceof ProjectStoreError ? cause : invalid(String(cause)),
@@ -360,8 +390,12 @@ export class ProjectApi {
           this.#repository.receipt(this.#dataIdentity, requestId),
         );
         const document: ClientRequestDocument = {
-          request: retained.request,
-          ...(receipt === undefined ? {} : { receipt }),
+          subject: {
+            requestId: retained.request.requestId,
+            operation: retained.request.operation,
+            targetKind: retained.request.target.kind,
+          },
+          status: receipt?.status ?? "accepted",
         };
         return response(document);
       } catch (cause) {
@@ -383,8 +417,12 @@ export class ProjectApi {
               this.#repository.receipt(this.#dataIdentity, retained.request.requestId),
             );
             return {
-              request: retained.request,
-              ...(receipt === undefined ? {} : { receipt }),
+              subject: {
+                requestId: retained.request.requestId,
+                operation: retained.request.operation,
+                targetKind: retained.request.target.kind,
+              },
+              status: receipt?.status ?? "accepted",
             };
           }),
         );

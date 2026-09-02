@@ -214,6 +214,7 @@ export const PhasePanel = (props: {
                     emptyMessage="No failed checks match this filter."
                     items={failedChecks()}
                     label="Failed checks"
+                    namespace={`phase-${props.name}-${props.attempt}-failed-checks`}
                     searchText={(check) => check}
                     render={(check) => (
                       <span data-check={check} data-check-held="false" class="mr-1 inline-block">
@@ -275,6 +276,7 @@ export const PhasePanel = (props: {
                   emptyMessage="No permission breaches match this filter."
                   items={record()?.breaches ?? []}
                   label="Permission breaches"
+                  namespace={`phase-${props.name}-${props.attempt}-permission-breaches`}
                   searchText={(breach) => `${breach.path}\n${breach.outcome._tag}`}
                   render={(breach) => (
                     <div

@@ -7,12 +7,21 @@ import {
   daemonConnectionState,
   requireDaemonReconnect,
 } from "../services/connectionState.ts";
+import { reconnectDaemonNotifications } from "../services/observeDaemonNotifications.ts";
 
 export const DaemonConnectionNotice = (): JSX.Element => {
   const client = useQueryClient();
   const reconnect = (): void => {
     beginDaemonReconnect();
-    void client.resetQueries().then(completeDaemonReconnect, requireDaemonReconnect);
+    void (async () => {
+      try {
+        await reconnectDaemonNotifications(client);
+        await client.refetchQueries({}, { throwOnError: true });
+        completeDaemonReconnect();
+      } catch {
+        requireDaemonReconnect();
+      }
+    })();
   };
   return (
     <Show when={daemonConnectionState() === "reconnect"}>

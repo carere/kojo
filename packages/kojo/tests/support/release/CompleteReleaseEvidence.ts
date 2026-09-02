@@ -997,6 +997,16 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
       {
         tier: "kojo-integration",
         path: "packages/kojo/tests/integration/contexts/daemon/cliContract.test.ts",
+        name: "follows a request without an implicit deadline and uses text unless JSON is explicit",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/daemon/cliContract.test.ts",
+        name: "exits request follow with the in-progress code when the Daemon disconnects",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/daemon/cliContract.test.ts",
         name: "returns exact usage, failure, wait-timeout, and success exits from real processes",
       },
       {
@@ -1133,6 +1143,16 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         tier: "console-browser",
         path: "apps/console/tests/browser/daemonComponents.spec.ts",
         name: "reads Recent changes from durable Daemon history after reload and filters by request ID",
+      },
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/waterfall.spec.ts",
+        name: "a Phase panel shows Agent session, token, correction, and repository facts",
+      },
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/waterfall.spec.ts",
+        name: "a Phase and its Sandbox acquisition remain one link apart",
       },
     ],
   ),

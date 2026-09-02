@@ -6,20 +6,22 @@ test only because its old file can compile.
 
 ## Console fixed-point audit
 
-The seven removed browser suites contain 113 test declarations. The audit classifies all 113 as
-current behavior and adapts them to the authenticated Daemon/browser fixture. No current Waterfall,
-detail, Gate, polling, degraded-state, or Run-list behavior is removed.
+The seven removed browser suites contain 113 test declarations. The audit keeps 104 current
+behaviors and classifies nine repository-local Trace artifact/activity declarations as obsolete.
+The Daemon now owns immutable Run-level Captured Artifacts; it has no Phase-local prompt, session,
+diff, or occurrence API. No current Waterfall, detail, Gate, polling, degraded-state, or Run-list
+behavior is removed.
 
 | Removed suite | Declarations | Current/adapted | Obsolete | Current evidence |
 | --- | ---: | ---: | ---: | --- |
 | `degraded.spec.ts` | 3 | 3 | 0 | `projectCatalogue.spec.ts`, `workflowCatalogue.spec.ts`, `reconnect.spec.ts` |
-| `detailPanel.spec.ts` | 35 | 35 | 0 | `runConsole.spec.ts`, `daemonComponents.spec.ts`, `waterfall.spec.ts` |
+| `detailPanel.spec.ts` | 35 | 26 | 9 | `runConsole.spec.ts`, `daemonComponents.spec.ts`, `waterfall.spec.ts` |
 | `gate.spec.ts` | 23 | 23 | 0 | `gateVerdict.spec.ts`, `runConsole.spec.ts`, `daemonComponents.spec.ts` |
 | `polling.spec.ts` | 2 | 2 | 0 | Restored as authenticated Daemon browser evidence in `polling.spec.ts` |
 | `realRun.spec.ts` | 5 | 5 | 0 | `runConsole.spec.ts`, `gateVerdict.spec.ts`, shipped-Daemon release evidence |
 | `runList.spec.ts` | 5 | 5 | 0 | `runConsole.spec.ts` |
-| `waterfall.spec.ts` | 40 | 40 | 0 | Restored as `waterfall.spec.ts` with 41 authenticated current-contract leaves |
-| **Total** | **113** | **113** | **0** | |
+| `waterfall.spec.ts` | 40 | 40 | 0 | Restored as `waterfall.spec.ts` with 50 authenticated current-contract leaves |
+| **Total** | **113** | **104** | **9** | |
 
 The Waterfall adaptation retains every fixed-point assertion category: Host and acquisition rows,
 scope placement, rebuild rows, collapsed Gate and idle breaks, all-row walls, wall-clock mode,
@@ -27,14 +29,65 @@ concurrency geometry, in-flight Phase growth and settlement, failure/breach/inte
 correction marks, read-only behavior, scale selection, zoom, selection, hover, table parity, empty
 state, catalogue navigation, hit testing, tick uniqueness at 40 and 400 days, resize stability, pan,
 modifier-wheel zoom, the canonical 41-hour break, and long-duration labels. The extra current leaf
-checks a distinct in-flight table record.
+checks a distinct in-flight table record. Additional detail-panel leaves keep the old assertions
+that still describe the breaking Console contract.
 
-The detail-panel declarations remain current because the breaking Console still has Phase, Sandbox,
-Asking, Artifact, revision, failure, provenance, and Run outcome panels. The adapted tests read one
-Daemon Run document and authenticated Artifact endpoints. They do not restore old repository-local
-Trace readers. The Gate and real-Run declarations remain current as Recorded/Applied, expiry,
-answering, structured Asking routes, and rebuilt Sandbox behavior. Their adaptations record only a
-Verdict through the Daemon; no client applies it.
+The detail-panel audit is leaf-based. Leaves 1–13 map to the Phase deep-link, close/view retention,
+summary, Agent identity/model/session/resume/token/context/correction, Host/Sandbox, invalid answer,
+failed-check, repository-disagreement, breach, and invalid-Phase assertions in `waterfall.spec.ts`.
+Leaves 23–35 map to the Sandbox acquisition/cross-panel/held state, missing Run, layout, Run failure,
+and provenance assertions in `waterfall.spec.ts`, `runConsole.spec.ts`, and
+`daemonComponents.spec.ts`. The fixture carries real public Agent and repository fields through the
+authenticated Daemon Run contract; the tests do not inject internal `RunDoc` data.
+
+Old leaves 14–18 and 19–22 are obsolete as written. They require Phase-local prompt/session/diff
+artifact panes and an occurrence polling endpoint. #64 makes Captured Artifacts immutable Run-level
+resources and removes repository-local Trace readers and activity-event APIs. Current Artifact
+authorization, lazy content, download, hash, and reload behavior remains in `artifact.spec.ts`.
+
+The exact `detailPanel.spec.ts` declaration mapping is:
+
+| Old leaf | Classification | Current exact evidence |
+| ---: | --- | --- |
+| 1 | adapted | `a Phase deep link restores exactly one selected span and keeps the Waterfall` |
+| 2 | adapted | same leaf includes direct URL and reload selection |
+| 3 | adapted | `closing and toggling a Phase panel preserve the selected Run view` |
+| 4 | adapted | `closing and toggling a Phase panel preserve the selected Run view` and `the table toggle renders every Waterfall Phase and persists in the URL` |
+| 5 | adapted | `a Phase panel shows Agent session, token, correction, and repository facts` plus Phase Summary/Where fields |
+| 6 | adapted | `code and Host Phases do not invent Agent or Sandbox facts` |
+| 7 | adapted | same code-Phase leaf requires no Agent pane |
+| 8 | adapted | `an invalid Agent answer is an error and does not invent verification fields` |
+| 9 | adapted | `Phase errors keep failed checks and permission outcomes distinct` |
+| 10 | adapted | `failed checks include a failure that never completed its Run check` |
+| 11 | adapted | Agent/repository-facts leaf requires claimed/changed disagreement |
+| 12 | adapted | `Phase errors keep failed checks and permission outcomes distinct` |
+| 13 | adapted | invalid-Phase deep-link leaf keeps the Waterfall and closes normally |
+| 14 | obsolete | removed Phase-local prompt/session/diff fetch API |
+| 15 | obsolete | removed Phase-local session artifact; correction count remains in leaf 5 |
+| 16 | obsolete | removed Phase-local diff pane |
+| 17 | obsolete | removed Phase-local Agent artifact pane; Agent error remains in leaves 8/10 |
+| 18 | obsolete | removed Phase-local Agent artifact pane; in-flight state remains in Waterfall cases |
+| 19 | obsolete | removed occurrence streaming API |
+| 20 | obsolete | removed occurrence list/poll API |
+| 21 | obsolete | removed occurrence detail API |
+| 22 | obsolete | removed occurrence list API |
+| 23 | adapted | `a Sandbox deep link shows the exact acquisition and its Phase` |
+| 24 | adapted | `the second Sandbox acquisition exposes Gate idle time and setup cost` |
+| 25 | adapted | `a Phase and its Sandbox acquisition remain one link apart` |
+| 26 | adapted | `a held Sandbox panel states which release facts are not recorded yet` |
+| 27 | adapted | `a missing Run is a settled answer and not a reconnecting outage` |
+| 28 | adapted | `the Phase panel keeps one page scroll and the whole Waterfall axis reachable` |
+| 29 | adapted | `the Phase panel keeps one page scroll and the whole Waterfall axis reachable` |
+| 30 | adapted | `the Phase panel keeps one page scroll and the whole Waterfall axis reachable` |
+| 31 | adapted | `failed Run outcome and labelled provenance remain on the Run page` |
+| 32 | adapted | `a successful Run has no failure outcome and a Host-only Run states no branch` |
+| 33 | adapted | `the Waterfall stays visible while a person reads the Phase panel` |
+| 34 | adapted | `failed Run outcome and labelled provenance remain on the Run page` |
+| 35 | adapted | `a successful Run has no failure outcome and a Host-only Run states no branch` |
+
+The Gate and real-Run declarations remain current as Recorded/Applied, expiry, answering,
+structured Asking routes, and rebuilt Sandbox behavior. Their adaptations record only a Verdict
+through the Daemon; no client applies it.
 
 The three degraded declarations remain current at new ownership seams: a registered Project can have
 a Missing Factory, a Project can have no current Workflow, and a disconnected Console preserves the

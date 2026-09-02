@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import type { OperationReceipt } from "@carere/kojo-client-contracts/contexts/client/contracts/operation";
 import type {
-  ClientRequestDocument,
   ProjectLocationResult,
   ProjectSnapshot,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
@@ -15,6 +14,7 @@ import {
   configurationCheckLines,
   configurationStatusLines,
 } from "../../daemon/adapters/DaemonCommandPresentation.ts";
+import { prepareHostClientRequest } from "../../daemon/adapters/prepareHostClientRequest.ts";
 import type {
   ConfigurationApplyResult,
   ConfigurationCheck,
@@ -115,11 +115,11 @@ const register = Command.make(
       arguments: { location },
       preconditions: {},
     };
-    yield* Console.log(`request ${id}`);
-    yield* daemonRequest<ClientRequestDocument>(`/api/v1/client-requests/${id}`, {
-      method: "PUT",
-      body: mutation,
+    yield* Effect.try({
+      try: () => prepareHostClientRequest(paths, mutation),
+      catch: clientError,
     }).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
+    yield* Console.log(`request ${id}`);
     const receipt = yield* daemonRequest<OperationReceipt>(`/api/v1/client-requests/${id}/retry`, {
       method: "POST",
       body: {},
@@ -188,6 +188,19 @@ const runLocationChange = (
     if (endpoint === undefined)
       return yield* commandFailed("the Daemon is not ready; run `kojo daemon status`");
     const id = Option.getOrElse(requestId, () => crypto.randomUUID());
+    const mutation: MutationEnvelope = {
+      mutationVersion: 1,
+      requestId: id,
+      dataIdentity: endpoint.dataIdentity,
+      operation: `${action}Project`,
+      target: { identityVersion: 1, kind: "project", parts: [projectId] },
+      arguments: { ...(location === undefined ? {} : { location }) },
+      preconditions: { confirm: true },
+    };
+    yield* Effect.try({
+      try: () => prepareHostClientRequest(productionPaths(), mutation),
+      catch: clientError,
+    }).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
     yield* Console.log(`request ${id}`);
     yield* Console.log(`draining Project ${projectId} before ${action}`);
     const receipt = yield* daemonRequest<OperationReceipt>(

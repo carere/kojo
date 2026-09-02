@@ -82,6 +82,8 @@ export const useRun = (runId: () => string): UseQueryResult<RunDoc, Error> =>
           ...(phase.errorTag === undefined ? {} : { errorTag: phase.errorTag }),
           ...(phase.breaches === undefined ? {} : { breaches: phase.breaches }),
           ...(phase.verification === undefined ? {} : { verification: phase.verification }),
+          ...(phase.agent === undefined ? {} : { agent: phase.agent }),
+          ...(phase.repo === undefined ? {} : { repo: phase.repo }),
         })),
         gates: (run.gates ?? []).map((gate) => ({
           gate: gate.gate,

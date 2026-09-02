@@ -1,5 +1,4 @@
-import type { MutationEnvelope } from "./mutation.ts";
-import type { OperationReceipt } from "./operation.ts";
+import type { ReceiptStatus } from "./operation.ts";
 
 export type ProjectState = "available" | "unavailable" | "archived";
 export type FactoryState = "missing" | "invalid" | "available";
@@ -68,8 +67,12 @@ export interface ProjectSnapshot {
 }
 
 export interface ClientRequestDocument {
-  readonly request: MutationEnvelope;
-  readonly receipt?: OperationReceipt;
+  readonly subject: {
+    readonly requestId: string;
+    readonly operation: string;
+    readonly targetKind: string;
+  };
+  readonly status: "accepted" | ReceiptStatus;
 }
 
 /** Daemon-owned recent accepted client requests. */

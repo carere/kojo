@@ -8,6 +8,7 @@ import { Console, Data, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { clientExit } from "../../../cli/ClientExit.ts";
 import { commandFailed } from "../../../cli/CommandFailed.ts";
+import { prepareHostClientRequest } from "../../daemon/adapters/prepareHostClientRequest.ts";
 import type { DaemonPaths } from "../../daemon/models/DaemonPaths.ts";
 import { readDaemonEndpoint } from "../../daemon/services/daemonStatus.ts";
 import { linuxPaths } from "../../daemon/services/linuxPaths.ts";
@@ -92,6 +93,20 @@ const recordVerdict = (
     try: async () => {
       const endpoint = daemonEndpoint(paths);
       const body: RecordVerdictRequest = { ...input, dataIdentity: endpoint.dataIdentity };
+      prepareHostClientRequest(paths(), {
+        mutationVersion: 1,
+        requestId: input.requestId,
+        dataIdentity: endpoint.dataIdentity,
+        operation: "recordGateVerdict",
+        target: { identityVersion: 1, kind: "gate", parts: [input.requestId] },
+        arguments: {
+          token: input.token,
+          choice: input.choice,
+          reason: input.reason,
+          ...(input.answerer === undefined ? {} : { answerer: input.answerer }),
+        },
+        preconditions: {},
+      });
       const response = await fetch("http://localhost/api/v1/gate-answers", {
         unix: endpoint.socketPath,
         method: "POST",

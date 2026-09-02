@@ -76,7 +76,10 @@ test("uses filtered Zaidan lists for Phases, Artifacts, and detail resources", a
         verification: {
           envelope: "verify",
           ran: ["typecheck", "test"],
-          failed: ["test"],
+          failed: Array.from(
+            { length: 55 },
+            (_, index) => `check-${String(index).padStart(2, "0")}`,
+          ),
           corrections: 1,
           correctable: true,
         },
@@ -135,8 +138,18 @@ test("uses filtered Zaidan lists for Phases, Artifacts, and detail resources", a
   await expect(page.getByText("1 of 1 Artifacts")).toBeVisible();
 
   await page.goto(`http://127.0.0.1:47242/runs/${runId}/phases/verify/1?view=timeline`);
-  await expect(page.getByText("1 of 1 Failed checks")).toBeVisible();
+  await expect(page.getByText("55 of 55 Failed checks")).toBeVisible();
   await expect(page.getByText("1 of 1 Permission breaches")).toBeVisible();
+  await expect(page.locator('[data-field="failed-checks"] li')).toHaveCount(50);
+  await page.locator(`[data-load-more="phase-verify-1-failed-checks"]`).click();
+  await expect(page.locator('[data-field="failed-checks"] li')).toHaveCount(55);
+  await page.getByLabel("Find Failed checks").fill("check-54");
+  await page.getByLabel("Find Permission breaches").fill("factory.json");
+  await expect(page).toHaveURL(/phase-verify-1-failed-checks-filter=check-54/);
+  await expect(page).toHaveURL(/phase-verify-1-permission-breaches-filter=factory.json/);
+  await page.reload();
+  await expect(page.getByLabel("Find Failed checks")).toHaveValue("check-54");
+  await expect(page.getByLabel("Find Permission breaches")).toHaveValue("factory.json");
 
   await page.goto(
     `http://127.0.0.1:47242/runs/${runId}/sandboxes/build/1756684801000-1?view=timeline`,
@@ -162,22 +175,12 @@ test("reads Recent changes from durable Daemon history after reload and filters 
         observedAt: "2026-09-01T00:01:00.000Z",
         requests: [
           {
-            request: {
-              mutationVersion: 1,
+            subject: {
               requestId: "request-durable-change",
-              dataIdentity: "data-components",
               operation: "archiveProject",
-              target: { identityVersion: 1, kind: "project", parts: ["project-one"] },
-              arguments: { confirm: true },
-              preconditions: {},
+              targetKind: "project",
             },
-            receipt: {
-              receiptVersion: 1,
-              requestId: "request-durable-change",
-              dataIdentity: "data-components",
-              operation: "archiveProject",
-              status: "committed",
-            },
+            status: "committed",
           },
         ],
       }),
@@ -186,6 +189,7 @@ test("reads Recent changes from durable Daemon history after reload and filters 
   await page.goto(launch());
   await page.goto("http://127.0.0.1:47242/");
   await expect(page.locator('[data-recent-request="request-durable-change"]')).toBeVisible();
+  await expect(page.locator("[data-recent-changes]")).not.toContainText("confirm");
   await page.getByLabel("Find Recent changes").fill("durable-change");
   await expect(page.getByText("1 of 1 Recent changes")).toBeVisible();
   await page.reload();

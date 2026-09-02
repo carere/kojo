@@ -278,6 +278,7 @@ export const SandboxPanel = (props: {
                 emptyMessage="No completed Phases match this filter."
                 items={inside()}
                 label="Phases in this Sandbox"
+                namespace={`sandbox-${props.name}-${props.acquisition}-phases`}
                 searchText={(phase) => `${phase.name}\n${phase.kind}\n${phase.outcome}`}
                 render={(phase) => (
                   <Link

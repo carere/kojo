@@ -10,6 +10,7 @@ import {
   type RunningDaemon,
   startDaemon,
 } from "../../../../src/contexts/daemon/adapters/DaemonOwner.ts";
+import { HostClientRequestRepository } from "../../../../src/contexts/daemon/adapters/HostClientRequestRepository.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
 import { SqliteProjectRepository } from "../../../../src/contexts/project/adapters/SqliteProjectRepository.ts";
 import { SqliteExternalActionRepository } from "../../../../src/contexts/workflow/adapters/SqliteExternalActionRepository.ts";
@@ -326,8 +327,8 @@ describe("real CLI process over the private Daemon transport", () => {
     expect(JSON.parse(status.stdout)).toMatchObject({
       formatVersion: 1,
       request: {
-        request: { requestId: "request-top-level-cli" },
-        receipt: { status: "committed" },
+        subject: { requestId: "request-top-level-cli" },
+        status: "committed",
       },
     });
 
@@ -344,6 +345,87 @@ describe("real CLI process over the private Daemon transport", () => {
     expect(
       (await runCli(test.root, ["project", "register", "--path", test.workflowProject])).status,
     ).not.toBe(0);
+  });
+
+  it("follows a request without an implicit deadline and uses text unless JSON is explicit", async () => {
+    const test = await fixture();
+    const requestId = "request-follow-unbounded";
+    new HostClientRequestRepository(
+      join(test.hostPaths.dataRoot, "client-requests"),
+      test.daemon.endpoint.dataIdentity,
+    ).prepare({
+      mutationVersion: 1,
+      requestId,
+      dataIdentity: test.daemon.endpoint.dataIdentity,
+      operation: "archiveProject",
+      target: { identityVersion: 1, kind: "project", parts: ["project-a"] },
+      arguments: { reason: "private-reason" },
+      preconditions: {},
+    });
+
+    const timed = await runCli(test.root, [
+      "status",
+      "--request",
+      requestId,
+      "--follow",
+      "--timeout",
+      "100ms",
+    ]);
+    expect(timed.status).toBe(3);
+    expect(timed.stdout).toContain(`Request ${requestId}: accepted`);
+    expect(timed.stdout).not.toContain("private-reason");
+    expect(() => JSON.parse(timed.stdout)).toThrow();
+
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        clientCli,
+        test.root,
+        "status",
+        "--request",
+        requestId,
+        "--follow",
+        "--json",
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    await Bun.sleep(1_000);
+    expect(child.exitCode).toBeNull();
+    child.kill("SIGINT");
+    await child.exited;
+    const lines = (await new Response(child.stdout).text()).trim().split("\n");
+    expect(lines.length).toBeGreaterThanOrEqual(1);
+    expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({
+      formatVersion: 1,
+      request: { subject: { requestId }, status: "accepted" },
+    });
+  });
+
+  it("exits request follow with the in-progress code when the Daemon disconnects", async () => {
+    const test = await fixture();
+    const requestId = "request-follow-disconnect";
+    new HostClientRequestRepository(
+      join(test.hostPaths.dataRoot, "client-requests"),
+      test.daemon.endpoint.dataIdentity,
+    ).prepare({
+      mutationVersion: 1,
+      requestId,
+      dataIdentity: test.daemon.endpoint.dataIdentity,
+      operation: "archiveProject",
+      target: { identityVersion: 1, kind: "project", parts: ["project-a"] },
+      arguments: {},
+      preconditions: {},
+    });
+    const child = Bun.spawn(
+      [process.execPath, clientCli, test.root, "status", "--request", requestId, "--follow"],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const first = await child.stdout.getReader().read();
+    expect(new TextDecoder().decode(first.value)).toContain("accepted");
+    await Effect.runPromise(test.daemon.stop);
+    daemons.splice(daemons.indexOf(test.daemon), 1);
+    expect(await child.exited).toBe(3);
+    expect(await new Response(child.stderr).text()).toContain("disconnected while following");
   });
 
   it("applies full Project selectors and JSON input while keeping output free of private payloads", async () => {

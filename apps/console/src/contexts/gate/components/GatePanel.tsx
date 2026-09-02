@@ -233,6 +233,7 @@ export const GatePanel = (props: {
               emptyMessage="No rebuilt Sandboxes match this filter."
               items={rebuilt(doc(), asking(), record())}
               label="Rebuilt Sandboxes"
+              namespace={`gate-${props.gate}-${props.asking}-rebuilt-sandboxes`}
               searchText={(sandbox) => `${sandbox.name}\n${sandbox.sandboxId}\n${sandbox.outcome}`}
               render={(sandbox) => (
                 <span data-rebuild={sandbox.sandboxId} class="font-mono text-xs break-all">

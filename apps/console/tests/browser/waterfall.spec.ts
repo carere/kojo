@@ -92,6 +92,27 @@ const merged = (): RunDocument => {
       phase("run-merged", "hotfix", 10 * minute, 16 * minute, {
         kind: "agent",
         sandboxId: first,
+        agent: {
+          agent: "builder",
+          model: "fixture-model",
+          session: "run-merged-hotfix",
+          resumed: false,
+          tokensIn: 4_000,
+          tokensOut: 900,
+          contextTokens: 22_500,
+        },
+        repo: {
+          claimed: ["src/claimed.ts"],
+          changed: ["src/actual.ts"],
+          commits: ["abc1234"],
+        },
+        verification: {
+          envelope: "hotfix",
+          ran: ["lint", "test"],
+          failed: ["test"],
+          corrections: 2,
+          correctable: true,
+        },
       }),
       phase("run-merged", "test", 41 * hour + 28 * minute, 41 * hour + 30 * minute, {
         sandboxId: second,
@@ -181,12 +202,22 @@ const broken = (): RunDocument =>
         kind: "agent",
         outcome: "failed",
         errorTag: "CheckViolation",
+        verification: {
+          envelope: "implement",
+          ran: ["lint", "test"],
+          failed: ["test", "type checker"],
+          corrections: 0,
+          correctable: false,
+        },
       }),
       phase("run-broken", "edit", 3 * minute, 4 * minute, {
         kind: "agent",
         outcome: "failed",
         errorTag: "PermissionBreach",
-        breaches: [{ path: ".kojo/factory.json", outcome: { _tag: "Preserved" } }],
+        breaches: [
+          { path: ".kojo/factory.json", outcome: { _tag: "Preserved" } },
+          { path: "src/restored.ts", outcome: { _tag: "Restored" } },
+        ],
       }),
     ],
     { finishedAt: at(4 * minute) },
@@ -208,6 +239,20 @@ const stale = (): RunDocument =>
     { finishedAt: at(3 * hour + minute) },
   );
 
+const invalidAnswer = (): RunDocument =>
+  runDocument(
+    "run-invalid-answer",
+    "failed",
+    [
+      phase("run-invalid-answer", "draft", 0, minute, {
+        kind: "agent",
+        outcome: "failed",
+        errorTag: "EnvelopeParseError",
+      }),
+    ],
+    { finishedAt: at(minute) },
+  );
+
 const fixture = (runId: string, settled = false): RunDocument => {
   if (runId === "run-merged") return merged();
   if (runId === "run-lanes") return lanes();
@@ -216,6 +261,7 @@ const fixture = (runId: string, settled = false): RunDocument => {
   if (runId === "run-broken") return broken();
   if (runId === "run-approve") return approve();
   if (runId === "run-stale") return stale();
+  if (runId === "run-invalid-answer") return invalidAnswer();
   return runDocument(runId, "executing", []);
 };
 
@@ -302,9 +348,13 @@ test("a dense break keeps the long Phase visible through it", async ({ page }) =
 
 test("wall-clock mode removes every break", async ({ page }) => {
   await openRun(page, "run-merged");
+  const compressed = await boxOf(span(page, "run-merged/hotfix/1"));
+  expect(compressed.width).toBeGreaterThan(200);
   await page.locator("[data-axis]").click();
   await expect(page.locator("[data-axis]")).toHaveAttribute("data-axis", "wall-clock");
   await expect(page.locator("[data-break]")).toHaveCount(0);
+  const wallClock = await boxOf(span(page, "run-merged/hotfix/1"));
+  expect(wallClock.width).toBeLessThan(5);
 });
 
 test("concurrent acquisitions keep one row each", async ({ page }) => {
@@ -431,9 +481,14 @@ test("zoom stretches a Phase without changing its row", async ({ page }) => {
 test("click selection is exclusive and reversible", async ({ page }) => {
   await openRun(page, "run-merged");
   const hotfix = span(page, "run-merged/hotfix/1");
+  const testPhase = span(page, "run-merged/test/1");
   await hotfix.click();
   await expect(hotfix).toHaveAttribute("data-selected", "true");
-  await hotfix.click();
+  await testPhase.click();
+  await expect(testPhase).toHaveAttribute("data-selected", "true");
+  await expect(hotfix).toHaveAttribute("data-selected", "false");
+  await expect(page.locator('[data-selected="true"]')).toHaveCount(1);
+  await testPhase.click();
   await expect(page.locator('[data-selected="true"]')).toHaveCount(0);
 });
 
@@ -452,6 +507,11 @@ test("the table toggle renders every Waterfall Phase and persists in the URL", a
   await page.locator('[data-view="table"]').click();
   await expect(page).toHaveURL(/view=table/);
   await expect(page.locator("[data-phase-row]")).toHaveCount(spans);
+  await expect(page.locator('[data-phase-row="run-merged/hotfix/1"]')).toContainText("6m");
+  await page.reload();
+  await expect(page.locator("[data-phase-row]")).toHaveCount(spans);
+  await page.goto(`${origin}/runs/run-merged?view=table`);
+  await expect(page.locator('[data-phase-row="run-merged/hotfix/1"]')).toContainText("6m");
 });
 
 test("the Phase table includes an in-flight Phase", async ({ page }) => {
@@ -585,4 +645,231 @@ test("a months-long Gate wait uses weeks instead of thousands of hours", async (
   const text = (await page.locator("[data-break-label]").first().textContent()) ?? "";
   expect(text).not.toMatch(/\d{3,}h/);
   expect(text).toMatch(/\d+w/);
+});
+
+test("a Phase deep link restores exactly one selected span and keeps the Waterfall", async ({
+  page,
+}) => {
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/phases/hotfix/1?view=timeline`);
+  await expect(page.locator('[data-detail-panel="phase"]')).toBeVisible();
+  await expect(span(page, "run-merged/hotfix/1")).toHaveAttribute("data-selected", "true");
+  await expect(page.locator('[data-selected="true"]')).toHaveCount(1);
+  await expect(page.locator("[data-waterfall]")).toBeVisible();
+  await page.reload();
+  await expect(span(page, "run-merged/hotfix/1")).toHaveAttribute("data-selected", "true");
+});
+
+test("a Phase panel shows Agent session, token, correction, and repository facts", async ({
+  page,
+}) => {
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/phases/hotfix/1?view=timeline`);
+  await expect(page.locator('[data-field="attempt"]')).toContainText("1");
+  await expect(page.locator('[data-field="started"]')).toContainText("UTC");
+  await expect(page.locator('[data-field="duration"]')).toContainText("6m");
+  await expect(page.locator('[data-field="agent-name"]')).toContainText("builder");
+  await expect(page.locator('[data-field="model"]')).toContainText("fixture-model");
+  await expect(page.locator('[data-field="session"]')).toContainText("run-merged-hotfix");
+  await expect(page.locator('[data-field="resumed"]')).toContainText("cold");
+  await expect(page.locator('[data-field="tokens-in"]')).toContainText("4,000");
+  await expect(page.locator('[data-field="tokens-out"]')).toContainText("900");
+  await expect(page.locator('[data-field="context"]')).toContainText("22,500");
+  await expect(page.locator('[data-field="corrections"]')).toContainText("2");
+  await expect(page.locator('[data-field="claimed"]')).toContainText("src/claimed.ts");
+  await expect(page.locator('[data-field="changed"]')).toContainText("src/actual.ts");
+  await expect(page.locator('[data-field="commits"]')).toContainText("abc1234");
+  await expect(page.locator('[data-repo="disagrees"]')).toBeVisible();
+  await expect(page.locator('[data-where="sandbox"]')).toBeVisible();
+});
+
+test("code and Host Phases do not invent Agent or Sandbox facts", async ({ page }) => {
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/phases/in_progress/1?view=timeline`);
+  await expect(page.locator('[data-pane="agent"]')).toHaveCount(0);
+  await expect(page.locator('[data-where="host"]')).toContainText("needed no container");
+});
+
+test("a Phase and its Sandbox acquisition remain one link apart", async ({ page }) => {
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/phases/hotfix/1?view=timeline`);
+  await page.locator('[data-where="sandbox"]').click();
+  await expect(page.locator('[data-detail-panel="sandbox"]')).toBeVisible();
+  await expect(page.locator('[data-scope="sandbox"][data-selected="true"]')).toHaveCount(1);
+  await page.locator('[data-inside="run-merged/hotfix/1"]').click();
+  await expect(page.locator('[data-detail-panel="phase"]')).toBeVisible();
+  await expect(span(page, "run-merged/hotfix/1")).toHaveAttribute("data-selected", "true");
+});
+
+test("an invalid Phase deep link leaves the Run and Waterfall usable", async ({ page }) => {
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/phases/not-a-phase/1?view=timeline`);
+  await expect(page.getByText("This run has no phase run-merged/not-a-phase/1.")).toBeVisible();
+  await expect(page.locator("[data-waterfall]")).toBeVisible();
+  await page.locator("[data-panel-close]").click();
+  await expect(page).toHaveURL(/\/runs\/run-merged\?view=timeline/);
+});
+
+test("Phase errors keep failed checks and permission outcomes distinct", async ({ page }) => {
+  await openRun(page, "run-broken");
+  await page.goto(`${origin}/runs/run-broken/phases/implement/1?view=timeline`);
+  await expect(page.locator('[data-detail-panel] [data-error="CheckViolation"]')).toContainText(
+    "checks failed",
+  );
+  await expect(page.locator('[data-check="test"]')).toContainText("test");
+  await expect(page.locator('[data-check="lint"]')).toHaveCount(0);
+  await page.goto(`${origin}/runs/run-broken/phases/edit/1?view=timeline`);
+  await expect(page.locator('[data-breach=".kojo/factory.json"]')).toHaveAttribute(
+    "data-breach-outcome",
+    "Preserved",
+  );
+  await expect(page.locator('[data-breach="src/restored.ts"]')).toHaveAttribute(
+    "data-breach-outcome",
+    "Restored",
+  );
+});
+
+test("a Sandbox deep link shows the exact acquisition and its Phase", async ({ page }) => {
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/sandboxes/build/540000-1?view=timeline`);
+  await expect(page.locator('[data-detail-panel="sandbox"]')).toBeVisible();
+  await expect(page.locator('[data-field="provider"]')).toContainText("no-sandbox");
+  await expect(page.locator('[data-field="sandbox-kind"]')).toContainText("none");
+  await expect(page.locator('[data-field="branch"]')).toContainText("kojo/run-merged");
+  await expect(page.locator('[data-field="worktree"]')).toContainText("/private/run-merged");
+  await expect(page.locator('[data-inside="run-merged/hotfix/1"]')).toBeVisible();
+});
+
+test("the second Sandbox acquisition exposes Gate idle time and setup cost", async ({ page }) => {
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/sandboxes/build/149280000-2?view=timeline`);
+  await expect(page.locator('[data-detail-panel="sandbox"]')).toContainText("acquisition 2 of 2");
+  await expect(page.locator('[data-field="idle"]')).toContainText("41h 10m");
+  await expect(page.locator('[data-field="setup"]')).toContainText("1m");
+  await expect(page.locator('[data-inside="run-merged/test/1"]')).toBeVisible();
+  await expect(page.locator('[data-inside="run-merged/hotfix/1"]')).toHaveCount(0);
+});
+
+test("closing and toggling a Phase panel preserve the selected Run view", async ({ page }) => {
+  await openRun(page, "run-merged", { view: "table" });
+  await page.goto(`${origin}/runs/run-merged/phases/hotfix/1?view=table`);
+  await expect(page.locator('[data-detail-panel="phase"]')).toBeVisible();
+  await expect(page.locator("[data-phase-row]").first()).toBeVisible();
+
+  await page.locator("[data-panel-close]").click();
+  await expect(page).toHaveURL(/\/runs\/run-merged\?view=table/);
+  await expect(page.locator('[data-detail-panel="phase"]')).toHaveCount(0);
+
+  await page.goto(`${origin}/runs/run-merged?view=timeline`);
+  await span(page, "run-merged/hotfix/1").click();
+  await expect(page.locator('[data-detail-panel="phase"]')).toBeVisible();
+  await span(page, "run-merged/hotfix/1").click();
+  await expect(page.locator('[data-detail-panel="phase"]')).toHaveCount(0);
+  await expect(page.locator('[data-selected="true"]')).toHaveCount(0);
+});
+
+test("an invalid Agent answer is an error and does not invent verification fields", async ({
+  page,
+}) => {
+  await openRun(page, "run-invalid-answer");
+  await page.goto(`${origin}/runs/run-invalid-answer/phases/draft/1?view=timeline`);
+  await expect(page.locator('[data-detail-panel] [data-error="EnvelopeParseError"]')).toContainText(
+    "did not match the required format",
+  );
+  await expect(page.locator('[data-field="failed-checks"]')).toHaveCount(0);
+  await expect(page.locator('[data-field="corrections"]')).toHaveCount(0);
+});
+
+test("failed checks include a failure that never completed its Run check", async ({ page }) => {
+  await openRun(page, "run-broken");
+  await page.goto(`${origin}/runs/run-broken/phases/implement/1?view=timeline`);
+  await expect(page.locator('[data-check="test"]')).toHaveAttribute("data-check-held", "false");
+  await expect(page.locator('[data-check="type checker"]')).toHaveAttribute(
+    "data-check-held",
+    "false",
+  );
+  await expect(page.locator('[data-check-held="false"]')).toHaveCount(2);
+  await expect(page.locator('[data-check="lint"]')).toHaveCount(0);
+});
+
+test("a held Sandbox panel states which release facts are not recorded yet", async ({ page }) => {
+  const acquisition = `${base + 1_000}-1`;
+  await openRun(page, "run-scout");
+  await page.goto(`${origin}/runs/run-scout/sandboxes/lane/${acquisition}?view=timeline`);
+  await expect(page.locator('[data-sandbox-state="held"]')).toBeVisible();
+  await expect(page.locator('[data-field="provider"]')).toContainText("written on release");
+  await expect(page.locator('[data-inside="run-scout/explore/1"]')).toBeVisible();
+});
+
+test("a missing Run is a settled answer and not a reconnecting outage", async ({ page }) => {
+  let reads = 0;
+  await page.route("**/api/v1/runs/run-nope", async (route) => {
+    reads += 1;
+    await route.fulfill({
+      status: 404,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "no-such-run", message: "the Run does not exist" }),
+    });
+  });
+  await page.goto(launch());
+  await page.goto(`${origin}/runs/run-nope?view=timeline`);
+  await expect(page.getByText("There is no run run-nope in this factory.")).toBeVisible();
+  await expect(page.locator('[data-notice="retrying"]')).toHaveCount(0);
+  await page.waitForTimeout(1_200);
+  expect(reads).toBe(1);
+});
+
+test("the Phase panel keeps one page scroll and the whole Waterfall axis reachable", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1_280, height: 720 });
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/phases/hotfix/1?view=timeline`);
+  const panel = page.locator('[data-detail-panel="phase"]');
+  const waterfall = page.locator("[data-waterfall]");
+  const scroller = waterfall.locator("div.overflow-x-auto");
+  const panelBox = await boxOf(panel);
+  const waterfallBox = await boxOf(waterfall);
+  expect(panelBox.y).toBeGreaterThan(waterfallBox.y);
+  expect(Math.abs(panelBox.width - waterfallBox.width)).toBeLessThan(4);
+  expect(await scroller.evaluate((node) => node.scrollWidth - node.clientWidth)).toBe(0);
+  expect(await panel.evaluate((node) => node.scrollHeight > node.clientHeight + 1)).toBe(false);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBe(
+    0,
+  );
+});
+
+test("the Waterfall stays visible while a person reads the Phase panel", async ({ page }) => {
+  await page.setViewportSize({ width: 1_280, height: 400 });
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/phases/hotfix/1?view=timeline`);
+  await page
+    .locator('[data-detail-panel="phase"]')
+    .evaluate((node) => node.scrollIntoView({ block: "end" }));
+  const box = await boxOf(page.locator("[data-waterfall]"));
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(box.y).toBeLessThan(48);
+  expect(box.height).toBeGreaterThan(0);
+});
+
+test("failed Run outcome and labelled provenance remain on the Run page", async ({ page }) => {
+  await openRun(page, "run-broken");
+  const outcome = page.locator('[data-run-outcome="failed"]');
+  await expect(outcome).toBeVisible();
+  await expect(outcome.locator('[data-outcome-link="edit"]')).toBeVisible();
+  await outcome.locator('[data-outcome-link="edit"]').click();
+  await expect(page.locator('[data-detail-panel="phase"]')).toBeVisible();
+
+  await page.locator("[data-panel-close]").click();
+  for (const name of ["engine", "commit", "host", "config", "idempotency-key", "branch"]) {
+    await expect(page.locator(`[data-stamp="${name}"]`)).toHaveCount(1);
+  }
+});
+
+test("a successful Run has no failure outcome and a Host-only Run states no branch", async ({
+  page,
+}) => {
+  await openRun(page, "run-stale");
+  await expect(page.locator("[data-run-outcome]")).toHaveCount(0);
+  await expect(page.locator('[data-stamp="branch"]')).toContainText("no sandbox was acquired");
 });

@@ -35,6 +35,17 @@ const daemonRequest = <A>(
 const readRequest = (requestId: string): Effect.Effect<ClientRequestDocument, string> =>
   daemonRequest(`/api/v1/client-requests/${encodeURIComponent(requestId)}`);
 
+const timeoutMillis = (value: string): number | undefined => {
+  if (value === "none") return undefined;
+  const match = /^(\d+(?:\.\d+)?)(ms|s|m|h)?$/.exec(value);
+  if (match === null)
+    throw new Error("--timeout must be positive ms, s, m, h, bare seconds, or none");
+  const amount = Number(match[1]);
+  if (!(amount > 0)) throw new Error("--timeout must be positive");
+  const unit = match[2] ?? "s";
+  return amount * ({ ms: 1, s: 1_000, m: 60_000, h: 3_600_000 }[unit] ?? 1_000);
+};
+
 /** Top-level inspection, including recovery of one exact durable client request. */
 export const status = Command.make(
   "status",
@@ -43,10 +54,13 @@ export const status = Command.make(
     details: Flag.boolean("details"),
     follow: Flag.boolean("follow"),
     wait: Flag.boolean("wait"),
+    timeout: Flag.string("timeout").pipe(Flag.optional),
     json: Flag.boolean("json"),
   },
-  Effect.fn(function* ({ request, details, follow, wait, json }) {
+  Effect.fn(function* ({ request, details, follow, wait, timeout, json }) {
     if (follow && wait) return yield* clientExit(2, "--follow and --wait cannot be combined");
+    if (!follow && !wait && Option.isSome(timeout))
+      return yield* clientExit(2, "--timeout is valid only with --follow or --wait");
     if (Option.isNone(request)) {
       if (follow || wait) return yield* clientExit(2, "--follow and --wait require --request ID");
       const endpoint = yield* Effect.try({
@@ -66,24 +80,36 @@ export const status = Command.make(
     }
 
     const requestId = request.value;
+    const duration = yield* Effect.try({
+      try: () =>
+        Option.isSome(timeout) ? timeoutMillis(timeout.value) : follow ? undefined : 60_000,
+      catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
+    }).pipe(Effect.catch((message) => clientExit(2, message)));
     let document = yield* readRequest(requestId).pipe(Effect.catch(commandFailed));
     if (follow || wait) {
-      const deadline = Date.now() + 60_000;
-      while (document.receipt === undefined && Date.now() < deadline) {
-        if (follow) yield* Console.log(JSON.stringify({ formatVersion: 1, request: document }));
+      const deadline = duration === undefined ? undefined : Date.now() + duration;
+      let shown = "";
+      while (document.status === "accepted" && (deadline === undefined || Date.now() < deadline)) {
+        const line = json
+          ? JSON.stringify({ formatVersion: 1, request: document })
+          : `Request ${requestId}: ${document.status}`;
+        if (follow && line !== shown) {
+          yield* Console.log(line);
+          shown = line;
+        }
         yield* Effect.promise(() => Bun.sleep(250));
-        document = yield* readRequest(requestId).pipe(Effect.catch(commandFailed));
+        document = yield* readRequest(requestId).pipe(
+          Effect.catch(() => clientExit(3, `request ${requestId} disconnected while following`)),
+        );
       }
-      if (document.receipt === undefined)
+      if (document.status === "accepted")
         return yield* clientExit(3, `request ${requestId} is still in progress`);
     }
-    if (json || follow) {
+    if (json) {
       yield* Console.log(JSON.stringify({ formatVersion: 1, request: document }));
       return;
     }
-    yield* Console.log(
-      `Request ${requestId}: ${document.receipt === undefined ? "in progress" : document.receipt.status}`,
-    );
+    yield* Console.log(`Request ${requestId}: ${document.status}`);
     if (details) yield* Console.log(JSON.stringify(document));
   }),
 ).pipe(Command.withDescription("Inspect the Daemon or one exact durable client request"));

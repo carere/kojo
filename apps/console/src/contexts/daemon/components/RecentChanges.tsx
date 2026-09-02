@@ -22,16 +22,17 @@ export const RecentChanges = (): JSX.Element => {
         emptyMessage="No accepted changes are recorded by this Daemon."
         items={requests()}
         label="Recent changes"
+        namespace="recent-changes"
         searchText={(change) =>
-          `${change.request.requestId}\n${change.request.operation}\n${change.receipt?.status ?? "accepted"}`
+          `${change.subject.requestId}\n${change.subject.operation}\n${change.status}`
         }
         render={(change) => (
-          <div class="grid gap-1 text-xs" data-recent-request={change.request.requestId}>
+          <div class="grid gap-1 text-xs" data-recent-request={change.subject.requestId}>
             <span>
-              <strong>{change.request.operation}</strong> · {change.receipt?.status ?? "accepted"}
+              <strong>{change.subject.operation}</strong> · {change.status}
             </span>
-            <span class="text-muted-foreground">{change.request.target.kind}</span>
-            <code>{change.request.requestId}</code>
+            <span class="text-muted-foreground">{change.subject.targetKind}</span>
+            <code>{change.subject.requestId}</code>
           </div>
         )}
       />

@@ -8,10 +8,12 @@ import type {
   StopWorkflowResult,
   WorkflowSnapshot,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
+import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Console, Data, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { clientExit } from "../../../cli/ClientExit.ts";
 import { commandFailed } from "../../../cli/CommandFailed.ts";
+import { prepareHostClientRequest } from "../../daemon/adapters/prepareHostClientRequest.ts";
 import type { DaemonPaths } from "../../daemon/models/DaemonPaths.ts";
 import { readDaemonEndpoint } from "../../daemon/services/daemonStatus.ts";
 import { linuxPaths } from "../../daemon/services/linuxPaths.ts";
@@ -138,13 +140,23 @@ const startRun = Command.make(
         const endpoint = readDaemonEndpoint(productionPaths());
         if (endpoint === undefined)
           throw new Error("the Daemon is not ready; run `kojo daemon start`");
+        const requestId = crypto.randomUUID();
+        prepareHostClientRequest(productionPaths(), {
+          mutationVersion: 1,
+          requestId,
+          dataIdentity: endpoint.dataIdentity,
+          operation: "startWorkflow",
+          target: { identityVersion: 1, kind: "workflow", parts: [projectId, workflowName] },
+          arguments: parsed === undefined ? {} : { payload: parsed as JsonValue },
+          preconditions: {},
+        });
         const path = `/api/v1/projects/${encodeURIComponent(projectId)}/workflows/${encodeURIComponent(workflowName)}/actions/start`;
         const response = await fetch(`http://localhost${path}`, {
           unix: endpoint.socketPath,
           method: "POST",
           headers: { accept: "application/json", "content-type": "application/json" },
           body: JSON.stringify({
-            requestId: crypto.randomUUID(),
+            requestId,
             dataIdentity: endpoint.dataIdentity,
             ...(parsed === undefined ? {} : { payload: parsed }),
           }),
@@ -237,13 +249,23 @@ const stopWorkflow = Command.make(
         const endpoint = readDaemonEndpoint(productionPaths());
         if (endpoint === undefined)
           throw new Error("the Daemon is not ready; run `kojo daemon start`");
+        const requestId = crypto.randomUUID();
+        prepareHostClientRequest(productionPaths(), {
+          mutationVersion: 1,
+          requestId,
+          dataIdentity: endpoint.dataIdentity,
+          operation: "stopWorkflow",
+          target: { identityVersion: 1, kind: "workflow", parts: [projectId, workflowName] },
+          arguments: { ...(force ? { force } : {}) },
+          preconditions: {},
+        });
         const path = `/api/v1/projects/${encodeURIComponent(projectId)}/workflows/${encodeURIComponent(workflowName)}/actions/stop`;
         const response = await fetch(`http://localhost${path}`, {
           unix: endpoint.socketPath,
           method: "POST",
           headers: { accept: "application/json", "content-type": "application/json" },
           body: JSON.stringify({
-            requestId: crypto.randomUUID(),
+            requestId,
             dataIdentity: endpoint.dataIdentity,
             ...(force ? { force: true } : {}),
           }),

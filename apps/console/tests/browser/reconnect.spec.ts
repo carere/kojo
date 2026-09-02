@@ -34,6 +34,12 @@ test("bounds reconnect attempts, preserves the snapshot, and disables all mutati
   await expect(mutationScope).toHaveAttribute("disabled", "");
 
   await page.unroute("**/api/v1/projects");
+  await page.route("**/api/v1/client-requests", (route) => route.abort("connectionrefused"));
+  await page.getByRole("button", { name: "Reconnect", exact: true }).click();
+  await expect(page.getByText("Reconnect to the Daemon", { exact: true })).toBeVisible();
+  await expect(mutationScope).toHaveAttribute("disabled", "");
+  await page.unroute("**/api/v1/client-requests");
+
   let releaseAuthoritativeRead: (() => void) | undefined;
   let authoritativeReadStarted = false;
   await page.route("**/api/v1/projects", async (route) => {
@@ -54,7 +60,8 @@ test("bounds reconnect attempts, preserves the snapshot, and disables all mutati
 test("bounds stalled notification connection attempts before explicit Reconnect", async ({
   page,
 }) => {
-  await page.goto(launch());
+  const launchUrl = new URL(launch());
+  launchUrl.pathname = "/";
   let attempts = 0;
   await page.route("**/api/v1/notifications", async (route) => {
     attempts += 1;
@@ -63,7 +70,7 @@ test("bounds stalled notification connection attempts before explicit Reconnect"
   });
 
   const startedAt = Date.now();
-  await page.goto("http://127.0.0.1:47242/");
+  await page.goto(launchUrl.toString());
   await expect(page.getByText("2 total", { exact: true })).toBeVisible();
   await expect(page.getByText("Reconnect to the Daemon", { exact: true })).toBeVisible({
     timeout: 20_000,

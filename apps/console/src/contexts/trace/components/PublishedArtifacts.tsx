@@ -32,6 +32,7 @@ export const PublishedArtifacts = (props: {
             emptyMessage="No captured Artifacts match this filter."
             items={props.artifacts}
             label="Artifacts"
+            namespace="run-artifacts"
             searchText={(artifact) => `${artifact.name}\n${artifact.mediaType}\n${artifact.sha256}`}
             render={(artifact) => (
               <div class="border-border flex flex-wrap items-center gap-2 rounded-md border p-2">

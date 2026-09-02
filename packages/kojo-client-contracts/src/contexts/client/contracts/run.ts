@@ -20,6 +20,20 @@ export interface RunPhaseDocument {
   readonly sandboxId?: string;
   readonly errorTag?: string;
   readonly result?: JsonValue;
+  readonly agent?: {
+    readonly agent: string;
+    readonly model: string;
+    readonly session: string;
+    readonly resumed: boolean;
+    readonly tokensIn: number;
+    readonly tokensOut: number;
+    readonly contextTokens?: number;
+  };
+  readonly repo?: {
+    readonly claimed: ReadonlyArray<string>;
+    readonly changed: ReadonlyArray<string>;
+    readonly commits: ReadonlyArray<string>;
+  };
   readonly breaches?: ReadonlyArray<{
     readonly path: string;
     readonly outcome: { readonly _tag: string };

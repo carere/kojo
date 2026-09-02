@@ -88,6 +88,22 @@ export const runDocumentOf = (
             endedAt: new Date(Number(phase.endedAt)).toISOString(),
             ...(typeof phase.sandboxId === "string" ? { sandboxId: phase.sandboxId } : {}),
             ...(typeof phase.errorTag === "string" ? { errorTag: phase.errorTag } : {}),
+            ...(typeof phase.agent === "object" && phase.agent !== null
+              ? {
+                  agent: phase.agent as unknown as NonNullable<
+                    RunDocument["phases"][number]["agent"]
+                  >,
+                }
+              : {}),
+            ...(typeof phase.repo === "object" && phase.repo !== null
+              ? {
+                  repo: phase.repo as unknown as NonNullable<RunDocument["phases"][number]["repo"]>,
+                }
+              : {}),
+            ...(Array.isArray(phase.breaches) ? { breaches: phase.breaches as never } : {}),
+            ...(typeof phase.verification === "object" && phase.verification !== null
+              ? { verification: phase.verification as never }
+              : {}),
             ...(result === undefined ? {} : { result: result.encodedResult }),
           };
         }),
