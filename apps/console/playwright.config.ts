@@ -19,8 +19,8 @@ export default defineConfig({
   // assertion timeout strict, but do not let the 30-second whole-test budget interrupt a final
   // navigation or action after the Daemon has already returned every earlier assertion.
   timeout: 60_000,
-  // Every assertion here is about stated fixture records. A retry could only hide a state race or
-  // timing fault, so failures are meant to be reproducible.
+  // The suite uses stated fixture records and deliberate transitions. A retry could hide a state
+  // race or timing fault, so failures are meant to be reproducible.
   retries: 0,
   use: { trace: "retain-on-failure" },
   projects: [{ name: "console", use: { ...devices["Desktop Chrome"] } }],
