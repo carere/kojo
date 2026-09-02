@@ -71,6 +71,9 @@ const fixture = (
       "  echo 'Job='",
       "fi",
       "echo 'ControlGroup=/user.slice/user-1234.slice/user@1234.service'",
+      "echo 'Result=success'",
+      "echo 'ExecMainCode=exited'",
+      "echo 'ExecMainStatus=0'",
       "",
     ].join("\n"),
   );
@@ -174,6 +177,9 @@ type PredicateOptions = {
   readonly busPresent?: boolean;
   readonly login?: "absent" | "present" | "error" | "timeout";
   readonly manager?: "ready" | "error" | "timeout";
+  readonly result?: string;
+  readonly execMainCode?: string;
+  readonly execMainStatus?: string;
 };
 
 const predicateFixture = (options: PredicateOptions = {}) => {
@@ -184,6 +190,9 @@ const predicateFixture = (options: PredicateOptions = {}) => {
   const cgroup = options.cgroup ?? "empty";
   const login = options.login ?? "absent";
   const manager = options.manager ?? "ready";
+  const result = options.result ?? (activeState === "failed" ? "timeout" : "success");
+  const execMainCode = options.execMainCode ?? (activeState === "failed" ? "killed" : "exited");
+  const execMainStatus = options.execMainStatus ?? (activeState === "failed" ? "9" : "0");
   writeFileSync(
     subject.systemctl,
     [
@@ -197,6 +206,9 @@ const predicateFixture = (options: PredicateOptions = {}) => {
             `echo 'SubState=${subState}'`,
             `echo 'Job=${job}'`,
             "echo 'ControlGroup=/user.slice/user-1234.slice/user@1234.service'",
+            `echo 'Result=${result}'`,
+            `echo 'ExecMainCode=${execMainCode}'`,
+            `echo 'ExecMainStatus=${execMainStatus}'`,
           ]),
       "",
     ].join("\n"),
@@ -240,7 +252,11 @@ const predicateFixture = (options: PredicateOptions = {}) => {
   };
 };
 
-const runHelper = async (subject: ReturnType<typeof fixture>, attemptLimit: number) => {
+const runHelper = async (
+  subject: ReturnType<typeof fixture>,
+  attemptLimit: number,
+  managerTerminal: "inactive-dead" | "failed-failed" | "terminal-stopped" = "inactive-dead",
+) => {
   const child = Bun.spawn(
     [
       "bash",
@@ -254,6 +270,7 @@ const runHelper = async (subject: ReturnType<typeof fixture>, attemptLimit: numb
       subject.bus,
       String(attemptLimit),
       "0.1s",
+      managerTerminal,
     ],
     {
       env: {
@@ -301,6 +318,8 @@ describe("shipped systemd final-logout readiness evidence", () => {
         managerClassification: "properties-returned",
         managerActiveState: "inactive",
         managerSubState: "dead",
+        managerTerminalClassification: "terminal-stopped-clean",
+        managerResultClassification: "not-required",
         managerJobPresent: false,
         managerCgroupPopulated: false,
         loginClassification: "user-absent",
@@ -345,9 +364,9 @@ describe("shipped systemd final-logout readiness evidence", () => {
       noServiceStartRepairOrLingerChange: true,
     });
     expect(readFileSync(subject.systemctlCalls, "utf8").trim().split("\n")).toEqual([
-      "show user@1234.service --property=ActiveState,SubState,Job,ControlGroup",
-      "show user@1234.service --property=ActiveState,SubState,Job,ControlGroup",
-      "show user@1234.service --property=ActiveState,SubState,Job,ControlGroup",
+      "show user@1234.service --property=ActiveState,SubState,Job,ControlGroup,Result,ExecMainCode,ExecMainStatus",
+      "show user@1234.service --property=ActiveState,SubState,Job,ControlGroup,Result,ExecMainCode,ExecMainStatus",
+      "show user@1234.service --property=ActiveState,SubState,Job,ControlGroup,Result,ExecMainCode,ExecMainStatus",
     ]);
     expect(readFileSync(subject.loginctlCalls, "utf8").trim().split("\n")).toEqual([
       "show-user kojo-shipped-evidence --property=Sessions --property=Linger --property=State",
@@ -396,7 +415,10 @@ describe("shipped systemd final-logout readiness evidence", () => {
     {
       name: "deactivating manager",
       options: { activeState: "deactivating" },
-      changed: { managerActiveState: "deactivating" },
+      changed: {
+        managerActiveState: "deactivating",
+        managerTerminalClassification: "not-terminal-stopped",
+      },
     },
     {
       name: "non-dead manager substate",
@@ -438,7 +460,7 @@ describe("shipped systemd final-logout readiness evidence", () => {
   ])("rejects a $name as the only incomplete logout signal", async ({ options, changed }) => {
     const subject = predicateFixture(options);
 
-    expect(await runHelper(subject, 1)).toBe(1);
+    expect(await runHelper(subject, 1, "terminal-stopped")).toBe(1);
 
     const final = JSON.parse(readFileSync(subject.final, "utf8"));
     expect(final).toMatchObject({
@@ -470,7 +492,7 @@ describe("shipped systemd final-logout readiness evidence", () => {
       accepted: false,
     });
     expect(readFileSync(subject.systemctlCalls, "utf8").trim()).toBe(
-      "show user@1234.service --property=ActiveState,SubState,Job,ControlGroup",
+      "show user@1234.service --property=ActiveState,SubState,Job,ControlGroup,Result,ExecMainCode,ExecMainStatus",
     );
     expect(readFileSync(subject.loginctlCalls, "utf8").trim()).toBe(
       "show-user kojo-shipped-evidence --property=Sessions --property=Linger --property=State",
@@ -510,7 +532,7 @@ describe("shipped systemd final-logout readiness evidence", () => {
   ])("fails closed on a $name", async ({ options, changed }) => {
     const subject = predicateFixture(options);
 
-    expect(await runHelper(subject, 1)).toBe(1);
+    expect(await runHelper(subject, 1, "terminal-stopped")).toBe(1);
 
     expect(JSON.parse(readFileSync(subject.final, "utf8"))).toMatchObject({
       attemptLimit: 1,
@@ -532,7 +554,7 @@ describe("shipped systemd final-logout readiness evidence", () => {
   it("accepts a fully removed user-manager cgroup", async () => {
     const subject = predicateFixture({ cgroup: "absent" });
 
-    expect(await runHelper(subject, 1)).toBe(0);
+    expect(await runHelper(subject, 1, "terminal-stopped")).toBe(0);
 
     expect(JSON.parse(readFileSync(subject.final, "utf8"))).toMatchObject({
       attemptLimit: 1,
@@ -550,6 +572,126 @@ describe("shipped systemd final-logout readiness evidence", () => {
         busPresent: false,
       },
       accepted: true,
+    });
+  });
+
+  it("accepts an exact clean terminal manager in terminal-stopped mode", async () => {
+    const subject = predicateFixture({ cgroup: "absent" });
+
+    expect(await runHelper(subject, 1, "terminal-stopped")).toBe(0);
+
+    expect(JSON.parse(readFileSync(subject.final, "utf8"))).toMatchObject({
+      expected: {
+        classification: "terminal-stopped-within-bound",
+        managerTerminalClassification: "terminal-stopped",
+        managerResultClassification: "not-required-or-unsuccessful-manager-exit-recorded",
+      },
+      actual: {
+        classification: "logout-complete-within-bound",
+        managerActiveState: "inactive",
+        managerSubState: "dead",
+        managerTerminalClassification: "terminal-stopped-clean",
+        managerResultClassification: "not-required",
+      },
+      accepted: true,
+    });
+  });
+
+  it("accepts an exact failed terminal manager in terminal-stopped mode", async () => {
+    const subject = predicateFixture({
+      activeState: "failed",
+      subState: "failed",
+      cgroup: "absent",
+    });
+
+    expect(await runHelper(subject, 1, "terminal-stopped")).toBe(0);
+
+    expect(JSON.parse(readFileSync(subject.final, "utf8"))).toMatchObject({
+      expected: {
+        classification: "terminal-stopped-within-bound",
+        managerTerminalClassification: "terminal-stopped",
+        managerResultClassification: "not-required-or-unsuccessful-manager-exit-recorded",
+      },
+      actual: {
+        classification: "logout-complete-with-manager-failure-within-bound",
+        managerActiveState: "failed",
+        managerSubState: "failed",
+        managerResult: "timeout",
+        managerExecMainCode: "killed",
+        managerExecMainStatus: "9",
+        managerTerminalClassification: "terminal-stopped-with-failure",
+        managerResultClassification: "unsuccessful-manager-exit-recorded",
+        managerJobPresent: false,
+        managerCgroupPopulated: false,
+        managerCgroupState: "absent",
+        loginUserPresent: false,
+        endpointPresent: false,
+        busPresent: false,
+      },
+      noServiceStartRepairOrLingerChange: true,
+      accepted: true,
+    });
+  });
+
+  it.each([
+    {
+      name: "successful Result",
+      options: { result: "success" },
+    },
+    {
+      name: "missing ExecMainCode",
+      options: { execMainCode: "" },
+    },
+    {
+      name: "missing ExecMainStatus",
+      options: { execMainStatus: "" },
+    },
+  ])("rejects failed/failed without a $name", async ({ options }) => {
+    const subject = predicateFixture({
+      activeState: "failed",
+      subState: "failed",
+      cgroup: "absent",
+      ...options,
+    });
+
+    expect(await runHelper(subject, 1, "terminal-stopped")).toBe(1);
+
+    expect(JSON.parse(readFileSync(subject.final, "utf8"))).toMatchObject({
+      expected: {
+        managerTerminalClassification: "terminal-stopped",
+        managerResultClassification: "not-required-or-unsuccessful-manager-exit-recorded",
+      },
+      actual: {
+        classification: "logout-not-complete-within-bound",
+        managerTerminalClassification: "terminal-stopped-with-failure",
+        managerResultClassification: "manager-failure-details-incomplete",
+      },
+      accepted: false,
+    });
+  });
+
+  it("keeps the shipped inactive/dead policy strict for a failed terminal manager", async () => {
+    const subject = predicateFixture({
+      activeState: "failed",
+      subState: "failed",
+      cgroup: "absent",
+    });
+
+    expect(await runHelper(subject, 1)).toBe(1);
+
+    expect(JSON.parse(readFileSync(subject.final, "utf8"))).toMatchObject({
+      expected: {
+        managerActiveState: "inactive",
+        managerSubState: "dead",
+        managerTerminalClassification: "terminal-stopped-clean",
+      },
+      actual: {
+        classification: "logout-not-complete-within-bound",
+        managerActiveState: "failed",
+        managerSubState: "failed",
+        managerTerminalClassification: "terminal-stopped-with-failure",
+      },
+      accepted: false,
     });
   });
 });

@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-observations=${1:?usage: systemd-shipped-logout-readiness.sh OBSERVATIONS FINAL STDERR USER UID ENDPOINT BUS LIMIT INTERVAL}
-final=${2:?usage: systemd-shipped-logout-readiness.sh OBSERVATIONS FINAL STDERR USER UID ENDPOINT BUS LIMIT INTERVAL}
-stderr_log=${3:?usage: systemd-shipped-logout-readiness.sh OBSERVATIONS FINAL STDERR USER UID ENDPOINT BUS LIMIT INTERVAL}
-evidence_user=${4:?usage: systemd-shipped-logout-readiness.sh OBSERVATIONS FINAL STDERR USER UID ENDPOINT BUS LIMIT INTERVAL}
-evidence_uid=${5:?usage: systemd-shipped-logout-readiness.sh OBSERVATIONS FINAL STDERR USER UID ENDPOINT BUS LIMIT INTERVAL}
-endpoint=${6:?usage: systemd-shipped-logout-readiness.sh OBSERVATIONS FINAL STDERR USER UID ENDPOINT BUS LIMIT INTERVAL}
-bus=${7:?usage: systemd-shipped-logout-readiness.sh OBSERVATIONS FINAL STDERR USER UID ENDPOINT BUS LIMIT INTERVAL}
-attempt_limit=${8:?usage: systemd-shipped-logout-readiness.sh OBSERVATIONS FINAL STDERR USER UID ENDPOINT BUS LIMIT INTERVAL}
-interval=${9:?usage: systemd-shipped-logout-readiness.sh OBSERVATIONS FINAL STDERR USER UID ENDPOINT BUS LIMIT INTERVAL}
+usage='usage: systemd-shipped-logout-readiness.sh OBSERVATIONS FINAL STDERR USER UID ENDPOINT BUS LIMIT INTERVAL [MANAGER_TERMINAL]'
+observations=${1:?$usage}
+final=${2:?$usage}
+stderr_log=${3:?$usage}
+evidence_user=${4:?$usage}
+evidence_uid=${5:?$usage}
+endpoint=${6:?$usage}
+bus=${7:?$usage}
+attempt_limit=${8:?$usage}
+interval=${9:?$usage}
+expected_manager_terminal=${10:-inactive-dead}
 systemctl_command=${KOJO_EVIDENCE_SYSTEMCTL_COMMAND:-/usr/bin/systemctl}
 loginctl_command=${KOJO_EVIDENCE_LOGINCTL_COMMAND:-/usr/bin/loginctl}
 sleep_command=${KOJO_EVIDENCE_SLEEP_COMMAND:-sleep}
@@ -21,6 +23,36 @@ if [[ ! $attempt_limit =~ ^[1-9][0-9]*$ ]]; then
   echo "The systemd final-logout readiness attempt limit is invalid." >&2
   exit 1
 fi
+case "$expected_manager_terminal" in
+  inactive-dead)
+    expected_manager_active_state=inactive
+    expected_manager_sub_state=dead
+    expected_manager_terminal_classification=terminal-stopped-clean
+    expected_manager_result_classification=not-required
+    expected_observation_classification=logout-complete
+    expected_final_classification=logout-complete-within-bound
+    ;;
+  failed-failed)
+    expected_manager_active_state=failed
+    expected_manager_sub_state=failed
+    expected_manager_terminal_classification=terminal-stopped-with-failure
+    expected_manager_result_classification=unsuccessful-manager-exit-recorded
+    expected_observation_classification=logout-complete-with-manager-failure
+    expected_final_classification=logout-complete-with-manager-failure-within-bound
+    ;;
+  terminal-stopped)
+    expected_manager_active_state=inactive-or-failed
+    expected_manager_sub_state=dead-or-failed
+    expected_manager_terminal_classification=terminal-stopped
+    expected_manager_result_classification=not-required-or-unsuccessful-manager-exit-recorded
+    expected_observation_classification=terminal-stopped
+    expected_final_classification=terminal-stopped-within-bound
+    ;;
+  *)
+    echo "The expected systemd manager terminal state is invalid." >&2
+    exit 1
+    ;;
+esac
 
 : >"$observations"
 : >"$stderr_log"
@@ -33,6 +65,11 @@ manager_sub_state=unknown
 manager_job=unknown
 manager_job_present=true
 manager_control_group=
+manager_result=unknown
+manager_exec_main_code=unknown
+manager_exec_main_status=unknown
+manager_terminal_classification=not-terminal-stopped
+manager_result_classification=not-required
 manager_cgroup_populated_json=null
 manager_cgroup_state=unknown
 login_status=1
@@ -53,7 +90,8 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
   : >"$login_error_file"
   manager_properties=$(LC_ALL=C "$timeout_command" --signal=TERM --kill-after=1s "$probe_timeout" \
     "$systemctl_command" show "user@$evidence_uid.service" \
-    --property=ActiveState,SubState,Job,ControlGroup 2>"$manager_error_file")
+    --property=ActiveState,SubState,Job,ControlGroup,Result,ExecMainCode,ExecMainStatus \
+    2>"$manager_error_file")
   manager_status=$?
   login_properties=$(LC_ALL=C "$timeout_command" --signal=TERM --kill-after=1s "$probe_timeout" \
     "$loginctl_command" show-user "$evidence_user" \
@@ -79,12 +117,18 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
   manager_job=unknown
   manager_job_present=true
   manager_control_group=
+  manager_result=
+  manager_exec_main_code=
+  manager_exec_main_status=
   while IFS='=' read -r property value; do
     case "$property" in
       ActiveState) manager_active_state=$value ;;
       SubState) manager_sub_state=$value ;;
       Job) manager_job=$value ;;
       ControlGroup) manager_control_group=$value ;;
+      Result) manager_result=$value ;;
+      ExecMainCode) manager_exec_main_code=$value ;;
+      ExecMainStatus) manager_exec_main_status=$value ;;
     esac
   done <<<"$manager_properties"
   if [[ -z $manager_job || $manager_job == 0 ]]; then manager_job_present=false; fi
@@ -139,17 +183,55 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
   if [[ -e $bus ]]; then bus_present=true; fi
 
   actual_classification=logout-incomplete
-  if [[ $manager_status -eq 0 && $manager_active_state == inactive && \
-    $manager_sub_state == dead && $manager_job_present == false && \
+  manager_terminal_classification=not-terminal-stopped
+  manager_result_classification=not-required
+  if [[ $manager_active_state == inactive && $manager_sub_state == dead ]]; then
+    manager_terminal_classification=terminal-stopped-clean
+  elif [[ $manager_active_state == failed && $manager_sub_state == failed ]]; then
+    manager_terminal_classification=terminal-stopped-with-failure
+    manager_result_classification=manager-failure-details-incomplete
+    if [[ -n $manager_result && $manager_result != success && \
+      -n $manager_exec_main_code && -n $manager_exec_main_status ]]; then
+      manager_result_classification=unsuccessful-manager-exit-recorded
+    fi
+  fi
+  manager_terminal_accepted=false
+  if [[ $expected_manager_terminal == inactive-dead && \
+    $manager_terminal_classification == terminal-stopped-clean ]]; then
+    manager_terminal_accepted=true
+  elif [[ $expected_manager_terminal == failed-failed && \
+    $manager_terminal_classification == terminal-stopped-with-failure && \
+    $manager_result_classification == unsuccessful-manager-exit-recorded ]]; then
+    manager_terminal_accepted=true
+  elif [[ $expected_manager_terminal == terminal-stopped && \
+    ($manager_terminal_classification == terminal-stopped-clean || \
+      ($manager_terminal_classification == terminal-stopped-with-failure && \
+        $manager_result_classification == unsuccessful-manager-exit-recorded)) ]]; then
+    manager_terminal_accepted=true
+  fi
+  if [[ $manager_status -eq 0 && $manager_terminal_accepted == true && \
+    $manager_job_present == false && \
     $manager_cgroup_populated_json == false && $login_user_present_json == false && \
     $endpoint_present == false && $bus_present == false ]]; then
     logout_complete=true
-    actual_classification=logout-complete
+    if [[ $expected_manager_terminal == terminal-stopped ]]; then
+      actual_classification=logout-complete
+      if [[ $manager_terminal_classification == terminal-stopped-with-failure ]]; then
+        actual_classification=logout-complete-with-manager-failure
+      fi
+    else
+      actual_classification=$expected_observation_classification
+    fi
   fi
 
   jq -cn \
     --argjson observation "$observation" \
     --arg actualClassification "$actual_classification" \
+    --arg expectedClassification "$expected_observation_classification" \
+    --arg expectedManagerActiveState "$expected_manager_active_state" \
+    --arg expectedManagerSubState "$expected_manager_sub_state" \
+    --arg expectedManagerTerminalClassification "$expected_manager_terminal_classification" \
+    --arg expectedManagerResultClassification "$expected_manager_result_classification" \
     --argjson managerStatus "$manager_status" \
     --arg managerClassification "$manager_classification" \
     --arg managerActiveState "$manager_active_state" \
@@ -157,6 +239,11 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
     --arg managerJob "$manager_job" \
     --argjson managerJobPresent "$manager_job_present" \
     --arg managerControlGroup "$manager_control_group" \
+    --arg managerResult "$manager_result" \
+    --arg managerExecMainCode "$manager_exec_main_code" \
+    --arg managerExecMainStatus "$manager_exec_main_status" \
+    --arg managerTerminalClassification "$manager_terminal_classification" \
+    --arg managerResultClassification "$manager_result_classification" \
     --argjson managerCgroupPopulated "$manager_cgroup_populated_json" \
     --arg managerCgroupState "$manager_cgroup_state" \
     --argjson loginStatus "$login_status" \
@@ -170,11 +257,13 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
     '{
       observation: $observation,
       expected: {
-        classification: "logout-complete",
+        classification: $expectedClassification,
         managerStatus: 0,
         managerClassification: "properties-returned",
-        managerActiveState: "inactive",
-        managerSubState: "dead",
+        managerActiveState: $expectedManagerActiveState,
+        managerSubState: $expectedManagerSubState,
+        managerTerminalClassification: $expectedManagerTerminalClassification,
+        managerResultClassification: $expectedManagerResultClassification,
         managerJobPresent: false,
         managerCgroupPopulated: false,
         loginClassification: "user-absent",
@@ -191,6 +280,11 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
         managerJob: $managerJob,
         managerJobPresent: $managerJobPresent,
         managerControlGroup: $managerControlGroup,
+        managerResult: $managerResult,
+        managerExecMainCode: $managerExecMainCode,
+        managerExecMainStatus: $managerExecMainStatus,
+        managerTerminalClassification: $managerTerminalClassification,
+        managerResultClassification: $managerResultClassification,
         managerCgroupPopulated: $managerCgroupPopulated,
         managerCgroupState: $managerCgroupState,
         loginStatus: $loginStatus,
@@ -208,13 +302,26 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
 done
 
 final_actual_classification=logout-not-complete-within-bound
-if [[ $logout_complete == true ]]; then final_actual_classification=logout-complete-within-bound; fi
+if [[ $logout_complete == true ]]; then
+  final_actual_classification=$expected_final_classification
+  if [[ $expected_manager_terminal == terminal-stopped ]]; then
+    final_actual_classification=logout-complete-within-bound
+    if [[ $manager_terminal_classification == terminal-stopped-with-failure ]]; then
+      final_actual_classification=logout-complete-with-manager-failure-within-bound
+    fi
+  fi
+fi
 jq -n \
   --argjson attemptLimit "$attempt_limit" \
   --arg interval "$interval" \
   --arg probeTimeout "$probe_timeout" \
   --argjson observationCount "$observation_count" \
   --arg actualClassification "$final_actual_classification" \
+  --arg expectedClassification "$expected_final_classification" \
+  --arg expectedManagerActiveState "$expected_manager_active_state" \
+  --arg expectedManagerSubState "$expected_manager_sub_state" \
+  --arg expectedManagerTerminalClassification "$expected_manager_terminal_classification" \
+  --arg expectedManagerResultClassification "$expected_manager_result_classification" \
   --argjson managerStatus "$manager_status" \
   --arg managerClassification "$manager_classification" \
   --arg managerActiveState "$manager_active_state" \
@@ -222,6 +329,11 @@ jq -n \
   --arg managerJob "$manager_job" \
   --argjson managerJobPresent "$manager_job_present" \
   --arg managerControlGroup "$manager_control_group" \
+  --arg managerResult "$manager_result" \
+  --arg managerExecMainCode "$manager_exec_main_code" \
+  --arg managerExecMainStatus "$manager_exec_main_status" \
+  --arg managerTerminalClassification "$manager_terminal_classification" \
+  --arg managerResultClassification "$manager_result_classification" \
   --argjson managerCgroupPopulated "$manager_cgroup_populated_json" \
   --arg managerCgroupState "$manager_cgroup_state" \
   --argjson loginStatus "$login_status" \
@@ -241,9 +353,11 @@ jq -n \
     probeTimeout: $probeTimeout,
     observationCount: $observationCount,
     expected: {
-      classification: "logout-complete-within-bound",
-      managerActiveState: "inactive",
-      managerSubState: "dead",
+      classification: $expectedClassification,
+      managerActiveState: $expectedManagerActiveState,
+      managerSubState: $expectedManagerSubState,
+      managerTerminalClassification: $expectedManagerTerminalClassification,
+      managerResultClassification: $expectedManagerResultClassification,
       managerJobPresent: false,
       managerCgroupPopulated: false,
       loginClassification: "user-absent",
@@ -260,6 +374,11 @@ jq -n \
       managerJob: $managerJob,
       managerJobPresent: $managerJobPresent,
       managerControlGroup: $managerControlGroup,
+      managerResult: $managerResult,
+      managerExecMainCode: $managerExecMainCode,
+      managerExecMainStatus: $managerExecMainStatus,
+      managerTerminalClassification: $managerTerminalClassification,
+      managerResultClassification: $managerResultClassification,
       managerCgroupPopulated: $managerCgroupPopulated,
       managerCgroupState: $managerCgroupState,
       loginStatus: $loginStatus,

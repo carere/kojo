@@ -9,6 +9,7 @@ fixture=packages/kojo/tests/support/daemon/systemdLogoutFixture.ts
 unit=kojo-native-logout-evidence.service
 key=/tmp/kojo-native-evidence-key
 policy=/etc/polkit-1/rules.d/49-kojo-native-evidence.rules
+login_readiness_script=$workspace/.github/scripts/systemd-shipped-login-readiness.sh
 login_state_evidence_script=$workspace/.github/scripts/systemd-shipped-login-state-evidence.sh
 logout_readiness_script=$workspace/.github/scripts/systemd-shipped-logout-readiness.sh
 
@@ -120,11 +121,26 @@ bash "$logout_readiness_script" \
   "$endpoint" \
   "$bus" \
   90 \
-  1s
+  1s \
+  terminal-stopped
 jq -e '
   .accepted == true and
-  .actual.managerActiveState == "inactive" and
-  .actual.managerSubState == "dead" and
+  .expected.classification == "terminal-stopped-within-bound" and
+  .expected.managerTerminalClassification == "terminal-stopped" and
+  ((.actual.managerTerminalClassification == "terminal-stopped-clean" and
+    .actual.classification == "logout-complete-within-bound" and
+    .actual.managerActiveState == "inactive" and
+    .actual.managerSubState == "dead" and
+    .actual.managerResultClassification == "not-required") or
+   (.actual.managerTerminalClassification == "terminal-stopped-with-failure" and
+    .actual.classification == "logout-complete-with-manager-failure-within-bound" and
+    .actual.managerActiveState == "failed" and
+    .actual.managerSubState == "failed" and
+    .actual.managerResultClassification == "unsuccessful-manager-exit-recorded" and
+    .actual.managerResult != "success")) and
+  (.actual.managerResult | length) > 0 and
+  (.actual.managerExecMainCode | length) > 0 and
+  (.actual.managerExecMainStatus | length) > 0 and
   .actual.managerJobPresent == false and
   .actual.managerCgroupPopulated == false and
   .actual.loginUserPresent == false and
@@ -135,16 +151,30 @@ jq -e '
 ! kill -0 "$no_linger_child" 2>/dev/null
 {
   echo "Linger=no"
-  echo "UserManager=stopped"
+  echo "Daemon=stopped"
   echo "Endpoint=removed"
   echo "ChildProcessGroup=stopped"
   echo "LiveLoginStateEvidence=no-linger-live-login-state.json"
   echo "FinalLogoutEvidence=no-linger-logout-readiness-final.json"
+  jq -r '
+    "UserManager=\(.actual.managerTerminalClassification)",
+    "UserManagerState=\(.actual.managerActiveState)/\(.actual.managerSubState)",
+    "UserManagerResult=\(.actual.managerResult)",
+    "UserManagerExecMain=\(.actual.managerExecMainCode)/\(.actual.managerExecMainStatus)",
+    "UserManagerJob=\(.actual.managerJob)",
+    "UserManagerControlGroup=\(.actual.managerControlGroup)"
+  ' "$evidence_directory/no-linger-logout-readiness-final.json"
 } >"$evidence_directory/final-logout-without-linger.log"
 
 ssh "${ssh_arguments[@]}" \
-  "$remote_prefix && bun '$fixture' install >'$evidence_directory/linger-install.json' && bun packages/kojo/src/main.ts daemon keep-running-after-logout >'$evidence_directory/keep-running-after-logout.log' && bash '$login_state_evidence_script' '$evidence_directory/linger-live-login-state.json' '$evidence_directory/linger-live-login-state.stderr.log' '$evidence_user' '$evidence_uid' yes present 1 0s && bun '$fixture' inspect >'$evidence_directory/linger-inspect.json'"
+  "$remote_prefix && bash '$login_readiness_script' '$evidence_directory/post-terminal-manager-login-readiness-observations.jsonl' '$evidence_directory/post-terminal-manager-login-readiness-final.json' '$evidence_directory/post-terminal-manager-login-readiness.stderr.log' 20 0.25s && bun '$fixture' install >'$evidence_directory/linger-install.json' && bun packages/kojo/src/main.ts daemon keep-running-after-logout >'$evidence_directory/keep-running-after-logout.log' && bash '$login_state_evidence_script' '$evidence_directory/linger-live-login-state.json' '$evidence_directory/linger-live-login-state.stderr.log' '$evidence_user' '$evidence_uid' yes present 1 0s && bun '$fixture' inspect >'$evidence_directory/linger-inspect.json'"
 linger_child=$(jq -er .childProcessId "$evidence_directory/linger-inspect.json")
+jq -e '
+  .accepted == true and
+  .actual.classification == "manager-ready-within-bound" and
+  .actual.managerReady == true and
+  .noServiceStartRepairOrLingerChange == true
+' "$evidence_directory/post-terminal-manager-login-readiness-final.json" >/dev/null
 assert_login_state_receipt "$evidence_directory/linger-live-login-state.json" yes present
 
 grep -F "This changes linger for the complete OS user. All user services can then run after logout." \
@@ -174,6 +204,7 @@ runuser -u "$evidence_user" -- env \
   echo "Daemon=running"
   echo "Endpoint=present"
   echo "ChildProcessGroup=running"
+  echo "ManagerRecoveryEvidence=post-terminal-manager-login-readiness-final.json"
   echo "LiveLoginStateEvidence=linger-live-login-state.json"
   echo "FinalLoginStateEvidence=linger-final-login-state.json"
 } >"$evidence_directory/final-logout-with-linger.log"

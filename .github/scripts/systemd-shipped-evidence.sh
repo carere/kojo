@@ -150,11 +150,26 @@ bash "$logout_readiness_script" \
   "$endpoint" \
   "$runtime_directory/bus" \
   120 \
-  1s
+  1s \
+  terminal-stopped
 jq -e '
   .accepted == true and
-  .actual.managerActiveState == "inactive" and
-  .actual.managerSubState == "dead" and
+  .expected.classification == "terminal-stopped-within-bound" and
+  .expected.managerTerminalClassification == "terminal-stopped" and
+  ((.actual.managerTerminalClassification == "terminal-stopped-clean" and
+    .actual.classification == "logout-complete-within-bound" and
+    .actual.managerActiveState == "inactive" and
+    .actual.managerSubState == "dead" and
+    .actual.managerResultClassification == "not-required") or
+   (.actual.managerTerminalClassification == "terminal-stopped-with-failure" and
+    .actual.classification == "logout-complete-with-manager-failure-within-bound" and
+    .actual.managerActiveState == "failed" and
+    .actual.managerSubState == "failed" and
+    .actual.managerResultClassification == "unsuccessful-manager-exit-recorded" and
+    .actual.managerResult != "success")) and
+  (.actual.managerResult | length) > 0 and
+  (.actual.managerExecMainCode | length) > 0 and
+  (.actual.managerExecMainStatus | length) > 0 and
   .actual.managerJobPresent == false and
   .actual.managerCgroupPopulated == false and
   .actual.loginUserPresent == false and
@@ -164,12 +179,14 @@ jq -e '
 ' "$evidence_directory/logout-readiness-final.json" >/dev/null
 {
   echo "Linger=no"
-  echo "UserManager=stopped"
   echo "Daemon=stopped"
   echo "Endpoint=removed"
   echo "ServiceCgroup=empty"
   jq -r '
+    "UserManager=\(.actual.managerTerminalClassification)",
     "UserManagerState=\(.actual.managerActiveState)/\(.actual.managerSubState)",
+    "UserManagerResult=\(.actual.managerResult)",
+    "UserManagerExecMain=\(.actual.managerExecMainCode)/\(.actual.managerExecMainStatus)",
     "UserManagerJob=\(.actual.managerJob)",
     "UserManagerControlGroup=\(.actual.managerControlGroup)",
     "LoginUserPresent=\(.actual.loginUserPresent)",
@@ -238,6 +255,7 @@ fi
   echo "Endpoint=present"
   echo "CrossUserEndpointRead=refused"
   echo "CrossUserSocketConnect=refused"
+  echo "ManagerRecoveryEvidence=login-readiness-final.json"
 } >"$evidence_directory/final-logout-with-linger.log"
 
 diagnostic_step=managed-removal
@@ -334,7 +352,7 @@ jq -n \
       { name: "authenticated-browser", expected: "one authenticated browser inspects the actual encoded wire and renders persisted records and Artifact", actual: "passed", evidence: "browser-tests.log" },
       { name: "global-tool-independence", expected: "managed status and repair work after candidate global Kojo and Bun removal", actual: "passed", evidence: "global-removal.log; managed-status-after-global-removal.log; managed-repair-after-global-removal.log" },
       { name: "replacement-and-access", expected: "the Type=exec control group contains the replacement MainPID; old process and browser authority are revoked; another OS user is refused", actual: "passed", evidence: "cgroup-before-replacement.log; replacement-access.log; final-logout-with-linger.log" },
-      { name: "login-lifetime", expected: "final logout stops the Daemon without linger and preserves it only after explicit authorized linger", actual: "passed", evidence: "pre-logout-login-state.json; pre-logout-login-state.stderr.log; logout-readiness-observations.jsonl; logout-readiness-final.json; logout-readiness.stderr.log; final-logout-without-linger.log; login-readiness-observations.jsonl; login-readiness-final.json; login-readiness.stderr.log; post-refusal-login-state.json; post-refusal-login-state.stderr.log; keep-running-refusal.log; keep-running-after-logout.log; authorized-live-login-state.json; authorized-live-login-state.stderr.log; authorized-final-login-state.json; authorized-final-login-state.stderr.log; final-logout-with-linger.log" },
+      { name: "login-lifetime", expected: "final logout reaches an exact terminal stopped manager state without linger; the next PAM login restores manager readiness without root reset and preserves the Daemon only after explicit authorized linger", actual: "passed", evidence: "pre-logout-login-state.json; pre-logout-login-state.stderr.log; logout-readiness-observations.jsonl; logout-readiness-final.json; logout-readiness.stderr.log; final-logout-without-linger.log; login-readiness-observations.jsonl; login-readiness-final.json; login-readiness.stderr.log; post-refusal-login-state.json; post-refusal-login-state.stderr.log; keep-running-refusal.log; keep-running-after-logout.log; authorized-live-login-state.json; authorized-live-login-state.stderr.log; authorized-final-login-state.json; authorized-final-login-state.stderr.log; final-logout-with-linger.log" },
       { name: "removal-preserves-linger", expected: "shipped removal never disables user linger", actual: "passed", evidence: "managed-removal.log; removal-login-state.json; removal-login-state.stderr.log; removal-preserves-linger.log" }
     ],
     noHiddenRepairs: {
