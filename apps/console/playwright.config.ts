@@ -15,6 +15,10 @@ export default defineConfig({
   ],
   fullyParallel: true,
   reporter: [["list"]],
+  // The two catalogue flows each completed near 23 seconds on a two-core GitHub runner. Keep the
+  // assertion timeout strict, but do not let the 30-second whole-test budget interrupt a final
+  // navigation or action after the Daemon has already returned every earlier assertion.
+  timeout: 60_000,
   // Every assertion here is about a page rendered from a frozen clock over stated records, so a
   // retry could only ever hide a real flake. Failures are meant to be reproducible.
   retries: 0,

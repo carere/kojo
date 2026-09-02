@@ -178,7 +178,7 @@ printf '%s\n' "Authenticated launch grant issued; the secret was not retained." 
   KOJO_SHIPPED_SANDBOX_NAME="$sandbox_name" \
   KOJO_SHIPPED_SANDBOX_ACQUISITION="$sandbox_acquisition" \
   PLAYWRIGHT_BROWSERS_PATH=/opt/kojo-playwright \
-  "$candidate_bun" ../../node_modules/@playwright/test/cli.js test \
+  "$candidate_bun" ./node_modules/@playwright/test/cli.js test \
     --config playwright.release.config.ts) \
   >"$evidence_directory/browser-tests.log" 2>&1
 grep -E "1 passed" "$evidence_directory/browser-tests.log" >/dev/null

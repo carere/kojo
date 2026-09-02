@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 workspace=${1:?usage: systemd-shipped-evidence.sh WORKSPACE EVIDENCE_DIRECTORY PACKAGE_DIRECTORY REVISION}
 evidence_directory=${2:?usage: systemd-shipped-evidence.sh WORKSPACE EVIDENCE_DIRECTORY PACKAGE_DIRECTORY REVISION}
@@ -10,6 +10,61 @@ evidence_user=kojo-shipped-evidence
 key=/tmp/kojo-shipped-evidence-key
 policy=/etc/polkit-1/rules.d/49-kojo-shipped-evidence.rules
 user_script=.github/scripts/systemd-shipped-user-evidence.sh
+playwright_cli=$workspace/apps/console/node_modules/@playwright/test/cli.js
+diagnostic=$evidence_directory/controller-diagnostic.log
+diagnostic_step=preflight
+diagnostic_line=
+diagnostic_command=
+
+mkdir -p "$evidence_directory"
+chmod 0777 "$evidence_directory"
+
+write_diagnostic() {
+  local status=$1
+  local exit_code=$2
+  local line=${3:-}
+  local command=${4:-}
+  {
+    printf 'Status=%s\n' "$status"
+    printf 'Step=%s\n' "$diagnostic_step"
+    printf 'ExitCode=%s\n' "$exit_code"
+    printf 'Line=%s\n' "$line"
+    printf 'Command=%q\n' "$command"
+    printf 'Revision=%s\n' "$revision"
+  } >"$diagnostic"
+}
+
+record_failure() {
+  local exit_code=$1
+  diagnostic_line=$2
+  diagnostic_command=$3
+  return "$exit_code"
+}
+
+cleanup() {
+  loginctl disable-linger "$evidence_user" >/dev/null 2>&1 || true
+  loginctl terminate-user "$evidence_user" >/dev/null 2>&1 || true
+  userdel --remove "$evidence_user" >/dev/null 2>&1 || true
+  rm -f "$key" "$key.pub" "$policy"
+  chown -R "$workspace_owner" "$workspace" >/dev/null 2>&1 || true
+}
+
+finish() {
+  local exit_code=$?
+  trap - ERR EXIT
+  set +e
+  if [[ $exit_code -eq 0 ]]; then
+    write_diagnostic passed 0
+  else
+    write_diagnostic failed "$exit_code" "$diagnostic_line" "$diagnostic_command"
+  fi
+  cleanup
+  exit "$exit_code"
+}
+
+write_diagnostic running 0
+trap 'record_failure "$?" "$LINENO" "$BASH_COMMAND"' ERR
+trap finish EXIT
 
 if [[ $(id -u) -ne 0 ]]; then
   echo "This controller must run in a separate root control session." >&2
@@ -20,17 +75,7 @@ if id "$evidence_user" >/dev/null 2>&1; then
   exit 1
 fi
 
-cleanup() {
-  loginctl disable-linger "$evidence_user" >/dev/null 2>&1 || true
-  loginctl terminate-user "$evidence_user" >/dev/null 2>&1 || true
-  userdel --remove "$evidence_user" >/dev/null 2>&1 || true
-  rm -f "$key" "$key.pub" "$policy"
-  chown -R "$workspace_owner" "$workspace" >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
-
-mkdir -p "$evidence_directory"
-chmod 0777 "$evidence_directory"
+diagnostic_step=isolated-user-setup
 useradd --create-home --shell /bin/bash "$evidence_user"
 evidence_uid=$(id -u "$evidence_user")
 evidence_home=$(getent passwd "$evidence_user" | cut -d: -f6)
@@ -44,8 +89,10 @@ install -d -m 0700 -o "$evidence_user" -g "$evidence_user" "$evidence_home/.ssh"
 ssh-keygen -q -t ed25519 -N "" -f "$key"
 install -m 0600 -o "$evidence_user" -g "$evidence_user" "$key.pub" \
   "$evidence_home/.ssh/authorized_keys"
+diagnostic_step=browser-install
+test -f "$playwright_cli"
 PLAYWRIGHT_BROWSERS_PATH=/opt/kojo-playwright \
-  bun "$workspace/node_modules/@playwright/test/cli.js" install --with-deps chromium
+  bun "$playwright_cli" install --with-deps chromium
 chmod -R a+rX /opt/kojo-playwright
 systemctl start ssh
 /usr/sbin/sshd -T | grep -Fx "usepam yes" >/dev/null
@@ -61,11 +108,13 @@ ssh_arguments=(
 )
 remote_prefix="cd '$workspace' && export PATH=/usr/local/bin:/usr/bin:/bin CI=1 NO_COLOR=1 HOME='$evidence_home' XDG_RUNTIME_DIR='$runtime_directory' XDG_CONFIG_HOME='$evidence_home/.config' XDG_DATA_HOME='$evidence_home/.local/share' XDG_STATE_HOME='$evidence_home/.local/state' XDG_CACHE_HOME='$evidence_home/.cache' DBUS_SESSION_BUS_ADDRESS='unix:path=$runtime_directory/bus'"
 
+diagnostic_step=isolated-user-flow
 ssh "${ssh_arguments[@]}" \
   "$remote_prefix && id && stat -c 'RuntimeDirectory=%n Owner=%u Mode=%a' '$runtime_directory' && test -S '$runtime_directory/bus' && systemctl --user import-environment HOME XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_CACHE_HOME && systemctl --user show-environment && loginctl show-user '$evidence_user' --property=Sessions,Linger,State && bash '$user_script' '$workspace' '$evidence_directory' '$package_directory'" \
   >"$evidence_directory/user-flow.log" 2>"$evidence_directory/user-flow.stderr.log"
 
 [[ $(loginctl show-user "$evidence_user" --property=Linger --value) == no ]]
+diagnostic_step=no-linger-lifetime
 for _ in $(seq 1 120); do
   if ! systemctl is-active --quiet "user@$evidence_uid.service" && [[ ! -e $endpoint ]]; then
     no_linger_stopped=yes
@@ -83,6 +132,7 @@ done
 } >"$evidence_directory/final-logout-without-linger.log"
 
 managed_kojo=$evidence_home/.local/share/kojo/bin/kojo
+diagnostic_step=linger-authorization
 ssh "${ssh_arguments[@]}" \
   "$remote_prefix && PATH=/usr/bin:/bin '$managed_kojo' daemon start >'$evidence_directory/managed-start-after-login.log' && if PATH=/usr/bin:/bin '$managed_kojo' daemon keep-running-after-logout >'$evidence_directory/keep-running-refusal.log' 2>&1; then echo 'Linger unexpectedly changed without authority.' >&2; exit 90; fi"
 [[ $(loginctl show-user "$evidence_user" --property=Linger --value) == no ]]
@@ -131,8 +181,10 @@ fi
   echo "CrossUserSocketConnect=refused"
 } >"$evidence_directory/final-logout-with-linger.log"
 
+diagnostic_step=managed-removal
 ssh "${ssh_arguments[@]}" \
   "$remote_prefix && PATH=/usr/bin:/bin '$managed_kojo' daemon remove --timeout 60s >'$evidence_directory/managed-removal.log'"
+diagnostic_step=removal-verification
 [[ $(loginctl show-user "$evidence_user" --property=Linger --value) == yes ]]
 if runuser -u "$evidence_user" -- env \
   XDG_RUNTIME_DIR="$runtime_directory" \
@@ -175,6 +227,7 @@ echo "LingerAfterRemoval=yes" >"$evidence_directory/removal-preserves-linger.log
 } >"$evidence_directory/host-facts.log"
 sha256sum "$package_directory"/*.tgz >"$evidence_directory/package-sha256.log"
 
+diagnostic_step=evidence-manifest
 jq -n \
   --arg revision "$revision" \
   --arg os "$(. /etc/os-release && printf '%s' "$PRETTY_NAME")" \
@@ -220,3 +273,4 @@ jq -n \
       evidence: "factory-authoring.log records the only authored replacements before validation; no command changes the fixture in response to a failed check"
     }
   }' >"$evidence_directory/evidence.json"
+diagnostic_step=evidence-complete
