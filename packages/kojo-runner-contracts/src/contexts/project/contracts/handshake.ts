@@ -65,7 +65,9 @@ export const decodeHelloBody = (input: unknown): DecodeResult<HelloBody> => {
     "supportedProtocols",
   ]);
   if (!supportedProtocols.ok) return supportedProtocols;
-  const requiredFeatures = decodeStringArray(record.value.requiredFeatures, ["requiredFeatures"]);
+  const requiredFeatures = decodeStringArray(record.value.requiredFeatures, ["requiredFeatures"], {
+    unique: true,
+  });
   if (!requiredFeatures.ok) return requiredFeatures;
   return decodeSuccess({
     helloVersion: 1,
@@ -96,7 +98,7 @@ export const decodeWelcomeBody = (input: unknown): DecodeResult<WelcomeBody> => 
   if (record.value.selectedProtocol !== 1) {
     return decodeFailure(["selectedProtocol"], "Expected Runner protocol 1");
   }
-  const features = decodeStringArray(record.value.features, ["features"]);
+  const features = decodeStringArray(record.value.features, ["features"], { unique: true });
   if (!features.ok) return features;
   return decodeSuccess({
     welcomeVersion: 1,

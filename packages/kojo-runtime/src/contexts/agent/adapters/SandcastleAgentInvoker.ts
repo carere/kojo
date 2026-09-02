@@ -3,10 +3,12 @@ import { claudeCode } from "@ai-hero/sandcastle";
 import { Effect, Layer, Option } from "effect";
 import {
   inspectProviderState,
-  providerResourceEnvironment,
   recordProviderState,
-  resourceLeaseId,
 } from "../../project/adapters/ProviderResourceRegistry.ts";
+import {
+  providerResourceEnvironment,
+  resourceLeaseId,
+} from "../../project/models/ProviderResource.ts";
 import { ResourceLeaseClient } from "../../project/ports/ResourceLeaseClient.ts";
 import { Sandbox } from "../../sandbox/ports/Sandbox.ts";
 import { ArtifactPublisher } from "../../trace/ports/ArtifactPublisher.ts";

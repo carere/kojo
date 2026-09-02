@@ -27,6 +27,12 @@ import type {
 } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { problemOf } from "../../shared/services/api.ts";
+import {
+  daemonMutationsAllowed,
+  daemonReadsAllowed,
+  noteDaemonReadFailure,
+  noteDaemonReadSuccess,
+} from "./connectionState.ts";
 
 interface StoredSession {
   readonly credential: string;
@@ -35,6 +41,7 @@ interface StoredSession {
 }
 
 const storageKey = "kojo.browser-session.v1";
+const requestSignal = (): AbortSignal => AbortSignal.timeout(5_000);
 
 export class ConsoleAccessError extends Error {
   readonly code: "access-required" | "api-refused";
@@ -85,6 +92,7 @@ const compatibility = async (): Promise<BootstrapResponse> => {
   const response = await fetch("/_kojo/compat", {
     headers: { accept: "application/json" },
     cache: "no-store",
+    signal: requestSignal(),
   });
   if (!response.ok) throw new ConsoleAccessError("api-refused", "The Daemon API is unavailable.");
   return (await response.json()) as BootstrapResponse;
@@ -116,6 +124,7 @@ const currentAccess = (): Promise<StoredSession> => {
       headers: { accept: "application/json", "content-type": "application/json" },
       body: JSON.stringify(body),
       cache: "no-store",
+      signal: requestSignal(),
     });
     if (!response.ok) {
       throw new ConsoleAccessError("access-required", "Run `kojo ui` again to open this Console.");
@@ -139,24 +148,42 @@ const currentAccess = (): Promise<StoredSession> => {
 };
 
 const authorizedRead = async <A>(path: string): Promise<A> => {
+  if (!daemonReadsAllowed()) {
+    throw new ConsoleAccessError("api-refused", "Reconnect before you refresh a snapshot.");
+  }
   const session = await currentAccess();
-  const response = await fetch(path, {
-    headers: {
-      accept: "application/json",
-      authorization: `Bearer ${session.credential}`,
-    },
-    cache: "no-store",
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${session.credential}`,
+      },
+      cache: "no-store",
+      signal: requestSignal(),
+    });
+  } catch (cause) {
+    noteDaemonReadFailure(path);
+    throw cause;
+  }
   if (response.status === 401 || response.status === 403) {
     window.sessionStorage.removeItem(storageKey);
     access = undefined;
     throw new ConsoleAccessError("access-required", "Run `kojo ui` again to open this Console.");
   }
-  if (!response.ok) throw await problemOf(path, response);
-  return (await response.json()) as A;
+  if (!response.ok) {
+    if (response.status >= 500) noteDaemonReadFailure(path);
+    throw await problemOf(path, response);
+  }
+  const result = (await response.json()) as A;
+  noteDaemonReadSuccess(path);
+  return result;
 };
 
 const authorizedMutation = async <A>(path: string, body: unknown): Promise<A> => {
+  if (!daemonMutationsAllowed()) {
+    throw new ConsoleAccessError("api-refused", "Reconnect before you send a mutation.");
+  }
   const session = await currentAccess();
   const response = await fetch(path, {
     method: "POST",
@@ -167,6 +194,7 @@ const authorizedMutation = async <A>(path: string, body: unknown): Promise<A> =>
     },
     body: JSON.stringify(body),
     cache: "no-store",
+    signal: requestSignal(),
   });
   if (response.status === 401 || response.status === 403) {
     window.sessionStorage.removeItem(storageKey);
@@ -190,6 +218,20 @@ const authorizedMutation = async <A>(path: string, body: unknown): Promise<A> =>
 
 export const readDaemon = (): Promise<DaemonDocument> =>
   authorizedRead<DaemonDocument>("/api/v1/daemon");
+
+export const openDaemonNotifications = async (signal: AbortSignal): Promise<Response> => {
+  const session = await currentAccess();
+  const response = await fetch("/api/v1/notifications", {
+    headers: {
+      accept: "text/event-stream",
+      authorization: `Bearer ${session.credential}`,
+    },
+    cache: "no-store",
+    signal,
+  });
+  if (!response.ok) throw await problemOf("/api/v1/notifications", response);
+  return response;
+};
 
 export const readProjects = (): Promise<ProjectSnapshot> =>
   authorizedRead<ProjectSnapshot>("/api/v1/projects");
@@ -250,6 +292,7 @@ export const downloadPublishedArtifact = async (
     {
       headers: { authorization: `Bearer ${session.credential}` },
       cache: "no-store",
+      signal: requestSignal(),
     },
   );
   if (!response.ok) throw new ConsoleAccessError("api-refused", "The Artifact download failed.");

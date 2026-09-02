@@ -17,6 +17,19 @@ export interface LoadedTestEvidence {
   readonly namedSkips: ReadonlyArray<string>;
   readonly cacheHit: boolean;
   readonly log: string;
+  readonly tests: ReadonlyArray<TestObservation>;
+}
+
+export interface TestObservation {
+  readonly path: string;
+  readonly name: string;
+  readonly status: "failed" | "passed" | "skipped";
+}
+
+export interface RequiredObservation {
+  readonly tier: EvidenceTier;
+  readonly path: string;
+  readonly name: string;
 }
 
 export interface RequiredReleaseCheck {
@@ -26,6 +39,7 @@ export interface RequiredReleaseCheck {
   readonly testPath: string;
   readonly testName: string;
   readonly tiers: ReadonlyArray<EvidenceTier>;
+  readonly observations: ReadonlyArray<RequiredObservation>;
 }
 
 export interface CompleteEvidenceInput {
@@ -36,6 +50,8 @@ export interface CompleteEvidenceInput {
     readonly actual: "failed-as-expected";
     readonly check: string;
     readonly log: string;
+    readonly exitCode: number;
+    readonly diagnostic: string;
   };
 }
 
@@ -46,7 +62,51 @@ const check = (
   testPath: string,
   testName: string,
   tiers: ReadonlyArray<EvidenceTier>,
-): RequiredReleaseCheck => ({ checkId, stage, expected, testPath, testName, tiers });
+): RequiredReleaseCheck => {
+  const coreTier: EvidenceTier | undefined = testPath.startsWith("apps/console/tests/browser/")
+    ? "console-browser"
+    : testPath.startsWith("packages/kojo-runtime/tests/")
+      ? "contract-runtime"
+      : testPath.startsWith("packages/kojo/tests/unit/")
+        ? "kojo-unit"
+        : testPath.startsWith("packages/kojo/tests/integration/")
+          ? "kojo-integration"
+          : testPath.startsWith("packages/kojo/tests/host/")
+            ? "native-systemd"
+            : undefined;
+  const observations: ReadonlyArray<RequiredObservation> =
+    checkId === "RELEASE-01"
+      ? [
+          { tier: "shipped-systemd", path: "evidence.json", name: "printed-fresh-install" },
+          {
+            tier: "shipped-macos",
+            path: "RELEASE-01/evidence-manifest.json",
+            name: "fresh shipped install",
+          },
+        ]
+      : checkId === "RELEASE-02"
+        ? [
+            { tier: "shipped-systemd", path: "evidence.json", name: "real-daemon-records" },
+            {
+              tier: "shipped-macos",
+              path: "RELEASE-02/evidence-manifest.json",
+              name: "real persisted records",
+            },
+          ]
+        : checkId === "RELEASE-03"
+          ? [
+              { tier: "shipped-systemd", path: "evidence.json", name: "global-tool-independence" },
+              {
+                tier: "shipped-macos",
+                path: "RELEASE-03/evidence-manifest.json",
+                name: "managed tools after global removal",
+              },
+            ]
+          : coreTier === undefined
+            ? []
+            : [{ tier: coreTier, path: testPath, name: testName }];
+  return { checkId, stage, expected, testPath, testName, tiers, observations };
+};
 
 /**
  * The names are the stable evidence allocation from spec #64. Paths and test names point at the
@@ -426,8 +486,8 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "CLIENT-03",
     6,
     "subscriptions and reconnects preserve final state without delaying execution",
-    "packages/kojo/tests/integration/contexts/workflow/runApi.test.ts",
-    "Daemon no-Trigger Run API",
+    "packages/kojo/tests/integration/contexts/daemon/notifications.test.ts",
+    "preserves final snapshots across reconnect and disconnects slow readers without delaying execution",
     ["kojo-integration"],
   ),
   check(
@@ -514,10 +574,25 @@ export const loadedTestsFromLog = (
   log: string,
 ): LoadedTestEvidence => {
   const plain = log.replace(ansi, "");
+  const tests: TestObservation[] = [];
   let loaded = 0;
   let passed = 0;
   let skipped = 0;
   for (const line of plain.split("\n")) {
+    const result = line.match(/(?:^|\|)\s*([✓×↓])\s+(.+)$/);
+    if (result?.[1] !== undefined && result[2] !== undefined) {
+      const body = result[2].replace(/\s+\d+(?:\.\d+)?m?s\s*$/, "");
+      const path = body.match(
+        /((?:packages|apps)\/[^ >›:]+\.(?:test|spec)\.ts|tests\/[^ >›:]+\.(?:test|spec)\.ts)/,
+      )?.[1];
+      if (path !== undefined) {
+        tests.push({
+          path,
+          name: body,
+          status: result[1] === "✓" ? "passed" : result[1] === "↓" ? "skipped" : "failed",
+        });
+      }
+    }
     if (/\bTests\b/.test(line)) {
       const total = line.match(/\((\d+)\)\s*$/)?.[1];
       if (total !== undefined) {
@@ -554,6 +629,7 @@ export const loadedTestsFromLog = (
     namedSkips,
     cacheHit: false,
     log: logPath,
+    tests,
   };
 };
 
@@ -562,36 +638,68 @@ const fail = (message: string): never => {
 };
 
 export const completeReleaseEvidence = (input: CompleteEvidenceInput) => {
-  if (input.safetyRegression.actual !== "failed-as-expected") {
+  if (
+    input.safetyRegression.actual !== "failed-as-expected" ||
+    input.safetyRegression.exitCode === 0 ||
+    input.safetyRegression.diagnostic.trim().length === 0
+  ) {
     fail("the protected safety check did not detect its injected regression");
+  }
+  for (const tier of ["native-systemd", "shipped-systemd", "shipped-macos"] as const) {
+    if (input.tiers[tier] === undefined) fail(`supported Host has no ${tier} evidence`);
   }
   const ids = new Set<string>();
   const records = requiredReleaseChecks.map((required) => {
     if (ids.has(required.checkId)) fail(`duplicate required check ${required.checkId}`);
     ids.add(required.checkId);
-    const evidence = required.tiers.map((tier) => {
-      const receipt = input.tiers[tier] ?? fail(`${required.checkId} has no ${tier} evidence`);
+    if (required.observations.length === 0) fail(`${required.checkId} has no named observation`);
+    const evidence = required.observations.map((observation) => {
+      const receipt =
+        input.tiers[observation.tier] ??
+        fail(`${required.checkId} has no ${observation.tier} evidence`);
       if (receipt.testedRevision !== input.testedRevision) {
         fail(
-          `${required.checkId} ${tier} tested ${receipt.testedRevision}, not ${input.testedRevision}`,
+          `${required.checkId} ${observation.tier} tested ${receipt.testedRevision}, not ${input.testedRevision}`,
         );
       }
-      if (receipt.cacheHit) fail(`${required.checkId} ${tier} used a cache hit`);
-      if (receipt.loaded === 0) fail(`${required.checkId} ${tier} loaded zero tests`);
-      if (receipt.passed === 0) fail(`${required.checkId} ${tier} passed zero tests`);
+      if (receipt.cacheHit) fail(`${required.checkId} ${observation.tier} used a cache hit`);
+      if (receipt.loaded === 0) fail(`${required.checkId} ${observation.tier} loaded zero tests`);
+      if (receipt.passed === 0) fail(`${required.checkId} ${observation.tier} passed zero tests`);
       if (receipt.passed + receipt.skipped !== receipt.loaded) {
-        fail(`${required.checkId} ${tier} has incomplete test counts`);
+        fail(`${required.checkId} ${observation.tier} has incomplete test counts`);
       }
       if (receipt.namedSkips.length !== receipt.skipped) {
-        fail(`${required.checkId} ${tier} does not name every skip`);
+        fail(`${required.checkId} ${observation.tier} does not name every skip`);
       }
       for (const property of ["os", "architecture", "bun", "moon"] as const) {
         const value = receipt.environment[property];
         if (value === undefined || value.trim().length === 0) {
-          fail(`${required.checkId} ${tier} has no ${property} environment fact`);
+          fail(`${required.checkId} ${observation.tier} has no ${property} environment fact`);
         }
       }
-      return receipt;
+      const matching = receipt.tests.filter(
+        (test) =>
+          (test.path === observation.path || observation.path.endsWith(test.path)) &&
+          test.name.includes(observation.name),
+      );
+      if (matching.length === 0) {
+        fail(`${required.checkId} did not load named observation ${observation.name}`);
+      }
+      if (matching.some((test) => test.status !== "passed")) {
+        fail(`${required.checkId} named observation ${observation.name} did not pass`);
+      }
+      return {
+        tier: observation.tier,
+        testedRevision: receipt.testedRevision,
+        environment: receipt.environment,
+        loaded: matching.length,
+        passed: matching.length,
+        skipped: 0,
+        namedSkips: [],
+        cacheHit: false,
+        log: receipt.log,
+        tests: matching,
+      } satisfies LoadedTestEvidence;
     });
     return {
       formatVersion: 1,
@@ -600,7 +708,7 @@ export const completeReleaseEvidence = (input: CompleteEvidenceInput) => {
       testedRevision: input.testedRevision,
       test: { path: required.testPath, name: required.testName },
       expected: required.expected,
-      actual: "passed",
+      actual: evidence.every((receipt) => receipt.passed === receipt.loaded) ? "passed" : "failed",
       evidence,
       namedSkips: evidence.flatMap((receipt) => receipt.namedSkips),
     } as const;

@@ -1,5 +1,5 @@
+import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { describe, expect, it } from "vitest";
 import { layer } from "../../../../../src/contexts/project/adapters/InMemoryResourceLeaseRepository.ts";
 import { ResourceLeaseRepository } from "../../../../../src/contexts/project/ports/ResourceLeaseRepository.ts";
 

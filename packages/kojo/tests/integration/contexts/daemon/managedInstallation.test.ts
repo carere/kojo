@@ -12,9 +12,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { afterEach, describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { afterEach, describe, expect, it } from "vitest";
-import { removeManagedInstallation } from "../../../../src/contexts/daemon/adapters/ManagedInstallation.ts";
+import {
+  hostManagedInstallation,
+  removeManagedInstallation,
+} from "../../../../src/contexts/daemon/adapters/ManagedInstallation.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
 import type {
   NativeService,
@@ -108,7 +111,7 @@ describe("the managed Daemon installation", () => {
       keepRunningAfterLogout: () => calls.push("linger"),
     };
     const sourceRoot = new URL("../../../../", import.meta.url).pathname;
-    const lifecycle = manageDaemon(paths, native, {
+    const lifecycle = manageDaemon(paths, native, hostManagedInstallation, {
       sourceRoot,
       bunExecutable: process.execPath,
     });
@@ -290,7 +293,10 @@ describe("the managed Daemon installation", () => {
 
       await expect(
         Effect.runPromise(
-          manageDaemon(paths, native, { sourceRoot, bunExecutable: process.execPath }).install,
+          manageDaemon(paths, native, hostManagedInstallation, {
+            sourceRoot,
+            bunExecutable: process.execPath,
+          }).install,
         ),
       ).rejects.toThrow("symbolic link");
       expect(serviceStarted).toBe(false);
@@ -332,9 +338,9 @@ describe("the managed Daemon installation", () => {
       keepRunningAfterLogout: () => {},
     };
 
-    await expect(Effect.runPromise(manageDaemon(paths, native).install)).rejects.toThrow(
-      "unsupported Host",
-    );
+    await expect(
+      Effect.runPromise(manageDaemon(paths, native, hostManagedInstallation).install),
+    ).rejects.toThrow("unsupported Host");
     expect(existsSync(installationRoot)).toBe(false);
   });
 

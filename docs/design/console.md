@@ -24,6 +24,17 @@ Gate state. The Console can reconnect and read the same state.
 Health reports the Daemon, store, Runner, and Project facts separately. An empty Run list is an idle
 state. It is not proof that execution is unavailable.
 
+## Daemon connection
+
+The Daemon sends best-effort invalidation notices when durable state changes. Each notice tells the
+Console to read an authoritative snapshot. A slow notification reader is disconnected and does not
+delay Run execution.
+
+Each snapshot request has a five-second limit. The Console retries an unreachable Daemon twice,
+after one second and two seconds. Thus, one reconnect attempt ends in less than twenty seconds. If
+it cannot connect, the Console keeps the last snapshot, shows an explicit Reconnect action, and
+disables all mutations. It sends no more snapshot requests until the operator selects Reconnect.
+
 ## Security
 
 The Daemon binds to the local endpoint selected by its lifecycle contract. Clients authenticate

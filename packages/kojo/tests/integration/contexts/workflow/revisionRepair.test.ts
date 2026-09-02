@@ -11,8 +11,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { afterEach, describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { afterEach, describe, expect, it } from "vitest";
 import { SqliteProjectRepository } from "../../../../src/contexts/project/adapters/SqliteProjectRepository.ts";
 import { SqliteRevisionRepository } from "../../../../src/contexts/workflow/adapters/SqliteRevisionRepository.ts";
 import { SqliteRunRepository } from "../../../../src/contexts/workflow/adapters/SqliteRunRepository.ts";

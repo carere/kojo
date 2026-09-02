@@ -15,6 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import type { PublishedArtifact } from "../ports/ArtifactRepository.ts";
 
 export const MAX_PUBLISHED_ARTIFACT_BYTES = 16 * 1024 * 1024;
 
@@ -47,16 +48,6 @@ interface PublishedRow {
   readonly byte_size: number;
   readonly sha256: string;
   readonly retained_path: string;
-}
-
-export interface PublishedArtifact {
-  readonly artifactId: string;
-  readonly runId: string;
-  readonly name: string;
-  readonly mediaType: string;
-  readonly size: number;
-  readonly sha256: string;
-  readonly path: string;
 }
 
 /** Bounded, atomic Artifact publication outside Trace records. */

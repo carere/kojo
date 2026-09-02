@@ -128,7 +128,7 @@ const WorkflowActions = (props: {
         </button>
         <button
           type="button"
-          disabled={pending() || !forceAcknowledged() || props.workflow.activity === "inactive"}
+          disabled={pending() || !forceAcknowledged() || props.workflow.currentRuns.length === 0}
           class="rounded border border-red-700 px-2 py-1 text-xs text-red-700 dark:text-red-300"
           onClick={() => void stopWithForce()}
         >
@@ -298,12 +298,14 @@ export const Workflows = (props: { readonly projectId: string }): JSX.Element =>
           <Match when={workflows.isPending}>
             <p role="status">Reading fresh Workflow state…</p>
           </Match>
-          <Match when={workflows.error instanceof ConsoleAccessError}>
+          <Match
+            when={workflows.data === undefined && workflows.error instanceof ConsoleAccessError}
+          >
             <p role="alert">
               Console access is required. Run <code>kojo ui</code> again.
             </p>
           </Match>
-          <Match when={workflows.error !== null}>
+          <Match when={workflows.data === undefined && workflows.error !== null}>
             <p role="alert">
               Workflow state is unavailable. Run <code>kojo daemon status</code>.
             </p>

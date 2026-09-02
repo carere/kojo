@@ -1,4 +1,5 @@
 import { QueryClient } from "@tanstack/solid-query";
+import { daemonReadsAllowed, noteDaemonRetry } from "../../daemon/services/connectionState.ts";
 import { refused } from "./api.ts";
 
 /** How often a live Console asks again. One second, per console.md §7. */
@@ -10,11 +11,10 @@ export const pollMillis = 1_000;
  * Two defaults here are decisions rather than tuning, and both come out of console.md §10's rule
  * that an unreachable API must never blank the view:
  *
- * - **Retry forever, with a capped backoff — but only what is worth retrying.** A bounded retry ends
- *   in an error state, and an error state is a Console that has given up on a Daemon that may
- *   recover. Retrying without end is what makes *keep the last data on screen, show a
- *   retrying banner* true rather than true for thirty seconds. The cap keeps a long outage from
- *   backing off into minutes. **A refusal is exempt**: a `404 no-such-run` is the server answering,
+ * - **Retry at most twice, after one and two seconds.** Together with the five-second request
+ *   timeout, the complete attempt stays below the accepted twenty-second reconnect bound. A
+ *   bounded failure enters explicit Reconnect state and disables mutations. **A refusal is
+ *   exempt**: a `404 no-such-run` is the server answering,
  *   and asking again for a run that does not exist can only ever produce the same answer more
  *   slowly. Retrying it turns a mistyped id into a permanent *Loading…* under a retrying banner,
  *   which blames the API for a typo.
@@ -28,8 +28,13 @@ export const consoleQueryClient = (): QueryClient =>
   new QueryClient({
     defaultOptions: {
       queries: {
-        retry: (_attempt: number, error: Error) => !refused(error),
-        retryDelay: (attempt: number) => Math.min(500 * 2 ** attempt, 5_000),
+        retry: (attempt: number, error: Error) => {
+          if (refused(error) || !daemonReadsAllowed()) return false;
+          if (attempt >= 2) return false;
+          noteDaemonRetry();
+          return true;
+        },
+        retryDelay: (attempt: number) => 1_000 * 2 ** attempt,
         refetchOnWindowFocus: false,
         staleTime: 0,
       },

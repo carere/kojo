@@ -1,5 +1,5 @@
 import { Effect } from "effect";
-import type { RunApi } from "../../workflow/services/RunApi.ts";
+import type { RunCoordinator } from "../../workflow/services/RunCoordinator.ts";
 import { LifecycleError } from "../models/LifecycleError.ts";
 import type { LifecycleRecordedOwner } from "../models/LifecycleOperation.ts";
 import type { PurgeSafetyEvidence } from "../models/Purge.ts";
@@ -21,7 +21,7 @@ const digestOf = (value: unknown): string =>
 
 export class DaemonLifecycleApi implements DaemonLifecycleControl {
   readonly #dataIdentity: string;
-  readonly #runs: RunApi;
+  readonly #runs: RunCoordinator;
   readonly #receipts: DaemonLifecycleReceiptRepository;
   readonly #ready: Effect.Effect<void, LifecycleError>;
   readonly #activatePendingConfiguration: Effect.Effect<void, LifecycleError>;
@@ -32,7 +32,7 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
 
   constructor(options: {
     readonly dataIdentity: string;
-    readonly runs: RunApi;
+    readonly runs: RunCoordinator;
     readonly receipts: DaemonLifecycleReceiptRepository;
     readonly ready?: Effect.Effect<void, LifecycleError>;
     readonly activatePendingConfiguration?: Effect.Effect<void, LifecycleError>;
@@ -110,7 +110,7 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
           drainHeld: true,
         });
       }
-      return yield* api.#runs.beginDaemonDrain().pipe(Effect.mapError(asLifecycleError));
+      return yield* api.#runs.beginDaemonDrain.pipe(Effect.mapError(asLifecycleError));
     });
   };
 
@@ -126,7 +126,7 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
                   "the Daemon has no durable hold for this operation",
                 ),
               )
-            : this.#runs.daemonDrainProgress().pipe(Effect.mapError(asLifecycleError)),
+            : this.#runs.daemonDrainProgress.pipe(Effect.mapError(asLifecycleError)),
         ),
       );
 
@@ -244,9 +244,7 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
         }
         return receipt.owner;
       }
-      const progress = yield* api.#runs
-        .daemonDrainProgress()
-        .pipe(Effect.mapError(asLifecycleError));
+      const progress = yield* api.#runs.daemonDrainProgress.pipe(Effect.mapError(asLifecycleError));
       if (progress.executingRunIds.length > 0 && forceAuthorizationId === undefined) {
         return yield* Effect.fail(
           new LifecycleError(
@@ -294,7 +292,7 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
             ),
           );
         }
-        yield* api.#runs.releaseDaemonDispatch().pipe(Effect.mapError(asLifecycleError));
+        yield* api.#runs.releaseDaemonDispatch.pipe(Effect.mapError(asLifecycleError));
         return receipt.owner;
       }
       if (receipt === undefined || receipt.stage !== "process-stopped" || !receipt.drainHeld) {
@@ -323,7 +321,7 @@ export class DaemonLifecycleApi implements DaemonLifecycleControl {
         owner,
         drainHeld: false,
       });
-      yield* api.#runs.releaseDaemonDispatch().pipe(Effect.mapError(asLifecycleError));
+      yield* api.#runs.releaseDaemonDispatch.pipe(Effect.mapError(asLifecycleError));
       return owner;
     });
   };

@@ -1,5 +1,5 @@
+import { describe, expect, it } from "@effect/vitest";
 import { Effect, Layer, Option } from "effect";
-import { describe, expect, it } from "vitest";
 import { ResourceLeaseClient } from "../../../../src/contexts/project/ports/ResourceLeaseClient.ts";
 import { noSandbox } from "../../../../src/contexts/sandbox/adapters/providers.ts";
 import { workspaceProbe } from "../../../../src/contexts/sandbox/guards/workspaceIsReachable.ts";

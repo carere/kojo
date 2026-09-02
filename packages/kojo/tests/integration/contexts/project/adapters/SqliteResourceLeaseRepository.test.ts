@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
+import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { describe, expect, it } from "vitest";
 import { SqliteResourceLeaseRepository } from "../../../../../src/contexts/project/adapters/SqliteResourceLeaseRepository.ts";
 
 const authority = {

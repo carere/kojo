@@ -1,12 +1,13 @@
-import { it as effectIt } from "@effect/vitest";
+import { describe, it as effectIt, expect, it } from "@effect/vitest";
 import { Effect, Option } from "effect";
-import { describe, expect, it } from "vitest";
 import {
   daemonStatusConfiguration,
-  daemonStatusLines,
   plannedLifecycleResume,
+} from "../../../src/contexts/daemon/adapters/DaemonCommand.ts";
+import {
+  daemonStatusLines,
   upgradeStatusLines,
-} from "../../../src/cli/daemon.ts";
+} from "../../../src/contexts/daemon/adapters/DaemonCommandPresentation.ts";
 import { InMemoryLifecycleJournalRepository } from "../../../src/contexts/daemon/adapters/InMemoryLifecycleJournalRepository.ts";
 import { decodeUpgradeCheckResult } from "../../../src/contexts/daemon/models/ManagedUpgrade.ts";
 

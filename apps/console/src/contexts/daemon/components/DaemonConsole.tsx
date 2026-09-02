@@ -30,7 +30,7 @@ export const DaemonConsole = (): JSX.Element => {
           <Match when={daemon.isPending}>
             <p role="status">Reading fresh Daemon state…</p>
           </Match>
-          <Match when={daemon.error instanceof ConsoleAccessError}>
+          <Match when={daemon.data === undefined && daemon.error instanceof ConsoleAccessError}>
             <section class="rounded-lg border border-amber-500/40 bg-amber-500/10 p-5">
               <h2 class="font-semibold text-lg">Console access is required</h2>
               <p class="mt-2">
@@ -38,7 +38,7 @@ export const DaemonConsole = (): JSX.Element => {
               </p>
             </section>
           </Match>
-          <Match when={daemon.error !== null}>
+          <Match when={daemon.data === undefined && daemon.error !== null}>
             <section class="rounded-lg border border-red-500/40 bg-red-500/10 p-5">
               <h2 class="font-semibold text-lg">Daemon state is unavailable</h2>
               <p class="mt-2">

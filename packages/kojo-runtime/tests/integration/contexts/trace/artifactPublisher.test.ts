@@ -1,6 +1,6 @@
 import type { JsonValue } from "@carere/kojo-runner-contracts/contexts/shared/codecs/json";
+import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { describe, expect, it } from "vitest";
 import * as DaemonArtifactPublisher from "../../../../src/contexts/trace/adapters/DaemonArtifactPublisher.ts";
 import { ArtifactPublisher } from "../../../../src/contexts/trace/ports/ArtifactPublisher.ts";
 

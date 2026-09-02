@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { OperationReplyBody } from "@carere/kojo-runner-contracts/contexts/project/contracts/execution";
+import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { describe, expect, it } from "vitest";
 import {
   makeRunnerFrameReader,
   writeRunnerFrame,

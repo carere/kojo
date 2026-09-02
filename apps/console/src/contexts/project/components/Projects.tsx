@@ -177,7 +177,7 @@ export const Projects = (): JSX.Element => {
           <Match when={projects.isPending}>
             <p role="status">Reading fresh Project state…</p>
           </Match>
-          <Match when={projects.error instanceof ConsoleAccessError}>
+          <Match when={projects.data === undefined && projects.error instanceof ConsoleAccessError}>
             <section class="rounded-lg border border-amber-500/40 bg-amber-500/10 p-5">
               <h2 class="font-semibold text-lg">Console access is required</h2>
               <p class="mt-2">
@@ -185,7 +185,7 @@ export const Projects = (): JSX.Element => {
               </p>
             </section>
           </Match>
-          <Match when={projects.error !== null}>
+          <Match when={projects.data === undefined && projects.error !== null}>
             <p role="alert">
               Project state is unavailable. Run <code>kojo daemon status</code>.
             </p>

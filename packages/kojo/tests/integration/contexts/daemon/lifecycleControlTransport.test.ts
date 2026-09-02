@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { afterEach, describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { afterEach, describe, expect, it } from "vitest";
 import { FileLifecycleJournalRepository } from "../../../../src/contexts/daemon/adapters/FileLifecycleJournalRepository.ts";
 import {
   SocketDaemonLifecycleControl,

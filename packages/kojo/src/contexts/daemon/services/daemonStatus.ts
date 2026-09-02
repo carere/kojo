@@ -1,11 +1,11 @@
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Effect } from "effect";
-import { managedInstallationIsPresent } from "../adapters/ManagedInstallation.ts";
 import type { DaemonPaths } from "../models/DaemonPaths.ts";
 import type { DaemonStatus } from "../models/DaemonStatus.ts";
 import type { DaemonEndpoint } from "../models/Endpoint.ts";
 import { LifecycleError } from "../models/LifecycleError.ts";
+import type { ManagedInstallationRepository } from "../ports/ManagedInstallationRepository.ts";
 import type { NativeService } from "../ports/NativeService.ts";
 
 const privateOwned = (path: string, kind: "file" | "socket"): boolean => {
@@ -80,6 +80,7 @@ const probe = async (endpoint: DaemonEndpoint): Promise<boolean> => {
 export const inspectDaemon = (
   paths: DaemonPaths,
   nativeService: NativeService,
+  installation: ManagedInstallationRepository,
 ): Effect.Effect<DaemonStatus, LifecycleError> =>
   Effect.tryPromise({
     try: async () => {
@@ -88,7 +89,7 @@ export const inspectDaemon = (
       const responsive = endpoint === undefined ? false : await probe(endpoint);
       return {
         installed:
-          managedInstallationIsPresent(paths) &&
+          installation.isPresent(paths) &&
           existsSync(paths.serviceDefinition) &&
           privateOwned(paths.serviceDefinition, "file"),
         managedCli: paths.managedCli,

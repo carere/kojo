@@ -78,6 +78,9 @@ jobs:
       - name: Dead-code analysis
         run: bun knip
 
+      - name: Contract JSON codec source
+        run: bun .github/scripts/check-contract-codecs.ts
+
       # --- the tiers ------------------------------------------------------------------------------
       # Every task is run **by name**, because a tier that is not named here is a tier nobody runs.
       # Discover the list with `moon query tasks`; it is not hardcoded anywhere else.
@@ -85,10 +88,15 @@ jobs:
       - name: Contract and runtime tests
         run: |
           mkdir -p .release-evidence/logs
-          moon run kojo-client-contracts:test kojo-runner-contracts:test kojo-runtime:test kojo-runtime:test-integration --force 2>&1 | tee .release-evidence/logs/contract-runtime.log
+          moon run kojo-client-contracts:test --force -- --reporter=verbose 2>&1 | tee .release-evidence/logs/contract-runtime.log
+          moon run kojo-runner-contracts:test --force -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
+          moon run kojo-runtime:test --force -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
+          moon run kojo-runtime:test-integration --force -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
 
       - name: Unit tests and package graph
-        run: moon run kojo:test kojo:check-packages --force 2>&1 | tee .release-evidence/logs/kojo-unit.log
+        run: |
+          moon run kojo:test --force -- --reporter=verbose 2>&1 | tee .release-evidence/logs/kojo-unit.log
+          moon run kojo:check-packages --force 2>&1 | tee -a .release-evidence/logs/kojo-unit.log
 
       # Two guards that are neither a test tier nor a lint: no bare promise reaches Kojo's published
       # declarations, and the package refuses to build without the Console in it.
@@ -100,13 +108,13 @@ jobs:
         working-directory: apps/console
 
       - name: Browser tests
-        run: moon run console:test-browser --force 2>&1 | tee .release-evidence/logs/console-browser.log
+        run: moon run console:test-browser --force -- --reporter=list 2>&1 | tee .release-evidence/logs/console-browser.log
 
       # Last because it is the slowest and the only one that needs a container daemon. `ubuntu-latest`
       # ships Docker; the suites build the one image they need and skip with a stated reason if the
       # daemon is missing, so a runner without one says so rather than passing quietly.
       - name: Container tests
-        run: moon run kojo:test-integration --force 2>&1 | tee .release-evidence/logs/kojo-integration.log
+        run: moon run kojo:test-integration --force -- --reporter=verbose 2>&1 | tee .release-evidence/logs/kojo-integration.log
 
       - name: Record uncached core release evidence
         run: bun .github/scripts/complete-release-evidence.ts collect-core .release-evidence/core-evidence.json "$(git rev-parse HEAD)" .release-evidence/logs

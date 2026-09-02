@@ -511,12 +511,11 @@ export class SqliteDaemonGateRepository {
     });
 
   /** Persist a Recorded Verdict that can no longer be applied after a terminal Run transition. */
-  readonly reconcileTerminalInabilities = (): Effect.Effect<void, GateTransitionError> =>
-    Effect.try({
-      try: () =>
-        this.#database
-          .transaction(() => {
-            this.#database.run(`
+  readonly reconcileTerminalInabilities: Effect.Effect<void, GateTransitionError> = Effect.try({
+    try: () =>
+      this.#database
+        .transaction(() => {
+          this.#database.run(`
               UPDATE gate_askings
                  SET terminal_inability = (
                    SELECT CASE workflow_runs.state
@@ -532,17 +531,17 @@ export class SqliteDaemonGateRepository {
                    SELECT run_id FROM workflow_runs WHERE state IN ('failed', 'cancelled')
                  )
             `);
-            this.#database.run(`
+          this.#database.run(`
               DELETE FROM workflow_wakeups
                WHERE state = 'pending'
                  AND asking_identity_key IN (
                    SELECT identity_key FROM gate_askings WHERE terminal_inability IS NOT NULL
                  )
             `);
-          })
-          .immediate(),
-      catch: fault,
-    });
+        })
+        .immediate(),
+    catch: fault,
+  });
 
   #rowByToken(token: string): AskingRow {
     const row = this.#database

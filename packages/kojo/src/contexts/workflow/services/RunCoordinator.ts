@@ -20,14 +20,14 @@ import type { OperationReplyBody } from "@carere/kojo-runner-contracts/contexts/
 import type { RunnerFrame } from "@carere/kojo-runner-contracts/contexts/project/contracts/frame";
 import { decodeTraceMutation } from "@carere/kojo-runner-contracts/contexts/project/contracts/trace";
 import { Cause, Data, Duration, Effect, Exit, Option } from "effect";
-import type { SqliteDaemonGateRepository } from "../../gate/adapters/SqliteDaemonGateRepository.ts";
-import type { SqliteProjectRecoveryRepository } from "../../project/adapters/SqliteProjectRecoveryRepository.ts";
-import type {
-  ExecutionRevision,
-  SqliteProjectRepository,
-} from "../../project/adapters/SqliteProjectRepository.ts";
-import type { SqliteResourceLeaseRepository } from "../../project/adapters/SqliteResourceLeaseRepository.ts";
+import type { DaemonGateRepository } from "../../gate/ports/DaemonGateRepository.ts";
 import type { ProjectRecovery } from "../../project/models/ProjectRecovery.ts";
+import type {
+  DaemonProjectRepository,
+  ExecutionRevision,
+} from "../../project/ports/DaemonProjectRepository.ts";
+import type { ProjectRecoveryRepository } from "../../project/ports/ProjectRecoveryRepository.ts";
+import type { ResourceLeaseRepository } from "../../project/ports/ResourceLeaseRepository.ts";
 import {
   type MaterializedRevision,
   materializeRevision,
@@ -45,13 +45,10 @@ import {
   RunnerChannelError,
   writeRunnerFrame,
 } from "../../project/services/runnerChannel.ts";
-import type { AtomicArtifactRepository } from "../../trace/adapters/AtomicArtifactRepository.ts";
-import type { SqliteTraceRepository } from "../../trace/adapters/SqliteTraceRepository.ts";
 import type { TraceProjection } from "../../trace/models/DaemonTrace.ts";
-import type { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRepository.ts";
-import type { SqliteExternalActionRepository } from "../adapters/SqliteExternalActionRepository.ts";
-import type { SqliteRevisionRepository } from "../adapters/SqliteRevisionRepository.ts";
-import type { SqliteRunRepository } from "../adapters/SqliteRunRepository.ts";
+import type { ArtifactRepository } from "../../trace/ports/ArtifactRepository.ts";
+import type { TraceRepository } from "../../trace/ports/TraceRepository.ts";
+import type { TriggerRepository } from "../../trigger/ports/TriggerRepository.ts";
 import type {
   DaemonRun,
   PhaseResult,
@@ -61,7 +58,11 @@ import type {
 } from "../models/DaemonRun.ts";
 import type { ExternalActionIntent } from "../models/ExternalAction.ts";
 import { RetainedContentFault } from "../models/RetainedContentFault.ts";
+import type { RunnerMutationFault } from "../models/RunnerMutationFault.ts";
 import { DEFAULT_RUNNER_IDLE_MILLIS } from "../models/SchedulingDefaults.ts";
+import type { ExternalActionRepository } from "../ports/ExternalActionRepository.ts";
+import type { RevisionRepository } from "../ports/RevisionRepository.ts";
+import type { RunRepository } from "../ports/RunRepository.ts";
 import { canonicalJson } from "./canonicalJson.ts";
 
 interface RunnerRegistration {
@@ -148,7 +149,7 @@ const documentOf = (
   run: DaemonRun,
   phases: ReadonlyArray<PhaseResult>,
   trace: TraceProjection,
-  artifacts: ReturnType<AtomicArtifactRepository["list"]>,
+  artifacts: ReturnType<ArtifactRepository["list"]>,
   uncertainty?: ExternalActionIntent,
 ): RunDocument => ({
   runId: run.runId,
@@ -300,34 +301,22 @@ interface ActiveExecutionControl {
   readonly settleCommit: () => void;
 }
 
-export interface RunnerMutationFault {
-  readonly kind:
-    | "BeginResourceAcquisition"
-    | "ConfirmResourceAcquired"
-    | "BeginResourceRelease"
-    | "ConfirmResourceReleased"
-    | "PreserveResource"
-    | "ReportRecovery";
-  readonly runId: string;
-  readonly leaseId: string;
-}
-
 /** Daemon-owned no-Trigger admission, dispatch, and observation service. */
-export class RunApi {
+export class RunCoordinator {
   readonly #dataIdentity: string;
   readonly #instanceId: string;
   readonly #dataRoot: string;
   readonly #now: () => number;
-  readonly #projects: SqliteProjectRepository;
-  readonly #projectRecovery: SqliteProjectRecoveryRepository;
-  readonly #runs: SqliteRunRepository;
-  readonly #actions: SqliteExternalActionRepository;
-  readonly #revisions: SqliteRevisionRepository;
-  readonly #triggers: SqliteTriggerRepository;
-  readonly #gates: SqliteDaemonGateRepository;
-  readonly #resources: SqliteResourceLeaseRepository;
-  readonly #trace: SqliteTraceRepository;
-  readonly #artifacts: AtomicArtifactRepository;
+  readonly #projects: DaemonProjectRepository;
+  readonly #projectRecovery: ProjectRecoveryRepository["Service"];
+  readonly #runs: RunRepository["Service"];
+  readonly #actions: ExternalActionRepository["Service"];
+  readonly #revisions: RevisionRepository["Service"];
+  readonly #triggers: TriggerRepository["Service"];
+  readonly #gates: DaemonGateRepository["Service"];
+  readonly #resources: ResourceLeaseRepository["Service"];
+  readonly #trace: TraceRepository;
+  readonly #artifacts: ArtifactRepository;
   readonly #runnerSettings: () => {
     readonly idleMs: number;
     readonly handshakeMs: number;
@@ -362,16 +351,16 @@ export class RunApi {
     readonly instanceId: string;
     readonly dataRoot: string;
     readonly now: () => number;
-    readonly projects: SqliteProjectRepository;
-    readonly projectRecovery: SqliteProjectRecoveryRepository;
-    readonly runs: SqliteRunRepository;
-    readonly actions: SqliteExternalActionRepository;
-    readonly revisions: SqliteRevisionRepository;
-    readonly triggers: SqliteTriggerRepository;
-    readonly gates: SqliteDaemonGateRepository;
-    readonly resources: SqliteResourceLeaseRepository;
-    readonly trace: SqliteTraceRepository;
-    readonly artifacts: AtomicArtifactRepository;
+    readonly projects: DaemonProjectRepository;
+    readonly projectRecovery: ProjectRecoveryRepository["Service"];
+    readonly runs: RunRepository["Service"];
+    readonly actions: ExternalActionRepository["Service"];
+    readonly revisions: RevisionRepository["Service"];
+    readonly triggers: TriggerRepository["Service"];
+    readonly gates: DaemonGateRepository["Service"];
+    readonly resources: ResourceLeaseRepository["Service"];
+    readonly trace: TraceRepository;
+    readonly artifacts: ArtifactRepository;
     readonly runnerIdleMillis?: number;
     readonly runnerCleanupMillis?: number;
     readonly runnerSettings?: () => {
@@ -552,7 +541,7 @@ export class RunApi {
             requestedAt,
           );
         }
-        await Effect.runPromise(this.#gates.reconcileTerminalInabilities()).catch(() => undefined);
+        await Effect.runPromise(this.#gates.reconcileTerminalInabilities).catch(() => undefined);
         const run = await Effect.runPromise(this.#runs.read(options.runId));
         if (run === undefined) throw new Error("the selected Run was not found after cancellation");
         return {
@@ -580,36 +569,35 @@ export class RunApi {
     });
 
   /** Persisted lifecycle state supplies the initial hold after Daemon replacement. */
-  readonly beginDaemonDrain = (): Effect.Effect<
+  readonly beginDaemonDrain: Effect.Effect<
     {
       readonly held: true;
       readonly executingRunIds: ReadonlyArray<string>;
       readonly observedAt: string;
     },
     RunApiFault
-  > =>
-    Effect.tryPromise({
-      try: async () => {
-        this.#daemonDispatchHeld = true;
-        await Promise.all(Array.from(this.#triggerProcesses.values(), (process) => process.stop()));
-        return this.#daemonDrainProgress();
-      },
-      catch: runApiFault,
-    });
+  > = Effect.tryPromise({
+    try: async () => {
+      this.#daemonDispatchHeld = true;
+      await Promise.all(Array.from(this.#triggerProcesses.values(), (process) => process.stop()));
+      return this.#daemonDrainProgress();
+    },
+    catch: runApiFault,
+  });
 
-  readonly daemonDrainProgress = (): Effect.Effect<
+  readonly daemonDrainProgress: Effect.Effect<
     {
       readonly held: true;
       readonly executingRunIds: ReadonlyArray<string>;
       readonly observedAt: string;
     },
     RunApiFault
-  > => Effect.tryPromise({ try: () => this.#daemonDrainProgress(), catch: runApiFault });
+  > = Effect.tryPromise({ try: () => this.#daemonDrainProgress(), catch: runApiFault });
 
   /** Stop current Runner processes for an explicit forced drain, but keep this Daemon reusable. */
   readonly forceDaemonDrain = (
     cleanupMillis: number,
-  ): Effect.Effect<ReturnType<RunApi["lifecycleOwner"]>, RunApiFault> =>
+  ): Effect.Effect<ReturnType<RunCoordinator["lifecycleOwner"]>, RunApiFault> =>
     Effect.tryPromise({
       try: async () => {
         if (!Number.isSafeInteger(cleanupMillis) || cleanupMillis < 1) {
@@ -635,17 +623,16 @@ export class RunApi {
       catch: runApiFault,
     });
 
-  readonly releaseDaemonDispatch = (): Effect.Effect<void, RunApiFault> =>
-    Effect.tryPromise({
-      try: async () => {
-        this.#daemonDispatchHeld = false;
-        for (const project of await Effect.runPromise(this.#projects.projects)) {
-          await this.#restoreProjectTriggerPollers(project.projectId);
-        }
-        void this.#pump();
-      },
-      catch: runApiFault,
-    });
+  readonly releaseDaemonDispatch: Effect.Effect<void, RunApiFault> = Effect.tryPromise({
+    try: async () => {
+      this.#daemonDispatchHeld = false;
+      for (const project of await Effect.runPromise(this.#projects.projects)) {
+        await this.#restoreProjectTriggerPollers(project.projectId);
+      }
+      void this.#pump();
+    },
+    catch: runApiFault,
+  });
 
   async #daemonDrainProgress(): Promise<{
     readonly held: true;
@@ -679,7 +666,7 @@ export class RunApi {
   readonly stopForDaemonLifecycle = (
     cleanupMillis: number,
     forced: boolean,
-  ): Effect.Effect<ReturnType<RunApi["lifecycleOwner"]>, RunApiFault> =>
+  ): Effect.Effect<ReturnType<RunCoordinator["lifecycleOwner"]>, RunApiFault> =>
     Effect.tryPromise({
       try: async () => {
         if (!Number.isSafeInteger(cleanupMillis) || cleanupMillis < 1) {
@@ -1286,7 +1273,7 @@ export class RunApi {
             this.#runs.completeRun(authority, "failed", new Date(this.#now()).toISOString()),
           ).catch(() => undefined);
         }
-        await Effect.runPromise(this.#gates.reconcileTerminalInabilities()).catch(() => undefined);
+        await Effect.runPromise(this.#gates.reconcileTerminalInabilities).catch(() => undefined);
       } else {
         await Effect.runPromise(this.#runs.releaseReservation(reserved.reservationId)).catch(
           () => undefined,

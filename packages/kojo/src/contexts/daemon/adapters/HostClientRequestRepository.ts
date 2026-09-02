@@ -9,6 +9,7 @@ import {
   type JsonValue,
 } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { ProjectStoreError } from "../../project/models/ProjectStoreError.ts";
+import type { ClientRequestRepository } from "../ports/ClientRequestRepository.ts";
 import {
   assertPrivateNode,
   atomicPrivateFile,
@@ -17,7 +18,7 @@ import {
 
 const validRequestId = /^[A-Za-z0-9_-]+$/;
 
-export class HostClientRequestJournal {
+export class HostClientRequestRepository implements ClientRequestRepository {
   readonly #directory: string;
 
   constructor(directory: string) {

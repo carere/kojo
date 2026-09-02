@@ -23,12 +23,20 @@ const tier = (name: EvidenceTier): LoadedTestEvidence => ({
   tier: name,
   testedRevision: revision,
   environment: { os: "controlled", architecture: "arm64", bun: "1.4.0", moon: "2.5.0" },
-  loaded: 2,
-  passed: 1,
-  skipped: 1,
-  namedSkips: ["the other supported Host"],
+  loaded: requiredReleaseChecks
+    .flatMap((check) => check.observations)
+    .filter((item) => item.tier === name).length,
+  passed: requiredReleaseChecks
+    .flatMap((check) => check.observations)
+    .filter((item) => item.tier === name).length,
+  skipped: 0,
+  namedSkips: [],
   cacheHit: false,
   log: `${name}.log`,
+  tests: requiredReleaseChecks
+    .flatMap((check) => check.observations)
+    .filter((item) => item.tier === name)
+    .map((item) => ({ path: item.path, name: item.name, status: "passed" as const })),
 });
 
 const input = (): CompleteEvidenceInput => ({
@@ -41,6 +49,8 @@ const input = (): CompleteEvidenceInput => ({
     actual: "failed-as-expected",
     check: "the promise-free build check",
     log: "kojo-integration.log",
+    exitCode: 1,
+    diagnostic: "deliberateLeak.d.ts:1",
   },
 });
 
@@ -65,7 +75,11 @@ describe("complete breaking release evidence", () => {
       { loaded: 1, passed: 0, skipped: 1, namedSkips: ["unsupported Host"] },
       "passed zero tests",
     ],
-    ["unnamed skip", { namedSkips: [] }, "does not name every skip"],
+    [
+      "unnamed skip",
+      { loaded: 2, passed: 1, skipped: 1, namedSkips: [] },
+      "does not name every skip",
+    ],
     ["wrong revision", { testedRevision: "b".repeat(40) }, "tested"],
   ])("refuses %s", (_name, change, diagnostic) => {
     const subject = input();
@@ -96,6 +110,30 @@ describe("complete breaking release evidence", () => {
       }),
     ).toThrow("protected safety check did not detect");
   });
+
+  it("refuses a missing or skipped named required observation", () => {
+    const subject = input();
+    const integration = subject.tiers["kojo-integration"] as LoadedTestEvidence;
+    const required = requiredReleaseChecks.find((check) => check.checkId === "STATE-02");
+    const named = required?.observations[0];
+    expect(named).toBeDefined();
+    const without = integration.tests.filter((test) => test.name !== named?.name);
+    expect(() =>
+      completeReleaseEvidence({
+        ...subject,
+        tiers: { ...subject.tiers, "kojo-integration": { ...integration, tests: without } },
+      }),
+    ).toThrow("did not load named observation");
+    const skipped = integration.tests.map((test) =>
+      test.name === named?.name ? { ...test, status: "skipped" as const } : test,
+    );
+    expect(() =>
+      completeReleaseEvidence({
+        ...subject,
+        tiers: { ...subject.tiers, "kojo-integration": { ...integration, tests: skipped } },
+      }),
+    ).toThrow("did not pass");
+  });
 });
 
 describe("loaded release tests", () => {
@@ -106,14 +144,20 @@ describe("loaded release tests", () => {
       { os: "linux" },
       "contract.log",
       [
-        " Tests  2 passed | 1 skipped (3)",
+        " ✓ tests/unit/example.test.ts > current passing behavior 2ms",
         " ↓ tests/unit/example.test.ts > current skipped behavior",
+        " Tests  2 passed | 1 skipped (3)",
+        " ✓ tests/unit/example.test.ts > another passing behavior 1ms",
+        " ✓ tests/unit/example.test.ts > third passing behavior 1ms",
+        " ✓ tests/unit/example.test.ts > fourth passing behavior 1ms",
+        " ✓ tests/unit/example.test.ts > fifth passing behavior 1ms",
         " Tests  4 passed (4)",
       ].join("\n"),
     );
 
     expect(result).toMatchObject({ loaded: 7, passed: 6, skipped: 1 });
     expect(result.namedSkips).toEqual(["tests/unit/example.test.ts > current skipped behavior"]);
+    expect(result.tests).toHaveLength(6);
   });
 
   it("counts Playwright tests and rejects zero-test output", () => {

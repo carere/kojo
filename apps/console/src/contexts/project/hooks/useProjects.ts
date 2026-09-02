@@ -7,5 +7,4 @@ export const useProjects = (): UseQueryResult<ProjectSnapshot, Error> =>
     queryKey: ["projects", "snapshot"],
     queryFn: readProjects,
     refetchInterval: (query) => query.state.data?.refreshAfterMillis ?? 1_000,
-    retry: false,
   }));

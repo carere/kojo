@@ -19,13 +19,13 @@ import type {
   WorkflowSnapshot,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import { Effect } from "effect";
-import type { HostClientRequestJournal } from "../../daemon/adapters/HostClientRequestJournal.ts";
+import type { ClientRequestRepository } from "../../daemon/ports/ClientRequestRepository.ts";
 import type { FactoryRefreshObservation } from "../../workflow/models/FactoryRefresh.ts";
 import { RevisionCaptureError } from "../../workflow/models/RevisionCaptureError.ts";
-import type { RunApi } from "../../workflow/services/RunApi.ts";
+import type { ProjectRunControl } from "../../workflow/ports/RunControl.ts";
 import { refreshFactory } from "../../workflow/services/refreshFactory.ts";
-import type { SqliteProjectRepository } from "../adapters/SqliteProjectRepository.ts";
 import { ProjectStoreError } from "../models/ProjectStoreError.ts";
+import type { DaemonProjectRepository } from "../ports/DaemonProjectRepository.ts";
 import { exactGitWorkingTree } from "./gitWorkingTree.ts";
 
 const response = (body: unknown, status = 200): Response =>
@@ -94,20 +94,20 @@ export class ProjectApi {
   readonly #dataIdentity: string;
   readonly #dataRoot: string;
   readonly #instanceId: string;
-  readonly #journal: HostClientRequestJournal;
+  readonly #journal: ClientRequestRepository;
   readonly #now: () => number;
-  readonly #repository: SqliteProjectRepository;
-  readonly #runs: RunApi;
+  readonly #repository: DaemonProjectRepository;
+  readonly #runs: ProjectRunControl;
   readonly #worktrees: string;
 
   constructor(options: {
     readonly dataIdentity: string;
     readonly instanceId: string;
-    readonly journal: HostClientRequestJournal;
+    readonly journal: ClientRequestRepository;
     readonly now: () => number;
-    readonly repository: SqliteProjectRepository;
+    readonly repository: DaemonProjectRepository;
     readonly dataRoot: string;
-    readonly runs: RunApi;
+    readonly runs: ProjectRunControl;
   }) {
     this.#dataIdentity = options.dataIdentity;
     this.#dataRoot = options.dataRoot;

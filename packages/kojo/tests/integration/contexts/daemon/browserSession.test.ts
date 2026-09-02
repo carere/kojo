@@ -2,8 +2,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserSessionResponse } from "@carere/kojo-client-contracts/contexts/client/contracts/browser";
+import { afterEach, describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { afterEach, describe, expect, it } from "vitest";
 import {
   type RunningDaemon,
   startDaemon,

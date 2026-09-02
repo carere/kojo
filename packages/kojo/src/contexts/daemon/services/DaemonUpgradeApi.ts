@@ -11,8 +11,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { Effect } from "effect";
-import type { RunApi } from "../../workflow/services/RunApi.ts";
-import { readCheckedManagedRelease } from "../adapters/ManagedInstallation.ts";
+import type { LifecycleRunControl } from "../../workflow/ports/RunControl.ts";
 import type { DaemonPaths } from "../models/DaemonPaths.ts";
 import { LifecycleError } from "../models/LifecycleError.ts";
 import type {
@@ -29,6 +28,7 @@ import type {
 } from "../models/UpgradeActivation.ts";
 import type { UpgradeActivationReceipt } from "../models/UpgradeActivationReceipt.ts";
 import type { DaemonUpgradeControl } from "../ports/DaemonUpgradeControl.ts";
+import type { ManagedInstallationRepository } from "../ports/ManagedInstallationRepository.ts";
 import type { UpgradeActivationReceiptRepository } from "../ports/UpgradeActivationReceiptRepository.ts";
 import type { DaemonMutationGate } from "./DaemonMutationGate.ts";
 import type { ManagedUpgradePreflight } from "./ManagedUpgradePreflight.ts";
@@ -64,7 +64,7 @@ export class DaemonUpgradeApi implements DaemonUpgradeControl {
   readonly #paths: DaemonPaths;
   readonly #dataIdentity: string;
   readonly #activeReleaseId: () => string;
-  readonly #runs: RunApi;
+  readonly #runs: LifecycleRunControl;
   readonly #receipts: UpgradeActivationReceiptRepository;
   readonly #mutations: DaemonMutationGate;
   readonly #preflight: ManagedUpgradePreflight;
@@ -75,13 +75,14 @@ export class DaemonUpgradeApi implements DaemonUpgradeControl {
   readonly #activate: Effect.Effect<void, LifecycleError>;
   readonly #migration: UpgradeMigration | undefined;
   readonly #now: () => number;
+  readonly #installation: ManagedInstallationRepository;
 
   constructor(options: {
     readonly database: Database;
     readonly paths: DaemonPaths;
     readonly dataIdentity: string;
     readonly activeReleaseId: () => string;
-    readonly runs: RunApi;
+    readonly runs: LifecycleRunControl;
     readonly receipts: UpgradeActivationReceiptRepository;
     readonly mutations: DaemonMutationGate;
     readonly preflight: ManagedUpgradePreflight;
@@ -92,6 +93,7 @@ export class DaemonUpgradeApi implements DaemonUpgradeControl {
     readonly activate: Effect.Effect<void, LifecycleError>;
     readonly migration?: UpgradeMigration;
     readonly now?: () => number;
+    readonly installation: ManagedInstallationRepository;
   }) {
     this.#database = options.database;
     this.#paths = options.paths;
@@ -108,6 +110,7 @@ export class DaemonUpgradeApi implements DaemonUpgradeControl {
     this.#activate = options.activate;
     this.#migration = options.migration;
     this.#now = options.now ?? Date.now;
+    this.#installation = options.installation;
   }
 
   #owner(): LifecycleRecordedOwner {
@@ -115,7 +118,7 @@ export class DaemonUpgradeApi implements DaemonUpgradeControl {
   }
 
   #manifest(releaseId: string): CheckedManagedReleaseManifest {
-    return readCheckedManagedRelease(this.#paths, releaseId);
+    return this.#installation.checkedRelease(this.#paths, releaseId);
   }
 
   #dataFormat(): number {
@@ -301,7 +304,7 @@ export class DaemonUpgradeApi implements DaemonUpgradeControl {
           new LifecycleError("UPGRADE_RECEIPT_NOT_FOUND", "the upgrade receipt was not found"),
         );
       }
-      const progress = yield* api.#runs.beginDaemonDrain().pipe(Effect.mapError(error));
+      const progress = yield* api.#runs.beginDaemonDrain.pipe(Effect.mapError(error));
       if (receipt.stage === "prepared") {
         yield* api.#receipts.advance({
           operationId,
@@ -326,7 +329,7 @@ export class DaemonUpgradeApi implements DaemonUpgradeControl {
                   "the managed upgrade has no durable dispatch hold",
                 ),
               )
-            : this.#runs.daemonDrainProgress().pipe(Effect.mapError(error)),
+            : this.#runs.daemonDrainProgress.pipe(Effect.mapError(error)),
         ),
       );
 
@@ -364,7 +367,7 @@ export class DaemonUpgradeApi implements DaemonUpgradeControl {
         stage: "draining",
         changes: { forceAuthorizationId, owner },
       });
-      const progress = yield* api.#runs.daemonDrainProgress().pipe(Effect.mapError(error));
+      const progress = yield* api.#runs.daemonDrainProgress.pipe(Effect.mapError(error));
       if (progress.executingRunIds.length > 0) {
         return yield* Effect.fail(
           new LifecycleError(
@@ -495,7 +498,7 @@ export class DaemonUpgradeApi implements DaemonUpgradeControl {
       }
       yield* api.#resume;
       yield* api.#mutations.release(operationId);
-      yield* api.#runs.releaseDaemonDispatch().pipe(Effect.mapError(error));
+      yield* api.#runs.releaseDaemonDispatch.pipe(Effect.mapError(error));
       if (receipt.stage === "final-preflight-refused") {
         yield* api.#receipts.advance({
           operationId,
@@ -849,7 +852,7 @@ export class DaemonUpgradeApi implements DaemonUpgradeControl {
         });
       }
       yield* api.#activate;
-      yield* api.#runs.releaseDaemonDispatch().pipe(Effect.mapError(error));
+      yield* api.#runs.releaseDaemonDispatch.pipe(Effect.mapError(error));
       yield* api.#mutations.release(operationId);
       if (receipt.dispatchHeld || receipt.mutationsHeld) {
         yield* api.#receipts.advance({

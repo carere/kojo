@@ -1,18 +1,11 @@
 import { mkdir, open, readFile, rename } from "node:fs/promises";
 import { dirname } from "node:path";
 import { Data, Effect } from "effect";
+import type {
+  ProviderResourceEvidence,
+  ProviderResourceState,
+} from "../models/ProviderResource.ts";
 import type { CommittedResourceIdentity } from "../ports/ResourceLeaseClient.ts";
-
-export type ProviderResourceState = "creating" | "acquired" | "release-intent" | "released";
-
-export interface ProviderResourceEvidence {
-  readonly state: ProviderResourceState;
-  readonly locator?: string | undefined;
-}
-
-/** A replay-stable Runner protocol identity for one richer acquisition key. */
-export const resourceLeaseId = (acquisitionKey: string): string =>
-  `resource_${new Bun.CryptoHasher("sha256").update(acquisitionKey).digest("hex")}`;
 
 class ProviderRegistryError extends Data.TaggedError("ProviderRegistryError")<{
   readonly cause: unknown;
@@ -89,12 +82,3 @@ export const inspectProviderState = (
     },
     catch: (cause) => new ProviderRegistryError({ cause }),
   });
-
-/** Exact environment received by the actual sandbox or agent provider before it creates work. */
-export const providerResourceEnvironment = (
-  identity: CommittedResourceIdentity,
-): Record<string, string> => ({
-  KOJO_RESOURCE_ACQUISITION_KEY: identity.acquisitionKey,
-  KOJO_RESOURCE_PROVIDER_IDENTITY: identity.providerIdentity,
-  KOJO_RESOURCE_INSPECTION_FILE: identity.inspectionLocator,
-});

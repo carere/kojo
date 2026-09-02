@@ -46,6 +46,7 @@ export class RunRepository extends Context.Service<
     readonly reserveNext: (
       reservationId: string,
       reservedAt: string,
+      blockedProjectIds?: ReadonlySet<string>,
     ) => Effect.Effect<ReservedRun | undefined, RunStoreError>;
     readonly claimReserved: (
       reservationId: string,
@@ -57,6 +58,7 @@ export class RunRepository extends Context.Service<
       fault: RunExecutionFault,
       heldAt: string,
     ) => Effect.Effect<void, RunStoreError>;
+    readonly releaseReservation: (reservationId: string) => Effect.Effect<void, RunStoreError>;
     readonly suspend: (
       authority: RunAuthority,
       suspendedAt: string,
@@ -107,5 +109,27 @@ export class RunRepository extends Context.Service<
       detail: string,
     ) => Effect.Effect<void, RunStoreError>;
     readonly phases: (runId: string) => Effect.Effect<ReadonlyArray<PhaseResult>, RunStoreError>;
+    readonly recoverInterruptedExecutions: (
+      queuedAt: string,
+      deferredProjectIds?: ReadonlySet<string>,
+    ) => Effect.Effect<void, RunStoreError>;
+    readonly recoverProjectRunnerAfterRestart: (
+      projectId: string,
+      queuedAt: string,
+    ) => Effect.Effect<number, RunStoreError>;
+    readonly holdProjectRunnerAfterRestart: (
+      projectId: string,
+      fault: Omit<RunExecutionFault, "scope">,
+      heldAt: string,
+    ) => Effect.Effect<number, RunStoreError>;
+    readonly recoverProjectRunnerFailure: (
+      authority: RunAuthority,
+      queuedAt: string,
+      detail: string,
+    ) => Effect.Effect<void, RunStoreError>;
+    readonly repairProjectRecoveryHolds: (
+      projectId: string,
+      queuedAt: string,
+    ) => Effect.Effect<number, RunStoreError>;
   }
 >()("kojo/workflow/RunRepository") {}

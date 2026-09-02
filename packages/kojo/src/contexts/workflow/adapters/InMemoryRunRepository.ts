@@ -561,6 +561,12 @@ export const layer: Layer.Layer<RunRepository> = Layer.effect(
             state.runs.set(runId, { ...run, cleanup: { state: "fault", detail } });
           }
         }),
+      releaseReservation: () => Effect.void,
+      recoverInterruptedExecutions: () => Effect.void,
+      recoverProjectRunnerAfterRestart: () => Effect.succeed(0),
+      holdProjectRunnerAfterRestart: () => Effect.succeed(0),
+      recoverProjectRunnerFailure: () => Effect.void,
+      repairProjectRecoveryHolds: () => Effect.succeed(0),
       phases: (runId) =>
         Effect.sync(() =>
           [...state.results.entries()]

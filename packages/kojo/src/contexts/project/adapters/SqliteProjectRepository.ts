@@ -16,6 +16,7 @@ import type {
 } from "../../workflow/models/WorkflowActivity.ts";
 import type { RegisteredProject, RegisterProjectRequest } from "../models/Project.ts";
 import { ProjectStoreError } from "../models/ProjectStoreError.ts";
+import type { ExecutionRevision } from "../ports/DaemonProjectRepository.ts";
 import { ProjectRepository } from "../ports/ProjectRepository.ts";
 
 interface ProjectRow {
@@ -83,16 +84,6 @@ interface CurrentRunRow {
 const projectColumns = `project_id, location, project_state, factory_state, refresh_state,
   registered_at, refreshed_at, fault, remedy, last_location, location_active,
   location_confirmed, location_action, requested_location, location_change_started_at`;
-
-export interface ExecutionRevision {
-  readonly projectId: string;
-  readonly location: string;
-  readonly workflowName: string;
-  readonly revisionId: string;
-  readonly packageGraphId: string;
-  readonly publishedPath: string;
-  readonly entrySource: string;
-}
 
 const documentOf = (
   row: ProjectRow,

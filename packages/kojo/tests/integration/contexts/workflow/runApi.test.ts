@@ -19,9 +19,8 @@ import type {
   RunSnapshot,
   StartRunResult,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
-import { it as effectIt } from "@effect/vitest";
+import { afterEach, describe, it as effectIt, expect, it } from "@effect/vitest";
 import { Data, Effect } from "effect";
-import { afterEach, describe, expect, it } from "vitest";
 import {
   type RunningDaemon,
   startDaemon,

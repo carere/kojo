@@ -1,6 +1,6 @@
 import { Command } from "effect/unstable/cli";
+import { daemon } from "../contexts/daemon/adapters/DaemonCommand.ts";
 import { thisEngine } from "../contexts/shared/services/resolvePackage.ts";
-import { daemon } from "./daemon.ts";
 import { doctor } from "./doctor.ts";
 import { gate } from "./gate.ts";
 import { init } from "./init.ts";

@@ -1,7 +1,10 @@
 import { QueryClientProvider } from "@tanstack/solid-query";
 import { createRootRoute, HeadContent, Scripts } from "@tanstack/solid-router";
-import type { JSX } from "solid-js";
+import { type JSX, onCleanup, onMount } from "solid-js";
 import { HydrationScript } from "solid-js/web";
+import { DaemonConnectionNotice } from "../contexts/daemon/components/DaemonConnectionNotice.tsx";
+import { daemonMutationsAllowed } from "../contexts/daemon/services/connectionState.ts";
+import { observeDaemonNotifications } from "../contexts/daemon/services/observeDaemonNotifications.ts";
 import { browserNow } from "../contexts/shared/adapters/browserNow.ts";
 import { NowProvider } from "../contexts/shared/ports/Now.tsx";
 import { consoleQueryClient } from "../contexts/shared/services/queryClient.ts";
@@ -35,6 +38,11 @@ export const Route = createRootRoute({
 
 function RootDocument(props: { readonly children: JSX.Element }): JSX.Element {
   const now = browserNow();
+  let stopNotifications: (() => void) | undefined;
+  onMount(() => {
+    stopNotifications = observeDaemonNotifications(queryClient);
+  });
+  onCleanup(() => stopNotifications?.());
   return (
     <html lang="en">
       <head>
@@ -43,7 +51,14 @@ function RootDocument(props: { readonly children: JSX.Element }): JSX.Element {
       <body>
         <HeadContent />
         <QueryClientProvider client={queryClient}>
-          <NowProvider now={now}>{props.children}</NowProvider>
+          <DaemonConnectionNotice />
+          <fieldset
+            class="contents"
+            data-daemon-mutation-scope
+            disabled={!daemonMutationsAllowed()}
+          >
+            <NowProvider now={now}>{props.children}</NowProvider>
+          </fieldset>
         </QueryClientProvider>
         <Scripts />
       </body>

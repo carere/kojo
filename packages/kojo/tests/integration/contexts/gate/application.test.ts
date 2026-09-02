@@ -196,7 +196,7 @@ describe("SQLite Gate application", () => {
       expect(receipt.asking).toMatchObject({ state: "recorded" });
       expect(receipt.asking.terminalInability).toBeUndefined();
       database.run("UPDATE workflow_runs SET state = 'failed' WHERE run_id = ?", [authority.runId]);
-      await Effect.runPromise(repository.reconcileTerminalInabilities());
+      await Effect.runPromise(repository.reconcileTerminalInabilities);
       expect(await Effect.runPromise(repository.byToken("terminal-inability-token"))).toMatchObject(
         { state: "recorded", terminalInability: "run-failed" },
       );

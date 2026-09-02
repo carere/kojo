@@ -2,8 +2,8 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { describe, expect, it } from "vitest";
 import { SqliteUpgradeActivationReceiptRepository } from "../../../../src/contexts/daemon/adapters/SqliteUpgradeActivationReceiptRepository.ts";
 import type { UpgradeActivationReceiptStage } from "../../../../src/contexts/daemon/models/UpgradeActivationReceipt.ts";
 

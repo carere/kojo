@@ -1,6 +1,5 @@
-import { it as effectIt } from "@effect/vitest";
+import { describe, it as effectIt, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { describe, expect, it } from "vitest";
 import { InMemoryLifecycleJournalRepository } from "../../../../../src/contexts/daemon/adapters/InMemoryLifecycleJournalRepository.ts";
 import { LifecycleError } from "../../../../../src/contexts/daemon/models/LifecycleError.ts";
 import type {

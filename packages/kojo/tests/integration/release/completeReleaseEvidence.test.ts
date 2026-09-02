@@ -2,6 +2,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  type EvidenceTier,
+  requiredReleaseChecks,
+} from "../../support/release/CompleteReleaseEvidence.ts";
 
 const roots: Array<string> = [];
 const revision = "a".repeat(40);
@@ -12,17 +16,24 @@ const writeJson = (path: string, value: unknown): void => {
   writeFileSync(path, `${JSON.stringify(value)}\n`);
 };
 
-const loaded = (tier: string) => ({
-  tier,
-  testedRevision: revision,
-  environment: { os: "controlled", architecture: "arm64", bun: "1.4.0", moon: "2.5.0" },
-  loaded: 1,
-  passed: 1,
-  skipped: 0,
-  namedSkips: [],
-  cacheHit: false,
-  log: `${tier}.log`,
-});
+const loaded = (tier: EvidenceTier) => {
+  const tests = requiredReleaseChecks
+    .flatMap((check) => check.observations)
+    .filter((observation) => observation.tier === tier)
+    .map((observation) => ({ ...observation, status: "passed" as const }));
+  return {
+    tier,
+    testedRevision: revision,
+    environment: { os: "controlled", architecture: "arm64", bun: "1.4.0", moon: "2.5.0" },
+    loaded: tests.length,
+    passed: tests.length,
+    skipped: 0,
+    namedSkips: [],
+    cacheHit: false,
+    log: `${tier}.log`,
+    tests,
+  };
+};
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -48,6 +59,8 @@ describe("the complete breaking release evidence executable", () => {
         actual: "failed-as-expected",
         check: "deliberate Promise leak",
         log: "kojo-integration.log",
+        exitCode: 1,
+        diagnostic: "deliberateLeak.d.ts:1",
       },
     });
     mkdirSync(join(input, "native-systemd"), { recursive: true });
@@ -64,6 +77,14 @@ describe("the complete breaking release evidence executable", () => {
         "NamedSkip=the native macOS Daemon lifecycle",
       ].join("\n"),
     );
+    writeFileSync(
+      join(input, "native-systemd", "host-tests.log"),
+      [
+        " ✓ packages/kojo/tests/host/contexts/daemon/service.test.ts > native systemd user Daemon lifecycle",
+        " ↓ packages/kojo/tests/host/contexts/daemon/service.test.ts > the native macOS Daemon lifecycle",
+        " Tests  1 passed | 1 skipped (2)",
+      ].join("\n"),
+    );
     writeJson(join(input, "shipped-systemd", "evidence.json"), {
       testedRevision: revision,
       environment: {
@@ -77,8 +98,30 @@ describe("the complete breaking release evidence executable", () => {
         { loaded: 1, passed: 1, skipped: 0, namedSkips: [] },
       ],
       noHiddenRepairs: { actual: true },
+      checks: [
+        { name: "printed-fresh-install", expected: "fresh", actual: "passed", evidence: "log" },
+        { name: "real-daemon-records", expected: "records", actual: "passed", evidence: "log" },
+        {
+          name: "global-tool-independence",
+          expected: "managed",
+          actual: "passed",
+          evidence: "log",
+        },
+      ],
     });
     for (const checkId of ["RELEASE-01", "RELEASE-02", "RELEASE-03"]) {
+      const name =
+        checkId === "RELEASE-01"
+          ? "fresh shipped install"
+          : checkId === "RELEASE-02"
+            ? "real persisted records"
+            : "managed tools after global removal";
+      const actual =
+        checkId === "RELEASE-01"
+          ? "installed"
+          : checkId === "RELEASE-02"
+            ? "rendered through authenticated Console"
+            : "usable";
       writeJson(join(input, "shipped-macos", revision, checkId, "evidence-manifest.json"), {
         checkId,
         testedRevision: revision,
@@ -90,6 +133,7 @@ describe("the complete breaking release evidence executable", () => {
         },
         loadedTests: [{ loaded: 1, passed: 1, skipped: 0, namedSkips: [] }],
         noHiddenRepairs: true,
+        checks: [{ name, expected: "required", actual, evidence: "record" }],
       });
     }
 

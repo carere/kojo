@@ -14,8 +14,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { describe, expect, it } from "vitest";
 import { startDaemon } from "../../../../src/contexts/daemon/adapters/DaemonOwner.ts";
 import {
   managedReleaseSelection,

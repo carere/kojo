@@ -6,5 +6,4 @@ export const useDaemon = (): UseQueryResult<DaemonDocument, Error> =>
   useQuery(() => ({
     queryKey: ["daemon", "details"],
     queryFn: readDaemon,
-    retry: false,
   }));

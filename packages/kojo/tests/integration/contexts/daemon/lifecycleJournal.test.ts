@@ -10,13 +10,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { afterEach, describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { afterEach, describe, expect, it } from "vitest";
 import { FileLifecycleJournalRepository } from "../../../../src/contexts/daemon/adapters/FileLifecycleJournalRepository.ts";
 import { SqliteDaemonLifecycleReceiptRepository } from "../../../../src/contexts/daemon/adapters/SqliteDaemonLifecycleReceiptRepository.ts";
 import { LifecycleError } from "../../../../src/contexts/daemon/models/LifecycleError.ts";
 import { DaemonLifecycleApi } from "../../../../src/contexts/daemon/services/DaemonLifecycleApi.ts";
-import type { RunApi } from "../../../../src/contexts/workflow/services/RunApi.ts";
+import type { RunCoordinator } from "../../../../src/contexts/workflow/services/RunCoordinator.ts";
 
 const roots: Array<string> = [];
 const start = (operationId = "operation-1") => ({
@@ -157,8 +157,8 @@ describe("the private lifecycle journal", () => {
     let releases = 0;
     const runs = {
       lifecycleOwner: () => newOwner,
-      releaseDaemonDispatch: () => Effect.sync(() => releases++),
-    } as unknown as RunApi;
+      releaseDaemonDispatch: Effect.sync(() => releases++),
+    } as unknown as RunCoordinator;
     const api = new DaemonLifecycleApi({ dataIdentity: "data-1", runs, receipts });
 
     expect(

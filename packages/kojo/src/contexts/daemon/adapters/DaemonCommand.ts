@@ -2,62 +2,67 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Console, Duration, Effect, Option } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
-import {
-  acquireDaemonStartGate,
-  DaemonDataPurger,
-} from "../contexts/daemon/adapters/DaemonDataPurger.ts";
-import { FileLifecycleJournalRepository } from "../contexts/daemon/adapters/FileLifecycleJournalRepository.ts";
+import { clientExit } from "../../../cli/ClientExit.ts";
+import { commandFailed } from "../../../cli/CommandFailed.ts";
+import { timeoutMillis as parseTimeoutMillis } from "../../../cli/workflow.ts";
+import { acquireDaemonStartGate, DaemonDataPurger } from "../adapters/DaemonDataPurger.ts";
+import { FileLifecycleJournalRepository } from "../adapters/FileLifecycleJournalRepository.ts";
 import {
   SocketDaemonLifecycleControl,
   SocketDaemonUpgradeControl,
-} from "../contexts/daemon/adapters/LifecycleControlTransport.ts";
-import { macLaunchAgent } from "../contexts/daemon/adapters/MacLaunchAgent.ts";
+} from "../adapters/LifecycleControlTransport.ts";
+import { macLaunchAgent } from "../adapters/MacLaunchAgent.ts";
+import { ManagedDaemonSupervision } from "../adapters/ManagedDaemonSupervision.ts";
 import {
-  type DaemonSupervisionStatus,
-  ManagedDaemonSupervision,
-} from "../contexts/daemon/adapters/ManagedDaemonSupervision.ts";
-import {
+  hostManagedInstallation,
   managedReleaseSelection,
   readCheckedManagedRelease,
   removeManagedInstallation,
   stageManagedRelease,
-} from "../contexts/daemon/adapters/ManagedInstallation.ts";
-import { PurgeSafetyRecovery } from "../contexts/daemon/adapters/PurgeSafetyRecovery.ts";
-import { systemdUserService } from "../contexts/daemon/adapters/SystemdUserService.ts";
+} from "../adapters/ManagedInstallation.ts";
+import { PurgeSafetyRecovery } from "../adapters/PurgeSafetyRecovery.ts";
+import { systemdUserService } from "../adapters/SystemdUserService.ts";
 import type {
   ConfigurationApplyResult,
   ConfigurationCheck,
   ConfigurationStatus,
-} from "../contexts/daemon/models/Configuration.ts";
-import type { DaemonPaths } from "../contexts/daemon/models/DaemonPaths.ts";
-import type { DaemonStatus } from "../contexts/daemon/models/DaemonStatus.ts";
-import { LifecycleError } from "../contexts/daemon/models/LifecycleError.ts";
+} from "../models/Configuration.ts";
+import type { DaemonPaths } from "../models/DaemonPaths.ts";
+import type { DaemonStatus } from "../models/DaemonStatus.ts";
+import { LifecycleError } from "../models/LifecycleError.ts";
 import type {
   LifecycleOperationKind,
   LifecycleOperationStatus,
-} from "../contexts/daemon/models/LifecycleOperation.ts";
+} from "../models/LifecycleOperation.ts";
 import {
   decodeUpgradeCheckReport,
   decodeUpgradeCheckResult,
   type UpgradeCheckReport,
   type UpgradeCheckResult,
-} from "../contexts/daemon/models/ManagedUpgrade.ts";
-import type { LifecycleJournalRepository } from "../contexts/daemon/ports/LifecycleJournalRepository.ts";
-import type { NativeService } from "../contexts/daemon/ports/NativeService.ts";
-import { readDaemonEndpoint } from "../contexts/daemon/services/daemonStatus.ts";
-import { hostPaths } from "../contexts/daemon/services/hostPaths.ts";
-import { LifecycleController } from "../contexts/daemon/services/LifecycleController.ts";
-import { linuxPaths } from "../contexts/daemon/services/linuxPaths.ts";
-import { macPaths } from "../contexts/daemon/services/macPaths.ts";
-import { type DaemonLifecycle, manageDaemon } from "../contexts/daemon/services/manageDaemon.ts";
-import { assertPrivateNode } from "../contexts/daemon/services/secureHostPath.ts";
+} from "../models/ManagedUpgrade.ts";
+import type { LifecycleJournalRepository } from "../ports/LifecycleJournalRepository.ts";
+import type { NativeService } from "../ports/NativeService.ts";
+import { readDaemonEndpoint } from "../services/daemonStatus.ts";
+import { hostPaths } from "../services/hostPaths.ts";
+import { LifecycleController } from "../services/LifecycleController.ts";
+import { linuxPaths } from "../services/linuxPaths.ts";
+import { macPaths } from "../services/macPaths.ts";
+import { type DaemonLifecycle, manageDaemon } from "../services/manageDaemon.ts";
+import { assertPrivateNode } from "../services/secureHostPath.ts";
 import {
   UpgradeActivationController,
   type UpgradeActivationStatus,
-} from "../contexts/daemon/services/UpgradeActivationController.ts";
-import { clientExit } from "./ClientExit.ts";
-import { commandFailed } from "./CommandFailed.ts";
-import { timeoutMillis as parseTimeoutMillis } from "./workflow.ts";
+} from "../services/UpgradeActivationController.ts";
+import {
+  configurationApplyLines,
+  configurationCheckLines,
+  configurationStatusLines,
+  daemonCommandLine,
+  daemonStatusLines,
+  lifecycleStatusLines,
+  supervisionLines,
+  upgradeStatusLines,
+} from "./DaemonCommandPresentation.ts";
 
 interface ProductionController {
   readonly paths: DaemonPaths;
@@ -120,167 +125,17 @@ const productionUpgradeController = (): ProductionUpgradeController => {
 const productionLifecycle = (): DaemonLifecycle => {
   if (process.platform === "darwin") {
     const paths = macPaths();
-    return manageDaemon(paths, macLaunchAgent());
+    return manageDaemon(paths, macLaunchAgent(), hostManagedInstallation);
   }
   if (process.platform === "linux") {
     const paths = linuxPaths();
-    return manageDaemon(paths, systemdUserService());
+    return manageDaemon(paths, systemdUserService(), hostManagedInstallation);
   }
   throw new LifecycleError(
     "UNSUPPORTED_HOST",
     "Kojo supports macOS or Linux with a functioning systemd user manager",
   );
 };
-
-const line = (name: string, value: string): string => `${name}: ${value}.`;
-
-export const configurationStatusLines = (status: ConfigurationStatus): ReadonlyArray<string> => [
-  line("Configuration scope", status.scope),
-  ...(status.projectId === undefined ? [] : [line("Project", status.projectId)]),
-  line("Configuration state version", String(status.stateVersion)),
-  line("Explicit lifecycle restart required", status.restartRequired ? "yes" : "no"),
-  ...status.fields.map((field) =>
-    line(
-      field.path,
-      `effective=${JSON.stringify(field.effective)} default=${JSON.stringify(field.default)} scope=${field.scope} activation=${field.activation}${field.pending === undefined ? "" : ` pending=${JSON.stringify(field.pending)}`}`,
-    ),
-  ),
-];
-
-export const configurationCheckLines = (check: ConfigurationCheck): ReadonlyArray<string> => [
-  ...configurationStatusLines(check.proposed),
-  ...(check.plan === undefined
-    ? [line("Retention plan", "not required")]
-    : [
-        line("Retention plan", check.plan.planId),
-        line("Plan data identity", check.plan.dataIdentity),
-        line("Plan request hash", check.plan.requestHash),
-        line("Plan scope", check.plan.affectedScope),
-        line("Plan configuration state", String(check.plan.expectedStateVersion)),
-        line("Plan retained-data state", check.plan.expectedDataState),
-        line("Plan issued at", check.plan.issuedAt),
-        line("Plan expires at", check.plan.expiresAt),
-        line("Plan changes", JSON.stringify(check.plan.changes)),
-        line(
-          "Runs selected for correctness collection",
-          check.plan.impact.runIds.join(", ") || "none",
-        ),
-        line(
-          "Runs selected for Trace collection",
-          check.plan.impact.traceRunIds.join(", ") || "none",
-        ),
-        line(
-          "Artifacts selected for collection",
-          check.plan.impact.artifactIds.join(", ") || "none",
-        ),
-        line("Protected Runs", check.plan.impact.protectedRunIds.join(", ") || "none"),
-      ]),
-];
-
-export const configurationApplyLines = (
-  applied: ConfigurationApplyResult,
-): ReadonlyArray<string> => [
-  ...configurationStatusLines(applied.status),
-  line("Collected Run correctness", applied.collection.runs.join(", ") || "none"),
-  line("Collected Traces", applied.collection.traces.join(", ") || "none"),
-  line("Collected Artifacts", applied.collection.artifacts.join(", ") || "none"),
-];
-
-const supervisionLines = (status: DaemonSupervisionStatus): ReadonlyArray<string> => [
-  line("Daemon supervision", status.state),
-  line("Daemon restart attempts remaining", String(status.restartAttemptsRemaining)),
-  line("Daemon supervision repair required", status.repairRequired ? "yes" : "no"),
-  line("Daemon restart delays", JSON.stringify(status.policy.restartDelaysMs)),
-  line("Daemon healthy reset", `${status.policy.healthyResetMs} ms`),
-  ...(status.lastFailure === undefined
-    ? []
-    : [
-        line("Last Daemon failure", status.lastFailure.failedAt),
-        line("Last Daemon failure detail", status.lastFailure.detail),
-      ]),
-  ...(status.repairPlan === undefined
-    ? []
-    : [
-        line("Daemon repair plan", status.repairPlan.planId),
-        line("Daemon repair expected state", status.repairPlan.expectedState),
-        line("Daemon repair plan issued", status.repairPlan.issuedAt),
-        line("Daemon repair plan expires", status.repairPlan.expiresAt),
-      ]),
-  ...(status.lastRepair === undefined
-    ? []
-    : [
-        line("Last applied Daemon repair plan", status.lastRepair.planId),
-        line("Last Daemon repair applied", status.lastRepair.appliedAt),
-      ]),
-];
-
-export const daemonStatusLines = (status: DaemonStatus): ReadonlyArray<string> => [
-  line("Installed", status.installed ? "yes" : "no"),
-  line("Managed CLI", status.managedCli),
-  line("Automatic start", status.automaticStart),
-  line("Manager", status.manager),
-  line("Process", status.process),
-  line("Responsive", status.responsiveness),
-  line("Ready", status.ready ? "yes" : "no"),
-  line("Supported lifetime", status.loginLifetime),
-  line("Keep running after logout", status.logoutPersistence),
-  ...(status.detail === undefined ? [] : [line("Manager detail", status.detail)]),
-];
-
-export const lifecycleStatusLines = (status: LifecycleOperationStatus): ReadonlyArray<string> => [
-  line("Lifecycle operation", status.operation.operationId),
-  line("Lifecycle kind", status.operation.kind),
-  line("Lifecycle outcome", status.outcome),
-  line("Last lifecycle stage", status.operation.stage),
-  line("Recorded Daemon owner", status.recordedOwner?.daemonInstanceId ?? "not recorded"),
-  line("Recorded Runner owners", status.recordedOwner?.runnerInstanceIds.join(", ") || "none"),
-  line("Observed Daemon owner", status.observedOwner.daemonInstanceId ?? "not observed"),
-  line("Observed manager", status.observedOwner.manager),
-  line("Observed process", status.observedOwner.process),
-  line("Executing Runs in drain", String(status.progress?.executingRunIds.length ?? 0)),
-  line("Next permitted action", status.nextPermittedAction),
-];
-
-export const upgradeStatusLines = (report: UpgradeCheckReport): ReadonlyArray<string> => [
-  line("Managed upgrade check", report.outcome),
-  line("Staged candidate", report.candidateReleaseId),
-  line("Active source release", report.sourceReleaseId),
-  line("Checked Daemon data", report.dataIdentity),
-  line("Checked retained set", report.retainedSetHash),
-  line("Checked at", report.checkedAt),
-  line("Checked current Workflows", String(report.checked.currentWorkflows)),
-  line("Checked retained Runs", String(report.checked.retainedRuns)),
-  line("Checked terminal Runs", String(report.checked.terminalRuns)),
-  line("Checked validation references", String(report.checked.validations)),
-  line("Checked readers", String(report.checked.readers)),
-  line("Checked Workflow Revisions", String(report.checked.revisions)),
-  line("Rollback-loss approval", report.rollbackApproval),
-  ...report.compatibilityFaults.map((fault) =>
-    line(
-      `Compatibility ${fault.code}${fault.revisionId === undefined ? "" : ` for ${fault.revisionId}`}`,
-      `${fault.detail} Scope: ${fault.affectedScope.join(", ") || "none"}. Remedy: ${fault.remedy}`,
-    ),
-  ),
-  ...report.existingFaults.map((fault) =>
-    line(
-      `Existing ${fault.code}${fault.revisionId === undefined ? "" : ` for ${fault.revisionId}`}`,
-      `${fault.detail} Scope: ${fault.affectedScope.join(", ") || "none"}. Remedy: ${fault.remedy}`,
-    ),
-  ),
-  ...(report.plan === undefined
-    ? []
-    : [
-        line("No-rollback plan", report.plan.planId),
-        line("Plan affected scope", report.plan.affectedScope.join(", ") || "none"),
-        line("Plan state version", report.plan.expectedStateVersion),
-        line(
-          "Migration consequence",
-          `${report.plan.migration.description}; rollback from data format ${report.plan.migration.toDataFormat} to ${report.plan.migration.fromDataFormat} is not available`,
-        ),
-        line("Plan expiry", report.plan.expiresAt),
-      ]),
-  line("Managed upgrade remedy", report.remedy),
-];
 
 const printStatus = (status: DaemonStatus): Effect.Effect<void> =>
   Effect.forEach(daemonStatusLines(status), (statusLine) => Console.log(statusLine), {
@@ -347,10 +202,10 @@ const printUpgradeStatus = (report: UpgradeCheckReport): Effect.Effect<void> =>
 const printUpgradeActivationStatus = (status: UpgradeActivationStatus): Effect.Effect<void> =>
   Effect.forEach(
     [
-      line("Managed upgrade operation", status.operation.operationId),
-      line("Managed upgrade outcome", status.outcome),
-      line("Managed upgrade stage", status.operation.stage),
-      line("Managed upgrade next action", status.nextPermittedAction),
+      daemonCommandLine("Managed upgrade operation", status.operation.operationId),
+      daemonCommandLine("Managed upgrade outcome", status.outcome),
+      daemonCommandLine("Managed upgrade stage", status.operation.stage),
+      daemonCommandLine("Managed upgrade next action", status.nextPermittedAction),
     ],
     (statusLine) => Console.log(statusLine),
     { discard: true },

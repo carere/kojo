@@ -5,11 +5,11 @@ import type {
   RecordVerdictResult,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/gate";
 import { Cause, Data, Effect, Option } from "effect";
+import type { GateRunControl } from "../../workflow/ports/RunControl.ts";
 import { canonicalJson } from "../../workflow/services/canonicalJson.ts";
-import type { RunApi } from "../../workflow/services/RunApi.ts";
-import type { SqliteDaemonGateRepository } from "../adapters/SqliteDaemonGateRepository.ts";
 import type { DaemonAsking, GateTransitionReceipt } from "../models/DaemonAsking.ts";
 import { GateTransitionError } from "../models/GateTransitionError.ts";
+import type { DaemonGateRepository } from "../ports/DaemonGateRepository.ts";
 
 class GateApiFault extends Data.TaggedError("GateApiFault")<{
   readonly message: string;
@@ -54,15 +54,15 @@ export class GateApi {
   readonly #dataIdentity: string;
   readonly #instanceId: string;
   readonly #now: () => number;
-  readonly #repository: SqliteDaemonGateRepository;
-  readonly #runs: RunApi;
+  readonly #repository: DaemonGateRepository["Service"];
+  readonly #runs: GateRunControl;
 
   constructor(options: {
     readonly dataIdentity: string;
     readonly instanceId: string;
     readonly now: () => number;
-    readonly repository: SqliteDaemonGateRepository;
-    readonly runs: RunApi;
+    readonly repository: DaemonGateRepository["Service"];
+    readonly runs: GateRunControl;
   }) {
     this.#dataIdentity = options.dataIdentity;
     this.#instanceId = options.instanceId;
@@ -72,7 +72,7 @@ export class GateApi {
   }
 
   readonly snapshot = (projectId?: string): Effect.Effect<AskingSnapshot, GateApiFault> =>
-    this.#repository.reconcileTerminalInabilities().pipe(
+    this.#repository.reconcileTerminalInabilities.pipe(
       Effect.andThen(this.#repository.list),
       Effect.map((all) => {
         const askings = all.filter(

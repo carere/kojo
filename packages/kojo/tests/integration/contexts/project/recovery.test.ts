@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
+import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { describe, expect, it } from "vitest";
 import { SqliteProjectRecoveryRepository } from "../../../../src/contexts/project/adapters/SqliteProjectRecoveryRepository.ts";
 
 const open = (): Database => {

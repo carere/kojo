@@ -8,6 +8,11 @@ import type {
 } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
 import { Console, Data, Effect, Option } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
+import {
+  configurationApplyLines,
+  configurationCheckLines,
+  configurationStatusLines,
+} from "../contexts/daemon/adapters/DaemonCommandPresentation.ts";
 import type {
   ConfigurationApplyResult,
   ConfigurationCheck,
@@ -21,11 +26,6 @@ import { exactGitWorkingTree } from "../contexts/project/services/gitWorkingTree
 import type { RevisionDetails } from "../contexts/workflow/models/RevisionMaintenance.ts";
 import { clientExit } from "./ClientExit.ts";
 import { commandFailed } from "./CommandFailed.ts";
-import {
-  configurationApplyLines,
-  configurationCheckLines,
-  configurationStatusLines,
-} from "./daemon.ts";
 
 class ProjectClientError extends Data.TaggedError("ProjectClientError")<{
   readonly reason: string;

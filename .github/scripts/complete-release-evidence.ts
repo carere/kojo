@@ -1,5 +1,14 @@
 #!/usr/bin/env bun
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import {
   completeReleaseEvidence,
@@ -59,6 +68,28 @@ const collectCore = (arguments_: ReadonlyArray<string>): void => {
       ];
     }),
   );
+  const integration = tiers["kojo-integration"] as LoadedTestEvidence;
+  const protectedTest = integration.tests.find(
+    (test) =>
+      test.path.endsWith("tests/integration/contexts/sandbox/guards/promiseFreeTypes.test.ts") &&
+      test.name.includes("fails against a deliberate violation, wherever it is nested"),
+  );
+  if (protectedTest?.status !== "passed") {
+    fail("the named promise-free regression test was missing, skipped, or failed");
+  }
+  const regressionRoot = mkdtempSync(join(tmpdir(), "kojo-release-regression-"));
+  const regressionFile = join(regressionRoot, "nested", "deliberateLeak.d.ts");
+  mkdirSync(resolve(regressionFile, ".."), { recursive: true });
+  writeFileSync(regressionFile, "export declare const leaked: () => Promise<string>;\n");
+  const regression = Bun.spawnSync(
+    [process.execPath, "packages/kojo/src/scripts/check-public-types.ts", regressionRoot],
+    { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" },
+  );
+  rmSync(regressionRoot, { recursive: true, force: true });
+  const regressionDiagnostic = `${regression.stdout.toString()}${regression.stderr.toString()}`;
+  if (regression.exitCode === 0 || !regressionDiagnostic.includes("deliberateLeak.d.ts:1")) {
+    fail("the promise-free executable did not become red for the injected regression");
+  }
   writeJson(output, {
     formatVersion: 1,
     kind: "core-release-evidence",
@@ -68,8 +99,10 @@ const collectCore = (arguments_: ReadonlyArray<string>): void => {
     safetyRegression: {
       expected: "protected check fails for injected regression",
       actual: "failed-as-expected",
-      check: "the promise-free build check / fails against a deliberate violation, wherever it is nested",
-      log: "logs/kojo-integration.log",
+      check: protectedTest.name,
+      log: "logs/kojo-integration.log; injected-regression subprocess",
+      exitCode: regression.exitCode,
+      diagnostic: regressionDiagnostic.trim(),
     },
   });
 };
@@ -107,6 +140,8 @@ interface CoreEvidence {
     readonly actual: "failed-as-expected";
     readonly check: string;
     readonly log: string;
+    readonly exitCode: number;
+    readonly diagnostic: string;
   };
 }
 
@@ -120,6 +155,13 @@ interface HostManifest {
     readonly namedSkips: ReadonlyArray<string>;
   }>;
   readonly noHiddenRepairs?: boolean | Readonly<Record<string, unknown>>;
+  readonly checkId?: string;
+  readonly checks?: ReadonlyArray<{
+    readonly name: string;
+    readonly expected: string;
+    readonly actual: string;
+    readonly evidence: string;
+  }>;
 }
 
 const hostTier = (
@@ -140,6 +182,14 @@ const hostTier = (
     namedSkips: manifest.loadedTests.flatMap((item) => item.namedSkips),
     cacheHit: false,
     log,
+    tests: (manifest.checks ?? []).map((check) => ({
+      path: manifest.checkId === undefined ? "evidence.json" : `${manifest.checkId}/evidence-manifest.json`,
+      name: `${check.name}: ${check.actual}`,
+      status: ["passed", "installed", "recorded", "usable"].includes(check.actual) ||
+          check.actual.startsWith("rendered")
+        ? "passed"
+        : "failed",
+    })),
   };
 };
 
@@ -155,23 +205,25 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
   const native = facts(nativeFactsPath);
   const nativeCounts = native.HostTests?.match(/(\d+) passed, (\d+) skipped, (\d+) loaded/);
   if (nativeCounts === undefined) fail("native systemd Host counts are absent");
-  const nativeTier: LoadedTestEvidence = {
-    tier: "native-systemd",
-    testedRevision: native.TestedRevision ?? "",
-    environment: {
+  const nativeEnvironment = {
       os: native.OS ?? "unknown",
       architecture: native.Architecture ?? "unknown",
       kernel: native.Kernel ?? "unknown",
       bun: native.Bun ?? "unknown",
       moon: native.Moon ?? "unknown",
-    },
-    passed: Number(nativeCounts[1]),
-    skipped: Number(nativeCounts[2]),
-    loaded: Number(nativeCounts[3]),
-    namedSkips: native.NamedSkip === undefined ? [] : [native.NamedSkip],
-    cacheHit: false,
-    log: "native-systemd/host-tests.log",
-  };
+    };
+  const nativeTier = loadedTestsFromLog(
+    "native-systemd",
+    native.TestedRevision ?? "",
+    nativeEnvironment,
+    "native-systemd/host-tests.log",
+    readFileSync(join(inputRoot, "native-systemd", "host-tests.log"), "utf8"),
+  );
+  if (
+    nativeTier.passed !== Number(nativeCounts[1]) ||
+    nativeTier.skipped !== Number(nativeCounts[2]) ||
+    nativeTier.loaded !== Number(nativeCounts[3])
+  ) fail("native systemd Host log differs from its recorded counts");
 
   const systemdManifestPath = join(inputRoot, "shipped-systemd", "evidence.json");
   const systemd = readJson<HostManifest>(systemdManifestPath);
@@ -193,16 +245,26 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
   }
   const mac = macManifests[0];
   if (mac === undefined) fail("shipped macOS evidence is absent");
+  const macTiers = macManifests.map((manifest) =>
+    hostTier(
+      "shipped-macos",
+      manifest,
+      `shipped-macos/<revision>/${manifest.checkId ?? "unknown"}/evidence-manifest.json`,
+    ),
+  );
 
   const tiers = {
     ...core.tiers,
     "native-systemd": nativeTier,
     "shipped-systemd": hostTier("shipped-systemd", systemd, "shipped-systemd/evidence.json"),
-    "shipped-macos": hostTier(
-      "shipped-macos",
-      mac,
-      "shipped-macos/<revision>/RELEASE-01/evidence-manifest.json",
-    ),
+    "shipped-macos": {
+      ...macTiers[0],
+      loaded: macTiers.reduce((sum, tier) => sum + tier.loaded, 0),
+      passed: macTiers.reduce((sum, tier) => sum + tier.passed, 0),
+      skipped: macTiers.reduce((sum, tier) => sum + tier.skipped, 0),
+      namedSkips: macTiers.flatMap((tier) => tier.namedSkips),
+      tests: macTiers.flatMap((tier) => tier.tests),
+    },
   } as Readonly<Record<EvidenceTier, LoadedTestEvidence>>;
   const result = completeReleaseEvidence({
     testedRevision,

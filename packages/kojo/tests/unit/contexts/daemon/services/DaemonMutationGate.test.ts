@@ -1,5 +1,5 @@
+import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { describe, expect, it } from "vitest";
 import { DaemonMutationGate } from "../../../../../src/contexts/daemon/services/DaemonMutationGate.ts";
 
 describe("DaemonMutationGate", () => {

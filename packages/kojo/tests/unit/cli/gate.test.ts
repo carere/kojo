@@ -2,8 +2,8 @@ import type {
   AskingDocument,
   AskingSnapshot,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/gate";
+import { describe, expect, it } from "@effect/vitest";
 import { Runtime } from "effect";
-import { describe, expect, it } from "vitest";
 import { ClientExit } from "../../../src/cli/ClientExit.ts";
 import {
   askingLine,

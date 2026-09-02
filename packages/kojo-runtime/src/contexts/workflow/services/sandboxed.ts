@@ -2,7 +2,7 @@ import { Cause, Clock, Effect, Exit, Layer, Option, Scope } from "effect";
 import {
   providerResourceEnvironment,
   resourceLeaseId,
-} from "../../project/adapters/ProviderResourceRegistry.ts";
+} from "../../project/models/ProviderResource.ts";
 import { ResourceLeaseClient } from "../../project/ports/ResourceLeaseClient.ts";
 import { workspaceIsReachable, workspaceProbe } from "../../sandbox/guards/workspaceIsReachable.ts";
 import { worktreeIsUsable } from "../../sandbox/guards/worktreeIsUsable.ts";

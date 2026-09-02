@@ -1,6 +1,6 @@
 import type { RunDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
+import { describe, expect, it } from "@effect/vitest";
 import { Runtime } from "effect";
-import { describe, expect, it } from "vitest";
 import { ClientExit } from "../../../src/cli/ClientExit.ts";
 import { CommandFailed } from "../../../src/cli/CommandFailed.ts";
 import {

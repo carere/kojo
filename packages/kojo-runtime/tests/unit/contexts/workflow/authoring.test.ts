@@ -1,6 +1,6 @@
 import { Acceptance, Judgement } from "@carere/kojo-runtime/contexts/workflow/models/Acceptance";
+import { describe, expect, it } from "@effect/vitest";
 import { Effect, Schema } from "effect";
-import { describe, expect, it } from "vitest";
 import { layer as triggerLayer } from "../../../../src/contexts/trigger/adapters/InMemoryTrigger.ts";
 import { workflow } from "../../../../src/contexts/workflow/services/workflow.ts";
 

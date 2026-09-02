@@ -1,7 +1,12 @@
+// GENERATED CONTRACT SOURCE. Run `bun .github/scripts/generate-contract-codecs.ts` after edits.
 export type JsonPrimitive = boolean | null | number | string;
+
 export type JsonValue = JsonPrimitive | JsonArray | JsonObject;
+
 export type JsonArray = ReadonlyArray<JsonValue>;
+
 export type JsonObject = { readonly [key: string]: JsonValue };
+
 export type DecodePath = ReadonlyArray<number | string>;
 
 export interface DecodeIssue {
@@ -33,13 +38,20 @@ const decodeJsonValueAt = (
   if (input === null || typeof input === "boolean" || typeof input === "string") {
     return decodeSuccess(input);
   }
+
   if (typeof input === "number") {
     return Number.isFinite(input)
       ? decodeSuccess(input)
       : decodeFailure(path, "Expected a finite JSON number");
   }
-  if (typeof input !== "object") return decodeFailure(path, "Expected a JSON value");
-  if (ancestors.has(input)) return decodeFailure(path, "Expected an acyclic JSON value");
+
+  if (typeof input !== "object") {
+    return decodeFailure(path, "Expected a JSON value");
+  }
+
+  if (ancestors.has(input)) {
+    return decodeFailure(path, "Expected an acyclic JSON value");
+  }
 
   const nextAncestors = new Set(ancestors).add(input);
   if (Array.isArray(input)) {
@@ -61,11 +73,16 @@ const decodeJsonValueAt = (
     if (extraKey !== undefined) return decodeFailure(path, "Expected only JSON array elements");
     return decodeSuccess(values);
   }
-  if (!isPlainRecord(input)) return decodeFailure(path, "Expected a plain JSON object");
+
+  if (!isPlainRecord(input)) {
+    return decodeFailure(path, "Expected a plain JSON object");
+  }
+
   const ownKeys = Reflect.ownKeys(input);
   if (ownKeys.some((key) => typeof key === "symbol")) {
     return decodeFailure(path, "JSON object keys must be strings");
   }
+
   const value: Record<string, JsonValue> = {};
   for (const key of ownKeys) {
     if (typeof key !== "string") continue;
@@ -83,6 +100,17 @@ const decodeJsonValueAt = (
 export const decodeJsonValue = (input: unknown): DecodeResult<JsonValue> =>
   decodeJsonValueAt(input, [], new Set());
 
+/** Encode one JSON value with deterministic object-key order. */
+export const encodeCanonicalJson = (value: JsonValue): string => {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(encodeCanonicalJson).join(",")}]`;
+  const record = value as JsonObject;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${encodeCanonicalJson(record[key] ?? null)}`)
+    .join(",")}}`;
+};
+
 export const decodeClosedRecord = (
   input: unknown,
   allowedKeys: ReadonlyArray<string>,
@@ -96,9 +124,10 @@ export const decodeClosedRecord = (
   ) {
     return decodeFailure(path, "Expected an object");
   }
-  if (Reflect.ownKeys(input).some((key) => typeof key === "symbol")) {
-    return decodeFailure(path, "Object keys must be strings");
-  }
+
+  const symbolKey = Reflect.ownKeys(input).find((key) => typeof key === "symbol");
+  if (symbolKey !== undefined) return decodeFailure(path, "Object keys must be strings");
+
   const invalidDescriptor = Object.keys(input).find((key) => {
     const descriptor = Object.getOwnPropertyDescriptor(input, key);
     return descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable;
@@ -109,6 +138,7 @@ export const decodeClosedRecord = (
   if (Reflect.ownKeys(input).length !== Object.keys(input).length) {
     return decodeFailure(path, "Expected only enumerable data fields");
   }
+
   const extraKey = Object.keys(input).find((key) => !allowedKeys.includes(key));
   return extraKey === undefined
     ? decodeSuccess(input)
@@ -150,14 +180,16 @@ export const decodeInteger = (
 export const decodeStringArray = (
   input: unknown,
   path: DecodePath,
+  options: { readonly unique?: boolean } = {},
 ): DecodeResult<ReadonlyArray<string>> => {
   if (!Array.isArray(input)) return decodeFailure(path, "Expected an array");
   const values: string[] = [];
   for (let index = 0; index < input.length; index += 1) {
     const decoded = decodeString(input[index], [...path, index], { minLength: 1 });
     if (!decoded.ok) return decoded;
-    if (values.includes(decoded.value))
+    if (options.unique === true && values.includes(decoded.value)) {
       return decodeFailure([...path, index], "Expected a unique value");
+    }
     values.push(decoded.value);
   }
   return decodeSuccess(values);

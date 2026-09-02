@@ -7,5 +7,4 @@ export const useWorkflows = (projectId: string): UseQueryResult<WorkflowSnapshot
     queryKey: ["projects", projectId, "workflows"],
     queryFn: () => readWorkflows(projectId),
     refetchInterval: (query) => query.state.data?.refreshAfterMillis ?? 1_000,
-    retry: false,
   }));

@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
+import { afterEach, describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { afterEach, describe, expect, it } from "vitest";
 import { SqliteProjectRepository } from "../../../../src/contexts/project/adapters/SqliteProjectRepository.ts";
 import type { RevisionManifest } from "../../../../src/contexts/workflow/models/RevisionManifest.ts";
 

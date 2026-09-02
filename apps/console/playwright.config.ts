@@ -12,6 +12,7 @@ export default defineConfig({
     "workflowCatalogue.spec.ts",
     "gateVerdict.spec.ts",
     "artifact.spec.ts",
+    "reconnect.spec.ts",
   ],
   fullyParallel: true,
   reporter: [["list"]],

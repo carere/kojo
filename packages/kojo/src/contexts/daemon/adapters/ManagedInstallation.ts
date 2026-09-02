@@ -701,3 +701,10 @@ export const installManagedRelease = (
             cause,
           ),
   });
+
+/** Host-file adapter for managed release installation and inspection. */
+export const hostManagedInstallation = {
+  install: installManagedRelease,
+  isPresent: managedInstallationIsPresent,
+  checkedRelease: readCheckedManagedRelease,
+} satisfies import("../ports/ManagedInstallationRepository.ts").ManagedInstallationRepository;

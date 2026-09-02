@@ -1,11 +1,8 @@
 import { Effect } from "effect";
-import {
-  installManagedRelease,
-  type ManagedInstallationOptions,
-} from "../adapters/ManagedInstallation.ts";
 import type { DaemonPaths } from "../models/DaemonPaths.ts";
 import type { DaemonStatus } from "../models/DaemonStatus.ts";
 import { LifecycleError } from "../models/LifecycleError.ts";
+import type { ManagedInstallationRepository } from "../ports/ManagedInstallationRepository.ts";
 import type { NativeService } from "../ports/NativeService.ts";
 import { inspectDaemon } from "./daemonStatus.ts";
 
@@ -34,9 +31,10 @@ const lifecycleError = (cause: unknown): LifecycleError =>
 export const manageDaemon = (
   paths: DaemonPaths,
   nativeService: NativeService,
-  installation: Omit<ManagedInstallationOptions, "paths" | "serviceDocument"> = {},
+  installation: ManagedInstallationRepository,
+  installOptions: { readonly sourceRoot?: string; readonly bunExecutable?: string } = {},
 ): DaemonLifecycle => {
-  const status = inspectDaemon(paths, nativeService);
+  const status = inspectDaemon(paths, nativeService, installation);
   const nativeAction = (action: () => void): Effect.Effect<void, LifecycleError> =>
     Effect.try({ try: action, catch: lifecycleError });
   const transition = (action: () => void): Effect.Effect<DaemonStatus, LifecycleError> =>
@@ -44,8 +42,8 @@ export const manageDaemon = (
   return {
     install: Effect.gen(function* () {
       yield* nativeAction(nativeService.assertSupported);
-      const installed = yield* installManagedRelease({
-        ...installation,
+      const installed = yield* installation.install({
+        ...installOptions,
         paths,
         serviceDocument: nativeService.serviceDocument,
       });

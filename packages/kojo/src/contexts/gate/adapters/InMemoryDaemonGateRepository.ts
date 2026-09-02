@@ -209,4 +209,5 @@ export const layer = (state: InMemoryGateState = makeState()): Layer.Layer<Daemo
           ),
         ),
       ),
+    reconcileTerminalInabilities: Effect.void,
   });
