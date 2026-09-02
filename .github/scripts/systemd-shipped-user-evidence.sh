@@ -132,6 +132,44 @@ for observation in $(seq 1 120); do
   sleep 1
 done
 if [[ $daemon_ready != yes ]]; then
+  # These reads are failure-safe and occur while the isolated user manager, launcher, release, and
+  # journal still exist. Cleanup must not erase the only explanation for a failed managed child.
+  set +e
+  cp "$XDG_CONFIG_HOME/systemd/user/kojo.service" \
+    "$evidence_directory/systemd-unit-document.service"
+  systemctl --user cat kojo.service --no-pager \
+    >"$evidence_directory/systemd-unit-cat.log" 2>&1
+  systemctl --user status kojo.service --full --no-pager \
+    >"$evidence_directory/systemd-unit-status.log" 2>&1
+  systemctl --user show kojo.service --no-pager \
+    >"$evidence_directory/systemd-unit-show.log" 2>&1
+  journalctl --user-unit kojo.service --no-pager --lines=500 --output=short-precise \
+    >"$evidence_directory/systemd-unit-journal.log" 2>&1
+  cp "$XDG_DATA_HOME/kojo/active-release" "$evidence_directory/active-release"
+  cp "$XDG_DATA_HOME/kojo/releases/$release_id/release.json" \
+    "$evidence_directory/managed-release-manifest.json"
+  cp "$XDG_DATA_HOME/kojo/releases/$release_id/managed-release.json" \
+    "$evidence_directory/managed-release-declaration.json"
+  cp "$XDG_STATE_HOME/kojo/launcher-supervision/state.json" \
+    "$evidence_directory/managed-supervision-state.json"
+  find "$XDG_STATE_HOME/kojo/launcher-supervision" -maxdepth 2 \
+    -printf '%m %u:%g %y %p\n' >"$evidence_directory/managed-supervision-paths.log" 2>&1
+  stat -c 'Mode=%a Owner=%U:%G Type=%F Path=%n' \
+    "$XDG_DATA_HOME/kojo" \
+    "$XDG_DATA_HOME/kojo/bin/kojo-launcher" \
+    "$XDG_DATA_HOME/kojo/active-release" \
+    "$XDG_DATA_HOME/kojo/releases/$release_id" \
+    "$XDG_DATA_HOME/kojo/releases/$release_id/release.json" \
+    "$XDG_DATA_HOME/kojo/releases/$release_id/launcher.js" \
+    "$XDG_DATA_HOME/kojo/releases/$release_id/runtime/bun" \
+    "$XDG_STATE_HOME/kojo" \
+    "$XDG_STATE_HOME/kojo/launcher-supervision" \
+    "$XDG_RUNTIME_DIR/kojo" \
+    "$XDG_CONFIG_HOME/kojo" \
+    >"$evidence_directory/managed-path-modes.log" 2>&1
+  find "$XDG_DATA_HOME/kojo/releases/$release_id" -maxdepth 3 \
+    -printf '%m %u:%g %y %s %p\n' >"$evidence_directory/managed-release-paths.log" 2>&1
+  set -e
   {
     echo "ManagedReadyObservation=timed-out"
     echo "ObservationLimit=120"
