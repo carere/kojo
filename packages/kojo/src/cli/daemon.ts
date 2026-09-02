@@ -324,6 +324,13 @@ const privateDaemonRequest = <A>(
     catch: (cause) => (cause instanceof Error ? cause.message : String(cause)),
   });
 
+export const daemonStatusConfiguration = <A>(
+  details: boolean,
+  ready: boolean,
+  request: () => Effect.Effect<A, string>,
+): Effect.Effect<Option.Option<A>, string> =>
+  details && ready ? request().pipe(Effect.map(Option.some)) : Effect.succeed(Option.none());
+
 const readConfigurationPatch = (file: string): Effect.Effect<unknown, string> =>
   Effect.tryPromise({
     try: async () =>
@@ -652,11 +659,11 @@ const status = Command.make(
       }
     }
     let configuration: ConfigurationStatus | undefined;
-    if (details) {
-      configuration = yield* privateDaemonRequest<ConfigurationStatus>(
-        "/api/v1/daemon/configuration",
-      ).pipe(Effect.catch((message) => commandFailed(message)));
-    }
+    configuration = Option.getOrUndefined(
+      yield* daemonStatusConfiguration(details, daemon.ready, () =>
+        privateDaemonRequest<ConfigurationStatus>("/api/v1/daemon/configuration"),
+      ).pipe(Effect.catch((message) => commandFailed(message))),
+    );
     const upgrade = yield* latestUpgrade(paths).pipe(
       Effect.catch((cause) => commandFailed(`${cause.code}: ${cause.message}`)),
     );

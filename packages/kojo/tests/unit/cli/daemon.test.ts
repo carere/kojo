@@ -1,5 +1,8 @@
+import { it as effectIt } from "@effect/vitest";
+import { Effect, Option } from "effect";
 import { describe, expect, it } from "vitest";
 import {
+  daemonStatusConfiguration,
   daemonStatusLines,
   plannedLifecycleResume,
   upgradeStatusLines,
@@ -8,6 +11,29 @@ import { InMemoryLifecycleJournalRepository } from "../../../src/contexts/daemon
 import { decodeUpgradeCheckResult } from "../../../src/contexts/daemon/models/ManagedUpgrade.ts";
 
 describe("daemon status text", () => {
+  effectIt.effect("keeps detailed status offline when the stopped Daemon has no endpoint", () =>
+    Effect.gen(function* () {
+      let requests = 0;
+      const configuration = yield* daemonStatusConfiguration(true, false, () => {
+        requests += 1;
+        return Effect.fail("the Daemon is not ready; run `kojo daemon status`");
+      });
+
+      expect(Option.isNone(configuration)).toBe(true);
+      expect(requests).toBe(0);
+    }),
+  );
+
+  effectIt.effect("reads configuration details when the Daemon is ready", () =>
+    Effect.gen(function* () {
+      const configuration = yield* daemonStatusConfiguration(true, true, () =>
+        Effect.succeed({ scope: "daemon" }),
+      );
+
+      expect(Option.getOrUndefined(configuration)).toEqual({ scope: "daemon" });
+    }),
+  );
+
   it("keeps installation, automatic start, process, responsiveness, and readiness separate", () => {
     const lines = daemonStatusLines({
       installed: true,
