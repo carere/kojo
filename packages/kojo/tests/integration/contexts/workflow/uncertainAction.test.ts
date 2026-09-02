@@ -251,6 +251,7 @@ describe("uncertain external actions", () => {
             result: { count: 1 },
           });
           expect(readFileSync(counter, "utf8")).toBe("1");
+          yield* runs.completeRun(originalReplay, "succeeded", new Date(6).toISOString());
 
           const absent = yield* admitAndClaim(runs, "absent", "runner-c", 6);
           const absentIntent = intent(absent.run.runId, absent.authority);
