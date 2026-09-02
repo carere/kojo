@@ -118,7 +118,7 @@ test("renders persisted Gate and Sandbox Trace records and accepts their absent 
             sandboxId,
             name: "release",
             provider: "no-sandbox",
-            kind: "host",
+            kind: "none",
             branch: "kojo/release",
             worktreePath: "/tmp/release",
             environment: { KOJO_RUN_ID: runId },

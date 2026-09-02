@@ -18,6 +18,7 @@ import {
 } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import type { OperationReplyBody } from "@carere/kojo-runner-contracts/contexts/project/contracts/execution";
 import type { RunnerFrame } from "@carere/kojo-runner-contracts/contexts/project/contracts/frame";
+import { decodeTraceMutation } from "@carere/kojo-runner-contracts/contexts/project/contracts/trace";
 import { Data, Duration, Effect, Option } from "effect";
 import type { SqliteDaemonGateRepository } from "../../gate/adapters/SqliteDaemonGateRepository.ts";
 import type { SqliteProjectRecoveryRepository } from "../../project/adapters/SqliteProjectRecoveryRepository.ts";
@@ -46,7 +47,7 @@ import {
 } from "../../project/services/runnerChannel.ts";
 import type { AtomicArtifactRepository } from "../../trace/adapters/AtomicArtifactRepository.ts";
 import type { SqliteTraceRepository } from "../../trace/adapters/SqliteTraceRepository.ts";
-import type { TraceMutation, TraceProjection } from "../../trace/models/DaemonTrace.ts";
+import type { TraceProjection } from "../../trace/models/DaemonTrace.ts";
 import type { SqliteTriggerRepository } from "../../trigger/adapters/SqliteTriggerRepository.ts";
 import type { SqliteExternalActionRepository } from "../adapters/SqliteExternalActionRepository.ts";
 import type { SqliteRevisionRepository } from "../adapters/SqliteRevisionRepository.ts";
@@ -244,7 +245,7 @@ const documentOf = (
     sandboxId: String(sandbox.sandboxId),
     name: String(sandbox.name),
     provider: String(sandbox.provider),
-    kind: String(sandbox.kind),
+    kind: sandbox.kind as "bind-mount" | "isolated" | "none",
     branch: String(sandbox.branch),
     worktreePath: String(sandbox.worktreePath),
     environment: sandbox.environment as Readonly<Record<string, string>>,
@@ -2670,7 +2671,15 @@ export class RunApi {
             ) {
               throw new Error("the Trace mutation escaped current Run authority");
             }
-            await Effect.runPromise(this.#trace.write(authority, frame.body as TraceMutation));
+            const mutation = decodeTraceMutation(frame.body);
+            if (!mutation.ok) {
+              throw new Error(
+                `the Trace mutation is invalid: ${mutation.issues
+                  .map((issue) => `${issue.path.join(".") || "body"}: ${issue.message}`)
+                  .join("; ")}`,
+              );
+            }
+            await Effect.runPromise(this.#trace.write(authority, mutation.value));
             await replyMutation(frame, { state: "committed" });
             continue;
           }

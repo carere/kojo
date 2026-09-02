@@ -208,10 +208,10 @@ jq -n \
     checks: [
       { name: "printed-fresh-install", expected: "bun add -g, init, install, doctor, registration and Start succeed without conditional repair", actual: "passed", evidence: "candidate-install.log; fresh-init.log; factory-authoring.log; fresh-doctor.log; project-register.log; workflow-start.json" },
       { name: "shipped-managed-content", expected: "packed Kojo, copied global Bun and shipped Console own the service", actual: "passed", evidence: "candidate-install.log; daemon-install.log; managed-bun-sha256.log; package-sha256.log" },
-      { name: "real-daemon-records", expected: "Project, Workflow, Run, Gate, Trace, Sandbox and Artifact persist", actual: "passed", evidence: "run-succeeded.json; gate-applied.json; run-after-replacement.json; persisted-database.json" },
-      { name: "authenticated-browser", expected: "one authenticated browser renders persisted records and Artifact", actual: "passed", evidence: "browser-tests.log" },
+      { name: "real-daemon-records", expected: "Project, Workflow, Run, Gate, Trace, Sandbox and Artifact persist; optional wire fields are absent instead of null", actual: "passed", evidence: "run-succeeded.json; gate-applied.json; run-after-replacement.json; persisted-database.json" },
+      { name: "authenticated-browser", expected: "one authenticated browser inspects the actual encoded wire and renders persisted records and Artifact", actual: "passed", evidence: "browser-tests.log" },
       { name: "global-tool-independence", expected: "managed status and repair work after candidate global Kojo and Bun removal", actual: "passed", evidence: "global-removal.log; managed-status-after-global-removal.log; managed-repair-after-global-removal.log" },
-      { name: "replacement-and-access", expected: "old process and browser authority are revoked and another OS user is refused", actual: "passed", evidence: "replacement-access.log; final-logout-with-linger.log" },
+      { name: "replacement-and-access", expected: "the Type=exec control group contains the replacement MainPID; old process and browser authority are revoked; another OS user is refused", actual: "passed", evidence: "cgroup-before-replacement.log; replacement-access.log; final-logout-with-linger.log" },
       { name: "login-lifetime", expected: "final logout stops the Daemon without linger and preserves it only after explicit authorized linger", actual: "passed", evidence: "final-logout-without-linger.log; keep-running-refusal.log; keep-running-after-logout.log; final-logout-with-linger.log" },
       { name: "removal-preserves-linger", expected: "shipped removal never disables user linger", actual: "passed", evidence: "managed-removal.log; removal-preserves-linger.log" }
     ],

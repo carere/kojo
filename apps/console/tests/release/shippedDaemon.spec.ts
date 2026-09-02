@@ -36,6 +36,30 @@ test("renders actual shipped Daemon records through one authenticated browser se
   expect(await page.locator('[data-scope="sandbox"]').count()).toBeGreaterThanOrEqual(2);
   await expect(page.getByText("Captured Artifacts", { exact: true })).toBeVisible();
 
+  const wire = await page.evaluate(async (selectedRunId) => {
+    const stored = window.sessionStorage.getItem("kojo.browser-session.v1");
+    if (stored === null) throw new Error("the authenticated browser session is absent");
+    const session = JSON.parse(stored) as { readonly credential: string };
+    const response = await fetch(`/api/v1/runs/${encodeURIComponent(selectedRunId)}`, {
+      headers: { authorization: `Bearer ${session.credential}` },
+    });
+    if (!response.ok) throw new Error(`the Run wire response failed with ${response.status}`);
+    return (await response.json()) as Record<string, unknown>;
+  }, runId);
+  for (const optional of [
+    "queueReason",
+    "executionFault",
+    "cancellation",
+    "recovery",
+    "cleanup",
+    "uncertainty",
+  ]) {
+    expect(Object.hasOwn(wire, optional), `${optional} must be absent, not null`).toBe(false);
+  }
+  const phases = wire.phases as ReadonlyArray<Record<string, unknown>>;
+  expect(phases.length).toBeGreaterThanOrEqual(2);
+  expect(phases.every((phase) => !Object.hasOwn(phase, "errorTag"))).toBe(true);
+
   await page.goto(`${origin}/runs/${runId}/gates/${gateName}/${asking}`);
   await expect(page.locator('[data-gate-outcome="answered"]')).toBeVisible();
   await expect(page.locator('[data-gate-from="trace"]')).toBeVisible();

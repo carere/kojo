@@ -74,7 +74,7 @@ export PATH="$candidate_tools/bin:$PATH"
   >"$evidence_directory/fresh-init.log"
 "$candidate_bun" "$helper" author "$project" "$package_directory" \
   >"$evidence_directory/factory-authoring.log" 2>&1
-(cd "$project" && "$candidate_bun" install --frozen-lockfile) \
+(cd "$project" && "$candidate_bun" install) \
   >"$evidence_directory/factory-install.log" 2>&1
 (cd "$project" && "$candidate_kojo" doctor) >"$evidence_directory/fresh-doctor.log"
 grep -F "factory" "$evidence_directory/fresh-doctor.log" >/dev/null
@@ -147,6 +147,16 @@ jq -e '.run.phases | length >= 2' "$evidence_directory/run-succeeded.json" >/dev
 jq -e '.run.sandboxes | length >= 2' "$evidence_directory/run-succeeded.json" >/dev/null
 jq -e '.run.gates | length >= 1' "$evidence_directory/run-succeeded.json" >/dev/null
 jq -e '.run.artifacts | length >= 1' "$evidence_directory/run-succeeded.json" >/dev/null
+jq -e '
+  .run |
+  (has("queueReason") | not) and
+  (has("executionFault") | not) and
+  (has("cancellation") | not) and
+  (has("recovery") | not) and
+  (has("cleanup") | not) and
+  (has("uncertainty") | not) and
+  all(.phases[]; has("errorTag") | not)
+' "$evidence_directory/run-succeeded.json" >/dev/null
 jq -e '.asking.state == "applied"' "$evidence_directory/gate-applied.json" >/dev/null
 
 gate_name=$(jq -er '.run.gates[0].gate' "$evidence_directory/run-succeeded.json")
@@ -187,6 +197,19 @@ old_instance=$(jq -er '.instanceId' "$endpoint")
 old_pid=$(systemctl --user show kojo.service --property=MainPID --value)
 systemctl --user show kojo.service --property=Type,KillMode,ControlGroup,MainPID,ActiveState,SubState \
   >"$evidence_directory/systemd-before-replacement.log"
+[[ $(systemctl --user show kojo.service --property=Type --value) == exec ]]
+[[ $(systemctl --user show kojo.service --property=KillMode --value) == control-group ]]
+[[ $(systemctl --user show kojo.service --property=ActiveState --value) == active ]]
+[[ $(systemctl --user show kojo.service --property=SubState --value) == running ]]
+control_group=$(systemctl --user show kojo.service --property=ControlGroup --value)
+[[ $control_group == /user.slice/*/kojo.service ]]
+grep -Fx "$old_pid" "/sys/fs/cgroup$control_group/cgroup.procs" >/dev/null
+{
+  echo "Type=exec"
+  echo "KillMode=control-group"
+  echo "ControlGroup=$control_group"
+  echo "MainPidInCgroup=yes"
+} >"$evidence_directory/cgroup-before-replacement.log"
 
 find "$candidate_tools" -maxdepth 3 -mindepth 0 -print \
   >"$evidence_directory/global-removal-plan.log"
@@ -246,10 +269,16 @@ old_session_status=$(curl --silent --output /dev/null --write-out '%{http_code}'
 [[ $old_session_status == 401 ]]
 systemctl --user show kojo.service --property=Type,KillMode,ControlGroup,MainPID,ActiveState,SubState \
   >"$evidence_directory/systemd-after-replacement.log"
+[[ $(systemctl --user show kojo.service --property=Type --value) == exec ]]
+[[ $(systemctl --user show kojo.service --property=KillMode --value) == control-group ]]
+new_control_group=$(systemctl --user show kojo.service --property=ControlGroup --value)
+[[ $new_control_group == "$control_group" ]]
+grep -Fx "$new_pid" "/sys/fs/cgroup$new_control_group/cgroup.procs" >/dev/null
 {
   echo "OldInstanceReplaced=yes"
   echo "OldProcessStopped=yes"
   echo "OldBrowserSessionAtReplacement=401"
+  echo "ReplacementMainPidInCgroup=yes"
 } >"$evidence_directory/replacement-access.log"
 
 PATH=/usr/bin:/bin "$managed_kojo" run status "$run_id" --details --json \

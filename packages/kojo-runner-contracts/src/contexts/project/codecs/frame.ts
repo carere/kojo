@@ -32,6 +32,7 @@ import {
   decodePreserveResourceBody,
   decodeReportRecoveryBody,
 } from "../contracts/resource.ts";
+import { decodeTraceMutation } from "../contracts/trace.ts";
 
 const prefixIssues = <A>(
   result: DecodeResult<A>,
@@ -114,6 +115,8 @@ export const decodeRunnerFrame = (input: unknown): DecodeResult<RunnerFrame> => 
     body = prefixIssues(decodePreserveResourceBody(base.value.body), ["body"]);
   } else if (base.value.kind === "ReportRecovery") {
     body = prefixIssues(decodeReportRecoveryBody(base.value.body), ["body"]);
+  } else if (base.value.kind === "WriteTrace") {
+    body = prefixIssues(decodeTraceMutation(base.value.body), ["body"]);
   } else {
     body = prefixIssues(decodeJsonValue(base.value.body), ["body"]);
   }

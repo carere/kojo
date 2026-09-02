@@ -341,6 +341,16 @@ export class SqliteRunRepository {
       ) STRICT
     `);
     database.run(`
+      CREATE TABLE IF NOT EXISTS workflow_claim_generations (
+        run_id TEXT PRIMARY KEY NOT NULL,
+        generation INTEGER NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
+      ) STRICT
+    `);
+    database.run(
+      "INSERT OR IGNORE INTO workflow_claim_generations (run_id, generation) SELECT run_id, generation FROM workflow_claims",
+    );
+    database.run(`
       CREATE TABLE IF NOT EXISTS workflow_slots (
         run_id TEXT PRIMARY KEY NOT NULL,
         project_id TEXT NOT NULL,
@@ -714,12 +724,7 @@ export class SqliteRunRepository {
                 message: "global execution capacity is full",
               });
             }
-            const previous = this.#database
-              .query<{ readonly generation: number }, [string]>(
-                "SELECT generation FROM workflow_claims WHERE run_id = ?",
-              )
-              .get(runId);
-            const generation = (previous?.generation ?? 0) + 1;
+            const generation = this.#nextGeneration(runId);
             this.#database.run(
               `INSERT INTO workflow_claims (run_id, runner_instance_id, generation, revision_id, claimed_at)
              VALUES (?, ?, ?, ?, ?)
@@ -821,12 +826,7 @@ export class SqliteRunRepository {
                 ? (select("new") ?? select("continuation"))
                 : (select("continuation") ?? select("new"));
             if (selected === null) return undefined;
-            const previous = this.#database
-              .query<{ readonly generation: number }, [string]>(
-                "SELECT generation FROM workflow_claims WHERE run_id = ?",
-              )
-              .get(selected.run_id);
-            const generation = (previous?.generation ?? 0) + 1;
+            const generation = this.#nextGeneration(selected.run_id);
             this.#database.run(
               `INSERT INTO workflow_claims (run_id, runner_instance_id, generation, revision_id, claimed_at)
                VALUES (?, ?, ?, ?, ?)
@@ -1028,12 +1028,7 @@ export class SqliteRunRepository {
                 message: "the current execution limits or package graph hold this reservation",
               });
             }
-            const generation =
-              (this.#database
-                .query<{ readonly generation: number }, [string]>(
-                  "SELECT generation FROM workflow_claims WHERE run_id = ?",
-                )
-                .get(run.run_id)?.generation ?? 0) + 1;
+            const generation = this.#nextGeneration(run.run_id);
             this.#database.run(
               `INSERT INTO workflow_claims (run_id, runner_instance_id, generation, revision_id, claimed_at)
                VALUES (?, ?, ?, ?, ?)
@@ -1924,6 +1919,26 @@ export class SqliteRunRepository {
       throw new RunStoreError({ code: "RUN_NOT_FOUND", message: `Run ${runId} was not found` });
     }
     return row;
+  }
+
+  #nextGeneration(runId: string): number {
+    this.#database.run(
+      `INSERT INTO workflow_claim_generations (run_id, generation) VALUES (?, 1)
+       ON CONFLICT(run_id) DO UPDATE SET generation = generation + 1`,
+      [runId],
+    );
+    const row = this.#database
+      .query<{ readonly generation: number }, [string]>(
+        "SELECT generation FROM workflow_claim_generations WHERE run_id = ?",
+      )
+      .get(runId);
+    if (row === null) {
+      throw new RunStoreError({
+        code: "STORE_FAILED",
+        message: "the Run Claim generation was not recorded",
+      });
+    }
+    return row.generation;
   }
 
   #assertAuthority(authority: RunAuthority): void {

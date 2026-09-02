@@ -41,7 +41,7 @@ export interface RunSandboxDocument {
   readonly sandboxId: string;
   readonly name: string;
   readonly provider: string;
-  readonly kind: string;
+  readonly kind: "bind-mount" | "isolated" | "none";
   readonly branch: string;
   readonly worktreePath: string;
   readonly environment: Readonly<Record<string, string>>;

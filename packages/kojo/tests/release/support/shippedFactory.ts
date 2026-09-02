@@ -55,7 +55,7 @@ const prepare = (): void => {
 
 const commands = `/** Commands completed by the controlled release-evidence Workflow. */
 export const commands = {
-  install: "bun install --frozen-lockfile",
+  install: "bun install",
   test: "true",
   lint: "true",
   build: "true",

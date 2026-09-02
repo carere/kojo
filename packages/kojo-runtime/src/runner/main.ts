@@ -333,7 +333,6 @@ export const executeRegisteredRevision = async (
           kind: "run-finished",
           runId,
           outcome,
-          finishedAt: Date.now(),
         }),
       ).pipe(Effect.asVoid),
     phaseEntered: (runId, phase) =>
@@ -363,7 +362,11 @@ export const executeRegisteredRevision = async (
       ),
     occurrence: (record) =>
       Effect.promise(() =>
-        sendTraceMutation({ kind: "occurrence", record: plainJson(record) }),
+        sendTraceMutation({
+          kind: "occurrence",
+          occurrenceId: crypto.randomUUID(),
+          record: plainJson(record),
+        }),
       ).pipe(Effect.asVoid),
   });
   const sandboxSource = SandcastleSandboxSource.layer.pipe(Layer.provide(BunServices.layer));
