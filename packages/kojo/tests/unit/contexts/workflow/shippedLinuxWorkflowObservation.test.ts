@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { shippedWorkflowObservation } from "../../../support/release/ShippedWorkflowObservation.ts";
+import {
+  shippedWorkflowObservation,
+  shippedWorkflowObservationBounds,
+} from "../../../support/release/ShippedWorkflowObservation.ts";
 
 const projectId = "75983ca0-6709-44ca-a8e7-59f507e3aed2";
 
@@ -14,6 +17,21 @@ const workflow = (overrides: Record<string, unknown> = {}): Record<string, unkno
 });
 
 describe("shipped Linux Workflow observation", () => {
+  it("reserves failure classification inside the strict total bound", () => {
+    const configuredTotalMillis =
+      (shippedWorkflowObservationBounds.observerTerminateAfterSeconds +
+        shippedWorkflowObservationBounds.observerKillAfterSeconds +
+        shippedWorkflowObservationBounds.classifierTerminateAfterSeconds +
+        shippedWorkflowObservationBounds.classifierKillAfterSeconds) *
+      1_000;
+
+    expect(configuredTotalMillis).toBe(shippedWorkflowObservationBounds.totalBoundMillis);
+    expect(configuredTotalMillis).toBeLessThanOrEqual(120_000);
+    expect(shippedWorkflowObservationBounds.internalTimeoutMillis).toBeLessThan(
+      shippedWorkflowObservationBounds.observerTerminateAfterSeconds * 1_000,
+    );
+  });
+
   it("waits while the controlled Workflow Factory Refresh is pending", () => {
     const output = JSON.stringify({
       observationVersion: 1,

@@ -204,28 +204,48 @@ printf '%s\n' "$project_id" >"$evidence_directory/project-id"
 
 # Project registration starts a Factory Refresh. The helper observes one exact Project and Workflow
 # row until Project, Factory, Factory Refresh, and Workflow availability are all current. It writes
-# each raw and decoded attempt. Its internal deadline leaves time for final evidence. The outer GNU
-# timeout gives the complete operation a strict 120-second TERM-to-KILL bound.
+# each raw and decoded attempt. Its internal deadline leaves time for final evidence. One shared
+# bounds record reserves 115 seconds for observer TERM-to-KILL and 5 seconds for failure
+# classification. Both sequential stages therefore fit the strict 120-second total bound.
 factory_refresh_observations=$evidence_directory/bounded-factory-refresh-observations
 factory_refresh_final=$evidence_directory/bounded-factory-refresh-observation-final.json
 factory_refresh_summary=$evidence_directory/bounded-factory-refresh-observation.log
+factory_refresh_bounds=$evidence_directory/bounded-factory-refresh-bounds.json
 mkdir -p "$factory_refresh_observations"
+"$candidate_bun" "$workflow_observation_helper" bounds >"$factory_refresh_bounds"
+jq -e '
+  .internalTimeoutMillis < (.observerTerminateAfterSeconds * 1000) and
+  (((.observerTerminateAfterSeconds + .observerKillAfterSeconds +
+     .classifierTerminateAfterSeconds + .classifierKillAfterSeconds) * 1000) ==
+   .totalBoundMillis) and
+  .totalBoundMillis <= 120000
+' "$factory_refresh_bounds" >/dev/null
+factory_refresh_internal_millis=$(jq -er '.internalTimeoutMillis' "$factory_refresh_bounds")
+factory_refresh_observer_seconds=$(jq -er '.observerTerminateAfterSeconds' "$factory_refresh_bounds")
+factory_refresh_observer_kill_seconds=$(jq -er '.observerKillAfterSeconds' "$factory_refresh_bounds")
+factory_refresh_classifier_seconds=$(jq -er '.classifierTerminateAfterSeconds' "$factory_refresh_bounds")
+factory_refresh_classifier_kill_seconds=$(jq -er '.classifierKillAfterSeconds' "$factory_refresh_bounds")
 jq -n \
   --arg bun "$candidate_bun" \
   --arg helper "$workflow_observation_helper" \
   --arg kojo "$candidate_kojo" \
   --arg evidenceDirectory "$evidence_directory" \
   --arg projectId "$project_id" \
+  --arg observerSeconds "${factory_refresh_observer_seconds}s" \
+  --arg observerKillSeconds "${factory_refresh_observer_kill_seconds}s" \
+  --slurpfile bounds "$factory_refresh_bounds" \
   '{
     kind: "bounded-read-only-factory-refresh",
-    command: ["timeout", "--signal=TERM", "--kill-after=1s", "119s", $bun, $helper, "observe", $kojo, $evidenceDirectory, $projectId, "review", "115000"],
-    strictOperationBoundMillis: 120000,
+    command: ["timeout", "--signal=TERM", "--kill-after=" + $observerKillSeconds, $observerSeconds, $bun, $helper, "observe", $kojo, $evidenceDirectory, $projectId, "review", ($bounds[0].internalTimeoutMillis | tostring)],
+    bounds: $bounds[0],
     noRepairReregisterRestartOrStart: true
   }' >"$evidence_directory/bounded-factory-refresh-observer-command.json"
 set +e
-timeout --signal=TERM --kill-after=1s 119s \
+timeout --signal=TERM --kill-after="${factory_refresh_observer_kill_seconds}s" \
+  "${factory_refresh_observer_seconds}s" \
   "$candidate_bun" "$workflow_observation_helper" observe \
-  "$candidate_kojo" "$evidence_directory" "$project_id" review 115000 \
+  "$candidate_kojo" "$evidence_directory" "$project_id" review \
+  "$factory_refresh_internal_millis" \
   >"$evidence_directory/bounded-factory-refresh-observer.stdout.log" \
   2>"$evidence_directory/bounded-factory-refresh-observer.stderr.log"
 factory_refresh_status=$?
@@ -235,7 +255,8 @@ if [[ $factory_refresh_status -eq 124 || $factory_refresh_status -eq 137 ]]; the
   factory_refresh_failure=observer-hard-timeout
 fi
 if [[ $factory_refresh_status -ne 0 ]]; then
-  timeout --signal=TERM --kill-after=1s 4s \
+  timeout --signal=TERM --kill-after="${factory_refresh_classifier_kill_seconds}s" \
+    "${factory_refresh_classifier_seconds}s" \
     "$candidate_bun" "$workflow_observation_helper" classify-failure \
     "$evidence_directory" "$factory_refresh_failure" "$factory_refresh_status"
   echo "The controlled Workflow did not become available after a current Factory Refresh." >&2
@@ -255,7 +276,9 @@ elif ! jq -e '
   factory_refresh_validation=1
 fi
 if [[ $factory_refresh_validation -ne 0 ]]; then
-  "$candidate_bun" "$workflow_observation_helper" classify-failure \
+  timeout --signal=TERM --kill-after="${factory_refresh_classifier_kill_seconds}s" \
+    "${factory_refresh_classifier_seconds}s" \
+    "$candidate_bun" "$workflow_observation_helper" classify-failure \
     "$evidence_directory" "$factory_refresh_failure" "$factory_refresh_validation"
   echo "The Factory Refresh observer did not write valid complete success evidence." >&2
   exit 1

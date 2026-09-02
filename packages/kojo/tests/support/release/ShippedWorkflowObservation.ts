@@ -40,6 +40,15 @@ export interface FailedShippedWorkflowObservation {
   readonly observerExitCode: number;
 }
 
+export const shippedWorkflowObservationBounds = {
+  internalTimeoutMillis: 110_000,
+  observerTerminateAfterSeconds: 114,
+  observerKillAfterSeconds: 1,
+  classifierTerminateAfterSeconds: 4,
+  classifierKillAfterSeconds: 1,
+  totalBoundMillis: 120_000,
+} as const;
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -309,6 +318,10 @@ export const observeShippedWorkflow = async (
 
 if (import.meta.main) {
   const operation = process.argv[2];
+  if (operation === "bounds") {
+    process.stdout.write(`${JSON.stringify(shippedWorkflowObservationBounds)}\n`);
+    process.exit(0);
+  }
   if (operation === "classify-failure") {
     const evidenceDirectory = process.argv[3];
     const readiness = process.argv[4];
