@@ -253,6 +253,31 @@ export const releaseEvidence = workflow(
 );
 `;
 
+const projectIdSource = "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+
+export const shippedProjectId = (registeredOutput: string, listedOutput: string): string => {
+  const registered = [
+    ...registeredOutput.matchAll(
+      new RegExp(`^(?:registered|already registered) Project (${projectIdSource})$`, "gm"),
+    ),
+  ];
+  if (registered.length !== 1) {
+    throw new Error("shipped Project registration did not return exactly one UUID Project ID");
+  }
+  const listed = [...listedOutput.matchAll(new RegExp(`^(${projectIdSource})\\t`, "gm"))];
+  if (listed.length !== 1) {
+    throw new Error("shipped Project list did not return exactly one UUID Project ID");
+  }
+  const registeredId = registered[0]?.[1];
+  const listedId = listed[0]?.[1];
+  if (registeredId === undefined || listedId === undefined || registeredId !== listedId) {
+    throw new Error(
+      `shipped Project identity differs between registration (${registeredId}) and list (${listedId})`,
+    );
+  }
+  return registeredId;
+};
+
 const commands = `import { isPlaceholder } from "@carere/kojo-runtime/contexts/workflow/models/Placeholder";
 
 export const commands = {
@@ -684,7 +709,7 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
     await prepareProject(recorder, project, globalKojo, globalBun, environment);
     registry.assertConsumed();
     recorder.write("package-registry-requests.json", registry.requests);
-    await recorder.run(
+    const registered = await recorder.run(
       "printed-project-register",
       [globalKojo, "project", "register", "--path", "."],
       {
@@ -696,8 +721,7 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
       cwd: project,
       env: environment,
     });
-    const projectId = projects.stdout.match(/^(project_[A-Za-z0-9_-]+)/m)?.[1];
-    if (projectId === undefined) throw new Error("the shipped CLI did not return one Project ID");
+    const projectId = shippedProjectId(registered.stdout, projects.stdout);
 
     await waitFor(async () => {
       const result = await recorder.run(
