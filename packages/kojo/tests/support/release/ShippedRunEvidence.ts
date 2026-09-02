@@ -54,6 +54,9 @@ export const shippedRunEvidence = (output: string): ShippedRunEvidence => {
   const uncertainty = run.uncertainty;
   if (!isTerminalRunUncertaintyResolved(uncertainty)) {
     if (!isRecord(uncertainty)) return invalid("terminal Run uncertainty is not a record");
+    if (uncertainty.state === "result-confirmed") {
+      return invalid("terminal result-confirmed uncertainty is malformed");
+    }
     return invalid(`terminal Run uncertainty is ${String(uncertainty.state)}`);
   }
   return {

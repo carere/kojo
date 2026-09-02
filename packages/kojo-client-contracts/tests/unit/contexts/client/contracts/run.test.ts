@@ -31,4 +31,17 @@ describe("terminal Run uncertainty", () => {
       false,
     );
   });
+
+  it("rejects coercible malformed authority fields", () => {
+    expect(
+      isTerminalRunUncertaintyResolved({
+        ...resultConfirmed,
+        recoveryPolicy: ["unresolved"],
+      }),
+    ).toBe(false);
+    expect(isTerminalRunUncertaintyResolved({ ...resultConfirmed, attempt: "1" })).toBe(false);
+    expect(isTerminalRunUncertaintyResolved({ ...resultConfirmed, uncertaintyRevision: "0" })).toBe(
+      false,
+    );
+  });
 });

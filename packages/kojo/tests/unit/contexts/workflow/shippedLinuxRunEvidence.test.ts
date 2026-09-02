@@ -54,4 +54,15 @@ describe("shipped Linux terminal Run evidence", () => {
       diagnostic: "terminal Run retains optional field cleanup",
     });
   });
+
+  it("rejects a coercible array recovery policy", () => {
+    expect(
+      shippedRunEvidence(
+        output({ uncertainty: { ...uncertainty, recoveryPolicy: ["unresolved"] } }),
+      ),
+    ).toMatchObject({
+      valid: false,
+      diagnostic: "terminal result-confirmed uncertainty is malformed",
+    });
+  });
 });

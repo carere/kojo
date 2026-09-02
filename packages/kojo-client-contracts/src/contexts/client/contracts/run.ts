@@ -165,8 +165,9 @@ export const isTerminalRunUncertaintyResolved = (value: unknown): boolean => {
     Number(value.attempt) < 1 ||
     typeof value.inputHash !== "string" ||
     value.inputHash.length === 0 ||
+    typeof value.recoveryPolicy !== "string" ||
     !["recover-result", "prove-not-performed", "safe-repetition", "unresolved"].includes(
-      String(value.recoveryPolicy),
+      value.recoveryPolicy,
     ) ||
     !Number.isSafeInteger(value.uncertaintyRevision) ||
     Number(value.uncertaintyRevision) < 0
