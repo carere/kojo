@@ -1,5 +1,6 @@
 import { useSolux } from "@carere/solux";
-import { createEffect, For, type JSX, Show } from "solid-js";
+import { createEffect, type JSX, Show } from "solid-js";
+import { ResourceList } from "../../shared/components/data-grid/ResourceList.tsx";
 import { Notice } from "../../shared/components/Notice.tsx";
 import { Field, Pane } from "../../shared/components/Pane.tsx";
 import { settled } from "../../shared/hooks/settled.ts";
@@ -228,16 +229,18 @@ export const GatePanel = (props: {
               </p>
             }
           >
-            <div class="flex flex-col gap-1">
-              <For each={rebuilt(doc(), asking(), record())}>
-                {(sandbox) => (
-                  <span data-rebuild={sandbox.sandboxId} class="font-mono text-xs break-all">
-                    {sandbox.name} rebuilt —{" "}
-                    {humanDuration(sandbox.releasedAt - sandbox.acquiredAt)} held
-                  </span>
-                )}
-              </For>
-            </div>
+            <ResourceList
+              emptyMessage="No rebuilt Sandboxes match this filter."
+              items={rebuilt(doc(), asking(), record())}
+              label="Rebuilt Sandboxes"
+              searchText={(sandbox) => `${sandbox.name}\n${sandbox.sandboxId}\n${sandbox.outcome}`}
+              render={(sandbox) => (
+                <span data-rebuild={sandbox.sandboxId} class="font-mono text-xs break-all">
+                  {sandbox.name} rebuilt — {humanDuration(sandbox.releasedAt - sandbox.acquiredAt)}{" "}
+                  held
+                </span>
+              )}
+            />
           </Show>
         </Pane>
       </Show>

@@ -29,6 +29,7 @@ interface SupervisionAttempt {
   readonly budgetIndex?: number;
   readonly startedAt?: string;
   readonly readyAt?: string;
+  readonly operationSucceededAt?: string;
   readonly healthyResetMs: number;
   readonly planned: boolean;
 }
@@ -139,6 +140,7 @@ const attemptOf = (value: unknown): SupervisionAttempt | undefined => {
       "budgetIndex",
       "startedAt",
       "readyAt",
+      "operationSucceededAt",
       "healthyResetMs",
       "planned",
     ]) ||
@@ -152,6 +154,10 @@ const attemptOf = (value: unknown): SupervisionAttempt | undefined => {
       : attempt.startedAt !== undefined) ||
     (attempt.readyAt !== undefined &&
       (attempt.phase !== "running" || !validTime(attempt.readyAt))) ||
+    (attempt.operationSucceededAt !== undefined &&
+      (attempt.phase !== "running" ||
+        attempt.readyAt === undefined ||
+        !validTime(attempt.operationSucceededAt))) ||
     !positiveInteger(attempt.healthyResetMs) ||
     typeof attempt.planned !== "boolean"
   ) {
@@ -396,6 +402,20 @@ export class ManagedDaemonSupervision {
       return { ...attempt, readyAt: attempt.readyAt ?? new Date(this.#now()).toISOString() };
     });
 
+  readonly recordOperationSuccess = (attemptId: string): void =>
+    this.#changeAttempt(attemptId, (attempt) => {
+      if (attempt.phase !== "running" || attempt.readyAt === undefined) {
+        throw new LifecycleError(
+          "DAEMON_ATTEMPT_NOT_READY",
+          "a ready managed Daemon attempt must own the successful operation",
+        );
+      }
+      return {
+        ...attempt,
+        operationSucceededAt: attempt.operationSucceededAt ?? new Date(this.#now()).toISOString(),
+      };
+    });
+
   readonly recordPlannedStop = (attemptId: string): void =>
     this.#changeAttempt(attemptId, (attempt) => ({ ...attempt, planned: true }));
 
@@ -527,7 +547,10 @@ export class ManagedDaemonSupervision {
     const failedAt = new Date(this.#now()).toISOString();
     const healthy =
       attempt.readyAt !== undefined &&
-      this.#now() - Date.parse(attempt.readyAt) >= attempt.healthyResetMs;
+      attempt.operationSucceededAt !== undefined &&
+      this.#now() -
+        Math.max(Date.parse(attempt.readyAt), Date.parse(attempt.operationSucceededAt)) >=
+        attempt.healthyResetMs;
     const nextRestartIndex = Math.min(
       healthy
         ? 0

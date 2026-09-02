@@ -75,6 +75,42 @@ describe("the kojo command", () => {
     }),
   );
 
+  it.effect("parses top-level request status and retry, and positional Project registration", () =>
+    Effect.gen(function* () {
+      for (const argv of [
+        ["status", "--request", "request-one"],
+        ["retry", "--request", "request-one"],
+        ["project", "register", "."],
+      ]) {
+        const { outcome } = yield* runCli(argv);
+        expect(Result.isFailure(outcome), argv.join(" ")).toBe(true);
+        if (Result.isFailure(outcome)) {
+          expect(outcome.failure._tag, `${argv.join(" ")} did not reach its handler`).toBe(
+            "CommandFailed",
+          );
+        }
+      }
+    }),
+  );
+
+  it.effect("rejects removed Project request aliases and the removed registration flag", () =>
+    Effect.gen(function* () {
+      for (const argv of [
+        ["project", "request", "request-one"],
+        ["project", "retry", "request-one"],
+        ["project", "register", "--path", "."],
+      ]) {
+        const { outcome } = yield* runCli(argv);
+        expect(Result.isFailure(outcome), argv.join(" ")).toBe(true);
+        if (Result.isFailure(outcome)) {
+          expect(outcome.failure._tag, `${argv.join(" ")} reached a removed handler`).not.toBe(
+            "CommandFailed",
+          );
+        }
+      }
+    }),
+  );
+
   /**
    * The version the CLI prints is the version the registry serves.
    *

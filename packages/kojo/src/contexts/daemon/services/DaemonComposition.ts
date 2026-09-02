@@ -84,6 +84,7 @@ export interface StartDaemonOptions {
       readonly restartDelaysMs: ReadonlyArray<number>;
       readonly healthyResetMs: number;
     }) => void;
+    readonly recordOperationSuccess: () => void;
     readonly recordPlannedStop: () => void;
     readonly activatePolicy: (policy: {
       readonly restartDelaysMs: ReadonlyArray<number>;
@@ -627,6 +628,7 @@ export const startDaemonComposition = (
       sourceManifestPath,
       startedAt,
       upgradePreflight,
+      recordOperationSuccess: () => options.managedSupervision?.recordOperationSuccess(),
     });
     consoleServer = httpApplication.consoleServer;
     socketServer = httpApplication.socketServer;

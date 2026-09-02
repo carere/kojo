@@ -36,7 +36,7 @@ export const skill = (): string =>
     "```bash",
     "kojo doctor",
     "kojo daemon status",
-    "kojo project register --path .",
+    "kojo project register .",
     "kojo workflow list --project <project-id>",
     "```",
     "",

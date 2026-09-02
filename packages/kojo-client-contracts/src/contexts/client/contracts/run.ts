@@ -20,6 +20,17 @@ export interface RunPhaseDocument {
   readonly sandboxId?: string;
   readonly errorTag?: string;
   readonly result?: JsonValue;
+  readonly breaches?: ReadonlyArray<{
+    readonly path: string;
+    readonly outcome: { readonly _tag: string };
+  }>;
+  readonly verification?: {
+    readonly envelope: string;
+    readonly ran: ReadonlyArray<string>;
+    readonly failed: ReadonlyArray<string>;
+    readonly corrections: number;
+    readonly correctable: boolean;
+  };
 }
 
 export interface RunGateDocument {
@@ -135,6 +146,13 @@ export interface RunDocument {
   readonly admittedAt: string;
   readonly startedAt?: string;
   readonly finishedAt?: string;
+  readonly inFlight?: {
+    readonly phasePath: string;
+    readonly attempt: number;
+    readonly kind: "actor" | "code" | "agent";
+    readonly startedAt: string;
+    readonly sandboxId?: string;
+  };
   readonly phases: ReadonlyArray<RunPhaseDocument>;
   readonly gates?: ReadonlyArray<RunGateDocument>;
   readonly sandboxes?: ReadonlyArray<RunSandboxDocument>;

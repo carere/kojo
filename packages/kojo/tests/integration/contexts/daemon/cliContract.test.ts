@@ -232,6 +232,7 @@ export const compile = workflow(
   daemons.push(daemon);
   return {
     root: roots.at(-1) ?? "",
+    workflowProject,
     hostPaths,
     daemon,
     databasePath,
@@ -303,6 +304,48 @@ afterEach(async () => {
 });
 
 describe("real CLI process over the private Daemon transport", () => {
+  it("uses positional Project registration and top-level request status and retry", async () => {
+    const test = await fixture();
+    const registered = await runCli(test.root, [
+      "project",
+      "register",
+      test.workflowProject,
+      "--request-id",
+      "request-top-level-cli",
+    ]);
+    expect(registered.status, registered.stderr).toBe(0);
+    expect(registered.stdout).toContain("request request-top-level-cli");
+
+    const status = await runCli(test.root, [
+      "status",
+      "--request",
+      "request-top-level-cli",
+      "--json",
+    ]);
+    expect(status.status, status.stderr).toBe(0);
+    expect(JSON.parse(status.stdout)).toMatchObject({
+      formatVersion: 1,
+      request: {
+        request: { requestId: "request-top-level-cli" },
+        receipt: { status: "committed" },
+      },
+    });
+
+    const retried = await runCli(test.root, ["retry", "--request", "request-top-level-cli"]);
+    expect(retried.status, retried.stderr).toBe(0);
+    expect(JSON.parse(retried.stdout)).toMatchObject({
+      requestId: "request-top-level-cli",
+      status: "committed",
+    });
+
+    expect(
+      (await runCli(test.root, ["project", "retry", "request-top-level-cli"])).status,
+    ).not.toBe(0);
+    expect(
+      (await runCli(test.root, ["project", "register", "--path", test.workflowProject])).status,
+    ).not.toBe(0);
+  });
+
   it("applies full Project selectors and JSON input while keeping output free of private payloads", async () => {
     const test = await fixture();
     const workflows = await runCli(test.root, [

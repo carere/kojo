@@ -10,6 +10,7 @@ import type {
 } from "@carere/kojo-client-contracts/contexts/client/contracts/operation";
 import type {
   ClientRequestDocument,
+  ClientRequestSnapshot,
   ProjectCounts,
   ProjectLocationAction,
   ProjectSnapshot,
@@ -367,6 +368,38 @@ export class ProjectApi {
         return refusal(
           cause instanceof ProjectStoreError ? cause : invalid(String(cause)),
           requestId,
+          this.#dataIdentity,
+        );
+      }
+    });
+  }
+
+  recentRequests(): Effect.Effect<Response> {
+    return Effect.promise(async () => {
+      try {
+        const requests = await Promise.all(
+          this.#journal.list().map(async (retained): Promise<ClientRequestDocument> => {
+            const receipt = await Effect.runPromise(
+              this.#repository.receipt(this.#dataIdentity, retained.request.requestId),
+            );
+            return {
+              request: retained.request,
+              ...(receipt === undefined ? {} : { receipt }),
+            };
+          }),
+        );
+        const snapshot: ClientRequestSnapshot = {
+          observationVersion: 1,
+          instanceId: this.#instanceId,
+          dataIdentity: this.#dataIdentity,
+          observedAt: new Date(this.#now()).toISOString(),
+          requests,
+        };
+        return response(snapshot);
+      } catch (cause) {
+        return refusal(
+          cause instanceof ProjectStoreError ? cause : invalid(String(cause)),
+          "recent-requests",
           this.#dataIdentity,
         );
       }

@@ -1,7 +1,8 @@
 import { useSolux } from "@carere/solux";
 import { Link } from "@tanstack/solid-router";
-import { createEffect, For, type JSX, onCleanup, Show } from "solid-js";
+import { createEffect, type JSX, onCleanup, Show } from "solid-js";
 import { Badge, type BadgeTone } from "../../shared/components/Badge.tsx";
+import { ResourceList } from "../../shared/components/data-grid/ResourceList.tsx";
 import { Notice } from "../../shared/components/Notice.tsx";
 import { Field, Pane } from "../../shared/components/Pane.tsx";
 import { settled } from "../../shared/hooks/settled.ts";
@@ -209,13 +210,17 @@ export const PhasePanel = (props: {
               </Show>
               <Show when={failedChecks().length > 0}>
                 <Field name="failed-checks" label="failed checks">
-                  <For each={failedChecks()}>
-                    {(check) => (
+                  <ResourceList
+                    emptyMessage="No failed checks match this filter."
+                    items={failedChecks()}
+                    label="Failed checks"
+                    searchText={(check) => check}
+                    render={(check) => (
                       <span data-check={check} data-check-held="false" class="mr-1 inline-block">
                         ✗ {check}
                       </span>
                     )}
-                  </For>
+                  />
                 </Field>
               </Show>
             </div>
@@ -265,9 +270,13 @@ export const PhasePanel = (props: {
              * policy, and the outcome says whether Kojo restored the path or work was lost.
              */}
             <Show when={(record()?.breaches ?? []).length > 0}>
-              <div data-breaches class="flex flex-col gap-1">
-                <For each={record()?.breaches ?? []}>
-                  {(breach) => (
+              <div data-breaches>
+                <ResourceList
+                  emptyMessage="No permission breaches match this filter."
+                  items={record()?.breaches ?? []}
+                  label="Permission breaches"
+                  searchText={(breach) => `${breach.path}\n${breach.outcome._tag}`}
+                  render={(breach) => (
                     <div
                       data-breach={breach.path}
                       data-breach-outcome={breach.outcome._tag}
@@ -279,7 +288,7 @@ export const PhasePanel = (props: {
                       <span class="min-w-0 truncate font-mono">{breach.path}</span>
                     </div>
                   )}
-                </For>
+                />
               </div>
             </Show>
           </Pane>

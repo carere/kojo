@@ -1,8 +1,9 @@
-import { createResource, createSignal, For, type JSX, Show } from "solid-js";
+import { createResource, createSignal, type JSX, Show } from "solid-js";
 import {
   downloadPublishedArtifact,
   readPublishedArtifact,
 } from "../../daemon/services/browserAccess.ts";
+import { ResourceList } from "../../shared/components/data-grid/ResourceList.tsx";
 import { Pane } from "../../shared/components/Pane.tsx";
 
 interface ArtifactLine {
@@ -27,8 +28,12 @@ export const PublishedArtifacts = (props: {
     <Show when={props.artifacts.length > 0}>
       <Pane name="published-artifacts" title="Captured Artifacts">
         <div class="flex flex-col gap-2">
-          <For each={props.artifacts}>
-            {(artifact) => (
+          <ResourceList
+            emptyMessage="No captured Artifacts match this filter."
+            items={props.artifacts}
+            label="Artifacts"
+            searchText={(artifact) => `${artifact.name}\n${artifact.mediaType}\n${artifact.sha256}`}
+            render={(artifact) => (
               <div class="border-border flex flex-wrap items-center gap-2 rounded-md border p-2">
                 <span class="font-mono text-xs">{artifact.name}</span>
                 <span class="text-muted-foreground text-[11px]">{artifact.size} bytes</span>
@@ -52,7 +57,7 @@ export const PublishedArtifacts = (props: {
                 </button>
               </div>
             )}
-          </For>
+          />
           <Show when={content()}>
             {(artifact) => (
               <pre

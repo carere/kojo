@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   decodeMutationEnvelope,
@@ -77,5 +77,32 @@ export class HostClientRequestRepository implements ClientRequestRepository {
       });
     }
     return { request: decoded.value, body };
+  }
+
+  list(): ReadonlyArray<{
+    readonly request: MutationEnvelope;
+    readonly body: string;
+    readonly retainedAt: string;
+  }> {
+    return readdirSync(this.#directory)
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => {
+        const requestId = name.slice(0, -".json".length);
+        const retained = this.lookup(requestId);
+        if (retained === undefined) {
+          throw new ProjectStoreError({
+            code: "CLIENT_REQUEST_DAMAGED",
+            message: "The retained client request disappeared during observation.",
+            status: 500,
+            retry: "never",
+            remedy: "Preserve the client request directory and inspect the Daemon data.",
+          });
+        }
+        return {
+          ...retained,
+          retainedAt: statSync(this.#path(requestId)).mtime.toISOString(),
+        };
+      })
+      .sort((left, right) => right.retainedAt.localeCompare(left.retainedAt));
   }
 }

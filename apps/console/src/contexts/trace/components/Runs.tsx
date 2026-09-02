@@ -2,6 +2,7 @@ import { Link } from "@tanstack/solid-router";
 import { createMemo, createSignal, type JSX, Show } from "solid-js";
 import { useAskings } from "../../gate/hooks/useAskings.ts";
 import { ConsoleNavigation } from "../../shared/components/ConsoleNavigation.tsx";
+import { DataGrid } from "../../shared/components/data-grid/DataGrid.tsx";
 import { Pagination } from "../../shared/components/data-grid/Pagination.tsx";
 import { Notice } from "../../shared/components/Notice.tsx";
 import { retrying, settled } from "../../shared/hooks/settled.ts";
@@ -70,7 +71,7 @@ export const Runs = (): JSX.Element => {
   return (
     <div class="mx-auto grid min-h-screen max-w-7xl gap-8 p-4 lg:grid-cols-[13rem_1fr] lg:p-8">
       <ConsoleNavigation current="Runs" />
-      <main class="flex min-w-0 flex-col gap-4" data-list-composition="custom-status-table">
+      <main class="flex min-w-0 flex-col gap-4">
         <header class="flex flex-col gap-1">
           <div class="flex flex-wrap items-baseline justify-between gap-2">
             <h1 class="text-xl font-semibold">Runs</h1>
@@ -130,18 +131,29 @@ export const Runs = (): JSX.Element => {
         </Show>
 
         <Show when={lines()} fallback={<p class="text-muted-foreground text-sm">Loading Runs…</p>}>
-          <Show
-            when={filteredRows().length > 0}
-            fallback={
-              <Notice tone="empty" title="No Runs are recorded.">
-                <p class="mt-1">Start a Workflow from its registered Project.</p>
-              </Notice>
-            }
+          <DataGrid
+            matchedCount={filteredRows().length}
+            recordCount={rows().length}
+            resourceName="Runs"
+            selectedCount={0}
           >
-            <RunList rows={visibleRows()} />
-          </Show>
+            <Show
+              when={filteredRows().length > 0}
+              fallback={
+                <Notice tone="empty" title="No Runs are recorded.">
+                  <p class="mt-1">Start a Workflow from its registered Project.</p>
+                </Notice>
+              }
+            >
+              <RunList rows={visibleRows()} />
+            </Show>
+            <Pagination
+              cursor={cursor()}
+              matchedCount={filteredRows().length}
+              onChange={setCursor}
+            />
+          </DataGrid>
         </Show>
-        <Pagination cursor={cursor()} matchedCount={filteredRows().length} onChange={setCursor} />
       </main>
     </div>
   );

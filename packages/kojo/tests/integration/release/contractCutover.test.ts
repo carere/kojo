@@ -125,7 +125,7 @@ describe("the Daemon contract cutover", () => {
       "kojo init",
       "kojo doctor",
       "kojo daemon install",
-      "kojo project register --path .",
+      "kojo project register .",
       "kojo workflow list --project <project-id>",
       "kojo workflow start <project-id>",
       "kojo run status <run-id>",

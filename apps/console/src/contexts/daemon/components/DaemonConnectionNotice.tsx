@@ -1,13 +1,18 @@
 import { useQueryClient } from "@tanstack/solid-query";
 import { type JSX, Show } from "solid-js";
 import { Notice } from "../../shared/components/Notice.tsx";
-import { beginDaemonReconnect, daemonConnectionState } from "../services/connectionState.ts";
+import {
+  beginDaemonReconnect,
+  completeDaemonReconnect,
+  daemonConnectionState,
+  requireDaemonReconnect,
+} from "../services/connectionState.ts";
 
 export const DaemonConnectionNotice = (): JSX.Element => {
   const client = useQueryClient();
   const reconnect = (): void => {
     beginDaemonReconnect();
-    void client.resetQueries();
+    void client.resetQueries().then(completeDaemonReconnect, requireDaemonReconnect);
   };
   return (
     <Show when={daemonConnectionState() === "reconnect"}>

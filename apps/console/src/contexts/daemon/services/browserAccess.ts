@@ -11,6 +11,7 @@ import type {
 } from "@carere/kojo-client-contracts/contexts/client/contracts/gate";
 import type { OperationReceipt } from "@carere/kojo-client-contracts/contexts/client/contracts/operation";
 import type {
+  ClientRequestSnapshot,
   ProjectLocationResult,
   ProjectSnapshot,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
@@ -248,6 +249,9 @@ export const openDaemonNotifications = async (signal: AbortSignal): Promise<Resp
 
 export const readProjects = (): Promise<ProjectSnapshot> =>
   authorizedRead<ProjectSnapshot>("/api/v1/projects");
+
+export const readRecentClientRequests = (): Promise<ClientRequestSnapshot> =>
+  authorizedRead<ClientRequestSnapshot>("/api/v1/client-requests");
 
 export const changeProjectLocation = async (
   projectId: string,

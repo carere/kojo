@@ -293,7 +293,7 @@ describe("managed release staging", () => {
 });
 
 describe("real retained upgrade evidence", () => {
-  it("checks terminal Runs and readers, scopes corrupt evidence, and detects a changed retained set", async () => {
+  it("refuses corrupt or unknown retained evidence and a drain-time retained-set change", async () => {
     const root = mkdtempSync(join(tmpdir(), "kojo-upgrade-evidence-"));
     let database: Database | undefined;
     try {
@@ -399,7 +399,35 @@ describe("real retained upgrade evidence", () => {
       expect(corrupt.revisions[0]?.faults).toContainEqual(
         expect.objectContaining({ code: "CONTENT_CORRUPT", path: "manifest.json" }),
       );
+      const corruptResult = await Effect.runPromise(
+        new ManagedUpgradePreflight(repository).check({
+          candidate: candidate(),
+          sourceReleaseId: "source-release",
+        }),
+      );
+      expect(corruptResult.report.outcome).toBe("existing-fault");
+      expect(corruptResult.report.existingFaults).toContainEqual(
+        expect.objectContaining({ code: "CONTENT_CORRUPT", revisionId }),
+      );
       write(join(retained, "manifest.json"), `${canonicalJson(manifest)}\n`);
+
+      database.run("UPDATE workflow_revisions SET manifest_json = '{}' WHERE revision_id = ?", [
+        revisionId,
+      ]);
+      const unknownResult = await Effect.runPromise(
+        new ManagedUpgradePreflight(repository).check({
+          candidate: candidate(),
+          sourceReleaseId: "source-release",
+        }),
+      );
+      expect(unknownResult.report.outcome).toBe("incompatible");
+      expect(unknownResult.report.compatibilityFaults).toContainEqual(
+        expect.objectContaining({ code: "COMPATIBILITY_UNKNOWN", revisionId }),
+      );
+      database.run("UPDATE workflow_revisions SET manifest_json = ? WHERE revision_id = ?", [
+        canonicalJson(manifest),
+        revisionId,
+      ]);
 
       let captures = 0;
       const changing: UpgradePreflightRepository = {

@@ -14,6 +14,8 @@ export default defineConfig({
     "artifact.spec.ts",
     "reconnect.spec.ts",
     "daemonComponents.spec.ts",
+    "polling.spec.ts",
+    "waterfall.spec.ts",
   ],
   fullyParallel: true,
   reporter: [["list"]],

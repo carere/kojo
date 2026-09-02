@@ -327,6 +327,7 @@ export const Workflows = (props: { readonly projectId: string }): JSX.Element =>
               <DataGrid
                 matchedCount={rows().length}
                 recordCount={snapshot().counts.total}
+                resourceName="Workflows"
                 selectedCount={0}
               >
                 <DataGridTable

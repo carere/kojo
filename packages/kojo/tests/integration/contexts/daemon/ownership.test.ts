@@ -89,6 +89,7 @@ describe("one idle Daemon owns one data root", () => {
         recordReady: () => {
           recordedReady += 1;
         },
+        recordOperationSuccess: () => undefined,
         recordPlannedStop: () => undefined,
         activatePolicy: () => undefined,
       },
@@ -108,9 +109,13 @@ describe("one idle Daemon owns one data root", () => {
   it("records actual readiness with only the managed restart policy", async () => {
     const hostPaths = paths();
     const policies: Array<unknown> = [];
+    let successfulOperations = 0;
     const daemon = startDaemon(hostPaths, {
       managedSupervision: {
         recordReady: (policy) => policies.push(policy),
+        recordOperationSuccess: () => {
+          successfulOperations += 1;
+        },
         recordPlannedStop: () => undefined,
         activatePolicy: () => undefined,
       },
@@ -124,6 +129,16 @@ describe("one idle Daemon owns one data root", () => {
           healthyResetMs: daemonConfigurationDefaults.daemon.healthyResetMs,
         },
       ]);
+      expect(
+        await fetch("http://localhost/ready", { unix: daemon.endpoint.socketPath }),
+      ).toMatchObject({ status: 200 });
+      expect(successfulOperations).toBe(0);
+      expect(
+        await fetch("http://localhost/api/v1/projects", {
+          unix: daemon.endpoint.socketPath,
+        }),
+      ).toMatchObject({ status: 200 });
+      expect(successfulOperations).toBe(1);
     } finally {
       await Effect.runPromise(daemon.stop);
     }
@@ -135,6 +150,7 @@ describe("one idle Daemon owns one data root", () => {
     const daemon = startDaemon(hostPaths, {
       managedSupervision: {
         recordReady: () => undefined,
+        recordOperationSuccess: () => undefined,
         recordPlannedStop: () => {
           plannedStops += 1;
         },

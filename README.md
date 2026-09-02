@@ -37,7 +37,7 @@ every Runner. CLI commands are short-lived clients.
 kojo init --agent claude --model sonnet --sandbox docker --template review
 bun install
 kojo doctor
-kojo project register --path .
+kojo project register .
 ```
 
 `kojo init` keeps authored files. Complete the placeholders in `.kojo/commands.ts`, commit the

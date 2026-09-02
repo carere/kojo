@@ -62,6 +62,7 @@ export const runDaemon = async (): Promise<void> => {
               supervision.recordReady(managedAttemptId);
               supervision.activatePolicy(managedAttemptId, policy);
             },
+            recordOperationSuccess: () => supervision.recordOperationSuccess(managedAttemptId),
             recordPlannedStop: () => supervision.recordPlannedStop(managedAttemptId),
             activatePolicy: (policy) => supervision.activatePolicy(managedAttemptId, policy),
           },

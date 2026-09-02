@@ -82,7 +82,7 @@ describe("managed Daemon supervision", () => {
     expect(test.repository().prepareAttempt().outcome).toBe("exhausted");
   });
 
-  it("resets only after continuous recorded readiness, not process lifetime", () => {
+  it("resets only after readiness and an operation succeed, never from process lifetime or heartbeat", () => {
     const test = fixture();
     const initial = test.start();
     initial.supervision.finishAttempt(initial.attemptId, { detail: "initial fault" });
@@ -95,7 +95,17 @@ describe("managed Daemon supervision", () => {
     expect(second.delayMs).toBe(2_000);
     second.supervision.recordReady(second.attemptId);
     test.advance(300_000);
-    second.supervision.finishAttempt(second.attemptId, { detail: "failed after healthy period" });
+    second.supervision.finishAttempt(second.attemptId, {
+      detail: "heartbeat-only process failed after the healthy period",
+    });
+    const third = test.start();
+    expect(third.delayMs).toBe(4_000);
+    third.supervision.recordReady(third.attemptId);
+    third.supervision.recordOperationSuccess(third.attemptId);
+    test.advance(300_000);
+    third.supervision.finishAttempt(third.attemptId, {
+      detail: "failed after readiness and a successful operation",
+    });
 
     expect(test.start().delayMs).toBe(1_000);
   });

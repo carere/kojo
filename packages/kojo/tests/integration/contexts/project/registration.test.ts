@@ -15,6 +15,7 @@ import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/cl
 import type { OperationReceipt } from "@carere/kojo-client-contracts/contexts/client/contracts/operation";
 import type {
   ClientRequestDocument,
+  ClientRequestSnapshot,
   ProjectSnapshot,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
 import { afterEach, describe, expect, it } from "@effect/vitest";
@@ -172,7 +173,7 @@ describe("durable Project registration", () => {
     ).toContain(`"location":"${missing}"`);
   });
 
-  it("retains exact requests and receipts across a Daemon replacement", async () => {
+  it("retains exact requests, receipts, and Recent changes across a Daemon replacement", async () => {
     const hostPaths = paths();
     const project = repository(roots[0] ?? "", "restart-project");
     const first = startDaemon(hostPaths);
@@ -192,6 +193,15 @@ describe("durable Project registration", () => {
       request: { requestId: input.requestId, arguments: { location: project } },
       receipt: { status: "committed" },
     });
+    const recent = (await (
+      await call(replacement, "/api/v1/client-requests")
+    ).json()) as ClientRequestSnapshot;
+    expect(recent.requests).toContainEqual(
+      expect.objectContaining({
+        request: expect.objectContaining({ requestId: input.requestId }),
+        receipt: expect.objectContaining({ status: "committed" }),
+      }),
+    );
     expect((await retry(replacement, input.requestId)).status).toBe(200);
     const snapshot = (await (
       await call(replacement, "/api/v1/projects")

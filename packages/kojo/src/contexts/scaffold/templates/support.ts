@@ -138,7 +138,7 @@ export const readme = (choices: FactoryChoices, starter: Starter): string => {
     "                                     # refuses a trunk holding uncommitted work",
     "kojo doctor                          # says whether this factory can run, and refuses it if not",
     "kojo daemon install                   # once for this OS user",
-    "kojo project register --path .        # prints the Project ID after first Refresh",
+    "kojo project register .               # prints the Project ID after first Refresh",
     "kojo workflow list --project <project-id>",
     `kojo workflow start <project-id> ${starter.name} --payload '{"subject":"what the run is about"}'`,
     "kojo gate list                       # what is waiting on a human, and for how long",

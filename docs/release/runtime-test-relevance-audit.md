@@ -1,8 +1,48 @@
-# Runtime test relevance audit
+# Breaking-release test relevance audit
 
 This audit compares the tests removed from `origin/main` with the breaking Daemon runtime. It keeps
 tests when their production concept still exists in `packages/kojo-runtime`. It does not restore a
 test only because its old file can compile.
+
+## Console fixed-point audit
+
+The seven removed browser suites contain 113 test declarations. The audit classifies all 113 as
+current behavior and adapts them to the authenticated Daemon/browser fixture. No current Waterfall,
+detail, Gate, polling, degraded-state, or Run-list behavior is removed.
+
+| Removed suite | Declarations | Current/adapted | Obsolete | Current evidence |
+| --- | ---: | ---: | ---: | --- |
+| `degraded.spec.ts` | 3 | 3 | 0 | `projectCatalogue.spec.ts`, `workflowCatalogue.spec.ts`, `reconnect.spec.ts` |
+| `detailPanel.spec.ts` | 35 | 35 | 0 | `runConsole.spec.ts`, `daemonComponents.spec.ts`, `waterfall.spec.ts` |
+| `gate.spec.ts` | 23 | 23 | 0 | `gateVerdict.spec.ts`, `runConsole.spec.ts`, `daemonComponents.spec.ts` |
+| `polling.spec.ts` | 2 | 2 | 0 | Restored as authenticated Daemon browser evidence in `polling.spec.ts` |
+| `realRun.spec.ts` | 5 | 5 | 0 | `runConsole.spec.ts`, `gateVerdict.spec.ts`, shipped-Daemon release evidence |
+| `runList.spec.ts` | 5 | 5 | 0 | `runConsole.spec.ts` |
+| `waterfall.spec.ts` | 40 | 40 | 0 | Restored as `waterfall.spec.ts` with 41 authenticated current-contract leaves |
+| **Total** | **113** | **113** | **0** | |
+
+The Waterfall adaptation retains every fixed-point assertion category: Host and acquisition rows,
+scope placement, rebuild rows, collapsed Gate and idle breaks, all-row walls, wall-clock mode,
+concurrency geometry, in-flight Phase growth and settlement, failure/breach/interruption/kind and
+correction marks, read-only behavior, scale selection, zoom, selection, hover, table parity, empty
+state, catalogue navigation, hit testing, tick uniqueness at 40 and 400 days, resize stability, pan,
+modifier-wheel zoom, the canonical 41-hour break, and long-duration labels. The extra current leaf
+checks a distinct in-flight table record.
+
+The detail-panel declarations remain current because the breaking Console still has Phase, Sandbox,
+Asking, Artifact, revision, failure, provenance, and Run outcome panels. The adapted tests read one
+Daemon Run document and authenticated Artifact endpoints. They do not restore old repository-local
+Trace readers. The Gate and real-Run declarations remain current as Recorded/Applied, expiry,
+answering, structured Asking routes, and rebuilt Sandbox behavior. Their adaptations record only a
+Verdict through the Daemon; no client applies it.
+
+The three degraded declarations remain current at new ownership seams: a registered Project can have
+a Missing Factory, a Project can have no current Workflow, and a disconnected Console preserves the
+last authoritative snapshot. Both polling declarations remain current because live Runs still use
+the accepted one-second refresh interval and terminal Runs stop that interval. Their adaptations use
+the authenticated Daemon transport. Separate current tests require a per-attempt five-second
+notification deadline, two retries, an explicit Reconnect state, mutation lockout, and fresh
+authoritative reads before actions return.
 
 ## Restored current-contract suites
 

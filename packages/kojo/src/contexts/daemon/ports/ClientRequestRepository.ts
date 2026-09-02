@@ -6,4 +6,9 @@ export interface ClientRequestRepository {
   readonly lookup: (
     requestId: string,
   ) => { readonly request: MutationEnvelope; readonly body: string } | undefined;
+  readonly list: () => ReadonlyArray<{
+    readonly request: MutationEnvelope;
+    readonly body: string;
+    readonly retainedAt: string;
+  }>;
 }

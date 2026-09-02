@@ -442,7 +442,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
       {
         tier: "native-systemd",
         path: "packages/kojo/tests/host/contexts/daemon/service.test.ts",
-        name: "uses an isolated unit for one idle Daemon and stops its complete process group",
+        name: "uses a native systemd unit for singleton lifecycle, process-group stop, restart-budget reset, and post-activation failure isolation",
       },
     ],
   ),
@@ -457,7 +457,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
       {
         tier: "native-systemd",
         path: "packages/kojo/tests/host/contexts/daemon/service.test.ts",
-        name: "uses an isolated unit for one idle Daemon and stops its complete process group",
+        name: "uses a native systemd unit for singleton lifecycle, process-group stop, restart-budget reset, and post-activation failure isolation",
       },
     ],
   ),
@@ -697,12 +697,12 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
       {
         tier: "native-systemd",
         path: "packages/kojo/tests/host/contexts/daemon/service.test.ts",
-        name: "persists and exhausts the native launcher restart budget across owner reconstruction",
+        name: "uses a native systemd unit for singleton lifecycle, process-group stop, restart-budget reset, and post-activation failure isolation",
       },
       {
         tier: "kojo-integration",
         path: "packages/kojo/tests/integration/contexts/daemon/managedDaemonSupervision.test.ts",
-        name: "resets only after continuous recorded readiness, not process lifetime",
+        name: "resets only after readiness and an operation succeed, never from process lifetime or heartbeat",
       },
       {
         tier: "kojo-unit",
@@ -716,7 +716,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     5,
     "native per-user lifecycle and singleton behavior pass on macOS and systemd Linux",
     "packages/kojo/tests/host/contexts/daemon/service.test.ts",
-    "uses an isolated unit for one idle Daemon and stops its complete process group",
+    "uses a native systemd unit for singleton lifecycle, process-group stop, restart-budget reset, and post-activation failure isolation",
     ["native-systemd", "shipped-systemd", "shipped-macos"],
     [
       {
@@ -776,7 +776,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
       {
         tier: "native-systemd",
         path: "packages/kojo/tests/host/contexts/daemon/service.test.ts",
-        name: "uses an isolated unit for one idle Daemon and stops its complete process group",
+        name: "uses a native systemd unit for singleton lifecycle, process-group stop, restart-budget reset, and post-activation failure isolation",
       },
     ],
   ),
@@ -797,6 +797,11 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     ["kojo-unit", "kojo-integration"],
     [
       {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/daemon/preflight.test.ts",
+        name: "refuses corrupt or unknown retained evidence and a drain-time retained-set change",
+      },
+      {
         tier: "kojo-unit",
         path: "packages/kojo/tests/unit/contexts/daemon/services/ManagedUpgradePreflight.test.ts",
         name: "refuses a candidate protocol regression and keeps a corrupt retained fault scoped",
@@ -815,7 +820,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     5,
     "readiness and rollback outcomes stay distinct and recoverable",
     "packages/kojo/tests/integration/contexts/daemon/activation.test.ts",
-    "holds ordinary mutations, verifies backup, migrates restricted, and activates without Workflow execution",
+    "distinguishes failed readiness, safe rollback, failed rollback, and post-activation failure",
     ["kojo-unit", "kojo-integration", "native-systemd"],
     [
       {
@@ -833,7 +838,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
       {
         tier: "native-systemd",
         path: "packages/kojo/tests/host/contexts/daemon/service.test.ts",
-        name: "uses an isolated unit for one idle Daemon and stops its complete process group",
+        name: "uses a native systemd unit for singleton lifecycle, process-group stop, restart-budget reset, and post-activation failure isolation",
       },
     ],
   ),
@@ -885,7 +890,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
       {
         tier: "native-systemd",
         path: "packages/kojo/tests/host/contexts/daemon/service.test.ts",
-        name: "uses an isolated unit for one idle Daemon and stops its complete process group",
+        name: "uses a native systemd unit for singleton lifecycle, process-group stop, restart-budget reset, and post-activation failure isolation",
       },
       {
         tier: "shipped-macos",
@@ -950,7 +955,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     6,
     "lost client replies recover the original request without a second mutation",
     "packages/kojo/tests/integration/contexts/project/registration.test.ts",
-    "retains exact requests and receipts across a Daemon replacement",
+    "retains exact requests, receipts, and Recent changes across a Daemon replacement",
     ["kojo-integration"],
   ),
   check(
@@ -1116,8 +1121,20 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     6,
     "the Console uses its Zaidan grids and filters at browser seams",
     "apps/console/tests/browser/daemonComponents.spec.ts",
-    "keeps Zaidan composition keyboard-operable on narrow layouts and exposes documented custom gaps",
+    "uses Zaidan composition for every catalogue and keeps it keyboard-operable on narrow layouts",
     ["console-browser"],
+    [
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/daemonComponents.spec.ts",
+        name: "uses filtered Zaidan lists for Phases, Artifacts, and detail resources",
+      },
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/daemonComponents.spec.ts",
+        name: "reads Recent changes from durable Daemon history after reload and filters by request ID",
+      },
+    ],
   ),
   check(
     "RELEASE-01",

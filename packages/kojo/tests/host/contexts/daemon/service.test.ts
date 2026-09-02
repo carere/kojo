@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { FileLifecycleJournalRepository } from "../../../../src/contexts/daemon/adapters/FileLifecycleJournalRepository.ts";
 import { macLaunchAgent } from "../../../../src/contexts/daemon/adapters/MacLaunchAgent.ts";
 import { ManagedDaemonSupervision } from "../../../../src/contexts/daemon/adapters/ManagedDaemonSupervision.ts";
 import { systemdUserService } from "../../../../src/contexts/daemon/adapters/SystemdUserService.ts";
@@ -21,38 +22,116 @@ const waitFor = async (predicate: () => boolean, timeout = 60_000): Promise<void
   }
 };
 
-describe("the native launcher restart budget", () => {
-  it("persists and exhausts the native launcher restart budget across owner reconstruction", () => {
-    const root = mkdtempSync(join(tmpdir(), "kojo-native-restart-budget-"));
-    let time = Date.parse("2026-09-01T10:00:00.000Z");
-    try {
-      const startAndFail = (expectedDelay: number): void => {
-        const owner = new ManagedDaemonSupervision(root, { now: () => time });
-        const prepared = owner.prepareAttempt();
-        expect(prepared).toMatchObject({ outcome: "scheduled", delayMs: expectedDelay });
-        if (prepared.outcome !== "scheduled") throw new Error("restart was not scheduled");
-        time += prepared.delayMs;
-        owner.startAttempt(prepared.attemptId);
-        owner.finishAttempt(prepared.attemptId, { detail: "native launcher failure" });
-      };
+const childOf = (ownerProcessId: number): number | undefined => {
+  const children = Bun.spawnSync(["/usr/bin/pgrep", "-P", String(ownerProcessId)]);
+  if (children.exitCode !== 0) return undefined;
+  for (const line of children.stdout.toString().trim().split("\n")) {
+    const processId = Number(line);
+    if (!Number.isSafeInteger(processId)) continue;
+    const command = Bun.spawnSync(["/bin/ps", "-o", "command=", "-p", String(processId)]);
+    if (command.stdout.toString().includes("launcher/main.ts")) return processId;
+  }
+  return undefined;
+};
 
-      startAndFail(0);
-      for (const delay of [1_000, 2_000, 4_000, 8_000, 16_000]) startAndFail(delay);
+const exerciseNativeRestartBudget = async (
+  paths: DaemonPaths,
+  launcherProcessId: () => number | undefined,
+): Promise<void> => {
+  const supervision = () => new ManagedDaemonSupervision(paths.dataRoot);
+  const runningAttempt = async (priorAttemptId?: string) => {
+    let found: ReturnType<ManagedDaemonSupervision["status"]>["attempt"];
+    await waitFor(() => {
+      const attempt = supervision().status().attempt;
+      if (
+        attempt?.phase !== "running" ||
+        attempt.readyAt === undefined ||
+        attempt.attemptId === priorAttemptId
+      ) {
+        return false;
+      }
+      found = attempt;
+      return true;
+    });
+    if (found === undefined) throw new Error("the supervised Daemon did not become ready");
+    supervision().activatePolicy(found.attemptId, {
+      restartDelaysMs: [1_000, 2_000, 4_000],
+      healthyResetMs: 1,
+    });
+    return found;
+  };
+  const failAttempt = async (attemptId: string, expectedBudgetIndex: number): Promise<void> => {
+    let daemonProcessId: number | undefined;
+    await waitFor(() => {
+      const launcher = launcherProcessId();
+      if (launcher === undefined) return false;
+      daemonProcessId = childOf(launcher);
+      return daemonProcessId !== undefined;
+    });
+    process.kill(daemonProcessId as number, "SIGKILL");
+    await waitFor(() => {
+      const status = supervision().status();
+      const attempt = status.attempt;
+      return (
+        status.lastFailure?.attemptId === attemptId &&
+        attempt?.phase === "waiting" &&
+        attempt.budgetIndex === expectedBudgetIndex
+      );
+    });
+  };
 
-      expect(new ManagedDaemonSupervision(root, { now: () => time }).status()).toMatchObject({
-        state: "exhausted",
-        repairRequired: true,
-        nextRestartIndex: 5,
-        restartAttemptsRemaining: 0,
-      });
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+  const first = await runningAttempt();
+  const heartbeat = await fetch("http://localhost/ready", {
+    unix: join(paths.runtimeRoot, "daemon.sock"),
   });
-});
+  expect(heartbeat.status).toBe(200);
+  expect(supervision().status().attempt?.operationSucceededAt).toBeUndefined();
+  await Bun.sleep(5);
+  await failAttempt(first.attemptId, 0);
+
+  const second = await runningAttempt(first.attemptId);
+  expect(second.budgetIndex).toBe(0);
+  expect(second.operationSucceededAt).toBeUndefined();
+  await Bun.sleep(5);
+  await failAttempt(second.attemptId, 1);
+
+  const third = await runningAttempt(second.attemptId);
+  expect(third.budgetIndex).toBe(1);
+  const operation = await fetch("http://localhost/api/v1/projects", {
+    unix: join(paths.runtimeRoot, "daemon.sock"),
+  });
+  expect(operation.status).toBe(200);
+  await waitFor(() => supervision().status().attempt?.operationSucceededAt !== undefined);
+  const lifecycle = new FileLifecycleJournalRepository(join(paths.dataRoot, "lifecycle"));
+  const preparedOperation = lifecycle.begin({
+    operationId: "native-post-activation",
+    dataIdentity: "native-host-data",
+    originalRequestHash: "a".repeat(64),
+    kind: "upgrade",
+    sourceReleaseId: "source-release",
+    candidateReleaseId: "candidate-release",
+    checkedRetainedSetHash: "b".repeat(64),
+    startedAt: "2026-09-02T10:00:00.000Z",
+  });
+  lifecycle.advance({
+    operationId: preparedOperation.operationId,
+    expectedRevision: preparedOperation.stageRevision,
+    stage: "activated",
+    updatedAt: "2026-09-02T10:01:00.000Z",
+    changes: { outcome: "activated", detail: "native candidate activated" },
+  });
+  await Bun.sleep(5);
+  await failAttempt(third.attemptId, 0);
+  expect(lifecycle.read(preparedOperation.operationId)).toMatchObject({
+    stage: "activated",
+    outcome: "activated",
+  });
+  expect(supervision().status().lastFailure).toBeDefined();
+  await runningAttempt(third.attemptId);
+};
 
 describe.skipIf(process.platform !== "darwin")("the native macOS Daemon lifecycle", () => {
-  it("starts one isolated idle LaunchAgent and preserves stop and enablement as separate states", async () => {
+  it("uses a native LaunchAgent for singleton lifecycle, complete stop, restart-budget reset, and post-activation failure isolation", async () => {
     const root = mkdtempSync(join(tmpdir(), "kojo-native-service-"));
     const label = `dev.kojo.test.${crypto.randomUUID()}`;
     const installationRoot = join(root, "installation");
@@ -67,7 +146,8 @@ describe.skipIf(process.platform !== "darwin")("the native macOS Daemon lifecycl
       managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
     };
     const daemonMain = new URL("../../../../src/daemon/main.ts", import.meta.url).pathname;
-    writeNativeManagedRelease(paths, daemonMain);
+    const launcherMain = new URL("../../../../src/launcher/main.ts", import.meta.url).pathname;
+    writeNativeManagedRelease(paths, launcherMain);
     writeFileSync(paths.serviceDefinition, launchAgentDocument(paths, { label, home: root }), {
       mode: 0o600,
     });
@@ -76,6 +156,13 @@ describe.skipIf(process.platform !== "darwin")("the native macOS Daemon lifecycl
     try {
       service.installAndStart(paths.serviceDefinition);
       await waitFor(() => service.inspect().process === "running");
+      await waitFor(() => existsSync(join(paths.runtimeRoot, "endpoint.json")));
+      const launchctlTarget = `gui/${process.getuid?.() ?? 0}/${label}`;
+      await exerciseNativeRestartBudget(paths, () => {
+        const printed = Bun.spawnSync(["/bin/launchctl", "print", launchctlTarget]);
+        const processId = /^\s*pid\s*=\s*(\d+)\s*$/m.exec(printed.stdout.toString())?.[1];
+        return processId === undefined ? undefined : Number(processId);
+      });
       await waitFor(() => existsSync(join(paths.runtimeRoot, "endpoint.json")));
 
       const duplicate = Bun.spawnSync([process.execPath, daemonMain], {
@@ -156,7 +243,7 @@ const systemdUserManagerAvailable =
   Bun.spawnSync(["/usr/bin/systemctl", "--user", "show-environment"]).exitCode === 0;
 
 describe.skipIf(!systemdUserManagerAvailable)("the native systemd user Daemon lifecycle", () => {
-  it("uses an isolated unit for one idle Daemon and stops its complete process group", async () => {
+  it("uses a native systemd unit for singleton lifecycle, process-group stop, restart-budget reset, and post-activation failure isolation", async () => {
     const root = mkdtempSync(join(tmpdir(), "kojo-native-systemd-service-"));
     const identity = `kojo-test-${crypto.randomUUID()}`;
     const unit = `${identity}.service`;
@@ -175,7 +262,8 @@ describe.skipIf(!systemdUserManagerAvailable)("the native systemd user Daemon li
     const childProcessIdPath = join(root, "child.pid");
     mkdirSync(unitDirectory, { recursive: true, mode: 0o700 });
     const daemonMain = new URL("../../../../src/daemon/main.ts", import.meta.url).pathname;
-    writeNativeManagedRelease(paths, daemonMain, { childProcessIdPath });
+    const launcherMain = new URL("../../../../src/launcher/main.ts", import.meta.url).pathname;
+    writeNativeManagedRelease(paths, launcherMain, { childProcessIdPath });
     writeFileSync(
       paths.serviceDefinition,
       systemdUnitDocument(paths, {
@@ -196,6 +284,19 @@ describe.skipIf(!systemdUserManagerAvailable)("the native systemd user Daemon li
       await waitFor(() => existsSync(join(paths.runtimeRoot, "endpoint.json")));
       await waitFor(() => existsSync(childProcessIdPath));
       const childProcessId = Number(readFileSync(childProcessIdPath, "utf8").trim());
+      await exerciseNativeRestartBudget(paths, () => {
+        const shown = Bun.spawnSync([
+          "/usr/bin/systemctl",
+          "--user",
+          "show",
+          unit,
+          "--property=MainPID",
+          "--value",
+        ]);
+        const processId = Number(shown.stdout.toString().trim());
+        return Number.isSafeInteger(processId) && processId > 0 ? processId : undefined;
+      });
+      await waitFor(() => existsSync(join(paths.runtimeRoot, "endpoint.json")));
 
       const duplicate = Bun.spawnSync([process.execPath, daemonMain], {
         env: {

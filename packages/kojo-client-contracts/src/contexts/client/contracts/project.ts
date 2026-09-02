@@ -71,3 +71,12 @@ export interface ClientRequestDocument {
   readonly request: MutationEnvelope;
   readonly receipt?: OperationReceipt;
 }
+
+/** Daemon-owned recent accepted client requests. */
+export interface ClientRequestSnapshot {
+  readonly observationVersion: 1;
+  readonly instanceId: string;
+  readonly dataIdentity: string;
+  readonly observedAt: string;
+  readonly requests: ReadonlyArray<ClientRequestDocument>;
+}

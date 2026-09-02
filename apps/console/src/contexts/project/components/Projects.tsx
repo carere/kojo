@@ -16,6 +16,7 @@ import {
   type Setter,
   Switch,
 } from "solid-js";
+import { RecentChanges } from "../../daemon/components/RecentChanges.tsx";
 import { ConsoleAccessError } from "../../daemon/services/browserAccess.ts";
 import { Badge, type BadgeTone } from "../../shared/components/Badge.tsx";
 import { ConsoleNavigation } from "../../shared/components/ConsoleNavigation.tsx";
@@ -217,6 +218,7 @@ export const Projects = (): JSX.Element => {
                 <DataGrid
                   matchedCount={rows().length}
                   recordCount={snapshot().counts.total}
+                  resourceName="Projects"
                   selectedCount={Object.keys(selection()).length}
                 >
                   <DataGridTable
@@ -229,6 +231,7 @@ export const Projects = (): JSX.Element => {
                   />
                   <Pagination cursor={cursor()} matchedCount={rows().length} onChange={setCursor} />
                 </DataGrid>
+                <RecentChanges />
               </>
             )}
           </Match>

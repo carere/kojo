@@ -17,11 +17,19 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 import { startDaemon } from "../../../../src/contexts/daemon/adapters/DaemonOwner.ts";
+import { FileLifecycleJournalRepository } from "../../../../src/contexts/daemon/adapters/FileLifecycleJournalRepository.ts";
+import { macLaunchAgent } from "../../../../src/contexts/daemon/adapters/MacLaunchAgent.ts";
+import { ManagedDaemonSupervision } from "../../../../src/contexts/daemon/adapters/ManagedDaemonSupervision.ts";
 import {
   managedReleaseSelection,
   stageManagedRelease,
 } from "../../../../src/contexts/daemon/adapters/ManagedInstallation.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
+import { LifecycleError } from "../../../../src/contexts/daemon/models/LifecycleError.ts";
+import type { UpgradeReadinessEvidence } from "../../../../src/contexts/daemon/models/LifecycleOperation.ts";
+import type { DaemonUpgradeControl } from "../../../../src/contexts/daemon/ports/DaemonUpgradeControl.ts";
+import type { ManagedReleaseSelection } from "../../../../src/contexts/daemon/ports/ManagedReleaseSelection.ts";
+import { UpgradeActivationController } from "../../../../src/contexts/daemon/services/UpgradeActivationController.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
 
 const removeTree = (path: string): void => {
@@ -198,6 +206,7 @@ describe("recoverable managed upgrade activation", () => {
           recordReady: () => {
             candidateReadyCalls += 1;
           },
+          recordOperationSuccess: () => undefined,
           recordPlannedStop: () => undefined,
           activatePolicy: () => undefined,
         },
@@ -312,6 +321,205 @@ describe("recoverable managed upgrade activation", () => {
       if (candidateDaemon !== undefined)
         await Effect.runPromise(candidateDaemon.stop).catch(() => {});
       removeTree(root);
+    }
+  });
+});
+
+const activationOutcomeFixture = (options: {
+  readonly operationId: string;
+  readonly candidateReady: boolean;
+  readonly rollbackReady: boolean;
+}) => {
+  const root = mkdtempSync(join(tmpdir(), "kojo-upgrade-outcome-"));
+  const paths = pathsAt(root);
+  write(join(paths.installationRoot, "active-release"), "source-release\n");
+  write(paths.serviceDefinition, "isolated test service\n");
+  let running = true;
+  const launchctl = (arguments_: ReadonlyArray<string>) => {
+    const operation = arguments_[0];
+    if (operation === "print") {
+      return running
+        ? { exitCode: 0, stdout: "state = running\npid = 10\n", stderr: "" }
+        : { exitCode: 1, stdout: "", stderr: "not loaded" };
+    }
+    if (operation === "print-disabled") {
+      return { exitCode: 0, stdout: '"dev.kojo.daemon" => false\n', stderr: "" };
+    }
+    if (operation === "bootout") {
+      running = false;
+    }
+    if (operation === "bootstrap" || operation === "kickstart") {
+      running = true;
+    }
+    return { exitCode: 0, stdout: "", stderr: "" };
+  };
+  const sourceOwner = {
+    daemonInstanceId: "daemon-source",
+    runnerInstanceIds: [],
+    recordedAt: "2026-09-01T10:00:00.000Z",
+  };
+  const replacementOwner = {
+    daemonInstanceId: "daemon-replacement",
+    runnerInstanceIds: [],
+    recordedAt: "2026-09-01T10:01:00.000Z",
+  };
+  const readiness = (releaseId: string): UpgradeReadinessEvidence => ({
+    daemonInstanceId: "daemon-replacement",
+    dataIdentity: "data-one",
+    sourceReleaseId: "source-release",
+    candidateReleaseId: releaseId,
+    receiptDigest: "c".repeat(64),
+    wakeupDigest: "d".repeat(64),
+    integrity: "ok",
+    transports: "ready",
+    workflowExecutions: 0,
+    checkedAt: "2026-09-01T10:01:00.000Z",
+  });
+  const control: DaemonUpgradeControl = {
+    inspectPreflight: () => Effect.succeed(sourceOwner),
+    beginDrain: () =>
+      Effect.succeed({ held: true, executingRunIds: [], observedAt: "2026-09-01T10:00:01.000Z" }),
+    readDrain: () =>
+      Effect.succeed({ held: true, executingRunIds: [], observedAt: "2026-09-01T10:00:02.000Z" }),
+    forceDrain: () =>
+      Effect.succeed({ held: true, executingRunIds: [], observedAt: "2026-09-01T10:00:02.000Z" }),
+    holdMutations: () => Effect.void,
+    repeatFinalPreflight: () =>
+      Effect.succeed({
+        outcome: "accepted",
+        retainedSetHash: "b".repeat(64),
+        owner: sourceOwner,
+        detail: "compatible",
+      }),
+    releaseUpgradeHolds: () => Effect.void,
+    prepareHandoff: () => Effect.succeed({ digest: "f".repeat(64), owner: sourceOwner }),
+    confirmControllerReady: () => Effect.void,
+    createVerifiedBackup: () =>
+      Effect.succeed({
+        backupId: "backup-one",
+        sha256: "1".repeat(64),
+        dataVersion: "2".repeat(64),
+        verifiedAt: "2026-09-01T10:00:03.000Z",
+      }),
+    stopOwnedProcesses: () => Effect.succeed(sourceOwner),
+    readCandidateReadiness: () =>
+      options.candidateReady
+        ? Effect.succeed(readiness("candidate-release"))
+        : Effect.fail(new LifecycleError("UPGRADE_READINESS_FAILED", "candidate is not ready")),
+    authorizeActivation: () => Effect.succeed(replacementOwner),
+    inspectRollbackSafety: () =>
+      Effect.succeed({
+        safe: true,
+        sourceReleaseId: "source-release",
+        dataVersion: "2".repeat(64),
+        executionStopped: true,
+        detail: "the exact source release remains safe",
+      }),
+    readRollbackReadiness: () =>
+      options.rollbackReady
+        ? Effect.succeed(readiness("source-release"))
+        : Effect.fail(new LifecycleError("UPGRADE_ROLLBACK_NOT_READY", "source is not ready")),
+    authorizeRollback: () => Effect.succeed(replacementOwner),
+  };
+  const journal = new FileLifecycleJournalRepository(join(paths.dataRoot, "lifecycle"));
+  const releases: ManagedReleaseSelection = {
+    read: () => readFileSync(join(paths.installationRoot, "active-release"), "utf8").trim(),
+    select: (expectedReleaseId, nextReleaseId) => {
+      const current = readFileSync(join(paths.installationRoot, "active-release"), "utf8").trim();
+      if (current !== expectedReleaseId) {
+        throw new LifecycleError(
+          "MANAGED_RELEASE_SELECTION_CHANGED",
+          "the active managed release changed before selection",
+        );
+      }
+      write(join(paths.installationRoot, "active-release"), `${nextReleaseId}\n`);
+      return nextReleaseId;
+    },
+  };
+  const controller = new UpgradeActivationController({
+    journal,
+    control,
+    nativeService: macLaunchAgent({ launchctl }),
+    releases,
+    serviceDefinition: paths.serviceDefinition,
+    pollIntervalMillis: 1,
+    readinessMillis: 3,
+    stopMillis: 10,
+  });
+  return {
+    root,
+    paths,
+    journal,
+    controller,
+    request: {
+      operationId: options.operationId,
+      dataIdentity: "data-one",
+      originalRequestHash: "a".repeat(64),
+      kind: "upgrade" as const,
+      sourceReleaseId: "source-release",
+      candidateReleaseId: "candidate-release",
+      checkedRetainedSetHash: "b".repeat(64),
+      startedAt: "2026-09-01T10:00:00.000Z",
+    },
+  };
+};
+
+describe("durable upgrade failure outcomes", () => {
+  it("distinguishes failed readiness, safe rollback, failed rollback, and post-activation failure", async () => {
+    const rolledBack = activationOutcomeFixture({
+      operationId: "upgrade-safe-rollback",
+      candidateReady: false,
+      rollbackReady: true,
+    });
+    const rollbackFailed = activationOutcomeFixture({
+      operationId: "upgrade-failed-rollback",
+      candidateReady: false,
+      rollbackReady: false,
+    });
+    const activated = activationOutcomeFixture({
+      operationId: "upgrade-post-activation",
+      candidateReady: true,
+      rollbackReady: true,
+    });
+    try {
+      const safe = await Effect.runPromise(rolledBack.controller.request(rolledBack.request));
+      expect(safe.outcome).toBe("rolled-back");
+      expect(rolledBack.journal.read(rolledBack.request.operationId)).toMatchObject({
+        stage: "rolled-back",
+        outcome: "rolled-back",
+        rollbackAttempted: true,
+      });
+
+      const failed = await Effect.runPromise(
+        rollbackFailed.controller.request(rollbackFailed.request),
+      );
+      expect(failed.outcome).toBe("repair-required");
+      expect(failed.operation.detail).toContain("source is not ready");
+
+      const success = await Effect.runPromise(activated.controller.request(activated.request));
+      expect(success.outcome).toBe("activated");
+      const supervision = new ManagedDaemonSupervision(activated.paths.dataRoot, {
+        now: () => Date.parse("2026-09-01T10:02:00.000Z"),
+      });
+      const prepared = supervision.prepareAttempt();
+      if (prepared.outcome !== "scheduled") throw new Error("post-activation attempt not prepared");
+      supervision.startAttempt(prepared.attemptId);
+      supervision.finishAttempt(prepared.attemptId, {
+        detail: "candidate failed after activation",
+      });
+      expect(activated.journal.read(activated.request.operationId)).toMatchObject({
+        stage: "activated",
+        outcome: "activated",
+      });
+      expect(
+        new ManagedDaemonSupervision(activated.paths.dataRoot).status().lastFailure,
+      ).toMatchObject({
+        detail: "candidate failed after activation",
+      });
+    } finally {
+      removeTree(rolledBack.root);
+      removeTree(rollbackFailed.root);
+      removeTree(activated.root);
     }
   });
 });

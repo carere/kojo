@@ -82,16 +82,11 @@ const daemonRequest = <A>(
     catch: clientError,
   });
 
-const requestIdArgument = Argument.string("request-id").pipe(
-  Argument.withDescription("The durable client request ID"),
-);
-
 const register = Command.make(
   "register",
   {
-    path: Flag.directory("path", { mustExist: true }).pipe(
-      Flag.withDescription("The exact Git working-tree root to register"),
-      Flag.withDefault("."),
+    path: Argument.string("path").pipe(
+      Argument.withDescription("The exact Git working-tree root to register"),
     ),
     requestId: Flag.string("request-id").pipe(
       Flag.withDescription("Reuse this ID only for the exact same registration request"),
@@ -139,29 +134,6 @@ const register = Command.make(
     yield* Console.log(`Factory ${result.project.factoryState}. No Workflow was started.`);
   }),
 ).pipe(Command.withDescription("Register one exact Git working-tree root with the Daemon"));
-
-const lookup = Command.make(
-  "request",
-  { requestId: requestIdArgument },
-  Effect.fn(function* ({ requestId }) {
-    const document = yield* daemonRequest<ClientRequestDocument>(
-      `/api/v1/client-requests/${requestId}`,
-    ).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
-    yield* Console.log(JSON.stringify(document));
-  }),
-).pipe(Command.withDescription("Look up an exact retained client request and its receipt"));
-
-const retry = Command.make(
-  "retry",
-  { requestId: requestIdArgument },
-  Effect.fn(function* ({ requestId }) {
-    const receipt = yield* daemonRequest<OperationReceipt>(
-      `/api/v1/client-requests/${requestId}/retry`,
-      { method: "POST", body: {} },
-    ).pipe(Effect.catch((cause) => commandFailed(cause.reason)));
-    yield* Console.log(JSON.stringify(receipt));
-  }),
-).pipe(Command.withDescription("Retry the exact retained request without changing its content"));
 
 const list = Command.make(
   "list",
@@ -418,16 +390,5 @@ const repair = Command.make(
 
 export const project = Command.make("project").pipe(
   Command.withDescription("Register and inspect Projects owned by the Daemon"),
-  Command.withSubcommands([
-    register,
-    list,
-    relocate,
-    archive,
-    restore,
-    status,
-    configure,
-    repair,
-    lookup,
-    retry,
-  ]),
+  Command.withSubcommands([register, list, relocate, archive, restore, status, configure, repair]),
 );

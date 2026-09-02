@@ -243,7 +243,7 @@ export const init = Command.make(
         "     It says whether this factory can actually run, and refuses it while it cannot.",
         "  5. kojo daemon install",
         "     One per-user Daemon owns execution, Gate application, the Console, and storage.",
-        "  6. kojo project register --path .",
+        "  6. kojo project register .",
         "     Then use `kojo workflow list --project <project-id>` and",
         "     `kojo workflow start <project-id> <workflow> --payload <json>`.",
         "",

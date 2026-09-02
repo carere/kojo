@@ -26,6 +26,13 @@ export const beginDaemonReconnect = (): void => {
   setDaemonConnectionState("retrying");
 };
 
+export const completeDaemonReconnect = (): void => {
+  if (!manualReconnectInProgress) return;
+  mutationsLocked = false;
+  manualReconnectInProgress = false;
+  setDaemonConnectionState("connected");
+};
+
 export const noteDaemonConnected = (): void => {
   if (mutationsLocked || daemonConnectionState() === "reconnect") return;
   setDaemonConnectionState("connected");
@@ -55,8 +62,7 @@ export const noteDaemonReadFailure = (path: string): void => {
 
 export const noteDaemonReadSuccess = (path: string): void => {
   consecutiveReadAttempts.delete(path);
-  if (mutationsLocked && !manualReconnectInProgress) return;
+  if (mutationsLocked || manualReconnectInProgress) return;
   mutationsLocked = false;
-  manualReconnectInProgress = false;
   setDaemonConnectionState("connected");
 };

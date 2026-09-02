@@ -59,6 +59,7 @@ export const startDaemonHttpApplication = (options: {
   readonly paths: DaemonPaths;
   readonly projectApi: ProjectApi;
   readonly projectRepository: SqliteProjectRepository;
+  readonly recordOperationSuccess?: () => void;
   readonly release: ConsoleRelease;
   readonly revisionRepository: SqliteRevisionRepository;
   readonly runApi: RunCoordinator;
@@ -698,6 +699,9 @@ export const startDaemonHttpApplication = (options: {
           if (request.method === "GET" && url.pathname === "/api/v1/workflows") {
             return Effect.runPromise(projectApi.workflowSnapshot());
           }
+          if (request.method === "GET" && url.pathname === "/api/v1/client-requests") {
+            return Effect.runPromise(projectApi.recentRequests());
+          }
           if (request.method === "GET" && url.pathname === "/api/v1/runs") {
             return noStoreJson(await Effect.runPromise(runApi.snapshot()));
           }
@@ -851,8 +855,8 @@ export const startDaemonHttpApplication = (options: {
   const socketServer = Bun.serve({
     unix: socketPath,
     async fetch(request) {
-      return withOrdinaryMutation(mutationGate, request, async () => {
-        const url = new URL(request.url);
+      const url = new URL(request.url);
+      const response = await withOrdinaryMutation(mutationGate, request, async () => {
         if (request.method === "GET" && url.pathname === "/ready") {
           return Response.json(endpoint);
         }
@@ -877,6 +881,9 @@ export const startDaemonHttpApplication = (options: {
         }
         if (request.method === "GET" && url.pathname === "/api/v1/workflows") {
           return Effect.runPromise(projectApi.workflowSnapshot());
+        }
+        if (request.method === "GET" && url.pathname === "/api/v1/client-requests") {
+          return Effect.runPromise(projectApi.recentRequests());
         }
         if (request.method === "GET" && url.pathname === "/api/v1/runs") {
           return noStoreJson(await Effect.runPromise(runApi.snapshot()));
@@ -991,6 +998,11 @@ export const startDaemonHttpApplication = (options: {
         }
         return new Response("not found", { status: 404 });
       });
+      const isHeartbeat = url.pathname === "/ready" || url.pathname === "/api/v1/notifications";
+      if (!isHeartbeat && response.status >= 200 && response.status < 400) {
+        options.recordOperationSuccess?.();
+      }
+      return response;
     },
   });
   if (consoleServer === undefined) {

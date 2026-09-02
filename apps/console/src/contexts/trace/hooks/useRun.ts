@@ -54,6 +54,20 @@ export const useRun = (runId: () => string): UseQueryResult<RunDoc, Error> =>
             ? { outcome: run.state }
             : {}),
           ...(run.finishedAt === undefined ? {} : { finishedAt: Date.parse(run.finishedAt) }),
+          ...(run.inFlight === undefined
+            ? {}
+            : {
+                inFlight: {
+                  phaseId: `${run.runId}/${run.inFlight.phasePath}/${run.inFlight.attempt}`,
+                  name: run.inFlight.phasePath,
+                  kind: run.inFlight.kind,
+                  attempt: run.inFlight.attempt,
+                  startedAt: Date.parse(run.inFlight.startedAt),
+                  ...(run.inFlight.sandboxId === undefined
+                    ? {}
+                    : { sandboxId: run.inFlight.sandboxId }),
+                },
+              }),
         },
         phases: run.phases.map((phase) => ({
           phaseId: `${run.runId}/${phase.phasePath}/${phase.attempt}`,
@@ -66,6 +80,8 @@ export const useRun = (runId: () => string): UseQueryResult<RunDoc, Error> =>
           endedAt: Date.parse(phase.endedAt),
           ...(phase.sandboxId === undefined ? {} : { sandboxId: phase.sandboxId }),
           ...(phase.errorTag === undefined ? {} : { errorTag: phase.errorTag }),
+          ...(phase.breaches === undefined ? {} : { breaches: phase.breaches }),
+          ...(phase.verification === undefined ? {} : { verification: phase.verification }),
         })),
         gates: (run.gates ?? []).map((gate) => ({
           gate: gate.gate,

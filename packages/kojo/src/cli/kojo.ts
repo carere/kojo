@@ -1,4 +1,5 @@
 import { Command } from "effect/unstable/cli";
+import { retry, status } from "../contexts/daemon/adapters/ClientRequestCommand.ts";
 import { daemon } from "../contexts/daemon/adapters/DaemonCommand.ts";
 import { ui } from "../contexts/daemon/adapters/UiCommand.ts";
 import { gate } from "../contexts/gate/adapters/GateCommand.ts";
@@ -17,7 +18,7 @@ import { root } from "./root.ts";
  * one OS-user Daemon.
  */
 export const kojo = root.pipe(
-  Command.withSubcommands([init, doctor, run, gate, ui, daemon, project, workflow]),
+  Command.withSubcommands([init, doctor, status, retry, run, gate, ui, daemon, project, workflow]),
 );
 
 /**

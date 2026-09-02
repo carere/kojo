@@ -2,6 +2,7 @@ import { Link } from "@tanstack/solid-router";
 import { createMemo, createSignal, For, type JSX, Show } from "solid-js";
 import { Badge } from "../../shared/components/Badge.tsx";
 import { ConsoleNavigation } from "../../shared/components/ConsoleNavigation.tsx";
+import { DataGrid } from "../../shared/components/data-grid/DataGrid.tsx";
 import { Pagination } from "../../shared/components/data-grid/Pagination.tsx";
 import { Notice } from "../../shared/components/Notice.tsx";
 import {
@@ -72,7 +73,7 @@ export const GateQueue = (): JSX.Element => {
   return (
     <div class="mx-auto grid min-h-screen max-w-7xl gap-8 p-4 lg:grid-cols-[13rem_1fr] lg:p-8">
       <ConsoleNavigation current="Gate" />
-      <main class="flex min-w-0 flex-col gap-4" data-list-composition="custom-grouped-table">
+      <main class="flex min-w-0 flex-col gap-4">
         <header class="flex flex-col gap-1">
           <h1 class="text-xl font-semibold">What waits on a human</h1>
           <p class="text-muted-foreground text-xs">
@@ -123,38 +124,49 @@ export const GateQueue = (): JSX.Element => {
           when={settled(askings)}
           fallback={<p class="text-muted-foreground text-sm">Loading the queue…</p>}
         >
-          <Show
-            when={waitingRows(visibleRows()).length > 0}
-            fallback={
-              <Notice tone="empty" title="Nothing is waiting on a human.">
-                <p class="mt-1">
-                  No run in this factory has stopped at a gate. Nothing has gone wrong.
-                </p>
-              </Notice>
-            }
+          <DataGrid
+            matchedCount={filteredRows().length}
+            recordCount={rows().length}
+            resourceName="Askings"
+            selectedCount={0}
           >
-            <QueueTable rows={waitingRows(visibleRows())} />
-          </Show>
+            <Show
+              when={waitingRows(visibleRows()).length > 0}
+              fallback={
+                <Notice tone="empty" title="Nothing is waiting on a human.">
+                  <p class="mt-1">
+                    No run in this factory has stopped at a gate. Nothing has gone wrong.
+                  </p>
+                </Notice>
+              }
+            >
+              <QueueTable rows={waitingRows(visibleRows())} />
+            </Show>
 
-          {/*
-           * Settled — answered or expired — and never claimed to have been applied. This page reads
-           * one list across every run and has no run document to check, so it says what it knows
-           * and points at the run, which can prove the rest. The one exception is *expired*, which
-           * the run itself wrote down: that fact needs no document.
-           */}
-          <Show when={settledRows(visibleRows()).length > 0}>
-            <section class="flex flex-col gap-2" data-queue="recorded">
-              <h2 class="text-sm font-semibold">Settled</h2>
-              <p class="text-muted-foreground text-xs">
-                Answered, or expired. A verdict written down here is recorded, not applied — whether
-                a runner has applied it is on the run, open one to see. An expired asking cannot be
-                answered any more.
-              </p>
-              <QueueTable rows={settledRows(visibleRows())} />
-            </section>
-          </Show>
+            {/*
+             * Settled — answered or expired — and never claimed to have been applied. This page reads
+             * one list across every run and has no run document to check, so it says what it knows
+             * and points at the run, which can prove the rest. The one exception is *expired*, which
+             * the run itself wrote down: that fact needs no document.
+             */}
+            <Show when={settledRows(visibleRows()).length > 0}>
+              <section class="flex flex-col gap-2" data-queue="recorded">
+                <h2 class="text-sm font-semibold">Settled</h2>
+                <p class="text-muted-foreground text-xs">
+                  Answered, or expired. A verdict written down here is recorded, not applied —
+                  whether a runner has applied it is on the run, open one to see. An expired asking
+                  cannot be answered any more.
+                </p>
+                <QueueTable rows={settledRows(visibleRows())} />
+              </section>
+            </Show>
+            <Pagination
+              cursor={cursor()}
+              matchedCount={filteredRows().length}
+              onChange={setCursor}
+            />
+          </DataGrid>
         </Show>
-        <Pagination cursor={cursor()} matchedCount={filteredRows().length} onChange={setCursor} />
       </main>
     </div>
   );
@@ -163,10 +175,8 @@ export const GateQueue = (): JSX.Element => {
 /**
  * The rows, as a table.
  *
- * Hand-written rather than through TanStack Table, and that is the smaller thing here: this list has
- * no sorting, no filtering and no row model to own — the order is the one rule the queue has, and it
- * is computed with the rows. A headless table around six static columns would be machinery with
- * nothing to do.
+ * The shared Data Grid owns filtering, URL state, counts, and pagination. This table keeps only the
+ * queue's fixed priority order and row presentation.
  */
 const QueueTable = (props: { readonly rows: ReadonlyArray<QueueRow> }): JSX.Element => (
   <Table>
