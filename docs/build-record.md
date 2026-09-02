@@ -45,10 +45,11 @@ a private scoped registry. It then follows the printed install, init, doctor, re
 Gate, and Console commands. The controlled Workflow makes no agent call. It publishes one real
 Artifact through one real no-sandbox Resource and suspends at one real Gate.
 
-The required artifact is named `shipped-macos-release-evidence`. Its report is under
-`artifacts/verification/daemon/<tested-revision>/RELEASE-01/`. It contains package hashes, the
-managed release manifest, tested revision, tool and Host versions, loaded and skipped test counts,
-command logs, private-path modes, endpoint and process-group observations, Run and Gate records, and
-authenticated Console screenshots. The job removes its isolated global Kojo and Bun before it uses
-the managed status, repair, Gate, stop, start, and restart commands. Cleanup removes only paths that
-the isolation preflight proved absent before this job created them.
+The required artifact is named `shipped-macos-release-evidence`. Its reports are under
+`artifacts/verification/daemon/<tested-revision>/RELEASE-01/`, `RELEASE-02/`, and `RELEASE-03/`.
+They contain package hashes, the managed release manifest, tested revision, tool and Host versions,
+loaded and skipped test counts, command logs, private-path modes, endpoint and process-group
+observations, Run and Gate records, and authenticated Console screenshots. The job removes its
+isolated global Kojo and Bun before it uses the managed status, repair, Gate, stop, start, and restart
+commands. Cleanup removes only paths that the isolation preflight proved absent before this job
+created them.

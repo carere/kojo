@@ -52,7 +52,9 @@ const defaultInstallation = join(homedir(), "Library", "Application Support", "K
 const defaultData = join(defaultInstallation, "data");
 const defaultService = join(homedir(), "Library", "LaunchAgents", "dev.kojo.daemon.plist");
 const defaultCache = join(homedir(), "Library", "Caches", "Kojo");
-const serviceTarget = `gui/${process.getuid?.() ?? -1}/dev.kojo.daemon`;
+const serviceLabel = "dev.kojo.daemon";
+const serviceDomain = `gui/${process.getuid?.() ?? -1}`;
+const serviceTarget = `${serviceDomain}/${serviceLabel}`;
 
 const privateTemporaryRoot = (): string => {
   const result = Bun.spawnSync(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"]);
@@ -69,13 +71,27 @@ const assertReleaseIsolation = (): void => {
   if (process.env.GITHUB_ACTIONS !== "true") {
     failures.push("GITHUB_ACTIONS is not true; a disposable runner account is required");
   }
+  if (process.env.RUNNER_ENVIRONMENT !== "github-hosted") {
+    failures.push("RUNNER_ENVIRONMENT is not github-hosted; a disposable account is required");
+  }
   if (process.env.RUNNER_OS !== "macOS") failures.push("RUNNER_OS is not macOS");
   if (process.env.RUNNER_TEMP === undefined) failures.push("RUNNER_TEMP is absent");
-  for (const path of [defaultInstallation, defaultService, defaultCache]) {
+  for (const path of [
+    defaultInstallation,
+    defaultService,
+    defaultCache,
+    join(privateTemporaryRoot(), "Kojo"),
+  ]) {
     if (existsSync(path)) failures.push(`pre-existing Kojo path: ${path}`);
   }
   const loaded = Bun.spawnSync(["/bin/launchctl", "print", serviceTarget]);
   if (loaded.exitCode === 0) failures.push(`pre-existing native service: ${serviceTarget}`);
+  const disabled = Bun.spawnSync(["/bin/launchctl", "print-disabled", serviceDomain]);
+  if (disabled.exitCode !== 0) {
+    failures.push(`the native service domain is unavailable: ${serviceDomain}`);
+  } else if (disabled.stdout.toString().includes(`"${serviceLabel}"`)) {
+    failures.push(`pre-existing native service override: ${serviceTarget}`);
+  }
   if (failures.length > 0) {
     throw new Error(
       `native release isolation was not established; no installation command ran:\n- ${failures.join("\n- ")}`,
@@ -218,7 +234,7 @@ export const releaseEvidence = workflow(
           description: "Approve the controlled shipped macOS Run",
           actor: "release-verifier",
           choices: ["approve", "reject"],
-          deadline: Duration.minutes(5),
+          deadline: Duration.minutes(15),
           onExpiry: fail(),
         });
         return yield* code(
@@ -335,7 +351,7 @@ const endpoint = (): EndpointRecord => {
 const waitFor = async <A>(
   read: () => Promise<A | undefined>,
   message: string,
-  timeout = 30_000,
+  timeout = 60_000,
 ): Promise<A> => {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
@@ -422,27 +438,55 @@ const recordManagedProcesses = async (recorder: EvidenceRecorder, name: string):
   const managed = result.stdout
     .split("\n")
     .filter((line) => line.includes(defaultInstallation) || line.includes("dev.kojo.daemon"));
-  if (managed.length === 0)
-    throw new Error("no managed Kojo process was present in the Host table");
+  const observations = managed.flatMap((line) => {
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/);
+    return match === null
+      ? []
+      : [
+          {
+            pid: Number(match[1]),
+            parentPid: Number(match[2]),
+            processGroupId: Number(match[3]),
+            uid: Number(match[4]),
+            command: match[5] ?? "",
+          },
+        ];
+  });
+  const expectedUid = process.getuid?.();
+  if (
+    expectedUid === undefined ||
+    observations.length < 2 ||
+    observations.some((entry) => entry.uid !== expectedUid) ||
+    !observations.some((child) =>
+      observations.some(
+        (parent) =>
+          child.parentPid === parent.pid && child.processGroupId === parent.processGroupId,
+      ),
+    )
+  ) {
+    throw new Error("the managed launcher and Daemon process-group relationship was not present");
+  }
   recorder.write(`${name}.log`, `${managed.join("\n")}\n`);
+  recorder.write(`${name}.json`, observations);
 };
 
 /** Run only on an explicit disposable macOS CI account. */
 export const collectShippedMacosEvidence = async (): Promise<void> => {
   assertReleaseIsolation();
   const runnerTemporaryRoot = resolve(process.env.RUNNER_TEMP ?? "");
-  const evidenceRoot = resolve(
-    process.env.KOJO_RELEASE_EVIDENCE_DIR ??
+  const evidenceRevisionRoot = resolve(
+    process.env.KOJO_RELEASE_EVIDENCE_ROOT ??
       join(runnerTemporaryRoot, "kojo-shipped-macos-evidence"),
   );
+  const evidenceRoot = join(evidenceRevisionRoot, "RELEASE-01");
   if (
     runnerTemporaryRoot === resolve("/") ||
-    evidenceRoot === runnerTemporaryRoot ||
-    !evidenceRoot.startsWith(`${runnerTemporaryRoot}${sep}`)
+    evidenceRevisionRoot === runnerTemporaryRoot ||
+    !evidenceRevisionRoot.startsWith(`${runnerTemporaryRoot}${sep}`)
   ) {
     throw new Error("the release evidence path is not a child of the disposable runner directory");
   }
-  rmSync(evidenceRoot, { recursive: true, force: true });
+  rmSync(evidenceRevisionRoot, { recursive: true, force: true });
   const recorder = new EvidenceRecorder(evidenceRoot);
   const fixtureRoot = join(runnerTemporaryRoot, `kojo-shipped-${crypto.randomUUID()}`);
   const globalRoot = join(fixtureRoot, "global-bun");
@@ -454,6 +498,10 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
   let ownsInstallation = false;
   let registry: Awaited<ReturnType<typeof startShippedPackageRegistry>> | undefined;
   let browser: Browser | undefined;
+  let evidenceReports:
+    | ReadonlyArray<{ readonly checkId: string; readonly manifest: object }>
+    | undefined;
+  const cleanupFailures: string[] = [];
 
   mkdirSync(join(globalRoot, "bin"), { recursive: true, mode: 0o700 });
   mkdirSync(project, { recursive: true, mode: 0o700 });
@@ -463,9 +511,11 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
   try {
     registry = await startShippedPackageRegistry({ workspace, destination: archives });
     recorder.write("shipped-packages.json", registry.packages);
+    recorder.write("shipped-package-composition.json", registry.composition);
     const environment = {
       ...process.env,
       BUN_INSTALL: globalRoot,
+      BUN_INSTALL_CACHE_DIR: join(fixtureRoot, "bun-install-cache"),
       NPM_CONFIG_REGISTRY: registry.origin,
       npm_config_registry: registry.origin,
       PATH: `${join(globalRoot, "bin")}:/usr/bin:/bin:/usr/sbin:/sbin`,
@@ -500,6 +550,8 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
     );
 
     await prepareProject(recorder, project, globalKojo, globalBun, environment);
+    registry.assertConsumed();
+    recorder.write("package-registry-requests.json", registry.requests);
     await recorder.run(
       "printed-project-register",
       [globalKojo, "project", "register", "--path", "."],
@@ -775,6 +827,37 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
       throw new Error("native replacement changed the Daemon data identity");
     }
     recorder.write("native-replacement.json", { beforeStop, afterStart, afterRestart });
+    const persistedStatus = await recorder.run(
+      "run-status-after-native-replacement",
+      [managedKojo, "run", "status", runId, "--details", "--json"],
+      { cwd: project, env: managedEnvironment },
+    );
+    const persistedRun = (JSON.parse(persistedStatus.stdout) as { readonly run: RunStatus }).run;
+    if (
+      persistedRun.state !== "succeeded" ||
+      (persistedRun.phases?.length ?? 0) < 2 ||
+      (persistedRun.artifacts?.length ?? 0) < 1 ||
+      persistedRun.gates?.some((gate) => gate.outcome === "answered") !== true ||
+      persistedRun.sandboxes?.some((sandbox) => sandbox.outcome === "released") !== true
+    ) {
+      throw new Error(
+        `native replacement lost persisted Run evidence: ${JSON.stringify(persistedRun)}`,
+      );
+    }
+    recorder.write("run-after-native-replacement.json", persistedRun);
+    const replacementLaunch = await recorder.run(
+      "authenticated-console-grant-after-native-replacement",
+      [managedKojo, "ui", "--no-open"],
+      { cwd: project, env: managedEnvironment, redactOutput: true },
+    );
+    const replacementRender = await renderRun({
+      browser,
+      launchUrl: replacementLaunch.stdout.trim(),
+      runId,
+      screenshot: join(evidenceRoot, "console-after-native-replacement.png"),
+      expectedState: "succeeded",
+    });
+    recorder.write("console-after-native-replacement.txt", replacementRender.text);
     const duplicate = await recorder.run(
       "singleton-duplicate-launch",
       [join(defaultInstallation, "bin", "kojo-launcher")],
@@ -798,7 +881,7 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
       readonly bunVersion?: string;
       readonly kojoVersion?: string;
     };
-    recorder.write("evidence-manifest.json", {
+    const commonEvidence = {
       formatVersion: 1,
       ticket: 89,
       evidence: "shipped-macos-installation",
@@ -813,6 +896,7 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
       },
       managedRelease: managedManifest,
       packages: registry.packages,
+      packageComposition: registry.composition,
       loadedTests: [
         {
           tier: "release-macos",
@@ -822,45 +906,72 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
           namedSkips: [],
         },
       ],
-      checks: [
-        {
-          name: "fresh shipped install",
-          expected: "printed commands use packed package artifacts without fixture repair",
-          actual: "installed",
-          evidence: "steps/01-printed-global-kojo-install.log",
-        },
-        {
-          name: "real persisted records",
-          expected: "Project, Workflow, Run, Gate, Phase, Sandbox and Artifact",
-          actual: "rendered through authenticated Console",
-          evidence: "console-complete.png",
-        },
-        {
-          name: "managed tools after global removal",
-          expected: "status, repair and Gate answer remain usable",
-          actual: "usable",
-          evidence: "global-tool-removal.json",
-        },
-        {
-          name: "native lifecycle",
-          expected: "stop, start, replacement, singleton, endpoint, process group and access",
-          actual: "recorded",
-          evidence: "native-replacement.json",
-        },
-      ],
       noHiddenRepairs: true,
-      expectedOutcomes: [
-        "fresh package install",
-        "Factory init and doctor",
-        "real Run suspension and completion",
-        "authenticated Console render",
-        "global Kojo and Bun removal",
-        "managed status and repair",
-        "native stop, start, restart, singleton, access and process-group evidence",
-      ],
       packageRegistryRequests: registry.requests,
       providerExecution: "none",
-    });
+    };
+    evidenceReports = [
+      {
+        checkId: "RELEASE-01",
+        manifest: {
+          ...commonEvidence,
+          checkId: "RELEASE-01",
+          logs: ["vitest.log", "steps/", "records/"],
+          checks: [
+            {
+              name: "fresh shipped install",
+              expected: "printed commands use packed package artifacts without fixture repair",
+              actual: "installed",
+              evidence: "steps/01-printed-global-kojo-install.log",
+            },
+            {
+              name: "native lifecycle",
+              expected: "stop, start, replacement, singleton, endpoint, process group and access",
+              actual: "recorded",
+              evidence: "records/native-replacement.json",
+            },
+          ],
+        },
+      },
+      {
+        checkId: "RELEASE-02",
+        manifest: {
+          ...commonEvidence,
+          checkId: "RELEASE-02",
+          logs: ["../RELEASE-01/vitest.log", "../RELEASE-01/records/"],
+          checks: [
+            {
+              name: "real persisted records",
+              expected: "Project, Workflow, Run, Gate, Phase, Sandbox and Artifact",
+              actual: "rendered through authenticated Console",
+              evidence: "../RELEASE-01/console-complete.png",
+            },
+            {
+              name: "replacement persistence",
+              expected: "Run, Gate, Trace, Sandbox and Artifact survive replacement",
+              actual: "rendered through a new authenticated Console session",
+              evidence: "../RELEASE-01/console-after-native-replacement.png",
+            },
+          ],
+        },
+      },
+      {
+        checkId: "RELEASE-03",
+        manifest: {
+          ...commonEvidence,
+          checkId: "RELEASE-03",
+          logs: ["../RELEASE-01/vitest.log", "../RELEASE-01/records/"],
+          checks: [
+            {
+              name: "managed tools after global removal",
+              expected: "status, repair and Gate answer remain usable",
+              actual: "usable",
+              evidence: "../RELEASE-01/records/global-tool-removal.json",
+            },
+          ],
+        },
+      },
+    ];
   } finally {
     await browser?.close().catch(() => undefined);
     registry?.stop();
@@ -869,6 +980,9 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
         env: { ...process.env, PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
       });
       recorder.write("cleanup-managed-remove.log", `${cleanup.stdout}${cleanup.stderr}`);
+      if (cleanup.exitCode !== 0) {
+        cleanupFailures.push(`managed removal exited ${cleanup.exitCode}`);
+      }
     }
     if (ownsInstallation) {
       Bun.spawnSync(["/bin/launchctl", "bootout", serviceTarget]);
@@ -878,9 +992,30 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
         defaultCache,
         join(privateTemporaryRoot(), "Kojo"),
       ]) {
-        discardOwnedFixturePath(path);
+        try {
+          discardOwnedFixturePath(path);
+        } catch (cause) {
+          cleanupFailures.push(cause instanceof Error ? cause.message : String(cause));
+        }
       }
     }
-    rmSync(fixtureRoot, { recursive: true, force: true });
+    try {
+      discardOwnedFixturePath(fixtureRoot);
+    } catch (cause) {
+      cleanupFailures.push(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+  if (cleanupFailures.length > 0) {
+    throw new Error(`release cleanup was incomplete:\n- ${cleanupFailures.join("\n- ")}`);
+  }
+  if (evidenceReports === undefined) throw new Error("the release evidence reports are absent");
+  for (const report of evidenceReports) {
+    const directory = join(evidenceRevisionRoot, report.checkId);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(directory, "evidence-manifest.json"),
+      `${JSON.stringify(report.manifest, null, 2)}\n`,
+      { mode: 0o600 },
+    );
   }
 };

@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 interface PackedPackage {
@@ -24,7 +24,13 @@ export interface ShippedPackageRegistry {
     readonly tarball: string;
     readonly sha256: string;
   }>;
+  readonly composition: {
+    readonly packageNames: ReadonlyArray<string>;
+    readonly consoleFiles: number;
+    readonly consoleSha256: string;
+  };
   readonly requests: ReadonlyArray<string>;
+  readonly assertConsumed: () => void;
   readonly stop: () => void;
 }
 
@@ -69,6 +75,68 @@ const pack = (workspace: string, packagePath: string, destination: string): Pack
   };
 };
 
+const filesBelow = (root: string, prefix = ""): ReadonlyArray<string> =>
+  readdirSync(join(root, prefix)).flatMap((entry) => {
+    const relative = join(prefix, entry);
+    const stat = lstatSync(join(root, relative));
+    if (stat.isSymbolicLink()) {
+      throw new Error(`the built Console contains a symbolic link: ${relative}`);
+    }
+    return stat.isDirectory() ? filesBelow(root, relative) : [relative];
+  });
+
+const archivedFiles = (tarball: string): ReadonlyArray<string> => {
+  const result = spawnSync("/usr/bin/tar", ["-tzf", tarball], { encoding: "utf8" });
+  if (result.status !== 0) {
+    throw new Error(`the shipped package inventory could not be read: ${result.stderr}`);
+  }
+  return result.stdout.split("\n").filter((entry) => entry.length > 0 && !entry.endsWith("/"));
+};
+
+const verifyPackedConsole = (
+  workspace: string,
+  packed: ReadonlyArray<PackedPackage>,
+): { readonly consoleFiles: number; readonly consoleSha256: string } => {
+  const kojo = packed.find((entry) => entry.name === "@carere/kojo");
+  if (kojo === undefined) throw new Error("the shipped package set has no @carere/kojo archive");
+  const consoleRoot = join(workspace, "packages", "kojo", "console");
+  const localFiles = [...filesBelow(consoleRoot)].sort();
+  const archiveFiles = archivedFiles(kojo.tarball)
+    .filter((entry) => entry.startsWith("package/console/"))
+    .map((entry) => entry.slice("package/console/".length))
+    .sort();
+  if (
+    localFiles.length === 0 ||
+    !localFiles.includes("index.html") ||
+    localFiles.length !== archiveFiles.length ||
+    localFiles.some((entry, index) => entry !== archiveFiles[index])
+  ) {
+    throw new Error(
+      "the @carere/kojo archive does not contain the matching built Console inventory",
+    );
+  }
+  const inventory = localFiles.map((relative) => {
+    const archived = spawnSync(
+      "/usr/bin/tar",
+      ["-xOf", kojo.tarball, `package/console/${relative}`],
+      { encoding: "buffer" },
+    );
+    if (archived.status !== 0) {
+      throw new Error(`the packed Console file could not be read: ${relative}`);
+    }
+    const localHash = digest("sha256", readFileSync(join(consoleRoot, relative)));
+    const archiveHash = digest("sha256", archived.stdout);
+    if (localHash !== archiveHash) {
+      throw new Error(`the packed Console file differs from the tested build: ${relative}`);
+    }
+    return `${relative}\0${archiveHash}`;
+  });
+  return {
+    consoleFiles: inventory.length,
+    consoleSha256: digest("sha256", Buffer.from(inventory.join("\n"))),
+  };
+};
+
 const packageName = (path: string): string | undefined => {
   const decoded = decodeURIComponent(path.slice(1));
   return decoded.startsWith("@carere/") ? decoded : undefined;
@@ -91,6 +159,20 @@ export const startShippedPackageRegistry = async (options: {
     "packages/kojo-runner-contracts",
   ] as const;
   const packed = packagePaths.map((path) => pack(options.workspace, path, options.destination));
+  const expectedNames = [
+    "@carere/kojo",
+    "@carere/kojo-client-contracts",
+    "@carere/kojo-runner-contracts",
+    "@carere/kojo-runtime",
+  ];
+  const actualNames = packed.map((entry) => entry.name).sort();
+  if (
+    actualNames.length !== expectedNames.length ||
+    actualNames.some((name, i) => name !== expectedNames[i])
+  ) {
+    throw new Error(`the shipped package set is not exact: ${actualNames.join(", ")}`);
+  }
+  const consoleComposition = verifyPackedConsole(options.workspace, packed);
   const byName = new Map(packed.map((entry) => [entry.name, entry] as const));
   const requests: string[] = [];
 
@@ -151,6 +233,25 @@ export const startShippedPackageRegistry = async (options: {
   });
   origin = `http://127.0.0.1:${server.port}`;
 
+  const assertConsumed = (): void => {
+    const requestPaths = requests.map((request) => {
+      const path = request.slice(request.indexOf(" ") + 1);
+      try {
+        return decodeURIComponent(path);
+      } catch {
+        return path;
+      }
+    });
+    for (const entry of packed) {
+      if (!requestPaths.includes(`/${entry.name}`)) {
+        throw new Error(`the shipped installation did not request ${entry.name} metadata`);
+      }
+      if (!requestPaths.includes(`/tarballs/${basename(entry.tarball)}`)) {
+        throw new Error(`the shipped installation did not consume ${entry.name} archive`);
+      }
+    }
+  };
+
   return {
     origin,
     packages: packed.map((entry) => ({
@@ -159,7 +260,12 @@ export const startShippedPackageRegistry = async (options: {
       tarball: basename(entry.tarball),
       sha256: digest("sha256", readFileSync(entry.tarball)),
     })),
+    composition: {
+      packageNames: actualNames,
+      ...consoleComposition,
+    },
     requests,
+    assertConsumed,
     stop: () => server.stop(true),
   };
 };

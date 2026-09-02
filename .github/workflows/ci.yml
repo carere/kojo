@@ -224,13 +224,13 @@ jobs:
           KOJO_SHIPPED_MACOS_EVIDENCE: "1"
         run: |
           revision=$(git rev-parse HEAD)
-          evidence_dir="${RUNNER_TEMP}/artifacts/verification/daemon/${revision}/RELEASE-01"
-          export KOJO_RELEASE_EVIDENCE_DIR="${evidence_dir}"
+          evidence_root="${RUNNER_TEMP}/artifacts/verification/daemon/${revision}"
+          export KOJO_RELEASE_EVIDENCE_ROOT="${evidence_root}"
           set +e
           moon run kojo:test-release-macos 2>&1 | tee "${RUNNER_TEMP}/kojo-shipped-macos-vitest.log"
           status=${PIPESTATUS[0]}
-          mkdir -p "${evidence_dir}"
-          cp "${RUNNER_TEMP}/kojo-shipped-macos-vitest.log" "${evidence_dir}/vitest.log"
+          mkdir -p "${evidence_root}/RELEASE-01"
+          cp "${RUNNER_TEMP}/kojo-shipped-macos-vitest.log" "${evidence_root}/RELEASE-01/vitest.log"
           exit "$status"
 
       - name: Upload shipped macOS evidence

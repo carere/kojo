@@ -1,10 +1,9 @@
-import { describe, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { collectShippedMacosEvidence } from "../support/release/ShippedMacosEvidence.ts";
 
-const requested = process.env.KOJO_SHIPPED_MACOS_EVIDENCE === "1";
-
-describe.skipIf(!requested)("the shipped macOS installation", () => {
+describe("the shipped macOS installation", () => {
   it("follows the printed install and Factory path through native lifecycle and real browser evidence", async () => {
+    expect(process.env.KOJO_SHIPPED_MACOS_EVIDENCE).toBe("1");
     await collectShippedMacosEvidence();
   });
 });
