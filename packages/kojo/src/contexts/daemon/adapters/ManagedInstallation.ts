@@ -655,6 +655,7 @@ export const installManagedRelease = (
         } as const;
       }
 
+      ensurePrivateDirectory(paths.dataRoot);
       ensurePrivateDirectory(paths.installationRoot);
       ensurePrivateDirectory(paths.configurationRoot);
       ensurePrivateDirectory(paths.cacheRoot);

@@ -7,6 +7,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,6 +34,10 @@ const waitFor = async (predicate: () => boolean, timeout = 10_000): Promise<void
 
 const removeTree = (path: string): void => {
   const stat = lstatSync(path);
+  if (stat.isSymbolicLink()) {
+    rmSync(path, { force: true });
+    return;
+  }
   if (stat.isDirectory()) {
     chmodSync(path, 0o700);
     for (const child of readdirSync(path)) removeTree(join(path, child));
@@ -73,7 +78,16 @@ describe("the managed Daemon installation", () => {
       serviceDocument: () => "test service definition\n",
       assertSupported: () => {},
       inspect: () => observation,
-      installAndStart: () => calls.push("install-and-start"),
+      installAndStart: () => {
+        const data = lstatSync(paths.dataRoot);
+        const configuration = lstatSync(paths.configurationRoot);
+        expect(data.isDirectory()).toBe(true);
+        expect(configuration.isDirectory()).toBe(true);
+        expect(data.mode & 0o777).toBe(0o700);
+        expect(configuration.mode & 0o777).toBe(0o700);
+        expect([data.dev, data.ino]).not.toEqual([configuration.dev, configuration.ino]);
+        calls.push("install-and-start");
+      },
       start: () => calls.push("start"),
       stop: () => calls.push("stop"),
       enable: () => calls.push("enable"),
@@ -114,6 +128,7 @@ describe("the managed Daemon installation", () => {
     expect(readFileSync(join(release, "console", "index.html"), "utf8")).toContain("<html");
     for (const privateDirectory of [
       paths.installationRoot,
+      paths.dataRoot,
       paths.configurationRoot,
       paths.cacheRoot,
       paths.runtimeRoot,
@@ -170,6 +185,62 @@ describe("the managed Daemon installation", () => {
     }
     await waitFor(() => !existsSync(join(paths.runtimeRoot, "endpoint.json")));
   }, 60_000);
+
+  it.each([
+    ["systemd compatibility", "configuration"],
+    ["arbitrary", "outside"],
+  ] as const)(
+    "refuses the %s state link before native service start",
+    async (_name, targetName) => {
+      const root = mkdtempSync(join(tmpdir(), "kojo-linked-state-install-"));
+      roots.push(root);
+      const installationRoot = join(root, "installation");
+      const paths: DaemonPaths = {
+        installationRoot,
+        dataRoot: join(root, "state", "kojo"),
+        configurationRoot: join(root, "config", "kojo"),
+        cacheRoot: join(root, "cache", "kojo"),
+        runtimeRoot: join(root, "runtime", "kojo"),
+        serviceDefinition: join(root, "service", "kojo.service"),
+        managedCli: join(installationRoot, "bin", "kojo"),
+        managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
+      };
+      const target =
+        targetName === "configuration" ? paths.configurationRoot : join(root, "outside");
+      mkdirSync(target, { mode: 0o700, recursive: true });
+      mkdirSync(join(paths.dataRoot, ".."), { mode: 0o700, recursive: true });
+      symlinkSync(target, paths.dataRoot);
+      let serviceStarted = false;
+      const native: NativeService = {
+        serviceDocument: () => "test service definition\n",
+        assertSupported: () => undefined,
+        inspect: () => ({
+          automaticStart: "disabled",
+          manager: "unloaded",
+          process: "stopped",
+          loginLifetime: "test login lifetime",
+          logoutPersistence: "disabled",
+        }),
+        installAndStart: () => {
+          serviceStarted = true;
+        },
+        start: () => undefined,
+        stop: () => undefined,
+        enable: () => undefined,
+        disable: () => undefined,
+        keepRunningAfterLogout: () => undefined,
+      };
+      const sourceRoot = new URL("../../../../", import.meta.url).pathname;
+
+      await expect(
+        Effect.runPromise(
+          manageDaemon(paths, native, { sourceRoot, bunExecutable: process.execPath }).install,
+        ),
+      ).rejects.toThrow("symbolic link");
+      expect(serviceStarted).toBe(false);
+      expect(lstatSync(paths.dataRoot).isSymbolicLink()).toBe(true);
+    },
+  );
 
   it("refuses an unsupported Host before it writes managed content", async () => {
     const root = mkdtempSync(join(tmpdir(), "kojo-unsupported-install-"));
