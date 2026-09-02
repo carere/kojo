@@ -199,15 +199,19 @@ export const discardMaterializedRevisionCacheForPurge = (executionRoot: string):
       const retainedPackages =
         segments.at(-2) === ".kojo-retained" && segments.at(-1) === "packages";
       const packageResolution = segments.includes("node_modules");
-      const target = realpathSync(path);
-      if (
-        (!retainedPackages && !packageResolution) ||
-        !inside(graphs, target) ||
-        !lstatSync(target).isDirectory()
-      ) {
-        throw new Error(
-          `the materialized revision cache has an unexpected link at ${selected} to ${target}`,
-        );
+      if (!retainedPackages && !packageResolution) {
+        throw new Error(`the materialized revision cache has an unexpected link at ${selected}`);
+      }
+      let target: string;
+      let targetIsDirectory: boolean;
+      try {
+        target = realpathSync(path);
+        targetIsDirectory = lstatSync(target).isDirectory();
+      } catch {
+        throw new Error(`the materialized revision cache has an unresolved link at ${selected}`);
+      }
+      if (!inside(graphs, target) || !targetIsDirectory) {
+        throw new Error(`the materialized revision cache has an unexpected link at ${selected}`);
       }
       return;
     }

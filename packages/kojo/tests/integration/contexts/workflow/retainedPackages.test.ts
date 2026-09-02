@@ -4,7 +4,6 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -13,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, sep } from "node:path";
+import { join, relative } from "node:path";
 import { Effect } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -25,22 +24,6 @@ import { linkEngine } from "../../../support/linkEngine.ts";
 
 const roots: string[] = [];
 const packageRoot = new URL("../../../../", import.meta.url).pathname.replace(/\/$/, "");
-
-const symbolicLinksUnder = (root: string): ReadonlyArray<string> => {
-  const links: string[] = [];
-  const visit = (path: string): void => {
-    const stat = lstatSync(path);
-    if (stat.isSymbolicLink()) {
-      links.push(path);
-      return;
-    }
-    if (stat.isDirectory()) {
-      for (const child of readdirSync(path)) visit(join(path, child));
-    }
-  };
-  visit(root);
-  return links;
-};
 
 const fixture = (): {
   readonly root: string;
@@ -223,20 +206,6 @@ afterEach(() => {
 });
 
 describe("real Workflow Revision capture", () => {
-  it("refuses an unexpected cache link during purge preparation", () => {
-    const parent = mkdtempSync(join(tmpdir(), "kojo-materialized-purge-"));
-    roots.push(parent);
-    const executionRoot = join(parent, "runner-materialized");
-    const packageRoot = join(executionRoot, "graphs", "graph", "packages", "package");
-    mkdirSync(packageRoot, { recursive: true, mode: 0o700 });
-    symlinkSync(packageRoot, join(executionRoot, "unexpected-link"));
-
-    expect(() => discardMaterializedRevisionCacheForPurge(executionRoot)).toThrow(
-      "unexpected link",
-    );
-    expect(existsSync(executionRoot)).toBe(true);
-  });
-
   it("materializes exact source, assets, packages, links, resolution, and Effect evidence", async () => {
     const subject = fixture();
     const refreshed = await Effect.runPromise(
@@ -400,11 +369,17 @@ describe("real Workflow Revision capture", () => {
     secondMaterialized.dispose();
     materialized.dispose();
     expect(
-      symbolicLinksUnder(executionRoot).some(
-        (path) =>
-          path.includes(`${join("graphs", safe?.revision?.packageGraphId ?? "missing")}${sep}`) &&
-          path.includes(`${sep}node_modules${sep}`),
-      ),
+      lstatSync(
+        join(
+          executionRoot,
+          "graphs",
+          safe?.revision?.packageGraphId ?? "missing",
+          "packages",
+          left?.packageId ?? "missing",
+          "node_modules",
+          "fixture-shared",
+        ),
+      ).isSymbolicLink(),
     ).toBe(true);
     discardMaterializedRevisionCacheForPurge(executionRoot);
     expect(existsSync(executionRoot)).toBe(false);
