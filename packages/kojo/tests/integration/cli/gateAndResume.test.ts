@@ -265,7 +265,7 @@ describe("answering a Gate from another process", () => {
       "before:resume",
       "after:resume",
     ]);
-  }, 30_000);
+  });
 
   it("exits non-zero and names terminal inability when the answer ends in failure", async () => {
     const test = await harness("failure", "failure");
@@ -284,7 +284,7 @@ describe("answering a Gate from another process", () => {
     expect(answered.status).toBe(1);
     expect(answered.stderr).toContain("cannot apply");
     expect((await waitForRun(test.daemon, test.admission.runId)).state).toBe("failed");
-  }, 30_000);
+  });
 
   it("exits 0 when the answer is Applied and the Run succeeds", async () => {
     const test = await harness("success");
@@ -302,7 +302,7 @@ describe("answering a Gate from another process", () => {
       formatVersion: 1,
       asking: { state: "applied" },
     });
-  }, 30_000);
+  });
 
   it("keeps the first answer when a second one arrives", async () => {
     const test = await harness("first-answer");
@@ -311,7 +311,7 @@ describe("answering a Gate from another process", () => {
     const second = await runCli(test.root, ["answer", test.asking.token, "--choice", "reject"]);
     expect(second.status).toBe(1);
     expect((await snapshot(test.daemon)).askings[0]?.verdict?.choice).toBe("approve");
-  }, 30_000);
+  });
 
   it("lists without applying or executing the waiting Run", async () => {
     const test = await harness("list-only");
@@ -325,14 +325,14 @@ describe("answering a Gate from another process", () => {
         response.json(),
       ),
     ).toMatchObject({ state: "suspended" });
-  }, 30_000);
+  });
 
   it("refuses an unknown token with exit 1", async () => {
     const test = await harness("unknown-token");
     const answered = await runCli(test.root, ["answer", "not-a-gate-token", "--choice", "approve"]);
     expect(answered.status).toBe(1);
     expect(answered.stderr).toContain("not found");
-  }, 30_000);
+  });
 
   it("defaults to Unanswered and Recorded, while --all includes settled Askings", async () => {
     const test = await harness("list-default");
@@ -348,7 +348,7 @@ describe("answering a Gate from another process", () => {
     const all = await runCli(test.root, ["list", "--all"]);
     expect(all.stdout).toContain(test.asking.token);
     expect(all.stdout).toContain("State=applied");
-  }, 30_000);
+  });
 
   it("applies the first Verdict once when the Run stops at its next Gate", async () => {
     const test = await harness("second-gate", "second");
@@ -368,5 +368,5 @@ describe("answering a Gate from another process", () => {
       "before:second-gate",
       "after:second-gate",
     ]);
-  }, 30_000);
+  });
 });

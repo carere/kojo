@@ -228,5 +228,5 @@ describe("real Project Runner cancellation", () => {
       cleanup: { state: "confirmed" },
     });
     expect(readFileSync(evidence, "utf8")).toContain(String(processEvidence.runnerPid));
-  }, 30_000);
+  });
 });

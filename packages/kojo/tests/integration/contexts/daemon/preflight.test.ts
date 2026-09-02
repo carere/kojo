@@ -144,7 +144,7 @@ describe("managed release staging", () => {
     } finally {
       removeTree(root);
     }
-  }, 30_000);
+  });
 
   it("fails closed when retained candidate staging is incomplete", () => {
     const root = mkdtempSync(join(tmpdir(), "kojo-upgrade-incomplete-"));
@@ -289,7 +289,7 @@ describe("managed release staging", () => {
     } finally {
       removeTree(root);
     }
-  }, 30_000);
+  });
 });
 
 describe("real retained upgrade evidence", () => {

@@ -190,7 +190,7 @@ describe("remove safety and exact offline purge", () => {
     expect(await child.exited).toBe(1);
     expect(await new Response(child.stderr).text()).toContain("no exact one-use authorization");
     removeManagedInstallation(test.paths);
-  }, 30_000);
+  });
 
   it("recovers stale safety from the identity-bound capsule after managed removal", async () => {
     const test = fixture();
@@ -304,7 +304,7 @@ describe("remove safety and exact offline purge", () => {
     const missingEvidenceRecovery = recovery.check();
     const recoveredFromMissing = await recovery.apply(missingEvidenceRecovery.planToken);
     expect(purger.check().plan.evidenceId).toBe(recoveredFromMissing.evidenceId);
-  }, 30_000);
+  });
 
   it("refuses an old mutation envelope in the fresh post-purge data lifetime", async () => {
     const test = fixture();
@@ -372,7 +372,7 @@ describe("remove safety and exact offline purge", () => {
       await Effect.runPromise(freshDaemon.stop);
       removeManagedInstallation(test.paths);
     }
-  }, 30_000);
+  });
 
   it("reuses the same signing identity on restart and discloses all correctness tables", async () => {
     const test = fixture();

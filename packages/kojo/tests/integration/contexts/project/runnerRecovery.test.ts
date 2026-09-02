@@ -237,7 +237,7 @@ describe("real Project Runner recovery", () => {
       await call(daemon, `/api/v1/projects/${registered.project.projectId}/workflows`)
     ).json()) as WorkflowSnapshot;
     expect(afterRepair.workflows[0]?.activity).toBe(beforeRepair.workflows[0]?.activity);
-  }, 30_000);
+  });
 
   it("keeps the absolute replacement delay when a fresh Daemon owner restores the Run", async () => {
     const paths = hostPaths();
@@ -333,7 +333,7 @@ describe("real Project Runner recovery", () => {
       await Bun.sleep(20);
     }
     expect(run).toMatchObject({ runId: admitted.runId, state: "succeeded" });
-  }, 30_000);
+  });
 
   it("replaces a stalled Runner after health control stops receiving replies", async () => {
     const paths = hostPaths();
@@ -413,5 +413,5 @@ describe("real Project Runner recovery", () => {
     expect(existsSync(completed)).toBe(true);
     const stalledPid = Number(readFileSync(stalledProcess, "utf8"));
     expect(() => process.kill(stalledPid, 0)).toThrow();
-  }, 30_000);
+  });
 });

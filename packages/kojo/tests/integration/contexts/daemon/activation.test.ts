@@ -313,5 +313,5 @@ describe("recoverable managed upgrade activation", () => {
         await Effect.runPromise(candidateDaemon.stop).catch(() => {});
       removeTree(root);
     }
-  }, 30_000);
+  });
 });

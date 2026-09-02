@@ -602,7 +602,7 @@ describe("Daemon no-Trigger Run API", () => {
       "tickets",
     ]);
     expect(new Set(resumedPids.map(({ pid }) => pid)).size).toBe(1);
-  }, 30_000);
+  });
 
   it("executes one retained effect in a fresh offline Runner without the current Factory or packages", async () => {
     const hostPaths = paths();
@@ -682,7 +682,7 @@ describe("Daemon no-Trigger Run API", () => {
     expect(readFileSync(effectJournal, "utf8")).toBe("source-a:package-a\n");
     const restored = await waitForRun(restarted, admission.run.runId);
     expect(restored.state).toBe("succeeded");
-  }, 30_000);
+  });
 
   it("admits an exact retained revision and seals its stopped Runner cache for removal", async () => {
     const hostPaths = paths();
@@ -874,7 +874,7 @@ describe("Daemon no-Trigger Run API", () => {
         relativePath.startsWith("runner-materialized"),
       ),
     ).toBe(false);
-  }, 30_000);
+  });
 
   effectIt.live("settles an active dispatch before Daemon storage closes", () =>
     Effect.tryPromise({
@@ -1069,5 +1069,5 @@ describe("Daemon no-Trigger Run API", () => {
         }),
       ],
     });
-  }, 30_000);
+  });
 });
