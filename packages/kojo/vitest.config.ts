@@ -40,6 +40,14 @@ export default defineConfig({
           testTimeout: 60_000,
         },
       },
+      {
+        test: {
+          name: "release-macos",
+          include: ["tests/release/**/*.test.ts"],
+          fileParallelism: false,
+          testTimeout: 300_000,
+        },
+      },
     ],
   },
 });

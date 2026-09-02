@@ -48,6 +48,24 @@ tasks:
       - vitest.config.ts
     options:
       cache: false
+  test-release-macos:
+    command: bun node_modules/.bin/vitest run --project release-macos --reporter=verbose
+    deps:
+      - console:build
+    inputs:
+      - /README.md
+      - /packages/kojo-client-contracts/**/*
+      - /packages/kojo-runner-contracts/**/*
+      - /packages/kojo-runtime/**/*
+      - console/**/*
+      - managed-release.json
+      - package.json
+      - src/**/*
+      - tests/release/**/*
+      - tests/support/release/**/*
+      - vitest.config.ts
+    options:
+      cache: false
   # Sandcastle's build asserts Effect never leaks out of its published types. This asserts the
   # inverse for Kojo: no bare promise reaches ours, so the boundary in
   # contexts/sandbox/adapters/boundary.ts cannot quietly spread.

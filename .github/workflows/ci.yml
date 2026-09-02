@@ -196,3 +196,47 @@ jobs:
           name: shipped-systemd-release-evidence
           path: shipped-systemd-evidence
           if-no-files-found: error
+
+  shipped-macos-release:
+    name: Shipped macOS release evidence
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup toolchain
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        with:
+          auto-install: true
+
+      - name: Install repository dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install Chromium
+        run: bun x playwright install chromium
+
+      - name: Verify the shipped macOS installation
+        env:
+          KOJO_SHIPPED_MACOS_EVIDENCE: "1"
+        run: |
+          revision=$(git rev-parse HEAD)
+          evidence_dir="${RUNNER_TEMP}/artifacts/verification/daemon/${revision}/RELEASE-01"
+          export KOJO_RELEASE_EVIDENCE_DIR="${evidence_dir}"
+          set +e
+          moon run kojo:test-release-macos 2>&1 | tee "${RUNNER_TEMP}/kojo-shipped-macos-vitest.log"
+          status=${PIPESTATUS[0]}
+          mkdir -p "${evidence_dir}"
+          cp "${RUNNER_TEMP}/kojo-shipped-macos-vitest.log" "${evidence_dir}/vitest.log"
+          exit "$status"
+
+      - name: Upload shipped macOS evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: shipped-macos-release-evidence
+          path: ${{ runner.temp }}/artifacts/verification/daemon
+          if-no-files-found: error

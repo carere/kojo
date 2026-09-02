@@ -57,6 +57,7 @@
       },
       "devDependencies": {
         "@effect/vitest": "4.0.0-beta.106",
+        "@playwright/test": "1.62.1",
         "@types/bun": "^1.3.14",
         "vitest": "^4.1.0",
       },
