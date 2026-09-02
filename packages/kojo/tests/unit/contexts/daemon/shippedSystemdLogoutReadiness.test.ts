@@ -1,4 +1,12 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -110,6 +118,9 @@ const fixture = (
       "#!/usr/bin/env bash",
       "set -Eeuo pipefail",
       `printf '%s\\n' "$*" >>"$KOJO_TEST_TIMEOUT_CALLS"`,
+      "command=$4",
+      'if [[ $command == "$KOJO_EVIDENCE_SYSTEMCTL_COMMAND" && $KOJO_TEST_MANAGER_TIMEOUT == yes ]]; then exit 124; fi',
+      'if [[ $command == "$KOJO_EVIDENCE_LOGINCTL_COMMAND" && $KOJO_TEST_LOGIN_TIMEOUT == yes ]]; then exit 124; fi',
       "shift 2",
       "shift",
       `exec "$@"`,
@@ -141,6 +152,75 @@ const fixture = (
     completeAfter,
     keepCgroupPopulated: options.keepCgroupPopulated === true,
     loginProbeFailure: options.loginProbeFailure === true,
+    managerProbeTimeout: false,
+    loginProbeTimeout: false,
+  };
+};
+
+type PredicateOptions = {
+  readonly activeState?: string;
+  readonly subState?: string;
+  readonly job?: string;
+  readonly cgroup?: "absent" | "empty" | "populated";
+  readonly endpointPresent?: boolean;
+  readonly busPresent?: boolean;
+  readonly login?: "absent" | "present" | "error" | "timeout";
+  readonly manager?: "ready" | "error" | "timeout";
+};
+
+const predicateFixture = (options: PredicateOptions = {}) => {
+  const subject = fixture(1);
+  const activeState = options.activeState ?? "inactive";
+  const subState = options.subState ?? "dead";
+  const job = options.job ?? "";
+  const cgroup = options.cgroup ?? "empty";
+  const login = options.login ?? "absent";
+  const manager = options.manager ?? "ready";
+  writeFileSync(
+    subject.systemctl,
+    [
+      "#!/usr/bin/env bash",
+      "set -Eeuo pipefail",
+      `printf '%s\\n' "$*" >>"$KOJO_TEST_SYSTEMCTL_CALLS"`,
+      ...(manager === "error"
+        ? ["echo 'Failed to connect to bus: Connection refused' >&2", "exit 1"]
+        : [
+            `echo 'ActiveState=${activeState}'`,
+            `echo 'SubState=${subState}'`,
+            `echo 'Job=${job}'`,
+            "echo 'ControlGroup=/user.slice/user-1234.slice/user@1234.service'",
+          ]),
+      "",
+    ].join("\n"),
+  );
+  writeFileSync(
+    subject.loginctl,
+    [
+      "#!/usr/bin/env bash",
+      "set -Eeuo pipefail",
+      `printf '%s\\n' "$*" >>"$KOJO_TEST_LOGINCTL_CALLS"`,
+      ...(login === "present"
+        ? ["echo 'Sessions=99'", "echo 'Linger=no'", "echo 'State=active'"]
+        : login === "error"
+          ? ["echo 'Failed to connect to bus: Connection refused' >&2", "exit 1"]
+          : [
+              "echo 'Failed to get user: User ID 1234 is not logged in or lingering' >&2",
+              "exit 1",
+            ]),
+      "",
+    ].join("\n"),
+  );
+  if (cgroup === "absent") {
+    rmSync(subject.cgroupRoot, { recursive: true });
+  } else {
+    writeFileSync(subject.cgroupEvents, `populated ${cgroup === "populated" ? "1" : "0"}\n`);
+  }
+  if (options.endpointPresent === true) writeFileSync(subject.endpoint, "present");
+  if (options.busPresent !== true) rmSync(subject.bus);
+  return {
+    ...subject,
+    managerProbeTimeout: manager === "timeout",
+    loginProbeTimeout: login === "timeout",
   };
 };
 
@@ -177,6 +257,8 @@ const runHelper = async (subject: ReturnType<typeof fixture>, attemptLimit: numb
         KOJO_TEST_CGROUP_EVENTS: subject.cgroupEvents,
         KOJO_TEST_CLEAR_CGROUP: subject.keepCgroupPopulated ? "no" : "yes",
         KOJO_TEST_LOGIN_PROBE_FAILURE: subject.loginProbeFailure ? "yes" : "no",
+        KOJO_TEST_MANAGER_TIMEOUT: subject.managerProbeTimeout ? "yes" : "no",
+        KOJO_TEST_LOGIN_TIMEOUT: subject.loginProbeTimeout ? "yes" : "no",
       },
       stdin: "ignore",
       stdout: "pipe",
@@ -200,6 +282,7 @@ describe("shipped systemd final-logout readiness evidence", () => {
       Array.from({ length: 3 }, () => ({
         classification: "logout-complete",
         managerStatus: 0,
+        managerClassification: "properties-returned",
         managerActiveState: "inactive",
         managerSubState: "dead",
         managerJobPresent: false,
@@ -293,49 +376,164 @@ describe("shipped systemd final-logout readiness evidence", () => {
     expect(readFileSync(subject.sleepCalls, "utf8").trim()).toBe("0.1s");
   });
 
-  it("does not accept inactive and dead while the user-manager cgroup is populated", async () => {
-    const subject = fixture(2, { keepCgroupPopulated: true });
+  it.each([
+    {
+      name: "deactivating manager",
+      options: { activeState: "deactivating" },
+      changed: { managerActiveState: "deactivating" },
+    },
+    {
+      name: "non-dead manager substate",
+      options: { subState: "stop-sigterm" },
+      changed: { managerSubState: "stop-sigterm" },
+    },
+    {
+      name: "pending manager Job",
+      options: { job: "/org/freedesktop/systemd1/job/42" },
+      changed: { managerJob: "/org/freedesktop/systemd1/job/42", managerJobPresent: true },
+    },
+    {
+      name: "populated user-manager cgroup",
+      options: { cgroup: "populated" as const },
+      changed: { managerCgroupPopulated: true, managerCgroupState: "populated" },
+    },
+    {
+      name: "present Daemon endpoint",
+      options: { endpointPresent: true },
+      changed: { endpointPresent: true },
+    },
+    {
+      name: "present user bus",
+      options: { busPresent: true },
+      changed: { busPresent: true },
+    },
+    {
+      name: "present login user",
+      options: { login: "present" as const },
+      changed: {
+        loginStatus: 0,
+        loginClassification: "user-present",
+        loginUserPresent: true,
+        loginSessions: "99",
+        loginLinger: "no",
+        loginState: "active",
+      },
+    },
+  ])("rejects a $name as the only incomplete logout signal", async ({ options, changed }) => {
+    const subject = predicateFixture(options);
 
-    expect(await runHelper(subject, 2)).toBe(1);
+    expect(await runHelper(subject, 1)).toBe(1);
 
-    expect(JSON.parse(readFileSync(subject.final, "utf8"))).toMatchObject({
-      observationCount: 2,
+    const final = JSON.parse(readFileSync(subject.final, "utf8"));
+    expect(final).toMatchObject({
+      attemptLimit: 1,
+      observationCount: 1,
+      interval: "0.1s",
+      probeTimeout: "1s",
       actual: {
         classification: "logout-not-complete-within-bound",
+        managerStatus: 0,
+        managerClassification: "properties-returned",
+        managerActiveState: "inactive",
+        managerSubState: "dead",
+        managerJob: "",
+        managerJobPresent: false,
+        managerControlGroup: "/user.slice/user-1234.slice/user@1234.service",
+        managerCgroupPopulated: false,
+        managerCgroupState: "empty",
+        loginStatus: 1,
+        loginClassification: "user-absent",
+        loginUserPresent: false,
+        loginSessions: "",
+        loginLinger: "",
+        loginState: "",
+        endpointPresent: false,
+        busPresent: false,
+        ...changed,
+      },
+      accepted: false,
+    });
+    expect(readFileSync(subject.systemctlCalls, "utf8").trim()).toBe(
+      "show user@1234.service --property=ActiveState,SubState,Job,ControlGroup",
+    );
+    expect(readFileSync(subject.loginctlCalls, "utf8").trim()).toBe(
+      "show-user kojo-shipped-evidence --property=Sessions,Linger,State",
+    );
+    expect(existsSync(subject.sleepCalls)).toBe(false);
+  });
+
+  it.each([
+    {
+      name: "manager probe error",
+      options: { manager: "error" as const },
+      changed: { managerStatus: 1, managerClassification: "probe-failed" },
+    },
+    {
+      name: "manager probe timeout",
+      options: { manager: "timeout" as const },
+      changed: { managerStatus: 124, managerClassification: "probe-timed-out" },
+    },
+    {
+      name: "login probe error",
+      options: { login: "error" as const },
+      changed: {
+        loginStatus: 1,
+        loginClassification: "probe-failed",
+        loginUserPresent: null,
+      },
+    },
+    {
+      name: "login probe timeout",
+      options: { login: "timeout" as const },
+      changed: {
+        loginStatus: 124,
+        loginClassification: "probe-timed-out",
+        loginUserPresent: null,
+      },
+    },
+  ])("fails closed on a $name", async ({ options, changed }) => {
+    const subject = predicateFixture(options);
+
+    expect(await runHelper(subject, 1)).toBe(1);
+
+    expect(JSON.parse(readFileSync(subject.final, "utf8"))).toMatchObject({
+      attemptLimit: 1,
+      observationCount: 1,
+      actual: {
+        classification: "logout-not-complete-within-bound",
+        ...changed,
+      },
+      accepted: false,
+    });
+    expect(existsSync(subject.sleepCalls)).toBe(false);
+    const timeoutCalls = readFileSync(subject.timeoutCalls, "utf8").trim().split("\n");
+    expect(timeoutCalls).toHaveLength(2);
+    expect(timeoutCalls.every((call) => call.startsWith("--signal=TERM --kill-after=1s 1s "))).toBe(
+      true,
+    );
+  });
+
+  it("accepts a fully removed user-manager cgroup", async () => {
+    const subject = predicateFixture({ cgroup: "absent" });
+
+    expect(await runHelper(subject, 1)).toBe(0);
+
+    expect(JSON.parse(readFileSync(subject.final, "utf8"))).toMatchObject({
+      attemptLimit: 1,
+      observationCount: 1,
+      actual: {
+        classification: "logout-complete-within-bound",
         managerActiveState: "inactive",
         managerSubState: "dead",
         managerJobPresent: false,
-        managerCgroupPopulated: true,
+        managerCgroupPopulated: false,
+        managerCgroupState: "absent",
+        loginClassification: "user-absent",
         loginUserPresent: false,
         endpointPresent: false,
         busPresent: false,
       },
-      accepted: false,
+      accepted: true,
     });
-  });
-
-  it("fails closed when loginctl fails for a reason other than an absent login user", async () => {
-    const subject = fixture(2, { loginProbeFailure: true });
-
-    expect(await runHelper(subject, 2)).toBe(1);
-
-    expect(JSON.parse(readFileSync(subject.final, "utf8"))).toMatchObject({
-      observationCount: 2,
-      actual: {
-        classification: "logout-not-complete-within-bound",
-        managerActiveState: "inactive",
-        managerSubState: "dead",
-        managerCgroupPopulated: false,
-        loginStatus: 1,
-        loginClassification: "probe-failed",
-        loginUserPresent: null,
-        endpointPresent: false,
-        busPresent: false,
-      },
-      accepted: false,
-    });
-    expect(readFileSync(subject.stderr, "utf8")).toContain(
-      "LoginProbeStderr=Failed to connect to bus: Connection refused",
-    );
   });
 });

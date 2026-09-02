@@ -27,12 +27,14 @@ fi
 logout_complete=false
 observation_count=0
 manager_status=1
+manager_classification=probe-not-run
 manager_active_state=unknown
 manager_sub_state=unknown
 manager_job=unknown
 manager_job_present=true
 manager_control_group=
 manager_cgroup_populated_json=null
+manager_cgroup_state=unknown
 login_status=1
 login_classification=probe-not-run
 login_user_present_json=null
@@ -63,6 +65,12 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
   rm -f "$manager_error_file" "$login_error_file"
   if [[ -n $manager_error ]]; then printf 'ManagerProbeStderr=%s\n' "$manager_error" >>"$stderr_log"; fi
   if [[ -n $login_error ]]; then printf 'LoginProbeStderr=%s\n' "$login_error" >>"$stderr_log"; fi
+
+  manager_classification=probe-failed
+  if [[ $manager_status -eq 0 ]]; then manager_classification=properties-returned; fi
+  if [[ $manager_status -eq 124 || $manager_status -eq 137 ]]; then
+    manager_classification=probe-timed-out
+  fi
 
   manager_active_state=unknown
   manager_sub_state=unknown
@@ -103,15 +111,25 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
   fi
 
   manager_cgroup_populated_json=null
+  manager_cgroup_state=unknown
   manager_cgroup_path=$cgroup_root$manager_control_group
   cgroup_events=$manager_cgroup_path/cgroup.events
   if [[ -z $manager_control_group || ! -e $manager_cgroup_path ]]; then
     manager_cgroup_populated_json=false
+    manager_cgroup_state=absent
   elif [[ -r $cgroup_events ]]; then
     while read -r property value; do
-      if [[ $property == populated && $value == 0 ]]; then manager_cgroup_populated_json=false; fi
-      if [[ $property == populated && $value == 1 ]]; then manager_cgroup_populated_json=true; fi
+      if [[ $property == populated && $value == 0 ]]; then
+        manager_cgroup_populated_json=false
+        manager_cgroup_state=empty
+      fi
+      if [[ $property == populated && $value == 1 ]]; then
+        manager_cgroup_populated_json=true
+        manager_cgroup_state=populated
+      fi
     done <"$cgroup_events"
+  else
+    manager_cgroup_state=unreadable
   fi
   endpoint_present=false
   if [[ -e $endpoint ]]; then endpoint_present=true; fi
@@ -131,12 +149,14 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
     --argjson observation "$observation" \
     --arg actualClassification "$actual_classification" \
     --argjson managerStatus "$manager_status" \
+    --arg managerClassification "$manager_classification" \
     --arg managerActiveState "$manager_active_state" \
     --arg managerSubState "$manager_sub_state" \
     --arg managerJob "$manager_job" \
     --argjson managerJobPresent "$manager_job_present" \
     --arg managerControlGroup "$manager_control_group" \
     --argjson managerCgroupPopulated "$manager_cgroup_populated_json" \
+    --arg managerCgroupState "$manager_cgroup_state" \
     --argjson loginStatus "$login_status" \
     --arg loginClassification "$login_classification" \
     --argjson loginUserPresent "$login_user_present_json" \
@@ -150,6 +170,7 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
       expected: {
         classification: "logout-complete",
         managerStatus: 0,
+        managerClassification: "properties-returned",
         managerActiveState: "inactive",
         managerSubState: "dead",
         managerJobPresent: false,
@@ -162,12 +183,14 @@ for ((observation = 1; observation <= attempt_limit; observation++)); do
       actual: {
         classification: $actualClassification,
         managerStatus: $managerStatus,
+        managerClassification: $managerClassification,
         managerActiveState: $managerActiveState,
         managerSubState: $managerSubState,
         managerJob: $managerJob,
         managerJobPresent: $managerJobPresent,
         managerControlGroup: $managerControlGroup,
         managerCgroupPopulated: $managerCgroupPopulated,
+        managerCgroupState: $managerCgroupState,
         loginStatus: $loginStatus,
         loginClassification: $loginClassification,
         loginUserPresent: $loginUserPresent,
@@ -191,12 +214,14 @@ jq -n \
   --argjson observationCount "$observation_count" \
   --arg actualClassification "$final_actual_classification" \
   --argjson managerStatus "$manager_status" \
+  --arg managerClassification "$manager_classification" \
   --arg managerActiveState "$manager_active_state" \
   --arg managerSubState "$manager_sub_state" \
   --arg managerJob "$manager_job" \
   --argjson managerJobPresent "$manager_job_present" \
   --arg managerControlGroup "$manager_control_group" \
   --argjson managerCgroupPopulated "$manager_cgroup_populated_json" \
+  --arg managerCgroupState "$manager_cgroup_state" \
   --argjson loginStatus "$login_status" \
   --arg loginClassification "$login_classification" \
   --argjson loginUserPresent "$login_user_present_json" \
@@ -227,12 +252,14 @@ jq -n \
     actual: {
       classification: $actualClassification,
       managerStatus: $managerStatus,
+      managerClassification: $managerClassification,
       managerActiveState: $managerActiveState,
       managerSubState: $managerSubState,
       managerJob: $managerJob,
       managerJobPresent: $managerJobPresent,
       managerControlGroup: $managerControlGroup,
       managerCgroupPopulated: $managerCgroupPopulated,
+      managerCgroupState: $managerCgroupState,
       loginStatus: $loginStatus,
       loginClassification: $loginClassification,
       loginUserPresent: $loginUserPresent,

@@ -450,3 +450,34 @@ PATH=/usr/bin:/bin "$managed_kojo" run status "$run_id" --details --json \
   >"$evidence_directory/run-after-replacement.json"
 jq -e '.run.state == "succeeded" and (.run.artifacts | length >= 1)' \
   "$evidence_directory/run-after-replacement.json" >/dev/null
+
+set +e
+pre_logout_linger=$(LC_ALL=C /usr/bin/timeout --signal=TERM --kill-after=1s 1s \
+  /usr/bin/loginctl show-user "$(id -u)" --property=Linger --value \
+  2>"$evidence_directory/pre-logout-linger.stderr.log")
+pre_logout_linger_status=$?
+set -e
+pre_logout_linger_accepted=false
+if [[ $pre_logout_linger_status -eq 0 && $pre_logout_linger == no ]]; then
+  pre_logout_linger_accepted=true
+fi
+jq -n \
+  --argjson statusCommandExit "$pre_logout_linger_status" \
+  --arg linger "$pre_logout_linger" \
+  --argjson accepted "$pre_logout_linger_accepted" \
+  '{
+    formatVersion: 1,
+    kind: "bounded-systemd-pre-logout-linger",
+    probeTimeout: "1s",
+    expected: {
+      statusCommandExit: 0,
+      linger: "no"
+    },
+    actual: {
+      statusCommandExit: $statusCommandExit,
+      linger: $linger
+    },
+    readOnly: true,
+    accepted: $accepted
+  }' >"$evidence_directory/pre-logout-linger.json"
+[[ $pre_logout_linger_accepted == true ]]
