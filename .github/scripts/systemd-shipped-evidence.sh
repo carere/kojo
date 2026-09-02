@@ -11,6 +11,7 @@ key=/tmp/kojo-shipped-evidence-key
 policy=/etc/polkit-1/rules.d/49-kojo-shipped-evidence.rules
 user_script=.github/scripts/systemd-shipped-user-evidence.sh
 login_readiness_script=.github/scripts/systemd-shipped-login-readiness.sh
+logout_readiness_script=.github/scripts/systemd-shipped-logout-readiness.sh
 playwright_cli=$workspace/apps/console/node_modules/@playwright/test/cli.js
 diagnostic=$evidence_directory/controller-diagnostic.log
 diagnostic_step=preflight
@@ -116,20 +117,40 @@ ssh "${ssh_arguments[@]}" \
 
 [[ $(loginctl show-user "$evidence_user" --property=Linger --value) == no ]]
 diagnostic_step=no-linger-lifetime
-for _ in $(seq 1 120); do
-  if ! systemctl is-active --quiet "user@$evidence_uid.service" && [[ ! -e $endpoint ]]; then
-    no_linger_stopped=yes
-    break
-  fi
-  sleep 1
-done
-[[ ${no_linger_stopped:-no} == yes ]]
+bash "$logout_readiness_script" \
+  "$evidence_directory/logout-readiness-observations.jsonl" \
+  "$evidence_directory/logout-readiness-final.json" \
+  "$evidence_directory/logout-readiness.stderr.log" \
+  "$evidence_user" \
+  "$evidence_uid" \
+  "$endpoint" \
+  "$runtime_directory/bus" \
+  120 \
+  1s
+jq -e '
+  .accepted == true and
+  .actual.managerActiveState == "inactive" and
+  .actual.managerSubState == "dead" and
+  .actual.managerJobPresent == false and
+  .actual.managerCgroupPopulated == false and
+  .actual.loginUserPresent == false and
+  .actual.endpointPresent == false and
+  .actual.busPresent == false and
+  .noServiceStartRepairOrLingerChange == true
+' "$evidence_directory/logout-readiness-final.json" >/dev/null
 {
   echo "Linger=no"
   echo "UserManager=stopped"
   echo "Daemon=stopped"
   echo "Endpoint=removed"
   echo "ServiceCgroup=empty"
+  jq -r '
+    "UserManagerState=\(.actual.managerActiveState)/\(.actual.managerSubState)",
+    "UserManagerJob=\(.actual.managerJob)",
+    "UserManagerControlGroup=\(.actual.managerControlGroup)",
+    "LoginUserPresent=\(.actual.loginUserPresent)",
+    "BusPresent=\(.actual.busPresent)"
+  ' "$evidence_directory/logout-readiness-final.json"
 } >"$evidence_directory/final-logout-without-linger.log"
 
 managed_kojo=$evidence_home/.local/share/kojo/bin/kojo
@@ -272,7 +293,7 @@ jq -n \
       { name: "authenticated-browser", expected: "one authenticated browser inspects the actual encoded wire and renders persisted records and Artifact", actual: "passed", evidence: "browser-tests.log" },
       { name: "global-tool-independence", expected: "managed status and repair work after candidate global Kojo and Bun removal", actual: "passed", evidence: "global-removal.log; managed-status-after-global-removal.log; managed-repair-after-global-removal.log" },
       { name: "replacement-and-access", expected: "the Type=exec control group contains the replacement MainPID; old process and browser authority are revoked; another OS user is refused", actual: "passed", evidence: "cgroup-before-replacement.log; replacement-access.log; final-logout-with-linger.log" },
-      { name: "login-lifetime", expected: "final logout stops the Daemon without linger and preserves it only after explicit authorized linger", actual: "passed", evidence: "final-logout-without-linger.log; login-readiness-observations.jsonl; login-readiness-final.json; login-readiness.stderr.log; keep-running-refusal.log; keep-running-after-logout.log; final-logout-with-linger.log" },
+      { name: "login-lifetime", expected: "final logout stops the Daemon without linger and preserves it only after explicit authorized linger", actual: "passed", evidence: "logout-readiness-observations.jsonl; logout-readiness-final.json; logout-readiness.stderr.log; final-logout-without-linger.log; login-readiness-observations.jsonl; login-readiness-final.json; login-readiness.stderr.log; keep-running-refusal.log; keep-running-after-logout.log; final-logout-with-linger.log" },
       { name: "removal-preserves-linger", expected: "shipped removal never disables user linger", actual: "passed", evidence: "managed-removal.log; removal-preserves-linger.log" }
     ],
     noHiddenRepairs: {
