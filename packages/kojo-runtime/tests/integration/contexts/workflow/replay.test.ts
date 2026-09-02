@@ -153,7 +153,41 @@ const execute = async (
       },
     }),
   );
-  const executed = await readFrame();
+  let executed = await readFrame();
+  while (executed.kind !== "Ready") {
+    expect(executed).toMatchObject({
+      runId: request.runId,
+      revisionId: request.revisionId,
+      claimGeneration: 1,
+    });
+    const mutation = executed.body as unknown as Record<string, unknown>;
+    const result =
+      executed.kind === "WriteTrace"
+        ? { state: "committed" }
+        : executed.kind === "BeginAction"
+          ? { kind: "perform", actionId: String(mutation.actionId) }
+          : executed.kind === "CommitActionResult"
+            ? { state: "result-confirmed", actionId: String(mutation.actionId) }
+            : undefined;
+    if (result === undefined)
+      throw new Error(`Unexpected Runner execution mutation: ${executed.kind}`);
+    await Effect.runPromise(
+      writeRunnerFrame(socket, {
+        version: 1,
+        kind: "Ready",
+        requestId: crypto.randomUUID(),
+        daemonInstanceId: request.daemonInstanceId,
+        runnerInstanceId: request.runnerInstanceId,
+        body: {
+          replyVersion: 1,
+          operationRequestId: executed.requestId,
+          state: "committed",
+          result,
+        },
+      }),
+    );
+    executed = await readFrame();
+  }
   const executedBody = executed.body as unknown as OperationReplyBody;
   expect(executed).toMatchObject({
     kind: "Ready",

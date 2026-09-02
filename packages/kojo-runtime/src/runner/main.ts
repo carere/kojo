@@ -108,6 +108,8 @@ export type SendActionMutation = (
   body: JsonValue,
 ) => Promise<JsonValue>;
 
+export type SendTraceMutation = (body: JsonValue) => Promise<JsonValue>;
+
 class ActionMutationError extends Data.TaggedError("ActionMutationError")<{
   readonly message: string;
   readonly cause: unknown;
@@ -133,6 +135,8 @@ interface LoadedBundle {
 
 const hasProperties = (value: unknown): value is Record<string, unknown> =>
   value !== null && (typeof value === "object" || typeof value === "function");
+
+const plainJson = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue;
 
 const inside = (root: string, path: string): boolean => {
   const child = relative(root, path);
@@ -212,6 +216,7 @@ export const executeRegisteredRevision = async (
   sendResourceMutation: SendResourceMutation,
   sendArtifactMutation: SendArtifactMutation,
   sendActionMutation: SendActionMutation,
+  sendTraceMutation: SendTraceMutation,
 ): Promise<ExecuteRegisteredResult> => {
   const { bundle, payload } = await loadRegisteredRevision(request);
   const results = new Map(Object.entries(request.recordedResults));
@@ -318,11 +323,24 @@ export const executeRegisteredRevision = async (
     all: Effect.succeed([]),
   });
   const tracerLayer = Layer.succeed(Tracer, {
-    runStarted: () => Effect.void,
-    runFinished: () => Effect.void,
-    phaseEntered: () => Effect.void,
+    runStarted: (record) =>
+      Effect.promise(() =>
+        sendTraceMutation({ kind: "run-started", record: plainJson(record) }),
+      ).pipe(Effect.asVoid),
+    runFinished: (runId, outcome) =>
+      Effect.promise(() =>
+        sendTraceMutation({
+          kind: "run-finished",
+          runId,
+          outcome,
+        }),
+      ).pipe(Effect.asVoid),
+    phaseEntered: (runId, phase) =>
+      Effect.promise(() =>
+        sendTraceMutation({ kind: "phase-entered", runId, phase: plainJson(phase) }),
+      ).pipe(Effect.asVoid),
     phase: (phase) =>
-      Effect.sync(() => {
+      Effect.promise(async () => {
         completedPhases.set(keyOf(request.runId, request.revisionId, phase.name, phase.attempt), {
           phasePath: phase.name,
           attempt: phase.attempt,
@@ -332,10 +350,24 @@ export const executeRegisteredRevision = async (
           startedAt: new Date(phase.startedAt).toISOString(),
           endedAt: new Date(phase.endedAt).toISOString(),
         });
+        await sendTraceMutation({ kind: "phase", record: plainJson(phase) });
       }),
-    gate: () => Effect.void,
-    sandbox: () => Effect.void,
-    occurrence: () => Effect.void,
+    gate: (record) =>
+      Effect.promise(() => sendTraceMutation({ kind: "gate", record: plainJson(record) })).pipe(
+        Effect.asVoid,
+      ),
+    sandbox: (record) =>
+      Effect.promise(() => sendTraceMutation({ kind: "sandbox", record: plainJson(record) })).pipe(
+        Effect.asVoid,
+      ),
+    occurrence: (record) =>
+      Effect.promise(() =>
+        sendTraceMutation({
+          kind: "occurrence",
+          occurrenceId: crypto.randomUUID(),
+          record: plainJson(record),
+        }),
+      ).pipe(Effect.asVoid),
   });
   const sandboxSource = SandcastleSandboxSource.layer.pipe(Layer.provide(BunServices.layer));
   const hostWorkspace = BindMountWorkspace.layer({ root: process.cwd() }).pipe(
@@ -713,6 +745,7 @@ const runPrivateProtocol = async (): Promise<void> => {
         | "ReportRecovery"
         | "BeginAction"
         | "CommitActionResult"
+        | "WriteTrace"
         | "BeginArtifact"
         | "WriteArtifactChunk"
         | "FinishArtifact",
@@ -871,6 +904,16 @@ const runPrivateProtocol = async (): Promise<void> => {
               (kind, body) =>
                 sendExecutionMutation(
                   kind,
+                  {
+                    runId: operation.runId,
+                    revisionId: operation.revisionId,
+                    claimGeneration: operation.claimGeneration,
+                  },
+                  body,
+                ),
+              (body) =>
+                sendExecutionMutation(
+                  "WriteTrace",
                   {
                     runId: operation.runId,
                     revisionId: operation.revisionId,

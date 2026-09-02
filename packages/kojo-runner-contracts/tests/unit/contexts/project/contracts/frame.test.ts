@@ -122,6 +122,61 @@ describe("Runner contract golden fixtures", () => {
       }).ok,
     ).toBe(false);
   });
+
+  it("decodes a closed Trace mutation and refuses wire drift", () => {
+    const trace = {
+      ...execution,
+      kind: "WriteTrace",
+      body: {
+        kind: "phase",
+        record: {
+          runId: "run_1",
+          phaseId: "run_1/build/1",
+          name: "build",
+          description: "Build the release",
+          kind: "code",
+          outcome: "succeeded",
+          attempt: 1,
+          startedAt: 1,
+          endedAt: 2,
+        },
+      },
+    } as const;
+    expect(decodeRunnerFrame(trace).ok).toBe(true);
+    expect(
+      decodeRunnerFrame({
+        ...trace,
+        body: { ...trace.body, record: { ...trace.body.record, sandboxId: null } },
+      }).ok,
+    ).toBe(false);
+    expect(
+      decodeRunnerFrame({
+        ...trace,
+        body: { ...trace.body, record: { ...trace.body.record, renamedPhase: true } },
+      }).ok,
+    ).toBe(false);
+    expect(
+      decodeRunnerFrame({
+        ...trace,
+        body: {
+          kind: "gate",
+          record: {
+            runId: "run_1",
+            gate: "approve",
+            asking: "approve/1",
+            token: "token_1",
+            description: "Approve",
+            actor: "reviewer",
+            choices: ["approve", "reject"],
+            requestedAt: 1,
+            deadlineAt: 2,
+            onExpiry: "reject",
+            outcome: "answered",
+          },
+        },
+      }).ok,
+    ).toBe(false);
+  });
 });
 
 describe("Runner byte framing", () => {

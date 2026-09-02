@@ -156,6 +156,9 @@ describe("durable Workflow activity", () => {
         { kind: "continuation", count: 1 },
         { kind: "new", count: 100 },
       ]);
+      const resumed = yield* runs.claimNext("runner-resumed", new Date(204).toISOString());
+      expect(resumed?.run.runId).toBe(first.run.runId);
+      expect(resumed?.authority.generation).toBe(authority.generation + 1);
       database.close(false);
     }),
   );

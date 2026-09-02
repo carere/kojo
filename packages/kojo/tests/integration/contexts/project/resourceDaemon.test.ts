@@ -514,6 +514,24 @@ console.log(JSON.stringify({ answer: "controlled" }));
           runId: admitted.runId,
           state: "succeeded",
         });
+        const acquisitions = crashMode === "gate" ? 2 : 1;
+        expect(run?.sandboxes).toHaveLength(acquisitions);
+        expect(run?.sandboxes?.map((sandbox) => sandbox.outcome).sort()).toEqual(
+          crashMode === "gate" ? ["interrupted", "released"] : ["released"],
+        );
+        expect(
+          run?.sandboxes?.every((sandbox) => sandbox.environment.KOJO_RUN_ID === admitted.runId),
+        ).toBe(true);
+        expect(run?.gates).toHaveLength(crashMode === "gate" ? 1 : 0);
+        if (crashMode === "gate") {
+          expect(run?.gates?.[0]).toMatchObject({
+            gate: "continue",
+            actor: "fixture-reviewer",
+            outcome: "answered",
+            choice: "continue",
+            reason: "prove the next physical acquisition",
+          });
+        }
         expect(dropped).toBe(lostKind !== undefined);
       } finally {
         process.env.PATH = priorPath;

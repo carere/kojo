@@ -71,6 +71,81 @@ test("shows a Daemon Run and builds its initial Waterfall only from completed Ph
   await expect(page.getByText("not-yet-recorded", { exact: true })).toHaveCount(0);
 });
 
+test("renders persisted Gate and Sandbox Trace records and accepts their absent optional fields", async ({
+  page,
+}) => {
+  const runId = "run-persisted-trace";
+  const sandboxId = `${runId}/release/1000-1`;
+  await page.route(`**/api/v1/runs/${runId}`, async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        runId,
+        projectId: "project-browser-fixture",
+        workflowName: "release",
+        revisionId: "a".repeat(64),
+        packageGraphId: "b".repeat(64),
+        state: "succeeded",
+        admittedAt: "2026-09-01T00:00:00.000Z",
+        startedAt: "2026-09-01T00:00:00.500Z",
+        finishedAt: "2026-09-01T00:00:04.000Z",
+        phases: [
+          {
+            phasePath: "publish",
+            attempt: 1,
+            kind: "code",
+            outcome: "succeeded",
+            description: "Publish the release evidence",
+            startedAt: "2026-09-01T00:00:01.000Z",
+            endedAt: "2026-09-01T00:00:02.000Z",
+            sandboxId,
+          },
+        ],
+        gates: [
+          {
+            gate: "approve",
+            asking: "approve-1",
+            description: "Approve the release",
+            actor: "release-manager",
+            requestedAt: "2026-09-01T00:00:02.000Z",
+            deadlineAt: "2026-09-01T01:00:02.000Z",
+            onExpiry: "reject",
+            outcome: "expired",
+          },
+        ],
+        sandboxes: [
+          {
+            sandboxId,
+            name: "release",
+            provider: "no-sandbox",
+            kind: "none",
+            branch: "kojo/release",
+            worktreePath: "/tmp/release",
+            environment: { KOJO_RUN_ID: runId },
+            acquiredAt: "2026-09-01T00:00:01.000Z",
+            releasedAt: "2026-09-01T00:00:03.000Z",
+            outcome: "released",
+          },
+        ],
+      }),
+    });
+  });
+  await page.goto(launch());
+  await expect(page.getByText("Access active", { exact: true })).toBeVisible();
+
+  await page.goto(`${origin}/runs/${runId}`);
+  await expect(page.locator('[data-scope="sandbox"]')).toHaveCount(1);
+  await expect(page.locator('[data-stamp="branch"]')).toContainText("kojo/release");
+
+  await page.goto(`${origin}/runs/${runId}/gates/approve/approve-1`);
+  await expect(page.locator('[data-gate-outcome="expired"]')).toBeVisible();
+  await expect(page.locator('[data-gate-from="trace"]')).toBeVisible();
+
+  await page.goto(`${origin}/runs/${runId}/sandboxes/release/1000-1`);
+  await expect(page.getByText("no-sandbox", { exact: true })).toBeVisible();
+  await expect(page.getByText("released", { exact: true }).first()).toBeVisible();
+});
+
 test("shows the exact pinned-content fault and repair remedy for a held Run", async ({ page }) => {
   await page.route("**/api/v1/runs/run-held-content", async (route) => {
     await route.fulfill({

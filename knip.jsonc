@@ -49,8 +49,14 @@
         "src/launcher/main.ts",
         "tests/support/daemon/authenticatedConsoleServer.ts",
         "tests/support/daemon/consoleGrant.ts",
-        "tests/support/daemon/systemdLogoutFixture.ts"
+        "tests/support/daemon/systemdLogoutFixture.ts",
+        "tests/release/support/*.ts"
       ]
+    },
+    "apps/console": {
+      // The shipped release browser suite has its own native-Host configuration. CI starts both
+      // files from a shell controller, so neither is reachable from the regular browser tier.
+      "entry": ["playwright.release.config.ts", "tests/release/*.spec.ts"]
     },
     "packages/kojo-runtime": {
       // Imported only by the fresh Runner-process tests through an exact filesystem registration.
