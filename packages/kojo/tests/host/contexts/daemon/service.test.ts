@@ -10,9 +10,9 @@ import { systemdUnitDocument } from "../../../../src/contexts/daemon/services/sy
 import { writeNativeManagedRelease } from "../../../support/daemon/nativeManagedRelease.ts";
 
 // LaunchAgent bootout can retain the stopped job observation through its 30-second ExitTimeOut.
-// Ten seconds made the native evidence fail while launchd was still completing the requested
+// Thirty seconds made the native evidence fail at that exact boundary while launchd was still completing the requested
 // transition. This is an observation budget, not an extra stop or a fabricated state.
-const waitFor = async (predicate: () => boolean, timeout = 30_000): Promise<void> => {
+const waitFor = async (predicate: () => boolean, timeout = 60_000): Promise<void> => {
   const deadline = Date.now() + timeout;
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error("native service did not reach the expected state");

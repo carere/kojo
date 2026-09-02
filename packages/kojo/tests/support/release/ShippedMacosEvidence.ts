@@ -470,6 +470,121 @@ const recordManagedProcesses = async (recorder: EvidenceRecorder, name: string):
   recorder.write(`${name}.json`, observations);
 };
 
+const captureNativeFailure = (recorder: EvidenceRecorder, cause: unknown): void => {
+  recorder.write(
+    "native-failure.txt",
+    `${cause instanceof Error ? cause.message : String(cause)}\n`,
+  );
+  const captureCommand = (name: string, command: ReadonlyArray<string>): void => {
+    try {
+      const result = Bun.spawnSync([...command]);
+      recorder.write(
+        name,
+        `ExitCode=${result.exitCode}\n${result.stdout.toString()}${result.stderr.toString()}`,
+      );
+    } catch (commandCause) {
+      recorder.write(
+        name,
+        `Diagnostic command failed: ${commandCause instanceof Error ? commandCause.message : String(commandCause)}\n`,
+      );
+    }
+  };
+  captureCommand("native-failure-launchctl-print.log", ["/bin/launchctl", "print", serviceTarget]);
+  captureCommand("native-failure-launchctl-disabled.log", [
+    "/bin/launchctl",
+    "print-disabled",
+    serviceDomain,
+  ]);
+  try {
+    const processes = Bun.spawnSync(["/bin/ps", "-axo", "pid=,ppid=,pgid=,uid=,state=,command="]);
+    const managed = processes.stdout
+      .toString()
+      .split("\n")
+      .filter((line) => line.includes(defaultInstallation) || line.includes(serviceLabel))
+      .map((line) => line.replace(/^(\s*\d+\s+\d+\s+\d+\s+\d+\s+\S+)\s+.*$/, "$1 [managed Kojo]"));
+    recorder.write(
+      "native-failure-processes.log",
+      `ExitCode=${processes.exitCode}\n${managed.join("\n")}\n${processes.stderr.toString()}`,
+    );
+  } catch (processCause) {
+    recorder.write(
+      "native-failure-processes.log",
+      `Diagnostic command failed: ${processCause instanceof Error ? processCause.message : String(processCause)}\n`,
+    );
+  }
+
+  const selected = [
+    defaultInstallation,
+    defaultData,
+    defaultService,
+    defaultCache,
+    join(privateTemporaryRoot(), "Kojo"),
+    join(defaultInstallation, "active-release"),
+    join(defaultInstallation, "bin", "kojo"),
+    join(defaultInstallation, "bin", "kojo-launcher"),
+  ];
+  recorder.write(
+    "native-failure-paths.json",
+    selected.flatMap((path) => {
+      if (!existsSync(path)) return [];
+      const stat = lstatSync(path);
+      return [
+        {
+          path,
+          uid: stat.uid,
+          mode: (stat.mode & 0o777).toString(8).padStart(4, "0"),
+          kind: stat.isSymbolicLink()
+            ? "symbolic-link"
+            : stat.isDirectory()
+              ? "directory"
+              : stat.isFile()
+                ? "file"
+                : "special",
+          size: stat.size,
+        },
+      ];
+    }),
+  );
+  for (const [name, path] of [
+    ["native-failure-service.plist", defaultService],
+    ["native-failure-launcher-stdout.log", join(defaultCache, "daemon.stdout.log")],
+    ["native-failure-launcher-stderr.log", join(defaultCache, "daemon.stderr.log")],
+    [
+      "native-failure-supervision-state.json",
+      join(defaultData, "launcher-supervision", "state.json"),
+    ],
+  ] as const) {
+    try {
+      if (existsSync(path)) {
+        const stat = lstatSync(path);
+        if (stat.isFile() && !stat.isSymbolicLink())
+          recorder.write(name, readFileSync(path, "utf8"));
+      }
+    } catch (readCause) {
+      recorder.write(
+        `${name}.capture-error.txt`,
+        `${readCause instanceof Error ? readCause.message : String(readCause)}\n`,
+      );
+    }
+  }
+  try {
+    const activePath = join(defaultInstallation, "active-release");
+    if (existsSync(activePath)) {
+      const releaseId = readFileSync(activePath, "utf8").trim();
+      if (/^[A-Za-z0-9._-]+$/.test(releaseId)) {
+        const manifest = join(defaultInstallation, "releases", releaseId, "release.json");
+        if (existsSync(manifest))
+          recorder.write("native-failure-release.json", readFileSync(manifest, "utf8"));
+      }
+    }
+  } catch (readCause) {
+    recorder.write(
+      "native-failure-release.capture-error.txt",
+      `${readCause instanceof Error ? readCause.message : String(readCause)}\n`,
+    );
+  }
+};
+
 /** Run only on an explicit disposable macOS CI account. */
 export const collectShippedMacosEvidence = async (): Promise<void> => {
   assertReleaseIsolation();
@@ -972,6 +1087,16 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
         },
       },
     ];
+  } catch (cause) {
+    try {
+      captureNativeFailure(recorder, cause);
+    } catch (captureCause) {
+      recorder.write(
+        "native-failure-capture-error.txt",
+        `${captureCause instanceof Error ? captureCause.message : String(captureCause)}\n`,
+      );
+    }
+    throw cause;
   } finally {
     await browser?.close().catch(() => undefined);
     registry?.stop();

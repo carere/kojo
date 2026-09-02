@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { DaemonPaths } from "../models/DaemonPaths.ts";
 
 const escapeXml = (value: string): string =>
@@ -37,6 +38,8 @@ ${entry("KOJO_DAEMON_CONFIG", paths.configurationRoot)}
 ${entry("KOJO_DAEMON_CACHE", paths.cacheRoot)}
     </dict>
 ${entry("WorkingDirectory", paths.installationRoot)}
+${entry("StandardOutPath", join(paths.cacheRoot, "daemon.stdout.log"))}
+${entry("StandardErrorPath", join(paths.cacheRoot, "daemon.stderr.log"))}
     <key>KeepAlive</key>
     <true/>
     <key>ProcessType</key>

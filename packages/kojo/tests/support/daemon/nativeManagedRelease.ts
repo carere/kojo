@@ -12,6 +12,7 @@ export const writeNativeManagedRelease = (
   const releaseRoot = join(paths.installationRoot, "releases", releaseId);
   const consoleRoot = join(releaseRoot, "console");
   mkdirSync(join(paths.installationRoot, "bin"), { recursive: true, mode: 0o700 });
+  mkdirSync(paths.cacheRoot, { recursive: true, mode: 0o700 });
   mkdirSync(consoleRoot, { recursive: true, mode: 0o700 });
   writeFileSync(join(consoleRoot, "index.html"), "<!doctype html><title>Kojo evidence</title>\n", {
     mode: 0o600,
