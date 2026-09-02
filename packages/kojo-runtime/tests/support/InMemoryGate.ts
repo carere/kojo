@@ -1,8 +1,8 @@
 import { Context, Effect, Layer } from "effect";
 import { WorkflowEngine } from "effect/unstable/workflow";
-import type { GateRequest } from "../models/GateRequest.ts";
-import { Gate } from "../ports/Gate.ts";
-import { answerGate } from "../services/answerGate.ts";
+import type { GateRequest } from "../../src/contexts/gate/models/GateRequest.ts";
+import { Gate } from "../../src/contexts/gate/ports/Gate.ts";
+import { applyRecordedGateVerdict } from "./TestDaemonGateApplication.ts";
 
 /** A verdict written before the run started. Everything the test does not say gets a stand-in. */
 export interface ProgrammedAnswer {
@@ -28,7 +28,7 @@ export class RequestedGates extends Context.Service<
  * Answers are queued **per gate name and consumed in order**, so the reviewed loop gets a different
  * verdict on each round — reject, then approve — rather than the same one forever. When a gate's
  * queue runs out the request is recorded and nothing answers it, which is the suspending case: the
- * run stops and the test answers it by hand through `answerGate`.
+ * run stops and the test answers it by hand through `applyRecordedGateVerdict`.
  *
  * A programmed answer is written from inside the requesting half, before the run ever reaches the
  * wait, so a scripted gate does not suspend at all. That is deliberate — a test about what an
@@ -52,7 +52,7 @@ export const layer = (
             const next = queued.get(request.gate)?.shift();
             if (next === undefined) return;
 
-            yield* answerGate({
+            yield* applyRecordedGateVerdict({
               token: request.token,
               choice: next.choice,
               reason: next.reason ?? "",

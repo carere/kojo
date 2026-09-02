@@ -1,8 +1,8 @@
 import { Clock, Effect, type SchemaError } from "effect";
 import { DurableDeferred, type WorkflowEngine } from "effect/unstable/workflow";
 
-import { decodeUnknown } from "../../shared/lib/decode.ts";
-import { Verdict } from "../models/Verdict.ts";
+import { Verdict } from "../../src/contexts/gate/models/Verdict.ts";
+import { decodeUnknown } from "../../src/contexts/shared/lib/decode.ts";
 
 /**
  * The deferred a token points at, rebuilt from nothing but the token's deferred name.
@@ -27,15 +27,16 @@ export const parseToken = (
   decodeUnknown(DurableDeferred.TokenParsed.FromString)(input);
 
 /**
- * The answering half. Any process holding the token can run it — that is the point.
+ * Test-only Daemon application seam for applying a recorded verdict.
  *
- * It takes no `Gate`: the port exists to *ask*, and asking already finished. What resumes the run
- * is a write to the engine's storage, so this needs the engine and nothing else.
+ * Production Clients only record a verdict through the Daemon API. This helper simulates the
+ * Daemon application step after that recording boundary so Workflow tests can resume a suspended
+ * Run without shipping an answering Client or a storage-writing application service.
  *
  * Answering twice keeps the first answer. `deferredDone` refuses to overwrite a recorded result,
  * which is the same property that makes a per-asking deferred name load-bearing.
  */
-export const answerGate = (options: {
+export const applyRecordedGateVerdict = (options: {
   readonly token: DurableDeferred.Token;
   readonly choice: string;
   readonly reason: string;

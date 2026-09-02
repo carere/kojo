@@ -6,16 +6,18 @@ test only because its old file can compile.
 
 ## Restored current-contract suites
 
-The audit restores 36 suites. Each path keeps its suffix and moves from
+The audit restores 38 suites. Each path keeps its suffix and moves from
 `packages/kojo/tests/<tier>/` to `packages/kojo-runtime/tests/<tier>/`.
 
 | Old path suffix | New path suffix |
 | --- | --- |
+| `unit/contexts/agent/adapters/InMemoryAgentInvoker.test.ts` | same |
 | `unit/contexts/agent/services/envelopeBlock.test.ts` | same |
 | `unit/contexts/agent/services/piSession.test.ts` | same |
 | `unit/contexts/agent/services/renderPrompt.test.ts` | same |
 | `unit/contexts/gate/models/AskedGate.test.ts` | same |
 | `unit/contexts/sandbox/guards/hiddenPaths.test.ts` | same |
+| `unit/contexts/sandbox/adapters/InMemoryWorkspace.test.ts` | same |
 | `unit/contexts/sandbox/guards/workspaceIsReachable.test.ts` | same |
 | `unit/contexts/sandbox/guards/worktreeIsUsable.test.ts` | same |
 | `unit/contexts/sandbox/models/SandboxHooks.test.ts` | same |
@@ -51,11 +53,13 @@ The audit restores 36 suites. Each path keeps its suffix and moves from
 The restored suites use `@effect/vitest`. Unit suites use in-memory adapters. Integration suites use
 real process, file-system, Git, or sandbox adapters. Current Daemon ownership changes are part of
 the assertions: `.kojo/artifacts` is protected, Resource identity variables cross the sandbox
-boundary, and compensation follows the current replay result.
+boundary, compensation follows the current replay result, and `.kojo/data` is tested only as a
+barred historic Project path. The restored in-memory adapter suites retain script exhaustion,
+resume refusal, unsafe-command refusal, traversal safety, write, stat, and unlink coverage.
 
 ## Obsolete old-codebase suites
 
-The other 70 removed suites are not restored. They test one or more removed contracts:
+The other 68 removed suites are not restored. They test one or more removed contracts:
 
 - Old CLI and Console suites test the removed local execution owner, `watch`, old Factory
   commands, or the removed embedded Console. Current CLI unit, integration, and browser suites
@@ -115,7 +119,6 @@ unit/console/api.test.ts
 unit/console/application.test.ts
 unit/console/fixtures.test.ts
 unit/console/ui.test.ts
-unit/contexts/agent/adapters/InMemoryAgentInvoker.test.ts
 unit/contexts/agent/adapters/InMemoryRoster.test.ts
 unit/contexts/agent/guards/agentSpawnSites.test.ts
 unit/contexts/agent/guards/invisibleChecks.test.ts
@@ -125,7 +128,6 @@ unit/contexts/agent/services/riskNoteDesign.test.ts
 unit/contexts/gate/adapters/RecordingGate.test.ts
 unit/contexts/gate/adapters/TerminalGate.test.ts
 unit/contexts/gate/gate.test.ts
-unit/contexts/sandbox/adapters/InMemoryWorkspace.test.ts
 unit/contexts/sandbox/guards/sessions.test.ts
 unit/contexts/trace/adapters/InMemoryArtifactReader.test.ts
 unit/contexts/trace/adapters/InMemoryTraceReader.test.ts

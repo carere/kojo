@@ -4,6 +4,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -206,6 +207,67 @@ afterEach(() => {
 });
 
 describe("real Workflow Revision capture", () => {
+  it("publishes one complete identical Revision under concurrent capture", async () => {
+    const subject = fixture();
+    const captureModule = new URL(
+      "../../../../src/contexts/workflow/services/captureRevision.ts",
+      import.meta.url,
+    ).href;
+    const program = [
+      `import { captureWorkflowRevision } from ${JSON.stringify(captureModule)};`,
+      `import { readFileSync } from "node:fs";`,
+      `import { join } from "node:path";`,
+      `const result = captureWorkflowRevision(${JSON.stringify({
+        project: subject.root,
+        dataRoot: subject.dataRoot,
+        workflowName: "safe",
+      })});`,
+      `const source = readFileSync(join(result.publishedPath, "factory", "sources", "workflows", "safe.ts"), "utf8");`,
+      `console.log(JSON.stringify({ revisionId: result.revisionId, packageGraphId: result.packageGraphId, publishedPath: result.publishedPath, source }));`,
+    ].join("\n");
+    const processes = [
+      Bun.spawn([process.execPath, "-e", program], {
+        cwd: subject.root,
+        stdout: "pipe",
+        stderr: "pipe",
+      }),
+      Bun.spawn([process.execPath, "-e", program], {
+        cwd: subject.root,
+        stdout: "pipe",
+        stderr: "pipe",
+      }),
+    ];
+    const results = await Promise.all(
+      processes.map(async (process) => {
+        const [exitCode, stdout, stderr] = await Promise.all([
+          process.exited,
+          new Response(process.stdout).text(),
+          new Response(process.stderr).text(),
+        ]);
+        expect(stderr).toBe("");
+        expect(exitCode).toBe(0);
+        return JSON.parse(stdout) as {
+          readonly revisionId: string;
+          readonly packageGraphId: string;
+          readonly publishedPath: string;
+          readonly source: string;
+        };
+      }),
+    );
+
+    expect(results[0]).toEqual(results[1]);
+    expect(results[0]?.source).toBe(
+      readFileSync(join(subject.root, ".kojo/workflows/safe.ts"), "utf8"),
+    );
+    expect(
+      JSON.parse(readFileSync(join(results[0]?.publishedPath ?? "", "manifest.json"), "utf8")),
+    ).toMatchObject({
+      workflowName: "safe",
+      sources: expect.arrayContaining([expect.objectContaining({ path: "workflows/safe.ts" })]),
+    });
+    expect(readdirSync(join(subject.dataRoot, "staging"))).toEqual([]);
+  });
+
   it("materializes exact source, assets, packages, links, resolution, and Effect evidence", async () => {
     const subject = fixture();
     const refreshed = await Effect.runPromise(

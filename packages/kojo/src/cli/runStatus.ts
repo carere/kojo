@@ -1,5 +1,4 @@
 import {
-  runStatusCommands as commands,
   runStatusRequest as makeRunStatusRequest,
   runStatusLine as presentRunStatusLine,
   requestedRunExitCode as requestedRunExit,
@@ -12,4 +11,3 @@ export const runStatusLine = presentRunStatusLine;
 export const requestedRunExitCode = requestedRunExit;
 export const runStatusRequest = makeRunStatusRequest;
 export const validateUncertainRetry = validateRetry;
-export const runStatusCommands = commands;

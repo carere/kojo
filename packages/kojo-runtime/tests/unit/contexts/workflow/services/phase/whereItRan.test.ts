@@ -3,12 +3,9 @@ import { Duration, Effect, Exit, Layer, Option, Schema } from "effect";
 import type { DurableDeferred, Workflow } from "effect/unstable/workflow";
 import * as InMemoryAgentInvoker from "../../../../../../src/contexts/agent/adapters/InMemoryAgentInvoker.ts";
 import { AgentInvocationError } from "../../../../../../src/contexts/agent/models/AgentInvocationError.ts";
-import * as InMemoryGate from "../../../../../../src/contexts/gate/adapters/InMemoryGate.ts";
-import * as InMemoryGateRepository from "../../../../../../src/contexts/gate/adapters/InMemoryGateRepository.ts";
 import { GateExpired } from "../../../../../../src/contexts/gate/models/GateExpired.ts";
 import { GateUnreachable } from "../../../../../../src/contexts/gate/models/GateUnreachable.ts";
 import * as OnExpiry from "../../../../../../src/contexts/gate/models/OnExpiry.ts";
-import { answerGate } from "../../../../../../src/contexts/gate/services/answerGate.ts";
 import * as InMemorySandboxSource from "../../../../../../src/contexts/sandbox/adapters/InMemorySandboxSource.ts";
 import { SandboxError } from "../../../../../../src/contexts/sandbox/models/SandboxError.ts";
 import { tagged } from "../../../../../../src/contexts/sandbox/models/SandboxProvider.ts";
@@ -27,12 +24,15 @@ import {
   buildInfoLayer,
   layer as inMemoryExecutionServices,
 } from "../../../../../support/InMemoryExecutionServices.ts";
+import * as InMemoryGate from "../../../../../support/InMemoryGate.ts";
+import * as InMemoryGateRepository from "../../../../../support/InMemoryGateRepository.ts";
 import {
   inMemoryWorkflowEngine,
   selfContainedTestLayer,
   serviceFreeWorkflowEffect,
 } from "../../../../../support/inMemoryWorkflowEngine.ts";
 import { settle } from "../../../../../support/settleThenAdvance.ts";
+import { applyRecordedGateVerdict } from "../../../../../support/TestDaemonGateApplication.ts";
 
 /**
  * Where a phase ran, on the phase's own row.
@@ -236,7 +236,7 @@ describe("where a phase ran", () => {
         InMemoryGate.RequestedGates,
         (gates) => gates.requests,
       );
-      yield* answerGate({
+      yield* applyRecordedGateVerdict({
         token: requests[requests.length - 1]?.token as DurableDeferred.Token,
         choice: "approve",
         reason: "reads fine",

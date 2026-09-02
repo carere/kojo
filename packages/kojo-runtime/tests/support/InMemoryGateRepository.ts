@@ -1,6 +1,6 @@
 import { Effect, Layer, Option } from "effect";
-import { AskedGate } from "../models/AskedGate.ts";
-import { GateRepository } from "../ports/GateRepository.ts";
+import { AskedGate } from "../../src/contexts/gate/models/AskedGate.ts";
+import { GateRepository } from "../../src/contexts/gate/ports/GateRepository.ts";
 
 /**
  * The askings of one process, held in a map.

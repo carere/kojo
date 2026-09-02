@@ -2,12 +2,9 @@ import { describe, expect, it } from "@effect/vitest";
 import { Cause, Duration, Effect, Exit, Layer, Option, Schema } from "effect";
 import { TestClock } from "effect/testing";
 import type { DurableDeferred, Workflow, WorkflowEngine } from "effect/unstable/workflow";
-import * as InMemoryGate from "../../../../../src/contexts/gate/adapters/InMemoryGate.ts";
-import * as InMemoryGateRepository from "../../../../../src/contexts/gate/adapters/InMemoryGateRepository.ts";
 import { GateExpired } from "../../../../../src/contexts/gate/models/GateExpired.ts";
 import { GateUnreachable } from "../../../../../src/contexts/gate/models/GateUnreachable.ts";
 import * as OnExpiry from "../../../../../src/contexts/gate/models/OnExpiry.ts";
-import { answerGate } from "../../../../../src/contexts/gate/services/answerGate.ts";
 import * as InMemorySandboxSource from "../../../../../src/contexts/sandbox/adapters/InMemorySandboxSource.ts";
 import { SandboxError } from "../../../../../src/contexts/sandbox/models/SandboxError.ts";
 import { tagged } from "../../../../../src/contexts/sandbox/models/SandboxProvider.ts";
@@ -26,11 +23,14 @@ import {
   buildInfoLayer,
   layer as inMemoryExecutionServices,
 } from "../../../../support/InMemoryExecutionServices.ts";
+import * as InMemoryGate from "../../../../support/InMemoryGate.ts";
+import * as InMemoryGateRepository from "../../../../support/InMemoryGateRepository.ts";
 import {
   inMemoryWorkflowEngine,
   selfContainedTestLayer,
   serviceFreeWorkflowEffect,
 } from "../../../../support/inMemoryWorkflowEngine.ts";
+import { applyRecordedGateVerdict } from "../../../../support/TestDaemonGateApplication.ts";
 
 /**
  * A provider descriptor with no Sandcastle behind it.
@@ -237,7 +237,7 @@ const requested = Effect.flatMap(InMemoryGate.RequestedGates, (gates) => gates.r
 
 const answer = (token: DurableDeferred.Token, choice: string) =>
   Effect.gen(function* () {
-    yield* answerGate({ token, choice, reason: "reads fine", answerer: "kevin" });
+    yield* applyRecordedGateVerdict({ token, choice, reason: "reads fine", answerer: "kevin" });
     yield* settle;
   });
 

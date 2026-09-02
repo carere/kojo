@@ -10,7 +10,7 @@ import { matchesPattern } from "../../../../../src/contexts/workflow/guards/path
 const cases: ReadonlyArray<readonly [pattern: string, path: string, matches: boolean]> = [
   // `*` names one segment, and stops at the separator. These four rows are the whole ticket.
   [".kojo/workflows/*.ts", ".kojo/workflows/factory.ts", true],
-  [".kojo/workflows/*.ts", ".kojo/data/sessions/x/y.ts", false],
+  [".kojo/workflows/*.ts", "reports/sessions/x/y.ts", false],
   [".kojo/workflows/*.ts", ".kojo/workflows/lane/hotfix.ts", false],
   ["adws/adw_*.py", "adws/adw_data/sessions/x/y.py", false],
 
@@ -28,7 +28,7 @@ const cases: ReadonlyArray<readonly [pattern: string, path: string, matches: boo
   [".kojo/workflows/", ".kojo/workflows/factory.ts", true],
   [".kojo/workflows/", ".kojo/workflows/lane/hotfix.ts", true],
   [".kojo/workflows/", ".kojo/workflows.ts", false],
-  [".kojo/data/", ".kojo/data/runs/run_1/envelope.json", true],
+  ["reports/", "reports/runs/run_1/envelope.json", true],
 
   // No wildcard is equality, so a path is compared as a path.
   [".kojo/kojo.config.yaml", ".kojo/kojo.config.yaml", true],

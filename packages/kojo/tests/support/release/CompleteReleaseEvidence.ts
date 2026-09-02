@@ -111,8 +111,9 @@ const check = (
 
 /**
  * The names are the stable evidence allocation from spec #64. Paths and test names point at the
- * current Daemon codebase. Several original planned paths were combined when one higher-seam test
- * could prove the complete transition.
+ * current Daemon codebase. Each observation is an exact leaf test that exercises the stated
+ * behavior. A check can require several observations from one tier when one leaf cannot prove all
+ * parts of the acceptance statement.
  */
 export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
   check(
@@ -151,6 +152,11 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         tier: "kojo-unit",
         path: "packages/kojo/tests/unit/contexts/workflow/admission.test.ts",
         name: "keeps every JSON shape and deduplicates across revisions",
+      },
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/workflow/admission.test.ts",
+        name: "refuses changed content under one request identity",
       },
     ],
   ),
@@ -253,6 +259,13 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "packages/kojo/tests/integration/cli/gateAndResume.test.ts",
     "resumes the same Run where it stopped, and re-runs nothing",
     ["kojo-integration"],
+    [
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/project/runnerRecovery.test.ts",
+        name: "keeps the absolute replacement delay when a fresh Daemon owner restores the Run",
+      },
+    ],
   ),
   check(
     "RECOVER-01",
@@ -275,13 +288,23 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     4,
     "lost Resource acquisition and interrupted release reconcile provider truth",
     "packages/kojo/tests/integration/contexts/project/resourceDaemon.test.ts",
-    "runs one controlled sandbox and agent through the private Runner without a lost reply",
+    "runs one controlled sandbox and agent through the private Runner after a lost acquisition-intent reply",
     ["kojo-unit", "kojo-integration"],
     [
       {
         tier: "kojo-unit",
         path: "packages/kojo/tests/unit/contexts/project/adapters/InMemoryResourceLeaseRepository.test.ts",
         name: "keeps the acquisition identity inspectable after a lost reply",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/project/resourceDaemon.test.ts",
+        name: "runs one controlled sandbox and agent through the private Runner after a lost acquired-provider reply",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/project/resourceDaemon.test.ts",
+        name: "runs one controlled sandbox and agent through the private Runner after a lost release reply",
       },
     ],
   ),
@@ -290,8 +313,15 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     4,
     "unsafe worktrees and sessions are preserved and hold the Project",
     "packages/kojo/tests/integration/contexts/project/adapters/SqliteResourceLeaseRepository.test.ts",
-    "commits identity before acquisition and keeps each lifecycle state distinct",
+    "fences a stale holder and preserves dirty and unresolved Resources",
     ["kojo-integration"],
+    [
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/project/adapters/SqliteResourceLeaseRepository.test.ts",
+        name: "requires the exact durable termination proof before bounded recovery",
+      },
+    ],
   ),
   check(
     "RECOVER-05",
@@ -335,8 +365,8 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "REV-01",
     3,
     "concurrent capture never exposes partial or different validated content",
-    "packages/kojo/tests/integration/contexts/project/services/materializeRevision.test.ts",
-    "reports an external package link without exposing its Host target",
+    "packages/kojo/tests/integration/contexts/workflow/retainedPackages.test.ts",
+    "publishes one complete identical Revision under concurrent capture",
     ["kojo-unit", "kojo-integration"],
     [
       {
@@ -489,10 +519,20 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "LIFE-02",
     5,
     "planned drain outlives the client wait and force stays explicit",
-    "packages/kojo/tests/integration/contexts/daemon/lifecycleControlTransport.test.ts",
-    "reconnects one operation after endpoint loss and observes the replacement owner",
-    ["kojo-integration", "shipped-systemd", "shipped-macos"],
+    "packages/kojo/tests/unit/contexts/daemon/services/LifecycleController.test.ts",
+    "leaves a timed-out operation pending for a replacement controller to resume",
+    ["kojo-unit", "kojo-integration", "shipped-systemd", "shipped-macos"],
     [
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/daemon/services/LifecycleController.test.ts",
+        name: "uses a separate durable force identity and keeps an interrupted Run out of cancellation",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/daemon/lifecycleControlTransport.test.ts",
+        name: "reconnects one operation after endpoint loss and observes the replacement owner",
+      },
       { tier: "shipped-systemd", path: "evidence.json", name: "replacement-and-access" },
       {
         tier: "shipped-macos",
@@ -506,7 +546,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     5,
     "one lifecycle controller keeps the operation through endpoint and owner loss",
     "packages/kojo/tests/integration/contexts/daemon/lifecycleControlTransport.test.ts",
-    "carries exact managed upgrade evidence on the authenticated lifecycle socket",
+    "reconnects one operation after endpoint loss and observes the replacement owner",
     ["kojo-integration"],
   ),
   check(
@@ -523,7 +563,14 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "incomplete or incompatible release evidence refuses activation",
     "packages/kojo/tests/integration/contexts/daemon/preflight.test.ts",
     "fails closed when retained candidate staging is incomplete",
-    ["kojo-integration"],
+    ["kojo-unit", "kojo-integration"],
+    [
+      {
+        tier: "kojo-unit",
+        path: "packages/kojo/tests/unit/contexts/daemon/services/ManagedUpgradePreflight.test.ts",
+        name: "refuses a candidate protocol regression and keeps a corrupt retained fault scoped",
+      },
+    ],
   ),
   check(
     "LIFE-06",
@@ -592,6 +639,13 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "packages/kojo/tests/integration/contexts/daemon/browserSession.test.ts",
     "authorizes one tab session for 12 hours and rejects cross-origin mutations",
     ["kojo-integration"],
+    [
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/daemon/browserSession.test.ts",
+        name: "revokes old grants and sessions when a replacement reuses the port",
+      },
+    ],
   ),
   check(
     "ACCESS-04",
@@ -636,10 +690,35 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "CLI-01",
     6,
     "supported selectors, JSON modes, waits, retries, and exit codes remain stable",
-    "packages/kojo/tests/unit/cli/kojo.test.ts",
-    "prints its version",
-    ["kojo-unit", "kojo-integration"],
+    "packages/kojo/tests/integration/cli/workflow.test.ts",
+    "keeps Project, Factory, refresh, activity, availability, source, revision, and Trigger separate",
+    ["kojo-integration"],
     [
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/cli/runStatus.test.ts",
+        name: "writes one versioned object per JSON snapshot without the payload",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/cli/gate.test.ts",
+        name: "accepts a wait timeout and refuses a timeout without --wait as usage exit 2",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/cli/runStatus.test.ts",
+        name: "requires the exact action ID, reason, and possible-duplication acknowledgement",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/cli/runStatus.test.ts",
+        name: "maps API faults to 1 and interruption to 130 without a server mutation",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/cli/gateAndResume.test.ts",
+        name: "exits non-zero and names terminal inability when the answer ends in failure",
+      },
       {
         tier: "kojo-integration",
         path: "packages/kojo/tests/integration/cli/gateAndResume.test.ts",
@@ -820,11 +899,16 @@ export const completeReleaseEvidence = (input: CompleteEvidenceInput) => {
     const observedTiers = new Set(required.observations.map((observation) => observation.tier));
     if (
       requiredTiers.size !== required.tiers.length ||
-      required.observations.length !== required.tiers.length ||
       observedTiers.size !== requiredTiers.size ||
       [...requiredTiers].some((tier) => !observedTiers.has(tier))
     ) {
-      fail(`${required.checkId} does not declare one exact observation for every required tier`);
+      fail(`${required.checkId} does not declare exact observations for every required tier`);
+    }
+    const observationKeys = required.observations.map(
+      (observation) => `${observation.tier}\0${observation.path}\0${observation.name}`,
+    );
+    if (new Set(observationKeys).size !== observationKeys.length) {
+      fail(`${required.checkId} declares a duplicate observation`);
     }
     const evidence = required.observations.map((observation) => {
       const receipt =

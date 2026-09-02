@@ -5,7 +5,7 @@ import {
   type StartDaemonOptions as CompositionOptions,
   startDaemonComposition,
 } from "../services/DaemonComposition.ts";
-import { recoverPurgeSafety as recoverPurgeSafetyUseCase } from "../use-cases/recoverPurgeSafety.ts";
+import { recoverPurgeSafety as recoverPurgeSafetyUseCase } from "./recoverPurgeSafety.ts";
 
 export type RunningDaemon = ComposedRunningDaemon;
 export type StartDaemonOptions = CompositionOptions;

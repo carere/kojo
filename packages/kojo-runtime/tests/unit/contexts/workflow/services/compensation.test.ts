@@ -1,12 +1,9 @@
 import { beforeEach, describe, expect, it } from "@effect/vitest";
 import { Cause, Duration, Effect, Exit, Layer, Option, Schema } from "effect";
 import type { DurableDeferred, Workflow } from "effect/unstable/workflow";
-import * as InMemoryGate from "../../../../../src/contexts/gate/adapters/InMemoryGate.ts";
-import * as InMemoryGateRepository from "../../../../../src/contexts/gate/adapters/InMemoryGateRepository.ts";
 import { GateExpired } from "../../../../../src/contexts/gate/models/GateExpired.ts";
 import { GateUnreachable } from "../../../../../src/contexts/gate/models/GateUnreachable.ts";
 import * as OnExpiry from "../../../../../src/contexts/gate/models/OnExpiry.ts";
-import { answerGate } from "../../../../../src/contexts/gate/services/answerGate.ts";
 import { runBranch } from "../../../../../src/contexts/shared/models/RunBranch.ts";
 import type { RunId } from "../../../../../src/contexts/shared/models/RunId.ts";
 import * as InMemoryTracer from "../../../../../src/contexts/trace/adapters/InMemoryTracer.ts";
@@ -19,12 +16,15 @@ import {
   buildInfoLayer,
   layer as inMemoryExecutionServices,
 } from "../../../../support/InMemoryExecutionServices.ts";
+import * as InMemoryGate from "../../../../support/InMemoryGate.ts";
+import * as InMemoryGateRepository from "../../../../support/InMemoryGateRepository.ts";
 import {
   inMemoryWorkflowEngine,
   selfContainedTestLayer,
   serviceFreeWorkflowEffect,
 } from "../../../../support/inMemoryWorkflowEngine.ts";
 import { settleThenAdvance } from "../../../../support/settleThenAdvance.ts";
+import { applyRecordedGateVerdict } from "../../../../support/TestDaemonGateApplication.ts";
 
 /**
  * **Ticket 21 — the inverse of the merge.** When a whole run fails, the world is put back.
@@ -292,7 +292,7 @@ const status = <
 const answer = (choice: string, reason: string) =>
   Effect.gen(function* () {
     const requests = yield* requested;
-    yield* answerGate({
+    yield* applyRecordedGateVerdict({
       token: requests[requests.length - 1]?.token as DurableDeferred.Token,
       choice,
       reason,

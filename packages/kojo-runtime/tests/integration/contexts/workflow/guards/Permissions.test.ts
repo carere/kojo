@@ -53,7 +53,7 @@ const builder: PermissionPolicy = {
   agent: "hotfixer",
   writes: { _tag: "Unrestricted" },
   protectedPaths: factoryOwnPaths,
-  alwaysWritable: [".kojo/data/"],
+  alwaysWritable: [],
 };
 
 const breachIn = <A, E>(outcome: Result.Result<A, E>): PermissionBreach => {

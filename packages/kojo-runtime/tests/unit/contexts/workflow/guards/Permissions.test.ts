@@ -7,13 +7,11 @@ import type { PermissionPolicy } from "../../../../../src/contexts/workflow/mode
 import { factoryOwnPaths } from "../../../../../src/contexts/workflow/models/PermissionPolicy.ts";
 import { fingerprintedTree, untracked } from "../../../../support/fingerprintedTree.ts";
 
-const dataDirectory = ".kojo/data/";
-
 const policy = (agent: string, writes: PermissionPolicy["writes"]): PermissionPolicy => ({
   agent,
   writes,
   protectedPaths: factoryOwnPaths,
-  alwaysWritable: [dataDirectory],
+  alwaysWritable: [],
 });
 
 const builder = policy("hotfixer", { _tag: "Unrestricted" });
@@ -28,10 +26,9 @@ const breachIn = <A, E>(outcome: Result.Result<A, E>): PermissionBreach => {
 };
 
 describe("what an agent may change", () => {
-  it("lets every agent record its own work, whatever its scope", () => {
-    // A read-only agent is read-only with respect to the repository, never to its own report.
-    expect(Permissions.permits(scout, ".kojo/data/runs/run_1/envelope.json")).toBe(true);
-    expect(Permissions.permits(builder, ".kojo/data/runs/run_1/prompt.md")).toBe(true);
+  it("keeps Daemon-owned Run records outside every agent write scope", () => {
+    expect(Permissions.permits(scout, ".kojo/data/runs/run_1/envelope.json")).toBe(false);
+    expect(Permissions.permits(builder, ".kojo/data/runs/run_1/prompt.md")).toBe(false);
   });
 
   it("bars an unrestricted agent from the factory's own files", () => {
@@ -351,9 +348,8 @@ describe("a file created at the root of the factory's own directory", () => {
   /**
    * **And the exception, which is the whole reason this is a decision rather than a longer list.**
    *
-   * Barring `.kojo/` wholesale would also bar the two directories an agent is *supposed* to write
-   * into: the artifacts a phase records, and the run's own data. Both stay writable, for every
-   * scope, and neither depends on an author remembering to list them.
+   * Barring `.kojo/` wholesale keeps Daemon-owned records and Project Artifacts outside an Agent's
+   * write scope. A Client records through the Daemon instead of writing Project runtime data.
    */
   it.each([".kojo/artifacts/draft/report.md", ".kojo/artifacts/anything.txt"])(
     "bars Project data that only the Daemon can record: %s",
@@ -363,15 +359,14 @@ describe("a file created at the root of the factory's own directory", () => {
     },
   );
 
-  it("keeps the Project-local run data path writable", () => {
-    expect(Permissions.permits(builder, ".kojo/data/runs/abc/output.json")).toBe(true);
-    expect(Permissions.permits(scout, ".kojo/data/runs/abc/output.json")).toBe(true);
+  it("bars the removed Project-local Run data path", () => {
+    expect(Permissions.permits(builder, ".kojo/data/runs/abc/output.json")).toBe(false);
+    expect(Permissions.permits(scout, ".kojo/data/runs/abc/output.json")).toBe(false);
   });
 
   /**
    * The composition, as a table, including the case the ticket asks about: a path that matches
-   * **both** the protected list and the always-writable one. The run's own runtime wins, and it has
-   * to — an agent that cannot record its work is an agent whose failure nobody can read.
+   * both the protected list and a requested scope. The protected Project paths stay barred.
    */
   it.each([
     ["Project Artifact storage is protected", ".kojo/artifacts/x.md", false],

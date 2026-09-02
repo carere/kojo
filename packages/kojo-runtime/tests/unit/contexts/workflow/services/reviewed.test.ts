@@ -1,13 +1,10 @@
 import { beforeEach, describe, expect, it } from "@effect/vitest";
 import { Cause, Duration, Effect, Exit, Layer, Option, Schema } from "effect";
 import type { DurableDeferred, Workflow, WorkflowEngine } from "effect/unstable/workflow";
-import * as InMemoryGate from "../../../../../src/contexts/gate/adapters/InMemoryGate.ts";
-import * as InMemoryGateRepository from "../../../../../src/contexts/gate/adapters/InMemoryGateRepository.ts";
 import { GateExpired } from "../../../../../src/contexts/gate/models/GateExpired.ts";
 import { GateRejected } from "../../../../../src/contexts/gate/models/GateRejected.ts";
 import { GateUnreachable } from "../../../../../src/contexts/gate/models/GateUnreachable.ts";
 import * as OnExpiry from "../../../../../src/contexts/gate/models/OnExpiry.ts";
-import { answerGate, parseToken } from "../../../../../src/contexts/gate/services/answerGate.ts";
 import * as InMemoryTracer from "../../../../../src/contexts/trace/adapters/InMemoryTracer.ts";
 import { NotAccepted } from "../../../../../src/contexts/workflow/models/NotAccepted.ts";
 import { code } from "../../../../../src/contexts/workflow/services/phase/code.ts";
@@ -18,12 +15,18 @@ import {
   buildInfoLayer,
   layer as inMemoryExecutionServices,
 } from "../../../../support/InMemoryExecutionServices.ts";
+import * as InMemoryGate from "../../../../support/InMemoryGate.ts";
+import * as InMemoryGateRepository from "../../../../support/InMemoryGateRepository.ts";
 import {
   inMemoryWorkflowEngine,
   selfContainedTestLayer,
   serviceFreeWorkflowEffect,
 } from "../../../../support/inMemoryWorkflowEngine.ts";
 import { settle, settleThenAdvance } from "../../../../support/settleThenAdvance.ts";
+import {
+  applyRecordedGateVerdict,
+  parseToken,
+} from "../../../../support/TestDaemonGateApplication.ts";
 
 const deadline = Duration.days(7);
 
@@ -191,7 +194,7 @@ const traced = Effect.flatMap(InMemoryTracer.RecordedTrace, (trace) =>
 
 const answer = (token: DurableDeferred.Token, choice: string, reason: string) =>
   Effect.gen(function* () {
-    yield* answerGate({ token, choice, reason, answerer: "kevin" });
+    yield* applyRecordedGateVerdict({ token, choice, reason, answerer: "kevin" });
     yield* settle;
   });
 
