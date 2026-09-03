@@ -1234,7 +1234,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
       {
         tier: "kojo-integration",
         path: "packages/kojo/tests/integration/release/contractCutover.test.ts",
-        name: "uses the positional Project path in every shipped acceptance helper",
+        name: "uses the positional Project path in every shipped or generated guidance file",
       },
       {
         tier: "kojo-integration",

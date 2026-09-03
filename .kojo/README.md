@@ -25,7 +25,7 @@ protect Factory files from an agent call. Do not run `kojo init` over this hand-
 bun install
 node_modules/.bin/kojo doctor
 node_modules/.bin/kojo daemon install
-node_modules/.bin/kojo project register --path .
+node_modules/.bin/kojo project register .
 node_modules/.bin/kojo workflow list --project <project-id>
 node_modules/.bin/kojo workflow start <project-id> factory --payload '{"request":"what needs doing"}'
 node_modules/.bin/kojo run status <run-id>

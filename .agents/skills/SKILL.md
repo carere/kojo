@@ -27,7 +27,7 @@ kojo daemon install
 Register the repository once:
 
 ```bash
-kojo project register --path .
+kojo project register .
 ```
 
 ## Start a Run

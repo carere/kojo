@@ -114,22 +114,44 @@ describe("the Daemon contract cutover", () => {
     expect(supportResult.status, supportResult.stdout || supportResult.stderr).toBe(1);
   });
 
-  it("uses the positional Project path in every shipped acceptance helper", () => {
+  it("uses the positional Project path in every shipped or generated guidance file", () => {
     const root = new URL("../../../../../", import.meta.url);
-    const macos = readFileSync(
-      new URL("packages/kojo/tests/support/release/ShippedMacosEvidence.ts", root),
-      "utf8",
-    );
-    const systemd = readFileSync(
-      new URL(".github/scripts/systemd-shipped-user-evidence.sh", root),
-      "utf8",
-    );
     const removedRegisterFlag = ["project", "register", ["--", "path"].join("")].join(" ");
+    const guidance = [
+      { path: "README.md", positional: /kojo project register \./ },
+      { path: ".agents/skills/SKILL.md", positional: /kojo project register \./ },
+      { path: ".kojo/README.md", positional: /kojo project register \./ },
+      {
+        path: ".github/scripts/systemd-shipped-user-evidence.sh",
+        positional: /project register \.\)/,
+      },
+      {
+        path: "packages/kojo/tests/support/release/ShippedMacosEvidence.ts",
+        positional: /"project",\s*"register",\s*"\."/,
+      },
+      {
+        path: "packages/kojo/src/contexts/scaffold/templates/support.ts",
+        positional: /kojo project register \./,
+      },
+      {
+        path: "packages/kojo/src/contexts/scaffold/templates/skills.ts",
+        positional: /kojo project register \./,
+      },
+      {
+        path: "packages/kojo/src/contexts/scaffold/adapters/InitCommand.ts",
+        positional: /kojo project register \./,
+      },
+    ] as const;
 
-    expect(macos).toMatch(/"project",\s*"register",\s*"\."/);
-    expect(systemd).toContain("project register .)");
-    expect(macos).not.toContain(removedRegisterFlag);
-    expect(systemd).not.toContain(removedRegisterFlag);
+    for (const file of guidance) {
+      const content = readFileSync(new URL(file.path, root), "utf8");
+      expect(content, `${file.path} must show the positional Project path`).toMatch(
+        file.positional,
+      );
+      expect(content, `${file.path} must not show the removed --path alias`).not.toContain(
+        removedRegisterFlag,
+      );
+    }
   });
 
   it("propagates every piped CI test failure before evidence collection", () => {
