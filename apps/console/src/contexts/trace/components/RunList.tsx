@@ -1,6 +1,7 @@
 import { Link } from "@tanstack/solid-router";
 import { createColumnHelper, createTable, tableFeatures } from "@tanstack/solid-table";
-import { For, type JSX } from "solid-js";
+import { createEffect, For, Index, type JSX } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
 import { Badge, type BadgeTone } from "../../shared/components/Badge.tsx";
 import {
   Table,
@@ -85,13 +86,15 @@ const columns = helper.columns([
 ]);
 
 export const RunList = (props: { readonly rows: ReadonlyArray<RunRow> }): JSX.Element => {
+  const [rows, setRows] = createStore<Array<RunRow>>([]);
+  createEffect(() => setRows(reconcile([...props.rows], { key: "runId" })));
   const table = createTable({
     features,
     columns,
-    // A getter, not a snapshot: the rows are rebuilt on every poll and on every tick of the clock,
-    // and reading `props.rows` once here would freeze the list at whatever the first render saw.
+    // Reconcile by Run identity before the table reads the array. The clock and Daemon polling
+    // update row fields in place, so a person can click a link without that link being replaced.
     get data() {
-      return [...props.rows];
+      return [...rows];
     },
   });
 
@@ -113,19 +116,19 @@ export const RunList = (props: { readonly rows: ReadonlyArray<RunRow> }): JSX.El
         </For>
       </TableHeader>
       <TableBody>
-        <For each={table.getRowModel().rows}>
+        <Index each={table.getRowModel().rows}>
           {(row) => (
-            <TableRow data-run={row.original.runId}>
-              <For each={row.getAllCells()}>
+            <TableRow data-run={row().original.runId}>
+              <Index each={row().getAllCells()}>
                 {(cell) => (
                   <TableCell>
-                    <table.FlexRender cell={cell} />
+                    <table.FlexRender cell={cell()} />
                   </TableCell>
                 )}
-              </For>
+              </Index>
             </TableRow>
           )}
-        </For>
+        </Index>
       </TableBody>
     </Table>
   );
