@@ -23,6 +23,13 @@ const launch = (): string => {
   return result.stdout;
 };
 
+const authenticate = async (page: Page): Promise<void> => {
+  await page.goto(launch());
+  await expect(page.getByText("Access active", { exact: true })).toBeVisible({
+    timeout: runReadyTimeout,
+  });
+};
+
 const at = (offset: number): string => new Date(base + offset).toISOString();
 const phase = (
   _runId: string,
@@ -282,7 +289,7 @@ const openRun = async (
       body: JSON.stringify(fixture(runId, options.settled)),
     }),
   );
-  await page.goto(launch());
+  await authenticate(page);
   await page.goto(`${origin}/runs/${runId}?view=${options.view ?? "timeline"}`);
   await expect(page.locator("[data-run-header]")).toBeVisible({ timeout: runReadyTimeout });
 };
@@ -540,10 +547,14 @@ test("a Run catalogue row opens the Waterfall", async ({ page }) => {
   await page.route("**/api/v1/runs/run-merged", (route) =>
     route.fulfill({ contentType: "application/json", body: JSON.stringify(merged()) }),
   );
-  await page.goto(launch());
+  await authenticate(page);
   await page.goto(`${origin}/runs`);
   const runLink = page.locator('[data-run="run-merged"] a');
   await expect(runLink).toBeVisible({ timeout: runReadyTimeout });
+  const originalLink = await runLink.elementHandle();
+  expect(originalLink).not.toBeNull();
+  await page.waitForTimeout(1_100);
+  expect(await originalLink?.evaluate((node) => node.isConnected)).toBe(true);
   await runLink.click();
   await expect(page.locator("[data-waterfall]")).toBeVisible();
 });

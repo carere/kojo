@@ -13,23 +13,39 @@ const frontMatter = [
   "---",
   "name: kojo",
   "description: >-",
-  "  Drive the Kojo factory in this repository: start a run, see what is waiting on a human, answer",
-  "  a gate, observe its application, and inspect a Run. Use whenever the task is to run,",
-  "  resume, unblock, inspect or author a Kojo workflow, or whenever a `.kojo/` directory is present",
-  "  and the work touches it.",
+  "  Use Kojo in a Project: operate its per-user Daemon, Project, Workflow, Run, Gate, or Console,",
+  "  or author its Factory under `.kojo/`.",
   "---",
   "",
 ].join("\n");
 
-/** The skill itself: how to drive a factory, in the order a person does it. */
+/** The skill is a router. Each branch loads only the reference needed for that operation. */
 export const skill = (): string =>
   [
     frontMatter,
-    "# Driving Kojo",
+    "# Kojo",
     "",
-    "This repository holds a Factory in `.kojo/`. Read `.kojo/README.md` before you change it.",
-    "Kojo uses one OS-user Daemon. The Daemon owns storage, admission, scheduling, Runners, and Gate",
-    "application. A CLI or Console client does not own execution.",
+    "Choose the branch that matches the task, then read its target before you act:",
+    "",
+    "- **Use this Factory** — read `.kojo/README.md` to prepare it, find its Workflows, and start a",
+    "  Run.",
+    "- **Operate Kojo** — read `operations.md` beside this file to manage the Daemon or Project,",
+    "  inspect a Run, answer a Gate, or open the Console.",
+    "- **Author the Factory** — read `.kojo/README.md`, then `authoring.md` beside this file before",
+    "  you change a Workflow or another Factory file.",
+    "",
+    "Use `kojo` when it is installed globally. Otherwise use `node_modules/.bin/kojo`. Ask the",
+    "selected command for `--help` when you need its exact flags.",
+    "",
+  ].join("\n");
+
+/** Daemon and client operations, disclosed only when the task operates Kojo. */
+export const operations = (): string =>
+  [
+    "# Operating Kojo",
+    "",
+    "Kojo uses one Daemon for the current OS user. The Daemon owns storage, admission, scheduling,",
+    "Runners, and Gate application. Use the CLI or Console as a client of that Daemon.",
     "",
     "## Prepare and inspect",
     "",
@@ -62,16 +78,12 @@ export const skill = (): string =>
     "Run IDs are Project-qualified and idempotent. Repeating the same authored idempotency key returns",
     "the recorded Run, including a failure. Use `kojo run status` to inspect that Run.",
     "",
-    "## What not to do",
+    "## Boundaries",
     "",
-    "- Do not open a database, select another data root, or start a local execution engine.",
-    "- Do not edit `.kojo/` as part of work that its own Workflow requested.",
-    "- Do not run Git merge, push, or release commands by hand to finish a Run.",
-    "- Do not add a side effect to a Workflow body outside a Phase.",
-    "",
-    "## Authoring or changing a Workflow",
-    "",
-    "Read `authoring.md` beside this file before you edit a Workflow.",
+    "- Use public CLI and Console surfaces. The Daemon is the only correctness-store owner and",
+    "  execution engine.",
+    "- Keep `.kojo/` unchanged while its own Workflow performs requested work.",
+    "- Let the Workflow perform its declared merge and release Phases.",
     "",
   ].join("\n");
 

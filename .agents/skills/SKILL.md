@@ -1,69 +1,20 @@
 ---
 name: kojo
 description: >-
-  Use the Kojo Factory in this repository. Inspect Projects and Workflows, start a Run, inspect its
-  status, and answer a Gate through the per-user Daemon.
+  Use Kojo in a Project: operate its per-user Daemon, Project, Workflow, Run, Gate, or Console,
+  or author its Factory under `.kojo/`.
 ---
 
-# Use the Kojo Factory
+# Kojo
 
-Read `.kojo/README.md` before you change or run the Factory. The CLI is
-`node_modules/.bin/kojo` when a global `kojo` command is not available.
+Choose the branch that matches the task, then read its target before you act:
 
-## Check the Factory and Daemon
+- **Use this Factory** — read `.kojo/README.md` to prepare it, find its Workflows, and start a
+  Run.
+- **Operate Kojo** — read `operations.md` beside this file to manage the Daemon or Project,
+  inspect a Run, answer a Gate, or open the Console.
+- **Author the Factory** — read `.kojo/README.md`, then `authoring.md` beside this file before
+  you change a Workflow or another Factory file.
 
-```bash
-kojo doctor
-kojo daemon status
-kojo project list
-```
-
-Install the Daemon if this OS user does not have one:
-
-```bash
-kojo daemon install
-```
-
-Register the repository once:
-
-```bash
-kojo project register .
-```
-
-## Start a Run
-
-```bash
-kojo workflow list --project <project-id>
-kojo workflow start <project-id> factory --payload '{"request":"what needs doing"}'
-kojo run status <run-id>
-```
-
-The Daemon owns execution and all correctness storage. The CLI is a short-lived client. Use
-`kojo run list --project <project-id>` to find a Run.
-
-## Answer a Gate
-
-```bash
-kojo gate list
-kojo gate answer <token> --choice approve
-```
-
-The Daemon records and applies the answer. Confirm progress with `kojo run status <run-id>`.
-
-## Open the Console
-
-```bash
-kojo ui
-```
-
-This asks the Daemon to launch the Console and returns.
-
-## Authoring rules
-
-- Import authoring symbols by deep path from `@carere/kojo-runtime`.
-- Do not import authoring symbols from the CLI package.
-- Keep irreversible effects inside recorded phases.
-- Put a sandbox scope around phases, not inside a phase.
-- Keep the Project clean before a Workflow can merge accepted work.
-- Do not merge, push, or release by hand to complete a Run.
-- Run `kojo doctor` after a Factory change.
+Use `kojo` when it is installed globally. Otherwise use `node_modules/.bin/kojo`. Ask the
+selected command for `--help` when you need its exact flags.
