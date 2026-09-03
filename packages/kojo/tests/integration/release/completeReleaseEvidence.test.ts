@@ -14,6 +14,11 @@ const repositoryBun = /^bun = "(\d+\.\d+\.\d+)"$/m.exec(
   readFileSync(join(repository, ".prototools"), "utf8"),
 )?.[1];
 if (repositoryBun === undefined) throw new Error("the test repository has no exact Bun pin");
+const repositoryMoon = /^moon = "(\d+\.\d+\.\d+)"$/m.exec(
+  readFileSync(join(repository, ".prototools"), "utf8"),
+)?.[1];
+if (repositoryMoon === undefined) throw new Error("the test repository has no exact Moon pin");
+const recordedMoon = `moon ${repositoryMoon}`;
 
 interface CompleteIndex {
   readonly acceptedChecks: number;
@@ -44,7 +49,12 @@ const loaded = (tier: EvidenceTier) => {
   return {
     tier,
     testedRevision: revision,
-    environment: { os: "controlled", architecture: "arm64", bun: repositoryBun, moon: "2.5.0" },
+    environment: {
+      os: "controlled",
+      architecture: "arm64",
+      bun: repositoryBun,
+      moon: recordedMoon,
+    },
     loaded: tests.length,
     passed: tests.length,
     skipped: 0,
@@ -91,7 +101,7 @@ describe("the complete breaking release evidence executable", () => {
         "Architecture=x86_64",
         "Kernel=controlled",
         `Bun=${repositoryBun}`,
-        "Moon=2.5.0",
+        `Moon=${recordedMoon}`,
         `TestedRevision=${revision}`,
         "HostTests=1 passed, 1 skipped, 2 loaded",
         "NamedSkip=the native macOS Daemon lifecycle",
@@ -111,7 +121,7 @@ describe("the complete breaking release evidence executable", () => {
         os: "controlled Linux",
         architecture: "x86_64",
         bun: repositoryBun,
-        moon: "2.5.0",
+        moon: recordedMoon,
       },
       loadedTests: [
         { loaded: 2, passed: 1, skipped: 1, namedSkips: ["macOS Host test"] },
@@ -156,7 +166,7 @@ describe("the complete breaking release evidence executable", () => {
           os: "controlled macOS",
           architecture: "arm64",
           bun: repositoryBun,
-          moon: "2.5.0",
+          moon: recordedMoon,
         },
         loadedTests: [{ loaded: 1, passed: 1, skipped: 0, namedSkips: [] }],
         noHiddenRepairs: true,
@@ -263,6 +273,13 @@ describe("the complete breaking release evidence executable", () => {
       `native-systemd recorded Bun 9.9.9, not repository pin ${repositoryBun}`,
     );
     writeFileSync(nativeFactsPath, nativeFacts);
+    writeFileSync(nativeFactsPath, nativeFacts.replace(`Moon=${recordedMoon}`, "Moon=moon 9.9.9"));
+    const nativeMoonDrift = completeWith("native-moon-drift");
+    expect(nativeMoonDrift.exitCode).not.toBe(0);
+    expect(nativeMoonDrift.stderr.toString()).toContain(
+      `native-systemd recorded Moon moon 9.9.9, not repository pin ${repositoryMoon}`,
+    );
+    writeFileSync(nativeFactsPath, nativeFacts);
 
     const systemdPath = join(input, "shipped-systemd", "evidence.json");
     const systemd = JSON.parse(readFileSync(systemdPath, "utf8")) as {
@@ -275,6 +292,16 @@ describe("the complete breaking release evidence executable", () => {
       `shipped-systemd recorded Bun 9.9.9, not repository pin ${repositoryBun}`,
     );
     writeJson(systemdPath, systemd);
+    writeJson(systemdPath, {
+      ...systemd,
+      environment: { ...systemd.environment, moon: "moon 9.9.9" },
+    });
+    const systemdMoonDrift = completeWith("systemd-moon-drift");
+    expect(systemdMoonDrift.exitCode).not.toBe(0);
+    expect(systemdMoonDrift.stderr.toString()).toContain(
+      `shipped-systemd recorded Moon moon 9.9.9, not repository pin ${repositoryMoon}`,
+    );
+    writeJson(systemdPath, systemd);
 
     const macPath = join(input, "shipped-macos", revision, "RELEASE-02", "evidence-manifest.json");
     const mac = JSON.parse(readFileSync(macPath, "utf8")) as {
@@ -285,6 +312,13 @@ describe("the complete breaking release evidence executable", () => {
     expect(macDrift.exitCode).not.toBe(0);
     expect(macDrift.stderr.toString()).toContain(
       `shipped-macos recorded Bun 9.9.9, not repository pin ${repositoryBun}`,
+    );
+    writeJson(macPath, mac);
+    writeJson(macPath, { ...mac, environment: { ...mac.environment, moon: "moon 9.9.9" } });
+    const macMoonDrift = completeWith("mac-moon-drift");
+    expect(macMoonDrift.exitCode).not.toBe(0);
+    expect(macMoonDrift.stderr.toString()).toContain(
+      `shipped-macos recorded Moon moon 9.9.9, not repository pin ${repositoryMoon}`,
     );
   });
 });

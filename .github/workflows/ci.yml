@@ -157,13 +157,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes dbus-user-session jq openssh-server policykit-1
           pinned_bun=$(sed -n 's/^bun = "\([^"]*\)"$/\1/p' .prototools)
+          pinned_moon=$(sed -n 's/^moon = "\([^"]*\)"$/\1/p' .prototools)
           bun_binary="$HOME/.proto/tools/bun/$pinned_bun/bun"
-          moon_binary=$(find "$HOME/.proto/tools/moon" -mindepth 2 -maxdepth 2 -type f -name moon -perm /111 -print -quit)
+          moon_binary="$HOME/.proto/tools/moon/$pinned_moon/moon"
           test -n "$pinned_bun"
+          test -n "$pinned_moon"
           test -n "$bun_binary"
           test -x "$bun_binary"
           test "$("$bun_binary" --version)" = "$pinned_bun"
           test -n "$moon_binary"
+          test -x "$moon_binary"
+          test "$("$moon_binary" --version)" = "moon $pinned_moon"
           echo "Installing Bun from $bun_binary"
           echo "Installing Moon from $moon_binary"
           sudo install -m 0755 "$bun_binary" /usr/local/bin/bun
@@ -213,13 +217,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes dbus-user-session jq openssh-server policykit-1
           pinned_bun=$(sed -n 's/^bun = "\([^"]*\)"$/\1/p' .prototools)
+          pinned_moon=$(sed -n 's/^moon = "\([^"]*\)"$/\1/p' .prototools)
           bun_binary="$HOME/.proto/tools/bun/$pinned_bun/bun"
-          moon_binary=$(find "$HOME/.proto/tools/moon" -mindepth 2 -maxdepth 2 -type f -name moon -perm /111 -print -quit)
+          moon_binary="$HOME/.proto/tools/moon/$pinned_moon/moon"
           test -n "$pinned_bun"
+          test -n "$pinned_moon"
           test -n "$bun_binary"
           test -x "$bun_binary"
           test "$("$bun_binary" --version)" = "$pinned_bun"
           test -n "$moon_binary"
+          test -x "$moon_binary"
+          test "$("$moon_binary" --version)" = "moon $pinned_moon"
           sudo install -m 0755 "$bun_binary" /usr/local/bin/bun
           sudo install -m 0755 "$moon_binary" /usr/local/bin/moon
 

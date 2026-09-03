@@ -236,7 +236,7 @@ describe("the Daemon contract cutover", () => {
     expect(moonBun).toBe(pinnedBun);
   });
 
-  it("installs the exact repository Bun pin for both Linux Host evidence jobs", () => {
+  it("installs the exact repository tool pins for both Linux Host evidence jobs", () => {
     const workflow = readFileSync(
       new URL("../../../../../.github/workflows/ci.yml", import.meta.url),
       "utf8",
@@ -245,11 +245,16 @@ describe("the Daemon contract cutover", () => {
     for (const name of ["native-systemd-host", "shipped-systemd-release"]) {
       const job = namedWorkflowJob(workflow, name);
       expect(job).toContain("pinned_bun=$(sed -n");
+      expect(job).toContain("pinned_moon=$(sed -n");
       expect(job).toContain(".prototools)");
       expect(job).toContain('bun_binary="$HOME/.proto/tools/bun/$pinned_bun/bun"');
+      expect(job).toContain('moon_binary="$HOME/.proto/tools/moon/$pinned_moon/moon"');
       expect(job).toContain('test -x "$bun_binary"');
+      expect(job).toContain('test -x "$moon_binary"');
       expect(job).toContain('test "$("$bun_binary" --version)" = "$pinned_bun"');
+      expect(job).toContain('test "$("$moon_binary" --version)" = "moon $pinned_moon"');
       expect(job).not.toContain('bun_binary=$(find "$HOME/.proto/tools/bun"');
+      expect(job).not.toContain('moon_binary=$(find "$HOME/.proto/tools/moon"');
     }
   });
 

@@ -36,25 +36,31 @@ const environment = (): Readonly<Record<string, string>> => ({
   moon: Bun.spawnSync(["moon", "--version"]).stdout.toString().trim(),
 });
 
-const repositoryBunVersion = (): string => {
+type HostTier = "native-systemd" | "shipped-systemd" | "shipped-macos";
+type PinnedTool = "bun" | "moon";
+
+const repositoryToolVersion = (tool: PinnedTool): string => {
   const matches = [
     ...readFileSync(resolve(process.cwd(), ".prototools"), "utf8").matchAll(
-      /^bun = "(\d+\.\d+\.\d+)"$/gm,
+      new RegExp(`^${tool} = "(\\d+\\.\\d+\\.\\d+)"$`, "gm"),
     ),
   ];
   if (matches.length !== 1 || matches[0]?.[1] === undefined) {
-    fail("the repository does not declare one exact Bun pin");
+    fail(`the repository does not declare one exact ${tool} pin`);
   }
   return matches[0][1];
 };
 
-const requirePinnedHostBun = (
-  tier: "native-systemd" | "shipped-systemd" | "shipped-macos",
+const requirePinnedHostTool = (
+  tier: HostTier,
+  tool: PinnedTool,
   recorded: string | undefined,
   pinned: string,
 ): void => {
-  if (recorded !== pinned) {
-    fail(`${tier} recorded Bun ${recorded ?? "unknown"}, not repository pin ${pinned}`);
+  const label = tool === "bun" ? "Bun" : "Moon";
+  const expected = tool === "bun" ? pinned : `moon ${pinned}`;
+  if (recorded !== expected) {
+    fail(`${tier} recorded ${label} ${recorded ?? "unknown"}, not repository pin ${pinned}`);
   }
 };
 
@@ -233,7 +239,8 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
   }
   const core = readJson<CoreEvidence>(join(inputRoot, "core", "core-evidence.json"));
   if (core.cache !== "bypassed-by-moon-force") fail("core evidence did not bypass the cache");
-  const pinnedBun = repositoryBunVersion();
+  const pinnedBun = repositoryToolVersion("bun");
+  const pinnedMoon = repositoryToolVersion("moon");
 
   const nativeFactsPath = join(inputRoot, "native-systemd", "host-facts.log");
   const native = facts(nativeFactsPath);
@@ -258,12 +265,14 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
     nativeTier.skipped !== Number(nativeCounts[2]) ||
     nativeTier.loaded !== Number(nativeCounts[3])
   ) fail("native systemd Host log differs from its recorded counts");
-  requirePinnedHostBun("native-systemd", nativeEnvironment.bun, pinnedBun);
+  requirePinnedHostTool("native-systemd", "bun", nativeEnvironment.bun, pinnedBun);
+  requirePinnedHostTool("native-systemd", "moon", nativeEnvironment.moon, pinnedMoon);
 
   const systemdManifestPath = join(inputRoot, "shipped-systemd", "evidence.json");
   const systemd = readJson<HostManifest>(systemdManifestPath);
   if (systemd.noHiddenRepairs === undefined) fail("shipped systemd hidden-repair evidence is absent");
-  requirePinnedHostBun("shipped-systemd", systemd.environment.bun, pinnedBun);
+  requirePinnedHostTool("shipped-systemd", "bun", systemd.environment.bun, pinnedBun);
+  requirePinnedHostTool("shipped-systemd", "moon", systemd.environment.moon, pinnedMoon);
   const macManifests = filesUnder(join(inputRoot, "shipped-macos"))
     .filter((path) => basename(path) === "evidence-manifest.json")
     .map((path) => readJson<HostManifest & { readonly checkId?: string }>(path));
@@ -278,7 +287,8 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
     if (manifest.noHiddenRepairs !== true) {
       fail(`shipped macOS ${checkId} hidden-repair evidence is absent`);
     }
-    requirePinnedHostBun("shipped-macos", manifest.environment.bun, pinnedBun);
+    requirePinnedHostTool("shipped-macos", "bun", manifest.environment.bun, pinnedBun);
+    requirePinnedHostTool("shipped-macos", "moon", manifest.environment.moon, pinnedMoon);
   }
   const mac = macManifests[0];
   if (mac === undefined) fail("shipped macOS evidence is absent");
