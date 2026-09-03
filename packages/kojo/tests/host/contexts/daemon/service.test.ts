@@ -12,6 +12,7 @@ import { systemdUnitDocument } from "../../../../src/contexts/daemon/services/sy
 import {
   type NativeHostChildProcess,
   nativeHostKillDiagnostic,
+  nativeHostProcessCommand,
   selectManagedDaemonChild,
 } from "../../../support/daemon/nativeHostProcess.ts";
 import {
@@ -65,7 +66,7 @@ const childrenOf = (ownerProcessId: number): ReadonlyArray<NativeHostChildProces
   for (const line of children.stdout.toString().trim().split("\n")) {
     const processId = Number(line);
     if (!Number.isSafeInteger(processId)) continue;
-    const command = Bun.spawnSync(["/bin/ps", "-o", "command=", "-p", String(processId)]);
+    const command = Bun.spawnSync([...nativeHostProcessCommand(processId)]);
     found.push({ processId, command: command.stdout.toString().trim() });
   }
   return found;

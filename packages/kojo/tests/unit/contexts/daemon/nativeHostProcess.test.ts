@@ -1,12 +1,31 @@
 import { describe, expect, it } from "vitest";
 import {
   nativeHostKillDiagnostic,
+  nativeHostProcessCommand,
   selectManagedDaemonChild,
 } from "../../../support/daemon/nativeHostProcess.ts";
 
 describe("native Host managed Daemon process evidence", () => {
   const launcher =
     "/home/kojo/.local/share/proto/tools/bun/1.4.0/bun /workspace/packages/kojo/src/launcher/main.ts";
+
+  it("requests unbounded command output before matching a long managed Daemon identity", () => {
+    expect(nativeHostProcessCommand(3_208)).toEqual([
+      "/bin/ps",
+      "-ww",
+      "-o",
+      "command=",
+      "-p",
+      "3208",
+    ]);
+    const longLauncher = `/home/kojo/${"retained-release/".repeat(12)}packages/kojo/src/launcher/main.ts`;
+    expect(
+      selectManagedDaemonChild([
+        { processId: 3_195, command: "sleep 300" },
+        { processId: 3_208, command: longLauncher },
+      ]),
+    ).toEqual({ processId: 3_208, command: longLauncher });
+  });
 
   it("selects the managed Daemon instead of the synthetic process-group sibling", () => {
     expect(

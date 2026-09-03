@@ -5,6 +5,15 @@ export interface NativeHostChildProcess {
 
 const managedDaemonCommand = "launcher/main.ts";
 
+export const nativeHostProcessCommand = (processId: number): ReadonlyArray<string> => [
+  "/bin/ps",
+  "-ww",
+  "-o",
+  "command=",
+  "-p",
+  String(processId),
+];
+
 export const selectManagedDaemonChild = (
   children: ReadonlyArray<NativeHostChildProcess>,
 ): NativeHostChildProcess | undefined => {
