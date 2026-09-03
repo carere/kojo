@@ -1,12 +1,14 @@
 /**
  * One line of `GET /api/v1/runs`, as the Daemon wire carries it.
  *
- * The server's `RunSummary` holds the whole immutable run record; the list reads the three fields it
- * puts on screen and the two mutable ones that say where the run stands.
+ * The server's `RunSummary` holds the whole immutable Run record. The list keeps the Project and
+ * Workflow selectors with the fields it puts on screen and the mutable fields that say where the
+ * Run stands.
  */
 export interface RunLine {
   readonly run: {
     readonly runId: string;
+    readonly projectId: string;
     readonly workflow: string;
     readonly startedAt: number;
   };

@@ -37,9 +37,17 @@ export const Runs = (): JSX.Element => {
   const search = new URLSearchParams(window.location.search);
   const [text, setText] = createSignal(search.get("q") ?? "");
   const [status, setStatus] = createSignal(search.get("status") ?? "all");
+  const project = search.get("project") ?? "";
+  const workflow = search.get("workflow") ?? "";
+  const selectedLines = () =>
+    (lines() ?? []).filter(
+      (line) =>
+        (project === "" || line.run.projectId === project) &&
+        (workflow === "" || line.run.workflow === workflow),
+    );
   const filteredRows = createMemo(() => {
     const query = text().trim().toLocaleLowerCase();
-    return rows().filter(
+    return runRows({ runs: selectedLines(), askings: settled(askings) ?? [], now: now() }).filter(
       (row) =>
         (status() === "all" || row.status === status()) &&
         (query === "" ||
@@ -54,6 +62,8 @@ export const Runs = (): JSX.Element => {
     setCursor,
     reset: resetPage,
   } = usePaginationState(filteredRows, () => ({
+    project,
+    workflow,
     q: text(),
     status: status() === "all" ? undefined : status(),
   }));

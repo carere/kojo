@@ -51,6 +51,26 @@ test("paginates the complete Workflow table and keeps its cursor in the URL", as
 test("filters Workflow state and proves safe Trigger Start, Stop, force, and Run links", async ({
   page,
 }) => {
+  await page.route("**/api/v1/runs", async (route) => {
+    const response = await route.fetch();
+    const snapshot = (await response.json()) as {
+      readonly runs: ReadonlyArray<Record<string, unknown>>;
+    };
+    const selected = snapshot.runs[0];
+    if (selected === undefined) throw new Error("the Workflow fixture has no Run template");
+    await route.fulfill({
+      response,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...snapshot,
+        runs: [
+          selected,
+          { ...selected, runId: "run-unrelated-workflow", workflowName: "invalid" },
+          { ...selected, runId: "run-unrelated-project", projectId: "project-other" },
+        ],
+      }),
+    });
+  });
   await page.route("**/actions/stop", async (route) => {
     const body = route.request().postDataJSON() as {
       readonly operation?: string;
@@ -131,12 +151,14 @@ test("filters Workflow state and proves safe Trigger Start, Stop, force, and Run
 
   await page.getByLabel("Workflow availability").selectOption("all");
   await page.getByRole("link", { name: "Current Runs (1)" }).click();
-  await expect(page).toHaveURL(/\/runs\?project=.*workflow=available/, {
-    timeout: catalogueNavigationTimeout,
-  });
   await expect(page.getByRole("columnheader", { name: "Queue reason" })).toBeVisible({
     timeout: catalogueNavigationTimeout,
   });
+  await expect(page).toHaveURL(/\/runs\?project=.*workflow=available/);
+  await expect(page.locator("[data-run]")).toHaveCount(1);
+  await expect(page.locator('[data-run="run-queued"]')).toBeVisible();
+  await expect(page.locator('[data-run="run-unrelated-workflow"]')).toHaveCount(0);
+  await expect(page.locator('[data-run="run-unrelated-project"]')).toHaveCount(0);
   await expect(page.getByText("runner-starting", { exact: true })).toBeVisible();
   await page.getByLabel("Find Runs").fill("runner-starting");
   await page.getByLabel("Run status").selectOption("queued");

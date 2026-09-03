@@ -22,6 +22,7 @@ export const useRuns = (): UseQueryResult<ReadonlyArray<RunLine>, Error> =>
         (run): RunLine => ({
           run: {
             runId: run.runId,
+            projectId: run.projectId,
             workflow: run.workflowName,
             startedAt: Date.parse(run.startedAt ?? run.admittedAt),
           },
