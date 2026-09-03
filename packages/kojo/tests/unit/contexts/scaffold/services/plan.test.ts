@@ -80,12 +80,29 @@ describe("what a stamped factory is made of", () => {
           // Phase 8's own deliverable: an agent standing in a stamped repository is told how to
           // drive the factory it is standing in.
           ".claude/skills/kojo/SKILL.md",
+          ".claude/skills/kojo/operations.md",
           ".claude/skills/kojo/authoring.md",
         ]),
       );
       expect(paths.some((path) => path.startsWith(".kojo/workflows/"))).toBe(true);
     },
   );
+
+  it.each(templateNames)("%s stamps a small Kojo router with exact branch pointers", (template) => {
+    const stamped = plan(choicesFor(template));
+    const router = contentAt(stamped.files, ".claude/skills/kojo/SKILL.md");
+    const operations = contentAt(stamped.files, ".claude/skills/kojo/operations.md");
+
+    expect(router.split("\n").length).toBeLessThanOrEqual(24);
+    expect(router).toContain("`.kojo/README.md`");
+    expect(router).toContain("`operations.md`");
+    expect(router).toContain("`authoring.md`");
+    expect(router).not.toContain("```bash");
+    expect(router).not.toContain("kojo project register .");
+    expect(operations).toContain("kojo project register .");
+    expect(operations).toContain("kojo workflow start <project-id> <workflow>");
+    expect(operations).toContain("one Daemon for the current OS user");
+  });
 
   it.each(templateNames)(
     "%s copies no engine source: it imports the engine instead",

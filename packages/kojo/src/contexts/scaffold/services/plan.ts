@@ -7,7 +7,7 @@ import { dockerfile } from "../templates/dockerfile.ts";
 import { factoryManifest } from "../templates/factoryManifest.ts";
 import { hotfix } from "../templates/hotfix.ts";
 import { review } from "../templates/review.ts";
-import { authoring, skill, skillsDirectory } from "../templates/skills.ts";
+import { authoring, operations, skill, skillsDirectory } from "../templates/skills.ts";
 import type { Starter } from "../templates/starter.ts";
 import { environment, ignore, readme } from "../templates/support.ts";
 
@@ -48,12 +48,13 @@ export const plan = (choices: FactoryChoices): FactoryPlan => {
         { path: at("prompts", agent.name, "system.md"), content: agent.system },
         { path: at("prompts", agent.name, "user.md"), content: agent.user },
       ]),
-      // **The only two files this plan writes outside `.kojo/`.** A skill has to sit where the
+      // **The only three files this plan writes outside `.kojo/`.** A skill has to sit where the
       // agent's harness looks for one, and no harness looks inside a factory — so an agent working
       // in a stamped repository knows how to drive the thing that is stamped there. See
       // `templates/skills.ts`; the content is independent of every answer, because it is about Kojo
       // rather than about this factory.
       { path: skillAt("SKILL.md"), content: skill() },
+      { path: skillAt("operations.md"), content: operations() },
       { path: skillAt("authoring.md"), content: authoring() },
     ],
   };

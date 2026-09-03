@@ -3,6 +3,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  authoring as stampedAuthoring,
+  operations as stampedOperations,
+  skill as stampedSkill,
+} from "../../../src/contexts/scaffold/templates/skills.ts";
 
 interface PackageManifest {
   readonly bin?: Readonly<Record<string, string>>;
@@ -104,6 +109,18 @@ afterEach(() => {
 });
 
 describe("the Daemon contract cutover", () => {
+  it("keeps the repository Kojo router equal to the stamped skill", () => {
+    const root = new URL("../../../../../", import.meta.url);
+
+    expect(readFileSync(new URL(".agents/skills/SKILL.md", root), "utf8")).toBe(stampedSkill());
+    expect(readFileSync(new URL(".agents/skills/operations.md", root), "utf8")).toBe(
+      stampedOperations(),
+    );
+    expect(readFileSync(new URL(".agents/skills/authoring.md", root), "utf8")).toBe(
+      stampedAuthoring(),
+    );
+  });
+
   it("leaves the global package with no authoring compatibility exports", () => {
     const globalPackage = manifest(new URL("../../../package.json", import.meta.url));
     expect(globalPackage.exports).toEqual({});
@@ -137,7 +154,7 @@ describe("the Daemon contract cutover", () => {
     const removedRegisterFlag = ["project", "register", ["--", "path"].join("")].join(" ");
     const guidance = [
       { path: "README.md", positional: /kojo project register \./ },
-      { path: ".agents/skills/SKILL.md", positional: /kojo project register \./ },
+      { path: ".agents/skills/operations.md", positional: /kojo project register \./ },
       { path: ".kojo/README.md", positional: /kojo project register \./ },
       {
         path: ".github/scripts/systemd-shipped-user-evidence.sh",
