@@ -557,6 +557,8 @@ const waitFor = async <A>(
   throw new Error(message);
 };
 
+const shippedMacosArtifactContent = "actual Daemon artifact: shipped macOS\n";
+
 const renderRun = async (options: {
   readonly browser: Browser;
   readonly launchUrl: string;
@@ -644,20 +646,16 @@ const renderRun = async (options: {
       readonly artifactId?: unknown;
       readonly content?: unknown;
     };
-    if (
-      wire.artifactId !== artifactId ||
-      typeof wire.content !== "string" ||
-      !wire.content.includes("actual Daemon artifact: shipped macOS")
-    ) {
-      throw new Error("the authenticated Artifact response did not carry the retained content");
+    if (wire.artifactId !== artifactId || wire.content !== shippedMacosArtifactContent) {
+      throw new Error("the authenticated Artifact response changed the retained bytes");
     }
 
     stage = "render retained Artifact content in the Console";
     const visibleArtifact = page.locator(`[data-published-artifact-content="${artifactId}"]`);
     await visibleArtifact.waitFor({ state: "visible", timeout: 5_000 });
-    const visibleContent = await visibleArtifact.innerText();
-    if (!visibleContent.includes("actual Daemon artifact: shipped macOS")) {
-      throw new Error("the authenticated Console showed different retained Artifact content");
+    const visibleContent = await visibleArtifact.textContent();
+    if (visibleContent !== shippedMacosArtifactContent) {
+      throw new Error("the authenticated Console changed the retained Artifact bytes");
     }
     const text = (await page.locator("body").innerText()).trim();
     for (const expected of [

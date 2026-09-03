@@ -120,10 +120,49 @@ test("defaults the Gate table to every status and keeps complete review links an
 });
 
 test("records a Verdict with the Daemon OS user as Answerer", async ({ page }) => {
+  const refreshedDescription = "Decide the answerable release after live refresh";
+  let refreshAfterProbe = false;
+  let refreshedWithAuthority = false;
+  await page.route("**/api/v1/askings", async (route) => {
+    const response = await route.fetch();
+    if (!refreshAfterProbe) {
+      await route.fulfill({ response });
+      return;
+    }
+    refreshedWithAuthority =
+      route.request().headers().authorization?.startsWith("Bearer ") === true;
+    const snapshot = (await response.json()) as { askings: ReadonlyArray<Record<string, unknown>> };
+    const askings = snapshot.askings.map((asking) => {
+      const identity = asking.identity as { readonly runId?: unknown } | undefined;
+      return identity?.runId === "run-answerable"
+        ? { ...asking, description: refreshedDescription }
+        : asking;
+    });
+    const headers: Record<string, string> = {
+      ...response.headers(),
+      "x-kojo-test-refresh": "after-probe",
+    };
+    delete headers["content-length"];
+    await route.fulfill({
+      response,
+      headers,
+      contentType: "application/json",
+      body: JSON.stringify({ ...snapshot, askings }),
+    });
+  });
   await page.goto(launchUrl());
   const answerable = page.locator('[data-queued="run-answerable"] [data-queued-open]');
   await answerable.evaluate((element) => element.setAttribute("data-live-row-probe", "stable"));
-  await page.waitForTimeout(1_200);
+  const refreshedAskings = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/askings" &&
+      response.status() === 200 &&
+      response.headers()["x-kojo-test-refresh"] === "after-probe",
+  );
+  refreshAfterProbe = true;
+  await (await refreshedAskings).finished();
+  expect(refreshedWithAuthority).toBe(true);
+  await expect(answerable).toHaveAttribute("title", refreshedDescription);
   await expect(answerable).toHaveAttribute("data-live-row-probe", "stable");
   await answerable.click();
   const panel = page.locator("[data-detail-panel]");
