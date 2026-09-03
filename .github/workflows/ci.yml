@@ -286,6 +286,9 @@ jobs:
         with:
           auto-install: true
 
+      - name: Install locked dependencies for evidence aggregation
+        run: bun install --frozen-lockfile
+
       - name: Download core evidence
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:

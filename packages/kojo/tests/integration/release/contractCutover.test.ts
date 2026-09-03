@@ -90,6 +90,15 @@ const namedWorkflowStep = (workflow: string, name: string): string => {
   return step.slice(0, boundary?.index ?? step.length);
 };
 
+const namedWorkflowJob = (workflow: string, name: string): string => {
+  const marker = `  ${name}:\n`;
+  const start = workflow.indexOf(marker);
+  if (start < 0) throw new Error(`workflow job '${name}' is missing`);
+  const job = workflow.slice(start);
+  const boundary = /\n {2}[a-zA-Z0-9_-]+:\n/.exec(job.slice(marker.length));
+  return job.slice(0, boundary === null ? job.length : marker.length + boundary.index);
+};
+
 afterEach(() => {
   for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -199,6 +208,21 @@ describe("the Daemon contract cutover", () => {
     expect(upload).toContain("uses: actions/upload-artifact@");
     expect(upload).toContain("path: .release-evidence-output/artifacts/verification/daemon\n");
     expect(upload).toContain("include-hidden-files: true\n");
+  });
+
+  it("installs locked dependencies before it accepts complete release evidence", () => {
+    const workflow = readFileSync(
+      new URL("../../../../../.github/workflows/ci.yml", import.meta.url),
+      "utf8",
+    );
+    const job = namedWorkflowJob(workflow, "complete-release-evidence");
+    const installName = "Install locked dependencies for evidence aggregation";
+    const install = namedWorkflowStep(job, installName);
+
+    expect(install).toContain("run: bun install --frozen-lockfile\n");
+    expect(job.indexOf(`      - name: ${installName}\n`)).toBeLessThan(
+      job.indexOf("      - name: Accept the complete breaking release evidence\n"),
+    );
   });
 
   it("keeps Moon on the exact Bun version pinned for release evidence", () => {
