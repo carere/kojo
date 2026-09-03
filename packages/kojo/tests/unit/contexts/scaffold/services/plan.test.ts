@@ -22,7 +22,7 @@ import {
   plan,
   starters,
 } from "../../../../../src/contexts/scaffold/services/plan.ts";
-import { enginePackage } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
+import { runtimePackage } from "../../../../../src/contexts/shared/models/FactoryLayout.ts";
 import { someEngine } from "../../../../support/engineDependency.ts";
 
 const choicesFor = (template: TemplateName, manager: "bun" | "npm" = "bun"): FactoryChoices => ({
@@ -103,9 +103,9 @@ describe("what a stamped factory is made of", () => {
         for (const specifier of reaches) {
           expect(specifier.startsWith("../../")).toBe(false);
           if (specifier.includes("kojo"))
-            expect(specifier.startsWith(`${enginePackage}/`)).toBe(true);
+            expect(specifier.startsWith(`${runtimePackage}/`)).toBe(true);
         }
-        expect(file.content).toContain(`from "${enginePackage}/`);
+        expect(file.content).toContain(`from "${runtimePackage}/`);
       }
     },
   );
@@ -226,7 +226,7 @@ describe("the commands a fresh factory ships", () => {
     // computable without parsing: the stamped file exports the question.
     const commands = contentAt(plan(choicesFor("review")).files, ".kojo/commands.ts");
     expect(commands).toContain(
-      'import { isPlaceholder } from "@carere/kojo/contexts/scaffold/models/Placeholder"',
+      'import { isPlaceholder } from "@carere/kojo-runtime/contexts/workflow/models/Placeholder"',
     );
     expect(commands).toContain("export const survivingPlaceholders");
   });
@@ -254,8 +254,6 @@ describe("the README a stamped factory carries", () => {
     for (const row of rows) {
       const named =
         written.has(row) ||
-        // `data/` is a directory the plan makes rather than a file it writes.
-        stamped.directories.includes(`.kojo/${row.replace(/\/$/, "")}`) ||
         (row.includes("<agent>") &&
           [...written].some((path) => path.startsWith(row.split("<agent>")[0] ?? "")));
       expect(named, `the README names \`${row}\`, and nothing stamps it`).toBe(true);
@@ -266,14 +264,15 @@ describe("the README a stamped factory carries", () => {
     const readme = contentAt(plan(choicesFor(template)).files, ".kojo/README.md");
     const choices = choicesFor(template);
 
-    // Followed literally, the walk-through has to work. It cannot begin with `kojo run`: every
+    // Followed literally, the walk-through has to work. It cannot begin with a Workflow Start:
+    // every
     // file in the directory imports `kojo` and `effect`, and neither resolves until an install.
     expect(readme.indexOf(firstInstall(choices.toolchain.manager))).toBeLessThan(
-      readme.indexOf(`kojo run ${template}`),
+      readme.indexOf(`kojo workflow start <project-id> ${template}`),
     );
     // And the manifest it now describes is one initialisation writes, with both entries named.
     expect(readme).toContain("package.json");
-    expect(readme).toContain(choices.engine.kojo.specifier);
+    expect(readme).toContain(choices.engine.runtime.specifier);
     expect(readme).toContain(choices.engine.effect.specifier);
   });
 
@@ -285,19 +284,33 @@ describe("the README a stamped factory carries", () => {
   });
 });
 
-describe("where a run's own state goes", () => {
-  it.each(templateNames)("%s plans an ignored data directory", (template) => {
+describe("where a Run's state goes", () => {
+  it.each(templateNames)("%s keeps only credentials in the Project ignore file", (template) => {
     const stamped = plan(choicesFor(template));
 
-    // Made on the first run rather than on the first *use*, so the ignore rule below is true
-    // before anything has been written that would need it.
-    expect(stamped.directories).toContain(".kojo/data");
+    expect(stamped.directories).not.toContain(".kojo/data");
 
     const ignore = contentAt(stamped.files, ".kojo/.gitignore");
-    expect(ignore).toContain("data/");
-    // The credentials, and the engine's own SQLite file wherever `--database` puts it.
     expect(ignore).toContain(".env");
-    expect(ignore).toContain("*.db");
+    expect(ignore).not.toContain("data/");
+    expect(ignore).not.toContain("*.db");
+  });
+});
+
+describe("the Factory asset declaration", () => {
+  it.each(templateNames)("%s declares retained non-source inputs", (template) => {
+    const stamped = plan(choicesFor(template));
+    const manifest = JSON.parse(contentAt(stamped.files, ".kojo/factory.json")) as {
+      formatVersion: number;
+      assets: ReadonlyArray<string>;
+    };
+
+    expect(manifest.formatVersion).toBe(1);
+    expect(manifest.assets).toContain("kojo.config.yaml");
+    expect(manifest.assets).toContain("sandbox/Dockerfile");
+    expect(manifest.assets.some((asset) => asset.startsWith("prompts/"))).toBe(true);
+    expect(manifest.assets).not.toContain(".env");
+    expect(manifest.assets.every((asset) => !asset.startsWith("data/"))).toBe(true);
   });
 });
 

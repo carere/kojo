@@ -5,7 +5,6 @@ import { existsSync } from "node:fs";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Path } from "effect";
-import * as InMemoryImageBuilder from "../../../../../src/contexts/scaffold/adapters/InMemoryImageBuilder.ts";
 import {
   type TemplateName,
   templateNames,
@@ -79,10 +78,7 @@ const stampedInto = (template: TemplateName) =>
       sandbox: "docker",
       template,
       engine: thisEngine(),
-      uid: 1000,
-      gid: 1000,
-      skipImage: true,
-    }).pipe(Effect.provide(InMemoryImageBuilder.layer), Effect.orDie);
+    }).pipe(Effect.orDie);
 
     yield* fileSystem
       .makeDirectory(path.join(root, "node_modules"), { recursive: true })

@@ -1,0 +1,10 @@
+layer: library
+language: typescript
+
+tasks:
+  test:
+    command: bun node_modules/.bin/vitest run --project unit
+    inputs:
+      - src/**/*
+      - tests/unit/**/*
+      - vitest.config.ts

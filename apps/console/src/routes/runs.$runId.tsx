@@ -16,7 +16,7 @@ import type { RunViewMode } from "../contexts/trace/models/view.ts";
  */
 export const Route = createFileRoute("/runs/$runId")({
   validateSearch: (search: Record<string, unknown>): { readonly view: RunViewMode } => ({
-    view: search["view"] === "table" ? "table" : "timeline",
+    view: search.view === "table" ? "table" : "timeline",
   }),
   component: RunRoute,
 });

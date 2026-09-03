@@ -18,7 +18,9 @@ export default defineConfig({
           include: ["tests/integration/**/*.test.ts"],
           // Real adapters spawn real processes. The default five seconds is a budget for a pure
           // function, not for `git init` plus a commit.
-          testTimeout: 30_000,
+          // Process-heavy tests keep their own domain deadlines. Give those assertions enough
+          // runner time to complete when the CI Host is slower than a development Host.
+          testTimeout: 60_000,
           // One file at a time. These tests spawn whole processes, build containers, and share one
           // Docker daemon, so running the files in parallel makes them compete for the resources
           // they are measuring — and a lane that failed because the machine was busy is a red test
@@ -30,6 +32,22 @@ export default defineConfig({
           // is `fixtureRoot` in `lane.test.ts`. This setting stands on its own reason and nothing
           // else.
           fileParallelism: false,
+        },
+      },
+      {
+        test: {
+          name: "host",
+          include: ["tests/host/**/*.test.ts"],
+          fileParallelism: false,
+          testTimeout: 60_000,
+        },
+      },
+      {
+        test: {
+          name: "release-macos",
+          include: ["tests/release/**/*.test.ts"],
+          fileParallelism: false,
+          testTimeout: 1_200_000,
         },
       },
     ],

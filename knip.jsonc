@@ -23,35 +23,44 @@
   // An export used only inside its own file is a local, not a public surface.
   "ignoreExportsUsedInFile": true,
 
-  // Two dependencies nothing appears to import.
-  //
   // Biome is invoked by moon and by the git hooks rather than imported.
   //
-  // `kojo` is declared at the repository root because `.kojo/` imports it — `kojo doctor` refuses a
-  // factory whose directory cannot resolve the engine, and that resolution is what the declaration
-  // buys. It is a `workspace:*` link, so knip follows `kojo/contexts/...` straight into
-  // `packages/kojo/src/` and never attributes the import to the dependency entry that made it
-  // resolvable. Removing the entry would leave the factory working here and broken for anybody who
-  // installed Kojo, which is the fault this line is protecting.
-  "ignoreDependencies": ["@biomejs/biome"],
+  // `@carere/kojo` is the repository's CLI dependency. Factory source imports its authoring API
+  // from `@carere/kojo-runtime`, so no TypeScript module imports the CLI package.
+  "ignoreDependencies": ["@biomejs/biome", "@carere/kojo"],
 
   "workspaces": {
     ".": {
-      // Kojo's own factory. `.kojo/workflows/factory.ts` is loaded by path at run time — `kojo run`
-      // imports it out of the directory — so nothing in this repository imports it and knip reads
-      // the whole factory, and the two dependencies it exists to import, as dead.
+      // The Daemon captures Kojo's own Factory by path, so nothing in this repository imports its
+      // top-level Workflow.
       //
       // Only the top-level workflow is named. Everything else under `.kojo/` is reached from it, so
       // a lane or a check that stops being imported is still reported, which is the answer wanted:
       // an orphaned lane is dead code exactly like any other.
       "entry": [".kojo/workflows/factory.ts"]
     },
+    "packages/kojo": {
+      // The scripts are Moon task entry points. The managed LaunchAgent starts the launcher entry
+      // through its immutable bundle. The browser tier starts its isolated Daemon and grant client
+      // from Playwright command strings. The native Host controller starts the logout fixture from
+      // a real SSH/PAM session. No TypeScript module imports these programs.
+      "entry": [
+        "src/scripts/*.ts",
+        "src/launcher/main.ts",
+        "tests/support/daemon/authenticatedConsoleServer.ts",
+        "tests/support/daemon/consoleGrant.ts",
+        "tests/support/daemon/systemdLogoutFixture.ts",
+        "tests/release/support/*.ts"
+      ]
+    },
     "apps/console": {
-      // A program, not a module: `playwright.config.ts` starts it as a web server by naming it in a
-      // command string, so nothing imports it and knip reads it as dead. It is the entry point of
-      // the one server in the browser tier that stamps a factory and runs `kojo run` — see
-      // `tests/browser/realFactory.ts`.
-      "entry": ["tests/browser/realFactory.ts"]
+      // The shipped release browser suite has its own native-Host configuration. CI starts both
+      // files from a shell controller, so neither is reachable from the regular browser tier.
+      "entry": ["playwright.release.config.ts", "tests/release/*.spec.ts"]
+    },
+    "packages/kojo-runtime": {
+      // Imported only by the fresh Runner-process tests through an exact filesystem registration.
+      "ignoreFiles": ["tests/fixtures/runner/**"]
     }
   }
 }

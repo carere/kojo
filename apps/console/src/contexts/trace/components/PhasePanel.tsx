@@ -1,22 +1,20 @@
 import { useSolux } from "@carere/solux";
 import { Link } from "@tanstack/solid-router";
-import { createEffect, For, type JSX, onCleanup, Show } from "solid-js";
+import { createEffect, type JSX, onCleanup, Show } from "solid-js";
 import { Badge, type BadgeTone } from "../../shared/components/Badge.tsx";
+import { ResourceList } from "../../shared/components/data-grid/ResourceList.tsx";
 import { Notice } from "../../shared/components/Notice.tsx";
 import { Field, Pane } from "../../shared/components/Pane.tsx";
 import { settled } from "../../shared/hooks/settled.ts";
 import { axisDuration } from "../../shared/lib/duration.ts";
 import { instant } from "../../shared/lib/instant.ts";
 import { useNow } from "../../shared/ports/Now.tsx";
-import { useOccurrences } from "../hooks/useOccurrences.ts";
 import { useRun } from "../hooks/useRun.ts";
 import { discriminatorOf, nameOf, phaseIdOf } from "../models/ids.ts";
 import type { PhaseLine, PhaseState, RunDoc } from "../models/RunDoc.ts";
 import { keepView } from "../models/view.ts";
 import { deselected, selected, type WaterfallState } from "../services/waterfallStore.ts";
-import { ArtifactPane } from "./ArtifactPane.tsx";
 import { DetailPanel } from "./DetailPanel.tsx";
-import { OccurrenceList } from "./OccurrenceList.tsx";
 
 /**
  * Everything known about one phase — console.md §6, in the order somebody investigating reads it.
@@ -25,18 +23,8 @@ import { OccurrenceList } from "./OccurrenceList.tsx";
  * reader of the query the run view already made — same key, same cache, no second request. So opening
  * a phase costs nothing, and nothing in the panel can fail in a way that takes the waterfall with it.
  *
- * Five things come off the record and three do not:
- *
- * | Off the record | Fetched on demand |
- * |---|---|
- * | summary, the agent, errors, repository changes, where it ran | the prompt, the session, the diff |
- *
- * The three on the right are not in the trace at all, by design — two are too large for a wide row
- * and the third is git's to supply — so each is its own request and each degrades on its own.
- *
- * **Agent activity lives here and nowhere else.** Tool calls, commands and iterations stream while
- * an agent phase is in flight and are a finished list once it is not. Code phases do not show or
- * fetch agent-only information.
+ * Captured Artifacts are fetched through the authenticated Run Artifact API and are shown at Run
+ * level. This panel does not call repository-local trace endpoints.
  */
 
 const stateTones: Record<PhaseState, BadgeTone> = {
@@ -95,13 +83,6 @@ export const PhasePanel = (props: {
   const startedAt = () => record()?.startedAt ?? inFlight()?.startedAt ?? 0;
   const endedAt = () => record()?.endedAt ?? now();
   const sandboxId = () => record()?.sandboxId ?? inFlight()?.sandboxId;
-
-  const stream = useOccurrences({
-    runId: () => props.runId,
-    phaseId,
-    enabled: () => kind() === "agent",
-    live: () => inFlight() !== undefined,
-  });
 
   const failedChecks = (): ReadonlyArray<string> => record()?.verification?.failed ?? [];
   const hasErrors = (): boolean => record()?.errorTag !== undefined || failedChecks().length > 0;
@@ -229,13 +210,18 @@ export const PhasePanel = (props: {
               </Show>
               <Show when={failedChecks().length > 0}>
                 <Field name="failed-checks" label="failed checks">
-                  <For each={failedChecks()}>
-                    {(check) => (
+                  <ResourceList
+                    emptyMessage="No failed checks match this filter."
+                    items={failedChecks()}
+                    label="Failed checks"
+                    namespace={`phase-${props.name}-${props.attempt}-failed-checks`}
+                    searchText={(check) => check}
+                    render={(check) => (
                       <span data-check={check} data-check-held="false" class="mr-1 inline-block">
                         ✗ {check}
                       </span>
                     )}
-                  </For>
+                  />
                 </Field>
               </Show>
             </div>
@@ -285,9 +271,14 @@ export const PhasePanel = (props: {
              * policy, and the outcome says whether Kojo restored the path or work was lost.
              */}
             <Show when={(record()?.breaches ?? []).length > 0}>
-              <div data-breaches class="flex flex-col gap-1">
-                <For each={record()?.breaches ?? []}>
-                  {(breach) => (
+              <div data-breaches>
+                <ResourceList
+                  emptyMessage="No permission breaches match this filter."
+                  items={record()?.breaches ?? []}
+                  label="Permission breaches"
+                  namespace={`phase-${props.name}-${props.attempt}-permission-breaches`}
+                  searchText={(breach) => `${breach.path}\n${breach.outcome._tag}`}
+                  render={(breach) => (
                     <div
                       data-breach={breach.path}
                       data-breach-outcome={breach.outcome._tag}
@@ -299,7 +290,7 @@ export const PhasePanel = (props: {
                       <span class="min-w-0 truncate font-mono">{breach.path}</span>
                     </div>
                   )}
-                </For>
+                />
               </div>
             </Show>
           </Pane>
@@ -334,37 +325,6 @@ export const PhasePanel = (props: {
             )}
           </Show>
         </Pane>
-
-        <Show when={kind() === "agent"}>
-          <OccurrenceList occurrences={stream.occurrences()} live={inFlight() !== undefined} />
-
-          <ArtifactPane
-            runId={props.runId}
-            phaseId={phaseId()}
-            kind="prompt"
-            title="Prompt sent to the agent"
-            about="The system and user instructions that the agent received."
-            available={record() !== undefined}
-          />
-          <ArtifactPane
-            runId={props.runId}
-            phaseId={phaseId()}
-            kind="session"
-            title="Agent conversation"
-            about="The agent transcript, including correction turns."
-            available={record() !== undefined}
-          />
-        </Show>
-        <Show when={(record()?.repo?.commits.length ?? 0) > 0}>
-          <ArtifactPane
-            runId={props.runId}
-            phaseId={phaseId()}
-            kind="diff"
-            title="Code diff"
-            about="The content of the changes in this phase's commits."
-            available={record() !== undefined}
-          />
-        </Show>
       </Show>
     </DetailPanel>
   );

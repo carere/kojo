@@ -1,4 +1,4 @@
-import { Option, Schema } from "effect";
+import { Schema } from "effect";
 
 /**
  * Identifies one **acquisition** of one sandbox, not one sandbox definition.
@@ -25,7 +25,7 @@ export type SandboxId = typeof SandboxId.Type;
  *   scope twice inside one millisecond. Every one of those acquisitions is a separate container owed
  *   a separate row, and two rows sharing an id is a join nobody can undo afterwards.
  * - *A counter alone* collides across processes, which is the shape this whole design is built
- *   around: `kojo run` starts a run that suspends and exits, `kojo gate answer` resumes it days
+ *   around: `kojo workflow start` creates a Run, and `kojo gate answer` resumes it days
  *   later, and an in-memory counter restarts at one in the second process.
  *
  * **This is prophylactic, and the record should say so.** No run has been observed colliding. The
@@ -53,27 +53,6 @@ export const makeSandboxId = (
   acquiredAt: number,
   sequence: number,
 ): SandboxId => `${runId}/${name}/${acquiredAt}-${sequence}` as SandboxId;
-
-/**
- * The scope's name, read back out of an acquisition id — **the lane a phase ran in**.
- *
- * The inverse of `makeSandboxId`, and it lives here so a change to the format cannot leave a reader
- * behind. `PhaseRecord.sandboxId` is the only column that says which lane a phase belonged to, so
- * this is what turns *"which work was the hotfix lane's"* into a read of one column rather than a
- * join against the sandbox rows — a join which, the moment two lanes run at once, has nothing to
- * join on but overlapping timestamps.
- *
- * Parsed from the ends rather than from the front, because the middle is the only part that may
- * contain a slash: an execution id is a hash digest and the discriminator is `<millis>-<sequence>`,
- * while a scope name is whatever the author wrote. Anything that is not `a/b/c` is refused rather
- * than guessed at.
- */
-export const laneOf = (sandboxId: string | undefined): Option.Option<string> => {
-  if (sandboxId === undefined) return Option.none();
-  const first = sandboxId.indexOf("/");
-  const last = sandboxId.lastIndexOf("/");
-  return first < 0 || last <= first ? Option.none() : Option.some(sandboxId.slice(first + 1, last));
-};
 
 /** How many sandboxes this process has acquired. Module state, because the process is the scope. */
 let acquisitions = 0;

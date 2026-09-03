@@ -9,6 +9,7 @@ import { type Asking, waitedMillis } from "./Asking.ts";
  * move, and there is nothing left in this row to compute.
  */
 export interface QueueRow {
+  readonly state: "unanswered" | "recorded" | "applied" | "expired";
   readonly runId: string;
   readonly gate: string;
   /** The engine's own name for this round of this gate. Carried whole; the route encodes it. */
@@ -60,6 +61,15 @@ export const queueRows = (options: {
         : byState;
     })
     .map((asking) => ({
+      state:
+        asking.daemonState ??
+        (asking.expiredAt !== undefined
+          ? "expired"
+          : asking.appliedAt !== undefined
+            ? "applied"
+            : asking.verdict === undefined
+              ? "unanswered"
+              : "recorded"),
       runId: asking.request.runId,
       gate: asking.request.gate,
       asking: asking.request.asking,

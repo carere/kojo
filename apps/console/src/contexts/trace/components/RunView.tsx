@@ -1,6 +1,7 @@
 import { SoluxProvider } from "@carere/solux";
 import { Link, Outlet, useNavigate } from "@tanstack/solid-router";
-import { type JSX, Show } from "solid-js";
+import { createSignal, type JSX, Show } from "solid-js";
+import { cancelRun, retryUncertainAction } from "../../daemon/services/browserAccess.ts";
 import { GateCard } from "../../gate/components/GateCard.tsx";
 import { useAskings } from "../../gate/hooks/useAskings.ts";
 import { type Asking, latestAskingOf } from "../../gate/models/Asking.ts";
@@ -18,6 +19,7 @@ import type { RunViewMode } from "../models/view.ts";
 import { type PhaseSpan, spansOf } from "../models/waterfall.ts";
 import { waterfallStore } from "../services/waterfallStore.ts";
 import { PhaseTable } from "./PhaseTable.tsx";
+import { PublishedArtifacts } from "./PublishedArtifacts.tsx";
 import { RunOutcome } from "./RunOutcome.tsx";
 import { Waterfall } from "./Waterfall.tsx";
 
@@ -42,13 +44,18 @@ import { Waterfall } from "./Waterfall.tsx";
 const statusTones: Record<string, BadgeTone> = {
   executing: "running",
   suspended: "waiting",
+  held: "danger",
   succeeded: "good",
   failed: "danger",
+  cancelled: "danger",
 };
 
 /** How long the run has been going, or how long it took. Both come from the injected clock. */
 const elapsedOf = (doc: RunDoc, now: number): string => {
-  const finished = doc.run.outcome === "succeeded" || doc.run.outcome === "failed";
+  const finished =
+    doc.run.outcome === "succeeded" ||
+    doc.run.outcome === "failed" ||
+    doc.run.outcome === "cancelled";
   const until = finished ? (doc.run.finishedAt ?? now) : now;
   return axisDuration(until - doc.run.run.startedAt);
 };
@@ -89,11 +96,57 @@ export const RunView = (props: {
   const run = useRun(() => props.runId);
   const store = waterfallStore();
   const navigate = useNavigate();
+  const [cancelAcknowledged, setCancelAcknowledged] = createSignal(false);
+  const [cancelNotice, setCancelNotice] = createSignal<string>();
+  const [cancelPending, setCancelPending] = createSignal(false);
+  const [retryActionId, setRetryActionId] = createSignal("");
+  const [retryReason, setRetryReason] = createSignal("");
+  const [duplicationAcknowledged, setDuplicationAcknowledged] = createSignal(false);
+  const [retryPending, setRetryPending] = createSignal(false);
+  const [retryNotice, setRetryNotice] = createSignal<string>();
 
   const doc = () => settled(run);
-  const status = (): RunStatus => doc()?.run.outcome ?? "executing";
+  const status = (): RunStatus => doc()?.daemon?.state ?? doc()?.run.outcome ?? "executing";
   /** The server answered, and what it answered was *there is no such run*. */
   const missing = () => refusal(run);
+  const requestCancellation = async (): Promise<void> => {
+    if (!cancelAcknowledged()) return;
+    setCancelPending(true);
+    try {
+      const result = await cancelRun(props.runId);
+      setCancelNotice(
+        result.cancellation === "confirmed"
+          ? "Run cancellation is confirmed. Execution stopped."
+          : "Cancellation intent is durable. Execution stop is not confirmed.",
+      );
+      setCancelAcknowledged(false);
+      await run.refetch();
+    } catch (cause) {
+      setCancelNotice(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setCancelPending(false);
+    }
+  };
+  const requestUncertainRetry = async (actionId: string): Promise<void> => {
+    if (retryActionId() !== actionId || retryReason().trim() === "" || !duplicationAcknowledged())
+      return;
+    setRetryPending(true);
+    try {
+      await retryUncertainAction({
+        runId: props.runId,
+        actionId,
+        reason: retryReason().trim(),
+        possibleDuplicationAcknowledged: true,
+      });
+      setRetryNotice(`Retry authorization is durable for exact Action ${actionId}.`);
+      setDuplicationAcknowledged(false);
+      await run.refetch();
+    } catch (cause) {
+      setRetryNotice(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRetryPending(false);
+    }
+  };
 
   /**
    * The askings, polled while this run can still move.
@@ -229,6 +282,24 @@ export const RunView = (props: {
                * the durable state of a run.
                */}
               <div class="flex flex-wrap items-baseline gap-x-5 gap-y-1" data-run-stamp>
+                <Show when={document().daemon}>
+                  {(daemon) => (
+                    <>
+                      <Stamp name="project" label="Project">
+                        {daemon().projectId}
+                      </Stamp>
+                      <Stamp name="revision" label="Pinned revision">
+                        {daemon().revisionId}
+                      </Stamp>
+                      <Stamp name="graph" label="Pinned graph">
+                        {daemon().packageGraphId}
+                      </Stamp>
+                      <Stamp name="execution" label="Execution">
+                        {daemon().queueReason ?? daemon().state}
+                      </Stamp>
+                    </>
+                  )}
+                </Show>
                 <Stamp name="engine" label="engine">
                   {document().run.run.engineVersion}
                 </Stamp>
@@ -254,6 +325,160 @@ export const RunView = (props: {
                 </Stamp>
               </div>
             </header>
+
+            <Show when={document().daemon?.executionFault}>
+              {(fault) => (
+                <Notice tone="empty" title={`Pinned content fault: ${fault().code}`}>
+                  <p class="mt-1">{fault().detail}</p>
+                  <p class="mt-1 font-mono text-xs">Remedy: {fault().remedy}</p>
+                </Notice>
+              )}
+            </Show>
+
+            <Show when={document().daemon?.cancellation}>
+              {(cancellation) => (
+                <Notice
+                  tone={cancellation().state === "confirmed" ? "empty" : "retrying"}
+                  title={
+                    cancellation().state === "confirmed"
+                      ? "Run Cancelled — execution stopped"
+                      : "Cancellation requested — execution stop is not confirmed"
+                  }
+                >
+                  <p class="mt-1">
+                    Source: {cancellation().source}. Requested: {cancellation().requestedAt}.
+                  </p>
+                </Notice>
+              )}
+            </Show>
+
+            <Show when={document().daemon?.recovery}>
+              {(recovery) => (
+                <Notice tone="retrying" title="Interrupted sibling recovery">
+                  <p class="mt-1">{recovery().detail}</p>
+                </Notice>
+              )}
+            </Show>
+
+            <Show when={document().daemon?.cleanup}>
+              {(cleanup) => (
+                <Notice
+                  tone={cleanup().state === "fault" ? "empty" : "retrying"}
+                  title={`Resource cleanup: ${cleanup().state}`}
+                >
+                  <Show when={cleanup().detail}>{(detail) => <p class="mt-1">{detail()}</p>}</Show>
+                </Notice>
+              )}
+            </Show>
+
+            <Show when={document().daemon?.uncertainty}>
+              {(uncertainty) => (
+                <Notice
+                  tone="retrying"
+                  title={`External action uncertainty: ${uncertainty().state}`}
+                >
+                  <p class="mt-1">
+                    Action <code>{uncertainty().actionId}</code> for Phase {uncertainty().phasePath}
+                    #{uncertainty().attempt} has no confirmed result.
+                  </p>
+                  <p class="mt-1 text-xs">
+                    Missing output, timeout, replacement, a new Claim, and Trace absence do not
+                    prove that this action did not occur. Recovery policy:{" "}
+                    {uncertainty().recoveryPolicy}.
+                  </p>
+                  <Show when={uncertainty().evidence}>
+                    {(evidence) => (
+                      <p class="mt-1 text-xs">
+                        Evidence: {evidence().kind} — {evidence().detail}
+                      </p>
+                    )}
+                  </Show>
+                  <Show when={uncertainty().state === "unresolved" && !isTerminal(status())}>
+                    <section class="mt-3 grid max-w-2xl gap-2" aria-label="Retry uncertain action">
+                      <label class="grid gap-1 text-sm">
+                        Exact action ID
+                        <input
+                          class="rounded border bg-background px-2 py-1 font-mono text-xs"
+                          value={retryActionId()}
+                          onInput={(event) => setRetryActionId(event.currentTarget.value)}
+                        />
+                      </label>
+                      <label class="grid gap-1 text-sm">
+                        Reason
+                        <textarea
+                          class="rounded border bg-background px-2 py-1 text-sm"
+                          value={retryReason()}
+                          onInput={(event) => setRetryReason(event.currentTarget.value)}
+                        />
+                      </label>
+                      <label class="flex items-start gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={duplicationAcknowledged()}
+                          onChange={(event) =>
+                            setDuplicationAcknowledged(event.currentTarget.checked)
+                          }
+                        />
+                        <span>
+                          I acknowledge that this retry can duplicate the external action.
+                        </span>
+                      </label>
+                      <button
+                        type="button"
+                        class="w-fit rounded border border-red-700 px-3 py-1 text-red-700 text-sm dark:text-red-300"
+                        disabled={
+                          retryPending() ||
+                          retryActionId() !== uncertainty().actionId ||
+                          retryReason().trim() === "" ||
+                          !duplicationAcknowledged()
+                        }
+                        onClick={() => void requestUncertainRetry(uncertainty().actionId)}
+                      >
+                        Retry exact action
+                      </button>
+                    </section>
+                  </Show>
+                  <Show when={retryNotice()}>
+                    {(notice) => (
+                      <p role="status" class="mt-2">
+                        {notice()}
+                      </p>
+                    )}
+                  </Show>
+                </Notice>
+              )}
+            </Show>
+
+            <Show when={!isTerminal(status())}>
+              <section class="rounded border p-3" aria-label="Cancel Run">
+                <label class="flex items-start gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={cancelAcknowledged()}
+                    onChange={(event) => setCancelAcknowledged(event.currentTarget.checked)}
+                  />
+                  <span>
+                    I understand that cancellation does not undo completed effects or prove Resource
+                    cleanup.
+                  </span>
+                </label>
+                <button
+                  type="button"
+                  class="mt-2 rounded border border-red-700 px-3 py-1 text-red-700 text-sm dark:text-red-300"
+                  disabled={cancelPending() || !cancelAcknowledged()}
+                  onClick={() => void requestCancellation()}
+                >
+                  Cancel Run
+                </button>
+                <Show when={cancelNotice()}>
+                  {(notice) => (
+                    <p role="status" class="mt-2 text-sm">
+                      {notice()}
+                    </p>
+                  )}
+                </Show>
+              </section>
+            </Show>
 
             {/*
              * The gate card, directly beneath the header — console.md §4 — because it is the one
@@ -349,6 +574,8 @@ export const RunView = (props: {
                     </Show>
                   </Show>
                 </div>
+
+                <PublishedArtifacts runId={props.runId} artifacts={document().artifacts ?? []} />
 
                 {/*
                  * The dock. It renders nothing at all when no detail route is matched, which is what

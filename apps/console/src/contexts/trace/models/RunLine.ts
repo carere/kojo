@@ -1,17 +1,28 @@
 /**
- * One line of `GET /api/runs`, as the wire carries it.
+ * One line of `GET /api/v1/runs`, as the Daemon wire carries it.
  *
- * The server's `RunSummary` holds the whole immutable run record; the list reads the three fields it
- * puts on screen and the two mutable ones that say where the run stands.
+ * The server's `RunSummary` holds the whole immutable Run record. The list keeps the Project and
+ * Workflow selectors with the fields it puts on screen and the mutable fields that say where the
+ * Run stands.
  */
 export interface RunLine {
   readonly run: {
     readonly runId: string;
+    readonly projectId: string;
     readonly workflow: string;
     readonly startedAt: number;
   };
   /** How the run last stopped. Absent while it has never stopped, which is *executing*. */
-  readonly outcome?: "succeeded" | "failed" | "suspended";
+  readonly outcome?: "succeeded" | "failed" | "suspended" | "cancelled";
+  readonly executionState?:
+    | "queued"
+    | "executing"
+    | "suspended"
+    | "held"
+    | "succeeded"
+    | "failed"
+    | "cancelled";
+  readonly queueReason?: string;
 }
 
 /**
@@ -20,9 +31,17 @@ export interface RunLine {
  * Four states from the wire's three, because an absent outcome is not a missing value — it is the
  * run still going. Naming it keeps every consumer from re-deciding what `undefined` meant.
  */
-export type RunStatus = "executing" | "suspended" | "succeeded" | "failed";
+export type RunStatus =
+  | "queued"
+  | "executing"
+  | "suspended"
+  | "held"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
 
-export const statusOf = (line: RunLine): RunStatus => line.outcome ?? "executing";
+export const statusOf = (line: RunLine): RunStatus =>
+  line.executionState ?? line.outcome ?? "executing";
 
 /**
  * Has this run stopped for good?
@@ -32,7 +51,7 @@ export const statusOf = (line: RunLine): RunStatus => line.outcome ?? "executing
  * hours ago as still waiting.
  */
 export const isTerminal = (status: RunStatus): boolean =>
-  status === "succeeded" || status === "failed";
+  status === "succeeded" || status === "failed" || status === "cancelled";
 
 /**
  * Is there nothing left to watch?

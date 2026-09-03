@@ -28,7 +28,7 @@ export const commands = (choices: FactoryChoices): string => {
   return [
     ...ownedByYou("Every real invocation this factory makes. Three of the four are still fake."),
     "",
-    'import { isPlaceholder } from "@carere/kojo/contexts/scaffold/models/Placeholder";',
+    'import { isPlaceholder } from "@carere/kojo-runtime/contexts/workflow/models/Placeholder";',
     "",
     "/**",
     " * What a code phase runs.",

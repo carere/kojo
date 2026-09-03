@@ -2,6 +2,7 @@ import { useSolux } from "@carere/solux";
 import { Link } from "@tanstack/solid-router";
 import { createEffect, For, type JSX, onCleanup, Show } from "solid-js";
 import { Badge, type BadgeTone } from "../../shared/components/Badge.tsx";
+import { ResourceList } from "../../shared/components/data-grid/ResourceList.tsx";
 import { Notice } from "../../shared/components/Notice.tsx";
 import { Field, Pane } from "../../shared/components/Pane.tsx";
 import { settled } from "../../shared/hooks/settled.ts";
@@ -272,32 +273,35 @@ export const SandboxPanel = (props: {
               </p>
             }
           >
-            <ul class="flex flex-col gap-1">
-              <For each={inside()}>
-                {(phase) => (
-                  <li>
-                    <Link
-                      to="/runs/$runId/phases/$name/$attempt"
-                      params={{
-                        runId: props.runId,
-                        name: phase.name,
-                        attempt: String(phase.attempt),
-                      }}
-                      search={keepView}
-                      data-inside={phase.phaseId}
-                      class="flex items-center gap-2 text-xs underline underline-offset-2"
-                    >
-                      <span class="font-mono">{phase.name}</span>
-                      <span class="text-muted-foreground">
-                        {axisDuration(phase.endedAt - phase.startedAt)}
-                      </span>
-                    </Link>
-                  </li>
+            <div class="flex flex-col gap-1">
+              <ResourceList
+                emptyMessage="No completed Phases match this filter."
+                items={inside()}
+                label="Phases in this Sandbox"
+                namespace={`sandbox-${props.name}-${props.acquisition}-phases`}
+                searchText={(phase) => `${phase.name}\n${phase.kind}\n${phase.outcome}`}
+                render={(phase) => (
+                  <Link
+                    to="/runs/$runId/phases/$name/$attempt"
+                    params={{
+                      runId: props.runId,
+                      name: phase.name,
+                      attempt: String(phase.attempt),
+                    }}
+                    search={keepView}
+                    data-inside={phase.phaseId}
+                    class="flex items-center gap-2 text-xs underline underline-offset-2"
+                  >
+                    <span class="font-mono">{phase.name}</span>
+                    <span class="text-muted-foreground">
+                      {axisDuration(phase.endedAt - phase.startedAt)}
+                    </span>
+                  </Link>
                 )}
-              </For>
+              />
               <Show when={flying()}>
                 {(one) => (
-                  <li>
+                  <div class="p-2">
                     <Link
                       to="/runs/$runId/phases/$name/$attempt"
                       params={{
@@ -312,10 +316,10 @@ export const SandboxPanel = (props: {
                       <span class="font-mono">{one().name}</span>
                       <span class="text-muted-foreground">running</span>
                     </Link>
-                  </li>
+                  </div>
                 )}
               </Show>
-            </ul>
+            </div>
           </Show>
         </Pane>
       </Show>

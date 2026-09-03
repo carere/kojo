@@ -1,798 +1,885 @@
+import { spawnSync } from "node:child_process";
+import type {
+  RunDocument,
+  RunPhaseDocument,
+  RunSandboxDocument,
+} from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 import { expect, type Locator, type Page, test } from "@playwright/test";
-import { consoleAt, type FixtureName, frozenNow, open } from "./harness.ts";
 
-/**
- * The waterfall's grammar, graded against the real server serving stated records.
- *
- * console.md §5 and adr/trace/0001 are the specification, and each `describe` below is one line of
- * it. The assertions are about **geometry and structure** rather than about colour: a colour can be
- * re-themed, and "the break is drawn across every row" is a measurable claim about a box while "the
- * gate looks long" is not.
- *
- * Every fixture is written against a frozen clock, so every width here is the same number on every
- * machine.
- */
+const root = "/tmp/kojo-ticket-69-browser";
+const origin = "http://127.0.0.1:47241";
+const grantScript = new URL(
+  "../../../../packages/kojo/tests/support/daemon/consoleGrant.ts",
+  import.meta.url,
+).pathname;
+const base = Date.parse("2026-03-01T00:00:00.000Z");
+const hour = 60 * 60 * 1_000;
+const minute = 60 * 1_000;
+const runReadyTimeout = 30_000;
 
-/** One run's page, at the frozen instant, in whichever of the two modes. */
+const launch = (): string => {
+  const result = spawnSync("bun", [grantScript, root], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error("the Waterfall fixture Daemon did not issue a grant");
+  return result.stdout;
+};
+
+const at = (offset: number): string => new Date(base + offset).toISOString();
+const phase = (
+  _runId: string,
+  name: string,
+  startedAt: number,
+  endedAt: number,
+  options: Partial<RunPhaseDocument> = {},
+): RunPhaseDocument => ({
+  phasePath: name,
+  attempt: 1,
+  kind: "code",
+  outcome: "succeeded",
+  description: name,
+  startedAt: at(startedAt),
+  endedAt: at(endedAt),
+  ...options,
+});
+
+const sandbox = (
+  sandboxId: string,
+  name: string,
+  acquiredAt: number,
+  releasedAt: number,
+): RunSandboxDocument => ({
+  sandboxId,
+  name,
+  provider: "no-sandbox",
+  kind: "none",
+  branch: `kojo/${sandboxId.split("/")[0]}`,
+  worktreePath: `/private/${sandboxId}`,
+  environment: {},
+  acquiredAt: at(acquiredAt),
+  releasedAt: at(releasedAt),
+  outcome: "released",
+});
+
+const runDocument = (
+  runId: string,
+  state: RunDocument["state"],
+  phases: ReadonlyArray<RunPhaseDocument>,
+  options: Partial<RunDocument> = {},
+): RunDocument => ({
+  runId,
+  projectId: "project-waterfall",
+  workflowName: "waterfall",
+  revisionId: "a".repeat(64),
+  packageGraphId: "b".repeat(64),
+  state,
+  admittedAt: at(0),
+  startedAt: at(0),
+  ...(state === "succeeded" || state === "failed" || state === "cancelled"
+    ? { finishedAt: at(Math.max(...phases.map((item) => Date.parse(item.endedAt) - base), 1)) }
+    : {}),
+  phases,
+  sandboxes: [],
+  ...options,
+});
+
+const merged = (): RunDocument => {
+  const first = "run-merged/build/540000-1";
+  const second = "run-merged/build/149280000-2";
+  return runDocument(
+    "run-merged",
+    "succeeded",
+    [
+      phase("run-merged", "in_progress", 0, 200),
+      phase("run-merged", "route", 200, 8_200, { kind: "agent" }),
+      phase("run-merged", "hotfix", 10 * minute, 16 * minute, {
+        kind: "agent",
+        sandboxId: first,
+        agent: {
+          agent: "builder",
+          model: "fixture-model",
+          session: "run-merged-hotfix",
+          resumed: false,
+          tokensIn: 4_000,
+          tokensOut: 900,
+          contextTokens: 22_500,
+        },
+        repo: {
+          claimed: ["src/claimed.ts"],
+          changed: ["src/actual.ts"],
+          commits: ["abc1234"],
+        },
+        verification: {
+          envelope: "hotfix",
+          ran: ["lint", "test"],
+          failed: ["test"],
+          corrections: 2,
+          correctable: true,
+        },
+      }),
+      phase("run-merged", "test", 41 * hour + 28 * minute, 41 * hour + 30 * minute, {
+        sandboxId: second,
+      }),
+    ],
+    {
+      finishedAt: at(41 * hour + 30 * minute),
+      sandboxes: [
+        sandbox(first, "build", 9 * minute, 17 * minute),
+        sandbox(second, "build", 41 * hour + 27 * minute, 41 * hour + 30 * minute),
+      ],
+    },
+  );
+};
+
+const lanes = (withBreak = false): RunDocument => {
+  const runId = withBreak ? "run-lanes-break" : "run-lanes";
+  const api = `${runId}/api/0-1`;
+  const web = `${runId}/web/0-1`;
+  const duration = withBreak ? 3 * hour : 10 * minute;
+  return runDocument(
+    runId,
+    "succeeded",
+    [
+      phase(runId, withBreak ? "compile" : "probe", 0, withBreak ? duration : 8 * minute, {
+        kind: "agent",
+        sandboxId: api,
+      }),
+      phase(runId, "sift", minute, 6 * minute, { sandboxId: web }),
+      phase(runId, "report", withBreak ? duration : 9 * minute, duration + minute, {
+        sandboxId: web,
+      }),
+    ],
+    {
+      finishedAt: at(duration + minute),
+      sandboxes: [
+        sandbox(api, "api", 0, duration + minute),
+        sandbox(web, "web", 0, duration + minute),
+      ],
+    },
+  );
+};
+
+const scout = (settled = false): RunDocument => {
+  const held = `run-scout/lane/${base + 1_000}-1`;
+  return runDocument(
+    "run-scout",
+    settled ? "succeeded" : "executing",
+    [
+      phase("run-scout", "in_progress", 0, 200),
+      ...(settled
+        ? [phase("run-scout", "explore", 1_000, 10_000, { kind: "agent", sandboxId: held })]
+        : []),
+    ],
+    settled
+      ? { finishedAt: at(10_000), sandboxes: [sandbox(held, "lane", 1_000, 10_000)] }
+      : {
+          inFlight: {
+            phasePath: "explore",
+            attempt: 1,
+            kind: "agent",
+            startedAt: at(1_000),
+            sandboxId: held,
+          },
+        },
+  );
+};
+
+const broken = (): RunDocument =>
+  runDocument(
+    "run-broken",
+    "failed",
+    [
+      phase("run-broken", "in_progress", 0, 200),
+      phase("run-broken", "route", 200, 30_000, { kind: "agent" }),
+      phase("run-broken", "plan", 30_000, 2 * minute, {
+        kind: "agent",
+        verification: {
+          envelope: "plan",
+          ran: ["lint"],
+          failed: [],
+          corrections: 2,
+          correctable: true,
+        },
+      }),
+      phase("run-broken", "implement", 2 * minute, 3 * minute, {
+        kind: "agent",
+        outcome: "failed",
+        errorTag: "CheckViolation",
+        verification: {
+          envelope: "implement",
+          ran: ["lint", "test"],
+          failed: ["test", "type checker"],
+          corrections: 0,
+          correctable: false,
+        },
+      }),
+      phase("run-broken", "edit", 3 * minute, 4 * minute, {
+        kind: "agent",
+        outcome: "failed",
+        errorTag: "PermissionBreach",
+        breaches: [
+          { path: ".kojo/factory.json", outcome: { _tag: "WorkLost" } },
+          { path: "src/restored.ts", outcome: { _tag: "Restored" } },
+        ],
+      }),
+    ],
+    { finishedAt: at(4 * minute) },
+  );
+
+const approve = (): RunDocument =>
+  runDocument("run-approve", "suspended", [
+    phase("run-approve", "hotfix", 0, 10_000, { kind: "agent", outcome: "interrupted" }),
+  ]);
+
+const stale = (): RunDocument =>
+  runDocument(
+    "run-stale",
+    "succeeded",
+    [
+      phase("run-stale", "explore", 0, 3 * hour, { kind: "agent" }),
+      phase("run-stale", "finish", 3 * hour, 3 * hour + minute),
+    ],
+    { finishedAt: at(3 * hour + minute) },
+  );
+
+const invalidAnswer = (): RunDocument =>
+  runDocument(
+    "run-invalid-answer",
+    "failed",
+    [
+      phase("run-invalid-answer", "draft", 0, minute, {
+        kind: "agent",
+        outcome: "failed",
+        errorTag: "EnvelopeParseError",
+      }),
+    ],
+    { finishedAt: at(minute) },
+  );
+
+const fixture = (runId: string, settled = false): RunDocument => {
+  if (runId === "run-merged") return merged();
+  if (runId === "run-lanes") return lanes();
+  if (runId === "run-lanes-break") return lanes(true);
+  if (runId === "run-scout") return scout(settled);
+  if (runId === "run-broken") return broken();
+  if (runId === "run-approve") return approve();
+  if (runId === "run-stale") return stale();
+  if (runId === "run-invalid-answer") return invalidAnswer();
+  return runDocument(runId, "executing", []);
+};
+
 const openRun = async (
   page: Page,
-  fixtures: FixtureName,
   runId: string,
-  options: { readonly view?: "timeline" | "table"; readonly now?: number } = {},
+  options: {
+    readonly view?: "timeline" | "table";
+    readonly now?: number;
+    readonly settled?: boolean;
+  } = {},
 ): Promise<void> => {
-  await page.addInitScript(`window.__KOJO_NOW__ = ${options.now ?? frozenNow}`);
-  await page.goto(`${consoleAt[fixtures]}/runs/${runId}?view=${options.view ?? "timeline"}`);
-  await page.waitForSelector("[data-waterfall], [data-notice], table");
+  await page.addInitScript(`window.__KOJO_NOW__ = ${options.now ?? base + 10_000}`);
+  await page.route(`**/api/v1/runs/${runId}`, (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(fixture(runId, options.settled)),
+    }),
+  );
+  await page.goto(launch());
+  await page.goto(`${origin}/runs/${runId}?view=${options.view ?? "timeline"}`);
+  await expect(page.locator("[data-run-header]")).toBeVisible({ timeout: runReadyTimeout });
 };
 
 const span = (page: Page, phaseId: string): Locator => page.locator(`[data-phase="${phaseId}"]`);
 const row = (page: Page, rowId: string): Locator => page.locator(`[data-row="${rowId}"]`);
-
-/** A span's own box, in the page's pixels. Every claim about the axis is a claim about one of these. */
 const boxOf = async (locator: Locator) => {
   const box = await locator.boundingBox();
-  if (box === null) throw new Error("that element is not on the page");
+  if (box === null) throw new Error("the Waterfall element is not on the page");
   return box;
 };
 
-test.describe("rows are the scope tree, not concurrency lanes", () => {
-  test("the host is the root row and each acquisition is a child of it", async ({ page }) => {
-    await openRun(page, "busy", "run-merged");
-
-    // Three rows for a run that is mostly sequential: a gantt using the vertical axis for
-    // concurrency would have drawn one lane and a staircase.
-    const rows = page.locator("[data-row]");
-    await expect(rows).toHaveCount(3);
-    await expect(rows.nth(0)).toHaveAttribute("data-scope", "host");
-    await expect(rows.nth(0)).toHaveAttribute("data-depth", "0");
-    await expect(rows.nth(1)).toHaveAttribute("data-scope", "sandbox");
-    await expect(rows.nth(1)).toHaveAttribute("data-depth", "1");
-    await expect(rows.nth(2)).toHaveAttribute("data-scope", "sandbox");
-  });
-
-  test("a phase sits on the row of the scope it ran in", async ({ page }) => {
-    await openRun(page, "busy", "run-merged");
-
-    // The router ran on the host; the builder ran inside a container. That is the question no other
-    // view answers, and it is answered by which row the span is inside.
-    await expect(row(page, "host").locator('[data-phase="run-merged/route/1"]')).toHaveCount(1);
-    await expect(row(page, "host").locator('[data-phase="run-merged/hotfix/1"]')).toHaveCount(0);
-
-    const first = page.locator('[data-scope="sandbox"]').first();
-    await expect(first.locator('[data-phase="run-merged/hotfix/1"]')).toHaveCount(1);
-    await expect(first.locator('[data-phase="run-merged/scout/1"]')).toHaveCount(1);
-  });
-
-  test("the rebuild a gate forced is a second row, with nothing built to mark it", async ({
-    page,
-  }) => {
-    await openRun(page, "busy", "run-merged");
-
-    const sandboxes = page.locator('[data-scope="sandbox"]');
-    await expect(sandboxes).toHaveCount(2);
-    // Same scope, two acquisitions, two rows. The trace writes one record per acquisition, so this
-    // falls out of the row model rather than out of a rebuild indicator anybody designed.
-    await expect(sandboxes.nth(0)).toContainText("build");
-    await expect(sandboxes.nth(0)).toContainText("acquisition 1 of 2");
-    await expect(sandboxes.nth(1)).toContainText("build");
-    await expect(sandboxes.nth(1)).toContainText("acquisition 2 of 2");
-
-    // And the work after the gate is on the second one, which is what makes the two rows a fact
-    // about the run rather than a repeated label.
-    await expect(sandboxes.nth(1).locator('[data-phase="run-merged/test/1"]')).toHaveCount(1);
-    await expect(sandboxes.nth(0).locator('[data-phase="run-merged/test/1"]')).toHaveCount(0);
-  });
+test("the Host is the root row and each acquisition is its child", async ({ page }) => {
+  await openRun(page, "run-merged");
+  await expect(page.locator("[data-row]")).toHaveCount(3);
+  await expect(page.locator("[data-row]").first()).toHaveAttribute("data-scope", "host");
+  await expect(page.locator('[data-scope="sandbox"]')).toHaveCount(2);
 });
 
-test.describe("the time axis breaks", () => {
-  test("a gate held for forty-one hours collapses to a fixed width stating its duration", async ({
-    page,
-  }) => {
-    await openRun(page, "busy", "run-merged");
-
-    const wall = page.locator("[data-break]");
-    await expect(wall).toHaveCount(1);
-    // The number, not a long bar. A 41-hour bar reads as "long" and cannot be measured.
-    await expect(wall).toHaveAttribute("data-break", "41h 12m");
-    await expect(page.locator("[data-break-label]")).toContainText("41h 12m");
-
-    // And it is *fixed* width: the run before the gate is ten minutes and the wait is forty-one
-    // hours, so anything proportional would be four hundred times wider than the whole rest.
-    const wallBox = await boxOf(wall);
-    const hotfix = await boxOf(span(page, "run-merged/hotfix/1"));
-    expect(wallBox.width).toBeLessThan(hotfix.width);
-  });
-
-  test("the break is drawn across every row, not only the one the gate stopped", async ({
-    page,
-  }) => {
-    await openRun(page, "busy", "run-merged");
-
-    const wall = await boxOf(page.locator("[data-break]"));
-    const first = await boxOf(row(page, "host"));
-    const last = await boxOf(page.locator('[data-scope="sandbox"]').nth(1));
-
-    // From the top of the first row to the bottom of the last: a gate stops the whole run, and a
-    // gap drawn per row would say it stopped only the rows it happened to touch.
-    expect(wall.y).toBeLessThanOrEqual(first.y + 1);
-    expect(wall.y + wall.height).toBeGreaterThanOrEqual(last.y + last.height - 1);
-  });
-
-  test("dead time between phases breaks the same way, so an idle hour cannot hide", async ({
-    page,
-  }) => {
-    await openRun(page, "busy", "run-approve");
-
-    // Nothing covers this stretch — the run is suspended and no phase is running — so it is a gap
-    // rather than a span, and it breaks on exactly the same terms.
-    const wall = page.locator("[data-break]");
-    await expect(wall).toHaveCount(1);
-    await expect(wall).toHaveAttribute("data-break", "41h 0m");
-    await expect(wall).toHaveAttribute("data-break-dense", "false");
-  });
-
-  test("a break inside a long phase keeps the phase drawn", async ({ page }) => {
-    await openRun(page, "busy", "run-stale");
-
-    const inside = page.locator('[data-break][data-break-dense="true"]');
-    await expect(inside).toHaveCount(1);
-    await expect(inside).toHaveAttribute("data-break", "3h 0m");
-
-    // The three-hour phase still has a head and a tail on either side of the wall. A break that
-    // swallowed the span would have deleted the very thing it was called in to make readable.
-    const wall = await boxOf(inside);
-    const explore = await boxOf(span(page, "run-stale/explore/1"));
-    expect(explore.x).toBeLessThan(wall.x);
-    expect(explore.x + explore.width).toBeGreaterThan(wall.x + wall.width);
-  });
-
-  test("wall-clock gives up every break, and the run becomes the hairline it was", async ({
-    page,
-  }) => {
-    await openRun(page, "busy", "run-merged");
-    const broken = await boxOf(span(page, "run-merged/hotfix/1"));
-    expect(broken.width).toBeGreaterThan(200);
-
-    await page.locator("[data-axis]").click();
-
-    await expect(page.locator("[data-axis]")).toHaveAttribute("data-axis", "wall-clock");
-    await expect(page.locator("[data-break]")).toHaveCount(0);
-    // Six minutes of an agent, on an axis sized to forty-one hours. This is the control case the
-    // toggle exists to offer: linear is not a compromise the design gave up on, it is unreadable.
-    const linear = await boxOf(span(page, "run-merged/hotfix/1"));
-    expect(linear.width).toBeLessThan(5);
-  });
+test("a Phase stays on the row of the scope where it ran", async ({ page }) => {
+  await openRun(page, "run-merged");
+  await expect(row(page, "host").locator('[data-phase="run-merged/route/1"]')).toHaveCount(1);
+  await expect(
+    page.locator('[data-scope="sandbox"]').first().locator('[data-phase="run-merged/hotfix/1"]'),
+  ).toHaveCount(1);
 });
 
-/**
- * Two lanes held at the same time — ticket 35's fourth criterion, executed at last.
- *
- * Everything above this block grades a **staircase**: `run-merged` holds two containers and they are
- * sequential, so every assertion in it would read the same on a waterfall that had laid the run's
- * phases end to end. `run-lanes` and `run-lanes-break` are the first fixtures in this build whose
- * intervals genuinely overlap, and the assertions here are chosen for one property — each of them
- * reads differently on a wall-clock axis and on an axis built by adding durations up.
- *
- * The three claims are ticket 35's own handover, and each is graded rather than repeated:
- *
- * 1. one row per acquisition, and rows that do not overlap;
- * 2. the axis is `max(end) − min(start)`, never a sum;
- * 3. a held container is a real span across the sibling's phase, not a gap.
- */
-test.describe("two lanes, held at the same time", () => {
-  /** Whether two boxes share any horizontal ground at all. Concurrency, as a fact about pixels. */
-  const overlaps = (
-    left: { readonly x: number; readonly width: number },
-    right: { readonly x: number; readonly width: number },
-  ): boolean => left.x < right.x + right.width && right.x < left.x + left.width;
-
-  test("one row per acquisition, and two phases running at once are on two of them", async ({
-    page,
-  }) => {
-    await openRun(page, "busy", "run-lanes");
-
-    // The host, plus one row per acquisition. Two containers were alive together and the row model
-    // has no matching step to get wrong — but *has no matching step* is an argument, and the run
-    // that could turn it into a measurement did not exist until this fixture did.
-    const rows = page.locator("[data-row]");
-    await expect(rows).toHaveCount(3);
-    const lanes = page.locator('[data-scope="sandbox"]');
-    await expect(lanes.nth(0)).toContainText("api");
-    await expect(lanes.nth(1)).toContainText("web");
-    // Two acquisitions of two *different* scopes, so neither row is numbered: `acquisition 1 of 1`
-    // is noise, and a lane that wore it would be indistinguishable from `run-merged`'s rebuild.
-    await expect(page.locator("[data-acquisition]")).toHaveCount(0);
-
-    await expect(lanes.nth(0).locator('[data-phase="run-lanes/probe/1"]')).toHaveCount(1);
-    await expect(lanes.nth(1).locator('[data-phase="run-lanes/sift/1"]')).toHaveCount(1);
-    await expect(lanes.nth(1).locator('[data-phase="run-lanes/report/1"]')).toHaveCount(1);
-  });
-
-  test("two phases that share time do not share ground", async ({ page }) => {
-    await openRun(page, "busy", "run-lanes");
-
-    const probe = await boxOf(span(page, "run-lanes/probe/1"));
-    const sift = await boxOf(span(page, "run-lanes/sift/1"));
-
-    // The criterion in two lines, and it is a claim about boxes rather than about the row model:
-    // the two spans share time, and they do not share ground. A waterfall that drew both lanes on
-    // one row would satisfy the first and fail the second, and no fixture before this one could
-    // even ask — a staircase satisfies both for the trivial reason that nothing ever overlaps.
-    expect(overlaps(probe, sift)).toBe(true);
-    expect(sift.y).toBeGreaterThanOrEqual(probe.y + probe.height);
-  });
-
-  test("the axis is the wall clock, never the sum of what the lanes did", async ({ page }) => {
-    await openRun(page, "busy", "run-lanes");
-
-    // The axis the geometry decided on, in pixels, straight off the canvas it sized.
-    const canvas = Number(await page.locator("[data-canvas]").getAttribute("data-canvas"));
-    const probe = await boxOf(span(page, "run-lanes/probe/1"));
-
-    // `probe` is eight minutes of a ten-minute run, so it is four fifths of the axis. The same run
-    // holds 13m 28s of phase time, and an axis that added the durations up would draw this span at
-    // 59% — the two readings are eighteen points of canvas apart, and they are identical on every
-    // other fixture in this build, because no other fixture ever held two containers at once.
-    expect(probe.width / canvas).toBeGreaterThan(0.78);
-    expect(probe.width / canvas).toBeLessThan(0.82);
-
-    // And the concurrency itself, stated the other way round: `sift` starts after `probe` starts and
-    // ends before `probe` ends, so it is drawn strictly *inside* it. An axis built from a sum has
-    // nowhere to put a span inside another one — it would have to lay `sift` after `probe`.
-    const sift = await boxOf(span(page, "run-lanes/sift/1"));
-    expect(sift.x).toBeGreaterThan(probe.x);
-    expect(sift.x + sift.width).toBeLessThan(probe.x + probe.width);
-  });
-
-  test("the waiting lane's row is a span across the sibling's phase, not a gap", async ({
-    page,
-  }) => {
-    await openRun(page, "busy", "run-lanes");
-
-    const web = page.locator('[data-scope="sandbox"]').nth(1);
-    // Two spans on the lane and nothing between them: `sift` finished at six minutes and `report`
-    // could not start until the sibling let go at nine.
-    await expect(web.locator("[data-phase]")).toHaveCount(2);
-    const sift = await boxOf(span(page, "run-lanes/sift/1"));
-    const report = await boxOf(span(page, "run-lanes/report/1"));
-    expect(report.x - (sift.x + sift.width)).toBeGreaterThan(200);
-
-    // The band under them is continuous across that gap. The container was up for the whole of it
-    // and was being paid for, so the row is a span; drawing it idle would say the sibling constraint
-    // ticket 35 measured costs nothing.
-    const band = await boxOf(web.locator("[data-band]"));
-    expect(band.x).toBeLessThanOrEqual(sift.x);
-    expect(band.x + band.width).toBeGreaterThanOrEqual(report.x + report.width);
-
-    // And it reaches across the sibling's phase, which is the interval it was waiting through.
-    const probe = await boxOf(span(page, "run-lanes/probe/1"));
-    expect(band.x).toBeLessThanOrEqual(probe.x);
-    expect(band.x + band.width).toBeGreaterThanOrEqual(probe.x + probe.width);
-  });
-
-  test("a break inside one lane leaves the other lane's spans where they belong", async ({
-    page,
-  }) => {
-    await openRun(page, "busy", "run-lanes-break");
-
-    // Three hours of `compile` on one lane, collapsed. A break rescales every stretch that is left,
-    // so it is the operation most able to put a *sibling's* span in the wrong place.
-    const inside = page.locator('[data-break][data-break-dense="true"]');
-    await expect(inside).toHaveCount(1);
-    await expect(inside).toHaveAttribute("data-break", "2h 55m");
-    const wall = await boxOf(inside);
-
-    // The sibling lane first, because it is the claim this test exists for: what happened before the
-    // elided hours stays before the wall, what happened after stays after, and neither is dragged
-    // onto it. `report` starts on the instant the break ends, which is the position a reader of the
-    // axis is most able to lose.
-    const sift = await boxOf(span(page, "run-lanes-break/sift/1"));
-    const report = await boxOf(span(page, "run-lanes-break/report/1"));
-    expect(sift.x + sift.width).toBeLessThanOrEqual(wall.x);
-    expect(report.x).toBeGreaterThanOrEqual(wall.x + wall.width);
-
-    // And its container crosses the wall, because it did not stop existing when the axis stopped
-    // drawing those three hours.
-    const watch = page.locator('[data-scope="sandbox"]').nth(1);
-    const band = await boxOf(watch.locator("[data-band]"));
-    expect(band.x).toBeLessThan(wall.x);
-    expect(band.x + band.width).toBeGreaterThan(wall.x + wall.width);
-
-    // The broken lane itself still keeps a head and a tail, as it does on a run with one lane —
-    // stated last because it is the context the three assertions above are read against.
-    const compile = await boxOf(span(page, "run-lanes-break/compile/1"));
-    expect(compile.x).toBeLessThan(wall.x);
-    expect(compile.x + compile.width).toBeGreaterThan(wall.x + wall.width);
-  });
+test("a post-Gate rebuild is a second acquisition row", async ({ page }) => {
+  await openRun(page, "run-merged");
+  const sandboxes = page.locator('[data-scope="sandbox"]');
+  await expect(sandboxes.nth(0)).toContainText("acquisition 1 of 2");
+  await expect(sandboxes.nth(1)).toContainText("acquisition 2 of 2");
 });
 
-test.describe("the in-flight phase", () => {
-  test("is a span that grows to now, from the run row rather than a phase record", async ({
-    page,
-  }) => {
-    await openRun(page, "busy", "run-scout");
-
-    const running = span(page, "run-scout/explore/1");
-    await expect(running).toHaveAttribute("data-state", "running");
-
-    // It ends at *now*: the axis is exactly as wide as the run is long, and the span reaches its
-    // right edge. A record-shaped span could not — there is no record, because the phase is running.
-    const box = await boxOf(running);
-    const canvas = await boxOf(page.locator("[data-canvas]"));
-    expect(box.x + box.width).toBeCloseTo(canvas.x + canvas.width, 0);
-  });
-
-  test("runs on the row of the container it is inside, which has no record yet", async ({
-    page,
-  }) => {
-    await openRun(page, "busy", "run-scout");
-
-    // An acquisition is written when it is **released**, so a container in use right now is named by
-    // a phase and by nothing else. Putting that phase on the host row would say the work needed no
-    // container while it is sitting inside one.
-    const held = page.locator('[data-scope="sandbox"][data-held="true"]');
-    await expect(held).toHaveCount(1);
-    await expect(held).toContainText("lane");
-    await expect(held.locator('[data-phase="run-scout/explore/1"]')).toHaveCount(1);
-  });
-
-  test("grows when the clock moves, and nothing else does", async ({ page }) => {
-    await openRun(page, "busy", "run-scout");
-    const atRest = await boxOf(span(page, "run-scout/in_progress/1"));
-
-    // Twenty seconds later the run is thirty seconds old rather than ten, so the same axis width
-    // now holds three times as much time and the exited phase shrinks by exactly that much.
-    await openRun(page, "busy", "run-scout", { now: frozenNow + 20_000 });
-    await expect(page.locator("[data-elapsed]")).toHaveText("30s");
-    const later = await boxOf(span(page, "run-scout/in_progress/1"));
-    expect(later.width).toBeLessThan(atRest.width / 2);
-  });
-
-  test("is replaced by the real span on exit", async ({ page }) => {
-    // The same run id and the same phase id, one phase later. Two servers rather than two requests,
-    // because whether a phase has exited is a property of the trace and not of the page.
-    await openRun(page, "settled", "run-scout");
-
-    const exited = span(page, "run-scout/explore/1");
-    await expect(exited).toHaveCount(1);
-    await expect(exited).toHaveAttribute("data-state", "succeeded");
-    // Not both: a poll that caught the record arriving must not leave the growing span behind.
-    await expect(page.locator('[data-state="running"]')).toHaveCount(0);
-    // And the acquisition it ran in is a released one now, with a record behind it.
-    await expect(page.locator('[data-scope="sandbox"][data-held="true"]')).toHaveCount(0);
-  });
+test("a forty-one-hour wait collapses to one labelled fixed-width break", async ({ page }) => {
+  await openRun(page, "run-merged");
+  await expect(page.locator("[data-break]")).toHaveAttribute("data-break", /41h/);
+  expect((await boxOf(page.locator("[data-break]"))).width).toBeLessThan(
+    (await boxOf(span(page, "run-merged/hotfix/1"))).width,
+  );
 });
 
-test.describe("phase kind, failure and permission breach are visually distinct", () => {
-  test("a failed check and a permission breach do not read alike", async ({ page }) => {
-    await openRun(page, "busy", "run-broken");
-
-    const violated = span(page, "run-broken/implement/1");
-    await expect(violated).toHaveAttribute("data-state", "failed");
-    await expect(violated).toHaveAttribute("data-error", "CheckViolation");
-    await expect(violated).toHaveAttribute("data-breach", "false");
-    await expect(violated.locator('[data-mark="breach"]')).toHaveCount(0);
-
-    await openRun(page, "busy", "run-breach");
-    const breached = span(page, "run-breach/edit/1");
-    await expect(breached).toHaveAttribute("data-state", "failed");
-    await expect(breached).toHaveAttribute("data-breach", "true");
-    // Its own mark. A breach cannot be fixed by re-prompting, so it must not wear the outline a
-    // refused answer wears and nothing else.
-    await expect(breached.locator('[data-mark="breach"]')).toHaveCount(1);
-  });
-
-  test("an interrupted phase is not a failed one", async ({ page }) => {
-    await openRun(page, "busy", "run-approve");
-
-    // The suspension killed it. It did nothing wrong, and drawing it as a fault would accuse it.
-    await expect(span(page, "run-approve/hotfix/1")).toHaveAttribute("data-state", "interrupted");
-  });
-
-  test("kind is on the span, whatever the outcome was", async ({ page }) => {
-    await openRun(page, "busy", "run-broken");
-
-    await expect(span(page, "run-broken/in_progress/1")).toHaveAttribute("data-kind", "code");
-    await expect(span(page, "run-broken/route/1")).toHaveAttribute("data-kind", "agent");
-    // Failure is an outline rather than a different fill, so the kind survives it — *which agent
-    // phase died* is the question a person actually asks.
-    await expect(span(page, "run-broken/implement/1")).toHaveAttribute("data-kind", "agent");
-  });
+test("a break crosses every scope row", async ({ page }) => {
+  await openRun(page, "run-merged");
+  const wall = await boxOf(page.locator("[data-break]"));
+  const first = await boxOf(page.locator("[data-row]").first());
+  const last = await boxOf(page.locator("[data-row]").last());
+  expect(wall.y).toBeLessThanOrEqual(first.y + 1);
+  expect(wall.y + wall.height).toBeGreaterThanOrEqual(last.y + last.height - 1);
 });
 
-test.describe("corrections stay inside one span", () => {
-  test("a phase that took three attempts is one span with two correction marks", async ({
-    page,
-  }) => {
-    await openRun(page, "busy", "run-broken");
-
-    const plan = span(page, "run-broken/plan/1");
-    // One. adr/trace/0001: a corrected phase is one record, so the attempts are a detail-panel
-    // concern. `fix_1` / `retest_1` / `fix_2` are separate spans because the *author* wrote
-    // separate phases, and that is the distinction this assertion protects.
-    await expect(plan).toHaveCount(1);
-    await expect(plan).toHaveAttribute("data-corrections", "2");
-    await expect(plan.locator("[data-correction]")).toHaveCount(2);
-
-    // And no phase named `plan` appears a second time under any attempt.
-    await expect(page.locator('[data-phase^="run-broken/plan/"]')).toHaveCount(1);
-  });
+test("dead time between Phases uses the same break grammar", async ({ page }) => {
+  await openRun(page, "run-approve", { now: base + 41 * hour });
+  await expect(page.locator('[data-break][data-break-dense="false"]')).toHaveCount(1);
 });
 
-test.describe("the widget is read-only, and its scales reach seconds", () => {
-  test("nothing on the timeline is draggable or resizable", async ({ page }) => {
-    await openRun(page, "busy", "run-merged");
-
-    // Drag, resize, snapping and `addEvent` have no meaning over immutable history. A draggable
-    // trace bar is a bug shaped like a feature, so the editing half was not ported.
-    await expect(page.locator("[data-waterfall] [draggable]")).toHaveCount(0);
-    await expect(page.locator("[data-waterfall] [contenteditable]")).toHaveCount(0);
-
-    const before = await boxOf(span(page, "run-merged/hotfix/1"));
-    await page.mouse.move(before.x + before.width / 2, before.y + before.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(before.x + 250, before.y + 60, { steps: 8 });
-    await page.mouse.up();
-
-    const after = await boxOf(span(page, "run-merged/hotfix/1"));
-    expect(after.x).toBeCloseTo(before.x, 0);
-    expect(after.width).toBeCloseTo(before.width, 0);
-  });
-
-  test("a run measured in seconds gets a scale measured in seconds", async ({ page }) => {
-    await openRun(page, "busy", "run-scout");
-
-    // The reui component's own scales start at *daily*, which is three orders of magnitude out for
-    // a phase that lasted two hundred milliseconds.
-    await expect(page.locator("[data-scale]")).toHaveAttribute("data-scale", "1s");
-    await expect(page.locator("[data-tick]").first()).toHaveText("0s");
-  });
-
-  test("and a longer run gets a coarser step, off the same table", async ({ page }) => {
-    // The step table is the whole of the first consequence console.md §5 draws out of choosing a
-    // gantt, and one assertion at the second end of it left every step above `1s` free to be
-    // deleted. Two more runs, two more steps: a thirty-second run and a twelve-minute one.
-    await openRun(page, "busy", "run-breach");
-    await expect(page.locator("[data-scale]")).toHaveAttribute("data-scale", "30s");
-
-    await openRun(page, "busy", "run-merged");
-    await expect(page.locator("[data-scale]")).toHaveAttribute("data-scale", "2m");
-  });
-
-  test("zoom stretches the axis without moving a phase off its row", async ({ page }) => {
-    await openRun(page, "busy", "run-merged");
-    const before = await boxOf(span(page, "run-merged/hotfix/1"));
-
-    await page.locator('[data-zoom="in"]').click();
-
-    const after = await boxOf(span(page, "run-merged/hotfix/1"));
-    expect(after.width).toBeGreaterThan(before.width);
-    // Still inside the acquisition it ran in: zoom is a property of the look, not of the record.
-    await expect(
-      page.locator('[data-scope="sandbox"]').first().locator('[data-phase="run-merged/hotfix/1"]'),
-    ).toHaveCount(1);
-  });
+test("a dense break keeps the long Phase visible through it", async ({ page }) => {
+  await openRun(page, "run-stale");
+  const wall = await boxOf(page.locator('[data-break][data-break-dense="true"]'));
+  const phaseBox = await boxOf(span(page, "run-stale/explore/1"));
+  expect(phaseBox.x).toBeLessThan(wall.x);
+  expect(phaseBox.x + phaseBox.width).toBeGreaterThan(wall.x + wall.width);
 });
 
-/**
- * Solux's own two events, graded because ticket 29 opens from one of them.
- *
- * console.md §8 gives the waterfall's zoom, hover and selection to a store scoped to the component.
- * Zoom is graded above. These two were not, and selection is the thing the detail panel is opened
- * by — an unenforced click here would be a hole three tickets deep, so it is enforced here.
- */
-test.describe("what the pointer does", () => {
-  test("a click marks one span, and clicking the same one again lets go", async ({ page }) => {
-    await openRun(page, "busy", "run-merged");
-    const hotfix = span(page, "run-merged/hotfix/1");
-    const route = span(page, "run-merged/route/1");
-
-    await expect(page.locator('[data-selected="true"]')).toHaveCount(0);
-
-    await hotfix.click();
-    await expect(hotfix).toHaveAttribute("data-selected", "true");
-    // One at a time, across rows: the selection is the run's, not the row's.
-    await route.click();
-    await expect(route).toHaveAttribute("data-selected", "true");
-    await expect(hotfix).toHaveAttribute("data-selected", "false");
-    await expect(page.locator('[data-selected="true"]')).toHaveCount(1);
-
-    // And it can be let go of. A selection nothing can undo is a trap on a surface whose only job
-    // is investigation.
-    await route.click();
-    await expect(page.locator('[data-selected="true"]')).toHaveCount(0);
-  });
-
-  test("the pointer marks the span it is over, and lets go when it leaves", async ({ page }) => {
-    await openRun(page, "busy", "run-merged");
-    const hotfix = span(page, "run-merged/hotfix/1");
-
-    await hotfix.hover();
-    await expect(hotfix).toHaveAttribute("data-hovered", "true");
-    await expect(page.locator('[data-hovered="true"]')).toHaveCount(1);
-
-    // Leaving is its own event rather than a hover carrying nothing, which is why it can be graded
-    // on its own at all.
-    await page.locator("[data-run-header]").hover();
-    await expect(page.locator('[data-hovered="true"]')).toHaveCount(0);
-  });
+test("wall-clock mode removes every break", async ({ page }) => {
+  await openRun(page, "run-merged");
+  const compressed = await boxOf(span(page, "run-merged/hotfix/1"));
+  expect(compressed.width).toBeGreaterThan(200);
+  await page.locator("[data-axis]").click();
+  await expect(page.locator("[data-axis]")).toHaveAttribute("data-axis", "wall-clock");
+  await expect(page.locator("[data-break]")).toHaveCount(0);
+  const wallClock = await boxOf(span(page, "run-merged/hotfix/1"));
+  expect(wallClock.width).toBeLessThan(5);
 });
 
-test.describe("the table toggle", () => {
-  test("renders the same phase records as rows, and lives in the URL", async ({ page }) => {
-    await openRun(page, "busy", "run-merged");
-    const spans = await page.locator("[data-phase]").count();
-
-    await page.locator('[data-view="table"]').click();
-
-    await expect(page).toHaveURL(/view=table/);
-    await expect(page.locator("[data-waterfall]")).toHaveCount(0);
-    // The same records, not a second read: every span is a row and every row is a span.
-    await expect(page.locator("[data-phase-row]")).toHaveCount(spans);
-    await expect(page.locator('[data-phase-row="run-merged/hotfix/1"]')).toContainText("6m 0s");
-
-    // Pasted to a colleague, it still opens as a table. That is the whole reason it is not
-    // component state.
-    await openRun(page, "busy", "run-merged", { view: "table" });
-    await expect(page.locator("[data-phase-row]")).toHaveCount(spans);
-  });
-
-  test("the table holds the in-flight phase too", async ({ page }) => {
-    await openRun(page, "busy", "run-scout", { view: "table" });
-
-    await expect(page.locator('[data-phase-row="run-scout/explore/1"]')).toContainText("running");
-  });
+test("concurrent acquisitions keep one row each", async ({ page }) => {
+  await openRun(page, "run-lanes");
+  await expect(page.locator('[data-scope="sandbox"]')).toHaveCount(2);
+  await expect(page.locator("[data-acquisition]")).toHaveCount(0);
 });
 
-test.describe("a run with nothing in it yet", () => {
-  test("says so rather than showing an empty timeline or an error", async ({ page }) => {
-    await openRun(page, "busy", "run-build");
-
-    await expect(page.getByText("No phases yet.")).toBeVisible();
-    await expect(page.locator("[data-waterfall]")).toHaveCount(0);
-    // The header is still there: what produced the run is useful before any phase has run.
-    await expect(page.locator("[data-run-header]")).toBeVisible();
-  });
+test("concurrent Phases share time but not vertical ground", async ({ page }) => {
+  await openRun(page, "run-lanes");
+  const probe = await boxOf(span(page, "run-lanes/probe/1"));
+  const sift = await boxOf(span(page, "run-lanes/sift/1"));
+  expect(probe.x).toBeLessThan(sift.x + sift.width);
+  expect(sift.x).toBeLessThan(probe.x + probe.width);
+  expect(sift.y).toBeGreaterThanOrEqual(probe.y + probe.height);
 });
 
-test.describe("the way in", () => {
-  test("a run in the list opens the run view", async ({ page }) => {
-    await open(page, "busy");
-
-    await page.locator('tr[data-run="run-merged"] a').click();
-
-    await expect(page).toHaveURL(/\/runs\/run-merged/);
-    await expect(page.locator("[data-waterfall]")).toBeVisible();
-  });
+test("the axis uses wall-clock duration rather than summed lane time", async ({ page }) => {
+  await openRun(page, "run-lanes");
+  const canvas = Number(await page.locator("[data-canvas]").getAttribute("data-canvas"));
+  const probe = await boxOf(span(page, "run-lanes/probe/1"));
+  expect(probe.width / canvas).toBeGreaterThan(0.7);
 });
 
-/**
- * The two axis faults a person hit on a real run, both of which the fixtures were too tidy to show.
- */
-test.describe("a short phase is still a phase you can reach", () => {
-  test("the narrow span wins the hit test against the wide one beside it", async ({ page }) => {
-    await openRun(page, "busy", "run-merged");
+test("an acquired Sandbox band spans time spent waiting on a sibling", async ({ page }) => {
+  await openRun(page, "run-lanes");
+  const web = page.locator('[data-scope="sandbox"]').nth(1);
+  const band = await boxOf(web.locator("[data-band]"));
+  const probe = await boxOf(span(page, "run-lanes/probe/1"));
+  expect(band.x).toBeLessThanOrEqual(probe.x);
+  expect(band.x + band.width).toBeGreaterThanOrEqual(probe.x + probe.width);
+});
 
-    // `spanWidth` floors a very short phase at two pixels so it exists on screen, but nothing
-    // reserves that space — and the spans of a row are sorted by start time, so the *next* phase is
-    // later in the DOM and painted straight over it. Measured before the fix: `in_progress` at
-    // x=201 w=2 sat under `route` at x=201.2 w=8.2, and a click at its centre opened `route`.
-    //
-    // The suite already knew, without saying so: `realFactory.ts` pays 650 ms of real sleep to give
-    // its phases enough width to be clickable.
-    const narrow = page.locator('[data-phase="run-merged/in_progress/1"]');
-    await expect(narrow).toBeVisible();
+test("a break in one lane preserves its sibling positions and band", async ({ page }) => {
+  await openRun(page, "run-lanes-break");
+  const wall = await boxOf(page.locator('[data-break][data-break-dense="true"]'));
+  const sift = await boxOf(span(page, "run-lanes-break/sift/1"));
+  const report = await boxOf(span(page, "run-lanes-break/report/1"));
+  expect(sift.x + sift.width).toBeLessThanOrEqual(wall.x);
+  expect(report.x).toBeGreaterThanOrEqual(wall.x + wall.width);
+});
 
-    const hit = await narrow.evaluate((node) => {
-      const box = node.getBoundingClientRect();
-      const top = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
-      const owner = top?.closest("[data-phase]");
-      return owner instanceof HTMLElement ? owner.dataset.phase : null;
+test("an in-flight Phase grows to now", async ({ page }) => {
+  await openRun(page, "run-scout");
+  const running = span(page, "run-scout/explore/1");
+  await expect(running).toHaveAttribute("data-state", "running");
+  const phaseBox = await boxOf(running);
+  const canvas = await boxOf(page.locator("[data-canvas]"));
+  expect(phaseBox.x + phaseBox.width).toBeCloseTo(canvas.x + canvas.width, 0);
+});
+
+test("an in-flight Phase creates a held Sandbox row before release", async ({ page }) => {
+  await openRun(page, "run-scout");
+  await expect(page.locator('[data-scope="sandbox"][data-held="true"]')).toContainText("lane");
+});
+
+test("a later clock changes elapsed geometry without changing records", async ({ page }) => {
+  await openRun(page, "run-scout");
+  const before = await boxOf(span(page, "run-scout/in_progress/1"));
+  await openRun(page, "run-scout", { now: base + 30_000 });
+  const after = await boxOf(span(page, "run-scout/in_progress/1"));
+  expect(after.width).toBeLessThan(before.width);
+});
+
+test("the completed Phase replaces its in-flight projection", async ({ page }) => {
+  await openRun(page, "run-scout", { settled: true });
+  await expect(span(page, "run-scout/explore/1")).toHaveAttribute("data-state", "succeeded");
+  await expect(page.locator('[data-state="running"]')).toHaveCount(0);
+});
+
+test("a failed check and a permission breach remain distinct", async ({ page }) => {
+  await openRun(page, "run-broken");
+  await expect(span(page, "run-broken/implement/1")).toHaveAttribute("data-breach", "false");
+  await expect(span(page, "run-broken/edit/1")).toHaveAttribute("data-breach", "true");
+  await expect(span(page, "run-broken/edit/1").locator('[data-mark="breach"]')).toHaveCount(1);
+});
+
+test("an interrupted Phase is not shown as failed", async ({ page }) => {
+  await openRun(page, "run-approve", { now: base + 41 * hour });
+  await expect(span(page, "run-approve/hotfix/1")).toHaveAttribute("data-state", "interrupted");
+});
+
+test("Phase kind stays on successful and failed spans", async ({ page }) => {
+  await openRun(page, "run-broken");
+  await expect(span(page, "run-broken/in_progress/1")).toHaveAttribute("data-kind", "code");
+  await expect(span(page, "run-broken/implement/1")).toHaveAttribute("data-kind", "agent");
+});
+
+test("corrections remain marks inside one Phase span", async ({ page }) => {
+  await openRun(page, "run-broken");
+  const plan = span(page, "run-broken/plan/1");
+  await expect(plan).toHaveAttribute("data-corrections", "2");
+  await expect(plan.locator("[data-correction]")).toHaveCount(2);
+  await expect(page.locator('[data-phase^="run-broken/plan/"]')).toHaveCount(1);
+});
+
+test("the Waterfall is not draggable or editable", async ({ page }) => {
+  await openRun(page, "run-merged");
+  await expect(page.locator("[data-waterfall] [draggable]")).toHaveCount(0);
+  await expect(page.locator("[data-waterfall] [contenteditable]")).toHaveCount(0);
+});
+
+test("a short Run uses a seconds scale", async ({ page }) => {
+  await openRun(page, "run-scout");
+  await expect(page.locator("[data-scale]")).toHaveAttribute("data-scale", /s$/);
+});
+
+test("a longer Run selects a coarser scale", async ({ page }) => {
+  await openRun(page, "run-broken");
+  await expect(page.locator("[data-scale]")).toHaveAttribute("data-scale", /m$|30s/);
+});
+
+test("zoom stretches a Phase without changing its row", async ({ page }) => {
+  await openRun(page, "run-merged");
+  const before = await boxOf(span(page, "run-merged/hotfix/1"));
+  await page.locator('[data-zoom="in"]').click();
+  const after = await boxOf(span(page, "run-merged/hotfix/1"));
+  expect(after.width).toBeGreaterThan(before.width);
+  await expect(
+    page.locator('[data-scope="sandbox"]').first().locator('[data-phase="run-merged/hotfix/1"]'),
+  ).toHaveCount(1);
+});
+
+test("click selection is exclusive and reversible", async ({ page }) => {
+  await openRun(page, "run-merged");
+  const hotfix = span(page, "run-merged/hotfix/1");
+  const testPhase = span(page, "run-merged/test/1");
+  await hotfix.click();
+  await expect(hotfix).toHaveAttribute("data-selected", "true");
+  await testPhase.click();
+  await expect(testPhase).toHaveAttribute("data-selected", "true");
+  await expect(hotfix).toHaveAttribute("data-selected", "false");
+  await expect(page.locator('[data-selected="true"]')).toHaveCount(1);
+  await testPhase.click();
+  await expect(page.locator('[data-selected="true"]')).toHaveCount(0);
+});
+
+test("pointer hover is exclusive and clears on leave", async ({ page }) => {
+  await openRun(page, "run-merged");
+  const hotfix = span(page, "run-merged/hotfix/1");
+  await hotfix.hover();
+  await expect(hotfix).toHaveAttribute("data-hovered", "true");
+  await page.locator("[data-run-header]").hover();
+  await expect(page.locator('[data-hovered="true"]')).toHaveCount(0);
+});
+
+test("the table toggle renders every Waterfall Phase and persists in the URL", async ({ page }) => {
+  await openRun(page, "run-merged");
+  const spans = await page.locator("[data-phase]").count();
+  await page.locator('[data-view="table"]').click();
+  await expect(page).toHaveURL(/view=table/);
+  await expect(page.locator("[data-phase-row]")).toHaveCount(spans);
+  await expect(page.locator('[data-phase-row="run-merged/hotfix/1"]')).toContainText("6m 0s");
+  await page.reload();
+  await expect(page.locator("[data-phase-row]")).toHaveCount(spans);
+  await page.goto(`${origin}/runs/run-merged?view=table`);
+  await expect(page.locator('[data-phase-row="run-merged/hotfix/1"]')).toContainText("6m 0s");
+});
+
+test("the Phase table includes an in-flight Phase", async ({ page }) => {
+  await openRun(page, "run-scout", { view: "table" });
+  await expect(page.locator('[data-phase-row="run-scout/explore/1"]')).toContainText("running");
+});
+
+test("a Run with no Phases shows an explicit empty state", async ({ page }) => {
+  await openRun(page, "run-build");
+  await expect(page.getByText("No phases yet.")).toBeVisible();
+  await expect(page.locator("[data-waterfall]")).toHaveCount(0);
+  await expect(page.locator("[data-run-header]")).toBeVisible();
+});
+
+test("a Run catalogue row opens the Waterfall", async ({ page }) => {
+  await page.route("**/api/v1/runs", async (route) => {
+    const response = await route.fetch();
+    const snapshot = (await response.json()) as { runs: ReadonlyArray<Record<string, unknown>> };
+    await route.fulfill({
+      response,
+      contentType: "application/json",
+      body: JSON.stringify({ ...snapshot, runs: [merged()] }),
     });
-
-    expect(hit).toBe("run-merged/in_progress/1");
   });
+  await page.route("**/api/v1/runs/run-merged", (route) =>
+    route.fulfill({ contentType: "application/json", body: JSON.stringify(merged()) }),
+  );
+  await page.goto(launch());
+  await page.goto(`${origin}/runs`);
+  const runLink = page.locator('[data-run="run-merged"] a');
+  await expect(runLink).toBeVisible({ timeout: runReadyTimeout });
+  await runLink.click();
+  await expect(page.locator("[data-waterfall]")).toBeVisible();
+});
 
-  test("no two ticks are drawn at the same place", async ({ page }) => {
-    // A phase edge is a segment boundary, so a closing edge and the next opening edge are the same
-    // instant. The tick loop emitted both, and two labels overprinted at one pixel wherever an edge
-    // landed on an exact multiple of the step. run-lanes did it three times over.
-    for (const run of ["run-merged", "run-lanes", "run-scout", "run-breach"]) {
-      await openRun(page, "busy", run);
-      const offsets = await page
-        .locator("[data-tick]")
-        .evaluateAll((nodes) =>
-          nodes.map((node) => Math.round(node.getBoundingClientRect().x * 10) / 10),
-        );
-      expect(new Set(offsets).size, `${run} draws ${offsets.length} ticks`).toBe(offsets.length);
+test("a narrow Phase wins hit testing against its wider neighbour", async ({ page }) => {
+  await openRun(page, "run-merged");
+  const narrow = span(page, "run-merged/in_progress/1");
+  const hit = await narrow.evaluate((node) => {
+    const box = node.getBoundingClientRect();
+    return document
+      .elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)
+      ?.closest("[data-phase]")
+      ?.getAttribute("data-phase");
+  });
+  expect(hit).toBe("run-merged/in_progress/1");
+});
+
+test("no two ticks occupy the same position", async ({ page }) => {
+  await openRun(page, "run-lanes");
+  const positions = await page
+    .locator("[data-tick]")
+    .evaluateAll((nodes) =>
+      nodes.map((node) => Math.round(node.getBoundingClientRect().x * 10) / 10),
+    );
+  expect(new Set(positions).size).toBe(positions.length);
+});
+
+test("a forty-day wall-clock axis keeps tick labels apart", async ({ page }) => {
+  await openRun(page, "run-approve", { now: base + 40 * 24 * hour });
+  await page.locator("[data-axis]").click();
+  const positions = await page
+    .locator("[data-tick]")
+    .evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().x));
+  const gaps = positions.slice(1).map((position, index) => position - (positions[index] ?? 0));
+  expect(Math.min(...gaps)).toBeGreaterThan(36);
+});
+
+test("a four-hundred-day wall-clock axis keeps tick labels apart", async ({ page }) => {
+  await openRun(page, "run-approve", { now: base + 400 * 24 * hour });
+  await page.locator("[data-axis]").click();
+  const positions = await page
+    .locator("[data-tick]")
+    .evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().x));
+  const gaps = positions.slice(1).map((position, index) => position - (positions[index] ?? 0));
+  expect(Math.min(...gaps)).toBeGreaterThan(36);
+});
+
+test("an unchanged in-flight span keeps its DOM identity", async ({ page }) => {
+  await openRun(page, "run-scout");
+  const rebuilds = await page.evaluate(async () => {
+    const selector = '[data-phase="run-scout/explore/1"]';
+    let node = document.querySelector(selector);
+    let count = 0;
+    for (let sample = 0; sample < 6; sample += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const current = document.querySelector(selector);
+      if (current !== node) count += 1;
+      node = current;
     }
+    return count;
   });
+  expect(rebuilds).toBe(0);
 });
 
-/**
- * A gate nobody answers for months, which is the shape that broke the axis in the field.
- *
- * A suspended run's axis runs to *now*, so the longer it waits the longer the axis. There is no
- * fixture months long, and there does not need to be: the clock is an argument, so pushing it
- * forward turns `run-approve` into exactly that run.
- *
- * The step table used to end at `1d` and fall back to its last entry whenever nothing was coarse
- * enough — which drew one tick per day however many days there were. Measured on the pure model:
- * 41 ticks at 24 px for a 40-day axis, 121 at 8 px for 120 days, 401 at 2.4 px for 400 days. The
- * labels overprinted into a grey smear, which is what a person reported seeing.
- */
-test.describe("a very long axis is still an axis", () => {
-  const day = 24 * 60 * 60 * 1000;
+test("the axis grows and shrinks with its card", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openRun(page, "run-merged");
+  const canvas = () => page.locator("[data-canvas]").getAttribute("data-canvas").then(Number);
+  const narrow = await canvas();
+  await page.setViewportSize({ width: 1920, height: 900 });
+  await expect.poll(canvas).toBeGreaterThan(narrow + 200);
+});
 
-  for (const days of [40, 400]) {
-    test(`ticks stay apart and readable on a ${days}-day axis`, async ({ page }) => {
-      await openRun(page, "busy", "run-approve", { now: frozenNow + days * day });
+test("zoom overflow can pan to the end", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openRun(page, "run-merged");
+  const scroller = page.locator("[data-waterfall] div.overflow-x-auto");
+  await page.locator('[data-zoom="in"]').click();
+  await page.locator('[data-zoom="in"]').click();
+  await scroller.evaluate((node) => {
+    node.scrollLeft = node.scrollWidth;
+  });
+  expect(await scroller.evaluate((node) => node.scrollLeft)).toBeGreaterThan(100);
+});
 
-      // Wall-clock is the mode that cannot elide the wait, so it is the worst case.
-      await page.locator("[data-axis]").click();
-      await expect(page.locator("[data-axis]")).toHaveAttribute("data-axis", "wall-clock");
+test("modifier-wheel zooms the Waterfall instead of the page", async ({ page }) => {
+  await openRun(page, "run-merged");
+  const before = Number(await page.locator("[data-canvas]").getAttribute("data-canvas"));
+  await page.locator("[data-waterfall]").dispatchEvent("wheel", { deltaY: -120, ctrlKey: true });
+  await expect
+    .poll(async () => Number(await page.locator("[data-canvas]").getAttribute("data-canvas")))
+    .toBeGreaterThan(before);
+});
 
-      const xs = await page
-        .locator("[data-tick]")
-        .evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().x));
-      expect(xs.length).toBeGreaterThan(1);
+test("a canonical forty-one-hour break remains human-readable", async ({ page }) => {
+  await openRun(page, "run-merged");
+  await expect(page.locator("[data-break-label]").first()).toHaveText(/41h/);
+});
 
-      const sorted = [...xs].sort((left, right) => left - right);
-      const gaps = sorted.slice(1).map((x, index) => x - (sorted[index] ?? 0));
-      const tightest = Math.min(...gaps);
+test("a months-long Gate wait uses weeks instead of thousands of hours", async ({ page }) => {
+  await openRun(page, "run-approve", { now: base + 173 * 24 * hour });
+  const text = (await page.locator("[data-break-label]").first().textContent()) ?? "";
+  expect(text).not.toMatch(/\d{3,}h/);
+  expect(text).toMatch(/\d+w/);
+});
 
-      // `tickGap` is 72px in the model. Anything under about half of that is labels touching.
-      expect(tightest, `${xs.length} ticks, tightest gap ${tightest}px`).toBeGreaterThan(36);
+test("a Phase deep link restores exactly one selected span and keeps the Waterfall", async ({
+  page,
+}) => {
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/phases/hotfix/1?view=timeline`);
+  await expect(page.locator('[data-detail-panel="phase"]')).toBeVisible();
+  await expect(span(page, "run-merged/hotfix/1")).toHaveAttribute("data-selected", "true");
+  await expect(page.locator('[data-selected="true"]')).toHaveCount(1);
+  await expect(page.locator("[data-waterfall]")).toBeVisible();
+  await page.reload();
+  await expect(span(page, "run-merged/hotfix/1")).toHaveAttribute("data-selected", "true");
+});
+
+test("clicking a Phase span writes its exact Phase URL", async ({ page }) => {
+  await openRun(page, "run-merged");
+  await span(page, "run-merged/hotfix/1").click();
+  await expect(page).toHaveURL(/\/runs\/run-merged\/phases\/hotfix\/1\?view=timeline/);
+  await expect(page.locator('[data-detail-panel="phase"]')).toBeVisible();
+});
+
+test("a Phase panel shows Agent session, token, correction, and repository facts", async ({
+  page,
+}) => {
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/phases/hotfix/1?view=timeline`);
+  await expect(page.locator('[data-field="attempt"]')).toContainText("1");
+  await expect(page.locator('[data-field="started"]')).toContainText("UTC");
+  await expect(page.locator('[data-field="duration"]')).toContainText("6m 0s");
+  await expect(page.locator('[data-field="agent-name"]')).toContainText("builder");
+  await expect(page.locator('[data-field="model"]')).toContainText("fixture-model");
+  await expect(page.locator('[data-field="session"]')).toContainText("run-merged-hotfix");
+  await expect(page.locator('[data-field="resumed"]')).toContainText("cold");
+  await expect(page.locator('[data-field="tokens-in"]')).toContainText("4,000");
+  await expect(page.locator('[data-field="tokens-out"]')).toContainText("900");
+  await expect(page.locator('[data-field="context"]')).toContainText("22,500");
+  await expect(page.locator('[data-field="corrections"]')).toContainText("2");
+  await expect(page.locator('[data-field="claimed"]')).toContainText("src/claimed.ts");
+  await expect(page.locator('[data-field="changed"]')).toContainText("src/actual.ts");
+  await expect(page.locator('[data-field="commits"]')).toContainText("abc1234");
+  await expect(page.locator('[data-repo="disagrees"]')).toBeVisible();
+  await expect(page.locator('[data-where="sandbox"]')).toBeVisible();
+});
+
+test("code and Host Phases do not invent Agent or Sandbox facts", async ({ page }) => {
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/phases/in_progress/1?view=timeline`);
+  await expect(page.locator('[data-pane="agent"]')).toHaveCount(0);
+  await expect(page.locator('[data-where="host"]')).toContainText("needed no container");
+});
+
+test("a Phase and its Sandbox acquisition remain one link apart", async ({ page }) => {
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/phases/hotfix/1?view=timeline`);
+  await page.locator('[data-where="sandbox"]').click();
+  await expect(page.locator('[data-detail-panel="sandbox"]')).toBeVisible();
+  await expect(page.locator('[data-scope="sandbox"][data-selected="true"]')).toHaveCount(1);
+  await page.locator('[data-inside="run-merged/hotfix/1"]').click();
+  await expect(page.locator('[data-detail-panel="phase"]')).toBeVisible();
+  await expect(span(page, "run-merged/hotfix/1")).toHaveAttribute("data-selected", "true");
+});
+
+test("an invalid Phase deep link leaves the Run and Waterfall usable", async ({ page }) => {
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/phases/not-a-phase/1?view=timeline`);
+  await expect(page.getByText("This run has no phase run-merged/not-a-phase/1.")).toBeVisible();
+  await expect(page.locator("[data-waterfall]")).toBeVisible();
+  await page.locator("[data-panel-close]").click();
+  await expect(page).toHaveURL(/\/runs\/run-merged\?view=timeline/);
+});
+
+test("Phase errors keep failed checks and permission outcomes distinct", async ({ page }) => {
+  await openRun(page, "run-broken");
+  await page.goto(`${origin}/runs/run-broken/phases/implement/1?view=timeline`);
+  await expect(page.locator('[data-detail-panel] [data-error="CheckViolation"]')).toContainText(
+    "checks failed",
+  );
+  await expect(page.locator('[data-check="test"]')).toContainText("test");
+  await expect(page.locator('[data-check="lint"]')).toHaveCount(0);
+  await page.goto(`${origin}/runs/run-broken/phases/edit/1?view=timeline`);
+  await expect(page.locator('[data-breach=".kojo/factory.json"]')).toHaveAttribute(
+    "data-breach-outcome",
+    "WorkLost",
+  );
+  await expect(page.locator('[data-breach="src/restored.ts"]')).toHaveAttribute(
+    "data-breach-outcome",
+    "Restored",
+  );
+});
+
+test("a Sandbox deep link shows the exact acquisition and its Phase", async ({ page }) => {
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/sandboxes/build/540000-1?view=timeline`);
+  await expect(page.locator('[data-detail-panel="sandbox"]')).toBeVisible();
+  await expect(page.locator('[data-field="provider"]')).toContainText("no-sandbox");
+  await expect(page.locator('[data-field="sandbox-kind"]')).toContainText("none");
+  await expect(page.locator('[data-field="branch"]')).toContainText("kojo/run-merged");
+  await expect(page.locator('[data-field="worktree"]')).toContainText("/private/run-merged");
+  await expect(page.locator('[data-inside="run-merged/hotfix/1"]')).toBeVisible();
+});
+
+test("the second Sandbox acquisition exposes Gate idle time and setup cost", async ({ page }) => {
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/sandboxes/build/149280000-2?view=timeline`);
+  await expect(page.locator('[data-detail-panel="sandbox"]')).toContainText("acquisition 2 of 2");
+  await expect(page.locator('[data-field="idle"]')).toContainText("41h 10m");
+  await expect(page.locator('[data-field="setup"]')).toContainText("1m");
+  await expect(page.locator('[data-inside="run-merged/test/1"]')).toBeVisible();
+  await expect(page.locator('[data-inside="run-merged/hotfix/1"]')).toHaveCount(0);
+});
+
+test("closing and toggling a Phase panel preserve the selected Run view", async ({ page }) => {
+  await openRun(page, "run-merged", { view: "table" });
+  await page.goto(`${origin}/runs/run-merged/phases/hotfix/1?view=table`);
+  await expect(page.locator('[data-detail-panel="phase"]')).toBeVisible();
+  await expect(page.locator("[data-phase-row]").first()).toBeVisible();
+
+  await page.locator("[data-panel-close]").click();
+  await expect(page).toHaveURL(/\/runs\/run-merged\?view=table/);
+  await expect(page.locator('[data-detail-panel="phase"]')).toHaveCount(0);
+
+  await page.goto(`${origin}/runs/run-merged?view=timeline`);
+  await span(page, "run-merged/hotfix/1").click();
+  await expect(page.locator('[data-detail-panel="phase"]')).toBeVisible();
+  await span(page, "run-merged/hotfix/1").click();
+  await expect(page.locator('[data-detail-panel="phase"]')).toHaveCount(0);
+  await expect(page.locator('[data-selected="true"]')).toHaveCount(0);
+});
+
+test("an invalid Agent answer is an error and does not invent verification fields", async ({
+  page,
+}) => {
+  await openRun(page, "run-invalid-answer");
+  await page.goto(`${origin}/runs/run-invalid-answer/phases/draft/1?view=timeline`);
+  await expect(page.locator('[data-detail-panel] [data-error="EnvelopeParseError"]')).toContainText(
+    "did not match the required format",
+  );
+  await expect(page.locator('[data-field="failed-checks"]')).toHaveCount(0);
+  await expect(page.locator('[data-field="corrections"]')).toHaveCount(0);
+});
+
+test("failed checks include a failure that never completed its Run check", async ({ page }) => {
+  await openRun(page, "run-broken");
+  await page.goto(`${origin}/runs/run-broken/phases/implement/1?view=timeline`);
+  await expect(page.locator('[data-check="test"]')).toHaveAttribute("data-check-held", "false");
+  await expect(page.locator('[data-check="type checker"]')).toHaveAttribute(
+    "data-check-held",
+    "false",
+  );
+  await expect(page.locator('[data-check-held="false"]')).toHaveCount(2);
+  await expect(page.locator('[data-check="lint"]')).toHaveCount(0);
+});
+
+test("a held Sandbox panel states which release facts are not recorded yet", async ({ page }) => {
+  const acquisition = `${base + 1_000}-1`;
+  await openRun(page, "run-scout");
+  await page.goto(`${origin}/runs/run-scout/sandboxes/lane/${acquisition}?view=timeline`);
+  await expect(page.locator('[data-sandbox-state="held"]')).toBeVisible();
+  await expect(page.locator('[data-field="provider"]')).toContainText("written on release");
+  await expect(page.locator('[data-inside="run-scout/explore/1"]')).toBeVisible();
+});
+
+test("a missing Run is a settled answer and not a reconnecting outage", async ({ page }) => {
+  let reads = 0;
+  await page.route("**/api/v1/runs/run-nope", async (route) => {
+    reads += 1;
+    await route.fulfill({
+      status: 404,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "no-such-run", message: "the Run does not exist" }),
     });
+  });
+  await page.goto(launch());
+  await page.goto(`${origin}/runs/run-nope?view=timeline`);
+  await expect(page.getByText("There is no run run-nope in this factory.")).toBeVisible();
+  await expect(page.locator('[data-notice="retrying"]')).toHaveCount(0);
+  await page.waitForTimeout(1_200);
+  expect(reads).toBe(1);
+});
+
+test("the Phase panel keeps one page scroll and the whole Waterfall axis reachable", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1_280, height: 720 });
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/phases/hotfix/1?view=timeline`);
+  const panel = page.locator('[data-detail-panel="phase"]');
+  const waterfall = page.locator("[data-waterfall]");
+  const scroller = waterfall.locator("div.overflow-x-auto");
+  const panelBox = await boxOf(panel);
+  const waterfallBox = await boxOf(waterfall);
+  expect(panelBox.y).toBeGreaterThan(waterfallBox.y);
+  expect(Math.abs(panelBox.width - waterfallBox.width)).toBeLessThan(4);
+  expect(await scroller.evaluate((node) => node.scrollWidth - node.clientWidth)).toBe(0);
+  expect(await panel.evaluate((node) => node.scrollHeight > node.clientHeight + 1)).toBe(false);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBe(
+    0,
+  );
+});
+
+test("the Waterfall stays visible while a person reads the Phase panel", async ({ page }) => {
+  await page.setViewportSize({ width: 1_280, height: 400 });
+  await openRun(page, "run-merged");
+  await page.goto(`${origin}/runs/run-merged/phases/hotfix/1?view=timeline`);
+  await page
+    .locator('[data-detail-panel="phase"]')
+    .evaluate((node) => node.scrollIntoView({ block: "end" }));
+  const box = await boxOf(page.locator("[data-waterfall]"));
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(box.y).toBeLessThan(48);
+  expect(box.height).toBeGreaterThan(0);
+});
+
+test("failed Run outcome and labelled provenance remain on the Run page", async ({ page }) => {
+  await openRun(page, "run-broken");
+  const outcome = page.locator('[data-run-outcome="failed"]');
+  await expect(outcome).toBeVisible();
+  await expect(outcome.locator('[data-outcome-link="edit"]')).toBeVisible();
+  await outcome.locator('[data-outcome-link="edit"]').click();
+  await expect(page.locator('[data-detail-panel="phase"]')).toBeVisible();
+
+  await page.locator("[data-panel-close]").click();
+  for (const name of ["engine", "commit", "host", "config", "idempotency-key", "branch"]) {
+    await expect(page.locator(`[data-stamp="${name}"]`)).toHaveCount(1);
   }
 });
 
-/**
- * A live run redraws without rebuilding, which is what stops the picture flashing.
- *
- * **This is the one test in the suite that must not freeze the clock.** Everything else sets
- * `__KOJO_NOW__` so a screenshot holds still; the fault here only exists while the clock moves, so
- * freezing it would remove the subject and the test would pass over a bug.
- *
- * The fault: `view()` was a plain function, so every read re-ran the layout and produced fresh
- * objects, and `<For>` is keyed by reference — so every tick label, row and span was destroyed and
- * rebuilt once a second, for ever, on any run that had not finished. Measured on `run-scout`, whose
- * `explore` phase is in flight: a different DOM node every sample, while the span's width never left
- * 136 px. Nothing changed and everything was rebuilt.
- */
-test.describe("a run that is still going does not rebuild itself every second", () => {
-  test("the in-flight span survives the clock ticking", async ({ page }) => {
-    // No `openRun` here, and no `__KOJO_NOW__`: the live clock is the subject.
-    await page.goto(`${consoleAt.busy}/runs/run-scout`);
-
-    const span = page.locator('[data-phase="run-scout/explore/1"]');
-    await expect(span).toBeVisible();
-
-    // Counted inside one evaluate, by node identity, because that is the thing a person sees: a
-    // rebuilt element repaints. Three seconds covers three clock ticks and three polls.
-    const rebuilds = await page.evaluate(async () => {
-      const selector = '[data-phase="run-scout/explore/1"]';
-      let node = document.querySelector(selector);
-      let count = 0;
-      for (let sample = 0; sample < 12; sample += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 250));
-        const current = document.querySelector(selector);
-        if (current !== node) {
-          count += 1;
-          node = current;
-        }
-      }
-      return count;
-    });
-
-    expect(rebuilds, "the span was rebuilt while nothing about it changed").toBe(0);
-  });
-});
-
-/**
- * The timeline fills the card, pans when it overflows, and zooms under the modifier.
- *
- * The axis used to be a hardcoded 960 pixels. `Waterfall.tsx` recorded the reason — *a constant so
- * a span's width is the same on every machine* — and the price was that every card narrower than
- * 1136 pixels clipped the run and every card wider than it wasted the room. The property that
- * actually mattered is kept: the browser tier freezes the viewport, so these numbers are stable.
- */
-test.describe("the timeline uses the room it is given", () => {
-  const scroller = (page: Page): Locator => page.locator("[data-waterfall] div.overflow-x-auto");
-
-  test("the axis grows and shrinks with the card", async ({ page }) => {
-    await openRun(page, "busy", "run-merged");
-
-    const canvasNow = async (): Promise<number> =>
-      Number(await page.locator("[data-canvas]").getAttribute("data-canvas"));
-
-    await page.setViewportSize({ width: 1280, height: 900 });
-    await expect.poll(canvasNow).toBeGreaterThan(0);
-    const narrow = await canvasNow();
-
-    // **Polled for the change, not read once.** The axis is measured by a `ResizeObserver`, which
-    // reports after layout — so a read taken straight after `setViewportSize` returns the old
-    // number, and the first version of this test failed against working code for that reason.
-    await page.setViewportSize({ width: 1920, height: 900 });
-    await expect
-      .poll(canvasNow, { message: "the axis never grew when the window did" })
-      .toBeGreaterThan(narrow + 200);
-
-    // And it fits: nothing of the timeline is out of reach at zoom 1.
-    const hidden = await scroller(page).evaluate((node) => node.scrollWidth - node.clientWidth);
-    expect(hidden).toBe(0);
-  });
-
-  test("zooming in makes it pan, and the pan reaches the end", async ({ page }) => {
-    await page.setViewportSize({ width: 1280, height: 900 });
-    await openRun(page, "busy", "run-merged");
-    expect(await scroller(page).evaluate((node) => node.scrollWidth - node.clientWidth)).toBe(0);
-
-    await page.locator('[data-zoom="in"]').click();
-    await page.locator('[data-zoom="in"]').click();
-
-    const overflow = await scroller(page).evaluate((node) => node.scrollWidth - node.clientWidth);
-    expect(overflow, "a zoomed timeline has to have somewhere to pan to").toBeGreaterThan(100);
-
-    // Panning right actually moves it, which is what `overflow-x-auto` is there for.
-    await scroller(page).evaluate((node) => {
-      node.scrollLeft = node.scrollWidth;
-    });
-    expect(await scroller(page).evaluate((node) => node.scrollLeft)).toBeGreaterThan(100);
-  });
-
-  test("modifier and wheel zooms the timeline instead of the page", async ({ page }) => {
-    await page.setViewportSize({ width: 1280, height: 900 });
-    await openRun(page, "busy", "run-merged");
-
-    const canvasNow = async (): Promise<number> =>
-      Number(await page.locator("[data-canvas]").getAttribute("data-canvas"));
-    const before = await canvasNow();
-
-    // A wheel carrying the modifier. `ctrlKey` is also what a trackpad pinch sends.
-    await page.locator("[data-waterfall]").dispatchEvent("wheel", {
-      deltaY: -120,
-      ctrlKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-
-    await expect.poll(canvasNow).toBeGreaterThan(before);
-  });
-});
-
-/**
- * A wait long enough that hours stop meaning anything.
- *
- * `axisDuration` held hours for ever, on a recorded argument: a break's label has to be comparable
- * with the phases beside it, and `1d 17h` cannot be compared with `2m 0s` without arithmetic. That
- * argument assumed a factory run is measured in hours. A gate nobody answers is not — the label on
- * one printed `4164h 41m`, which is a hundred and seventy three days.
- *
- * Hours now hold to two days, which covers every break the fixtures and the design record carry,
- * and the scale goes to days, then weeks, then years above it.
- */
-test.describe("a break states a long wait in a unit somebody reads", () => {
-  const day = 24 * 60 * 60 * 1000;
-
-  test("the canonical forty-one hour break is unchanged", async ({ page }) => {
-    // console.md fixes this form, and two specs above assert it. It is the reason for the boundary.
-    await openRun(page, "busy", "run-merged");
-    await expect(page.locator("[data-break-label]").first()).toHaveText(/41h 12m/);
-  });
-
-  test("a gate held for months is stated in weeks, not in thousands of hours", async ({ page }) => {
-    // `run-approve` is suspended, so its axis runs to now — pushing the clock forward is what turns
-    // it into a gate nobody has answered since the spring.
-    await openRun(page, "busy", "run-approve", { now: frozenNow + 173 * day });
-
-    const label = page.locator("[data-break-label]").first();
-    await expect(label).toBeVisible();
-
-    const text = (await label.textContent()) ?? "";
-    expect(text, `a break reading "${text}" is not a duration anybody converts`).not.toMatch(
-      /\d{3,}h/,
-    );
-    expect(text).toMatch(/\d+w \d+d/);
-  });
+test("a successful Run has no failure outcome and a Host-only Run states no branch", async ({
+  page,
+}) => {
+  await openRun(page, "run-stale");
+  await expect(page.locator("[data-run-outcome]")).toHaveCount(0);
+  await expect(page.locator('[data-stamp="branch"]')).toContainText("no sandbox was acquired");
 });

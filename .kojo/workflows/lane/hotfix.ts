@@ -12,13 +12,13 @@
 //  - It grades the change with the **typecheck only**. That is less than either other lane runs, and
 //    it is the trade this lane is making — it buys minutes, and it pays for them in coverage.
 
-import * as OnExpiry from "@carere/kojo/contexts/gate/models/OnExpiry";
-import type { SandboxProvider } from "@carere/kojo/contexts/sandbox/models/SandboxProvider";
-import { withPermissions } from "@carere/kojo/contexts/workflow/guards/Permissions";
-import { agent } from "@carere/kojo/contexts/workflow/services/phase/agent";
-import { commit } from "@carere/kojo/contexts/workflow/services/phase/commit";
-import { reviewed } from "@carere/kojo/contexts/workflow/services/reviewed";
-import { sandboxed } from "@carere/kojo/contexts/workflow/services/sandboxed";
+import * as OnExpiry from "@carere/kojo-runtime/contexts/gate/models/OnExpiry";
+import type { SandboxProvider } from "@carere/kojo-runtime/contexts/sandbox/models/SandboxProvider";
+import { withPermissions } from "@carere/kojo-runtime/contexts/workflow/guards/Permissions";
+import { agent } from "@carere/kojo-runtime/contexts/workflow/services/phase/agent";
+import { commit } from "@carere/kojo-runtime/contexts/workflow/services/phase/commit";
+import { reviewed } from "@carere/kojo-runtime/contexts/workflow/services/reviewed";
+import { sandboxed } from "@carere/kojo-runtime/contexts/workflow/services/sandboxed";
 import { Duration, Effect } from "effect";
 import { built as builtChecks } from "../../checks.ts";
 import { commands } from "../../commands.ts";

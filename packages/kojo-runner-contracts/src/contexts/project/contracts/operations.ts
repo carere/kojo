@@ -1,0 +1,81 @@
+export const RUNNER_OPERATION_KINDS = [
+  "Hello",
+  "Welcome",
+  "Health",
+  "Ready",
+  "Fault",
+  "ValidateCapture",
+  "CaptureValidated",
+  "AcquireRevisionReader",
+  "ReleaseRevisionReader",
+  "RegisterRevision",
+  "DisposeRevision",
+  "ExecuteRun",
+  "ContinueRun",
+  "StartTrigger",
+  "StopTrigger",
+  "AdmitTriggerRequest",
+  "RecordTriggerProgress",
+  "RecordRejectedTriggerEvent",
+  "ReadRunState",
+  "ReadResult",
+  "BeginAction",
+  "CommitActionResult",
+  "SuspendRun",
+  "CompleteRun",
+  "CreateAsking",
+  "ReadDeferred",
+  "ApplyWakeup",
+  "ScheduleWakeup",
+  "BeginResourceAcquisition",
+  "ConfirmResourceAcquired",
+  "BeginResourceRelease",
+  "ConfirmResourceReleased",
+  "PreserveResource",
+  "ReportRecovery",
+  "WriteTrace",
+  "BeginArtifact",
+  "WriteArtifactChunk",
+  "FinishArtifact",
+  "ReadArtifactChunk",
+  "CancelRun",
+  "Drain",
+  "Shutdown",
+  "Stopped",
+] as const;
+
+export type RunnerOperationKind = (typeof RUNNER_OPERATION_KINDS)[number];
+
+export const EXECUTION_MUTATION_KINDS = [
+  "ExecuteRun",
+  "ContinueRun",
+  "AdmitTriggerRequest",
+  "RecordTriggerProgress",
+  "RecordRejectedTriggerEvent",
+  "BeginAction",
+  "CommitActionResult",
+  "SuspendRun",
+  "CompleteRun",
+  "CreateAsking",
+  "ApplyWakeup",
+  "ScheduleWakeup",
+  "BeginResourceAcquisition",
+  "ConfirmResourceAcquired",
+  "BeginResourceRelease",
+  "ConfirmResourceReleased",
+  "PreserveResource",
+  "ReportRecovery",
+  "WriteTrace",
+  "BeginArtifact",
+  "WriteArtifactChunk",
+  "FinishArtifact",
+  "CancelRun",
+] as const satisfies ReadonlyArray<RunnerOperationKind>;
+
+export type ExecutionMutationKind = (typeof EXECUTION_MUTATION_KINDS)[number];
+
+export const isRunnerOperationKind = (input: unknown): input is RunnerOperationKind =>
+  typeof input === "string" && (RUNNER_OPERATION_KINDS as ReadonlyArray<string>).includes(input);
+
+export const isExecutionMutationKind = (kind: RunnerOperationKind): kind is ExecutionMutationKind =>
+  (EXECUTION_MUTATION_KINDS as ReadonlyArray<RunnerOperationKind>).includes(kind);

@@ -1,0 +1,425 @@
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "@effect/vitest";
+import { Effect } from "effect";
+import {
+  hostManagedInstallation,
+  removeManagedInstallation,
+} from "../../../../src/contexts/daemon/adapters/ManagedInstallation.ts";
+import { systemdUserService } from "../../../../src/contexts/daemon/adapters/SystemdUserService.ts";
+import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
+import type { NativeServiceObservation } from "../../../../src/contexts/daemon/ports/NativeService.ts";
+import { manageDaemon } from "../../../../src/contexts/daemon/services/manageDaemon.ts";
+import {
+  managedLauncherReadinessTimeoutMillis,
+  observeManagedLauncherReadiness,
+  waitForManagedLauncherExit,
+} from "../../../support/daemon/managedLauncherReadiness.ts";
+
+const roots: Array<string> = [];
+
+const managedNative = (options: {
+  readonly observation: () => NativeServiceObservation;
+  readonly calls?: Array<string>;
+  readonly supported?: boolean;
+  readonly onInstall?: () => void;
+}) =>
+  systemdUserService({
+    unit: "kojo-test.service",
+    uid: 1200,
+    home: "/tmp/kojo-test-home",
+    systemctl: (arguments_) => {
+      if (arguments_.includes("show-environment"))
+        return options.supported === false
+          ? { exitCode: 1, stdout: "", stderr: "unsupported Host" }
+          : { exitCode: 0, stdout: "", stderr: "" };
+      if (arguments_.includes("is-enabled"))
+        return {
+          exitCode: 0,
+          stdout: `${options.observation().automaticStart === "enabled" ? "enabled" : "disabled"}\n`,
+          stderr: "",
+        };
+      if (arguments_.includes("show")) {
+        const observation = options.observation();
+        return {
+          exitCode: 0,
+          stdout: `LoadState=${observation.manager === "loaded" ? "loaded" : "not-found"}\nActiveState=${observation.process === "running" ? "active" : "inactive"}\n`,
+          stderr: "",
+        };
+      }
+      if (arguments_.includes("enable") && arguments_.includes("--now")) {
+        options.calls?.push("install-and-start");
+        options.onInstall?.();
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+    loginctl: (arguments_) => {
+      if (arguments_.includes("enable-linger")) options.calls?.push("linger");
+      return { exitCode: 0, stdout: "no\n", stderr: "" };
+    },
+  });
+
+const waitFor = async (
+  predicate: () => boolean,
+  timeout: number,
+  failure: () => string,
+): Promise<void> => {
+  const deadline = Date.now() + timeout;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(failure());
+    await Bun.sleep(25);
+  }
+};
+
+const removeTree = (path: string): void => {
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink()) {
+    rmSync(path, { force: true });
+    return;
+  }
+  if (stat.isDirectory()) {
+    chmodSync(path, 0o700);
+    for (const child of readdirSync(path)) removeTree(join(path, child));
+  } else {
+    chmodSync(path, 0o600);
+  }
+  rmSync(path, { recursive: true, force: true });
+};
+
+const processGroupExists = (processId: number): boolean => {
+  try {
+    process.kill(-processId, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+afterEach(() => {
+  for (const root of roots.splice(0)) removeTree(root);
+});
+
+describe("the managed Daemon installation", () => {
+  it("retains Kojo, Bun, Console, a stable CLI, and a stable launcher without reinstall side effects", async () => {
+    const root = mkdtempSync(join(tmpdir(), "kojo-managed-install-"));
+    roots.push(root);
+    const installationRoot = join(root, "installation");
+    const paths: DaemonPaths = {
+      installationRoot,
+      dataRoot: join(root, "data"),
+      configurationRoot: join(root, "config"),
+      cacheRoot: join(root, "cache"),
+      runtimeRoot: join(root, "runtime"),
+      serviceDefinition: join(root, "LaunchAgents", "dev.kojo.test.plist"),
+      managedCli: join(installationRoot, "bin", "kojo"),
+      managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
+    };
+    const calls: Array<string> = [];
+    let observation: NativeServiceObservation = {
+      automaticStart: "enabled",
+      manager: "loaded",
+      process: "running",
+      loginLifetime: "test login lifetime",
+      logoutPersistence: "disabled",
+    };
+    const native = managedNative({
+      observation: () => observation,
+      calls,
+      onInstall: () => {
+        const data = lstatSync(paths.dataRoot);
+        const configuration = lstatSync(paths.configurationRoot);
+        expect(data.isDirectory()).toBe(true);
+        expect(configuration.isDirectory()).toBe(true);
+        expect(data.mode & 0o777).toBe(0o700);
+        expect(configuration.mode & 0o777).toBe(0o700);
+        expect([data.dev, data.ino]).not.toEqual([configuration.dev, configuration.ino]);
+      },
+    });
+    const sourceRoot = new URL("../../../../", import.meta.url).pathname;
+    const lifecycle = manageDaemon(paths, native, hostManagedInstallation, {
+      sourceRoot,
+      bunExecutable: process.execPath,
+    });
+
+    const first = await Effect.runPromise(lifecycle.install);
+    observation = {
+      automaticStart: "disabled",
+      manager: "unloaded",
+      process: "stopped",
+      loginLifetime: "test login lifetime",
+      logoutPersistence: "disabled",
+    };
+    const second = await Effect.runPromise(lifecycle.install);
+    await Effect.runPromise(lifecycle.keepRunningAfterLogout);
+
+    expect(first.changed).toBe(true);
+    expect(second.changed).toBe(false);
+    expect(second.status).toMatchObject({
+      automaticStart: "disabled",
+      manager: "unloaded",
+      process: "stopped",
+    });
+    expect(calls).toEqual(["install-and-start", "linger"]);
+    expect(readFileSync(paths.managedCli, "utf8")).toContain("active-release");
+    expect(readFileSync(paths.managedLauncher, "utf8")).toContain("launcher.js");
+    const releaseId = readFileSync(join(installationRoot, "active-release"), "utf8").trim();
+    const release = join(installationRoot, "releases", releaseId);
+    expect(lstatSync(release).mode & 0o222).toBe(0);
+    expect(lstatSync(join(release, "runtime", "bun")).mode & 0o222).toBe(0);
+    expect(readFileSync(join(release, "console", "index.html"), "utf8")).toContain("<html");
+    for (const privateDirectory of [
+      paths.installationRoot,
+      paths.dataRoot,
+      paths.configurationRoot,
+      paths.cacheRoot,
+      paths.runtimeRoot,
+    ]) {
+      expect(lstatSync(privateDirectory).mode & 0o077).toBe(0);
+    }
+    expect(lstatSync(paths.serviceDefinition).mode & 0o077).toBe(0);
+
+    const command = Bun.spawnSync([paths.managedCli, "--version"], {
+      env: { ...process.env, HOME: root },
+    });
+    expect(command.exitCode).toBe(0);
+    expect(command.stdout.toString().trim()).not.toBe("");
+
+    const managedEnvironment = {
+      ...process.env,
+      HOME: root,
+      KOJO_MANAGED_INSTALLATION: paths.installationRoot,
+      KOJO_DAEMON_DATA: paths.dataRoot,
+      KOJO_DAEMON_RUNTIME: paths.runtimeRoot,
+      KOJO_DAEMON_CONFIG: paths.configurationRoot,
+      KOJO_DAEMON_CACHE: paths.cacheRoot,
+    };
+    const launcher = Bun.spawn([paths.managedLauncher], {
+      env: managedEnvironment,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      detached: true,
+    });
+    const output = new Response(launcher.stdout).text();
+    const error = new Response(launcher.stderr).text();
+    const endpointPath = join(paths.runtimeRoot, "endpoint.json");
+    let readinessFailure: { readonly cause: unknown } | undefined;
+    try {
+      const readiness = await observeManagedLauncherReadiness({
+        endpointPresent: () => existsSync(endpointPath),
+        exitCode: () => launcher.exitCode,
+      });
+      if (readiness.state === "exited") {
+        throw new Error(
+          `the installed managed launcher exited ${readiness.exitCode} before it published ${endpointPath}: ${await error}${await output}`,
+        );
+      }
+      if (readiness.state === "timed-out") {
+        throw new Error(
+          `the installed managed launcher did not publish ${endpointPath} within ${readiness.timeoutMillis}ms; launcher process is still ${readiness.process} at pid ${launcher.pid}`,
+        );
+      }
+      const duplicate = Bun.spawn([paths.managedLauncher], {
+        env: { ...managedEnvironment, KOJO_DAEMON_CHILD: "1" },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const duplicateOutput = new Response(duplicate.stdout).text();
+      const duplicateError = new Response(duplicate.stderr).text();
+      const duplicateExit = await Promise.race([
+        duplicate.exited,
+        Bun.sleep(5_000).then(async () => {
+          duplicate.kill("SIGKILL");
+          await duplicate.exited;
+          throw new Error("the duplicate shipped Daemon did not reject singleton ownership");
+        }),
+      ]);
+      expect(duplicateExit, await duplicateOutput).toBe(1);
+      expect(await duplicateError).toContain(
+        "another Daemon start or purge transition owns the stable lifecycle gate",
+      );
+      expect(await duplicateError).toContain("PURGE_GATE_HELD");
+    } catch (cause) {
+      readinessFailure = { cause };
+    }
+    let signalFailure: { readonly cause: unknown } | undefined;
+    try {
+      process.kill(-launcher.pid, "SIGTERM");
+    } catch (cause) {
+      if (launcher.exitCode === null) signalFailure = { cause };
+    }
+    const exitedGracefully = await waitForManagedLauncherExit({
+      exited: launcher.exited,
+      timeoutMillis: 5_000,
+      onTimeout: async () => {
+        try {
+          process.kill(-launcher.pid, "SIGKILL");
+        } catch {
+          // The managed process group completed its planned stop before the forced bound.
+        }
+        await launcher.exited;
+      },
+    });
+    await waitFor(
+      () => !existsSync(endpointPath),
+      managedLauncherReadinessTimeoutMillis,
+      () =>
+        [
+          `the installed managed launcher left ${endpointPath} published after ${managedLauncherReadinessTimeoutMillis}ms`,
+          `launcher pid: ${launcher.pid}`,
+          `launcher exit: ${String(launcher.exitCode)}`,
+          `process group present: ${String(processGroupExists(launcher.pid))}`,
+        ].join("; "),
+    );
+    expect(processGroupExists(launcher.pid)).toBe(false);
+    if (readinessFailure !== undefined) throw readinessFailure.cause;
+    if (signalFailure !== undefined) throw signalFailure.cause;
+    if (!exitedGracefully) {
+      throw new Error("the installed managed launcher did not stop its process group in 5000ms");
+    }
+  }, 90_000);
+
+  it.each([
+    ["systemd compatibility", "configuration"],
+    ["arbitrary", "outside"],
+  ] as const)(
+    "refuses the %s state link before native service start",
+    async (_name, targetName) => {
+      const root = mkdtempSync(join(tmpdir(), "kojo-linked-state-install-"));
+      roots.push(root);
+      const installationRoot = join(root, "installation");
+      const paths: DaemonPaths = {
+        installationRoot,
+        dataRoot: join(root, "state", "kojo"),
+        configurationRoot: join(root, "config", "kojo"),
+        cacheRoot: join(root, "cache", "kojo"),
+        runtimeRoot: join(root, "runtime", "kojo"),
+        serviceDefinition: join(root, "service", "kojo.service"),
+        managedCli: join(installationRoot, "bin", "kojo"),
+        managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
+      };
+      const target =
+        targetName === "configuration" ? paths.configurationRoot : join(root, "outside");
+      mkdirSync(target, { mode: 0o700, recursive: true });
+      mkdirSync(join(paths.dataRoot, ".."), { mode: 0o700, recursive: true });
+      symlinkSync(target, paths.dataRoot);
+      let serviceStarted = false;
+      const native = managedNative({
+        observation: () => ({
+          automaticStart: "disabled",
+          manager: "unloaded",
+          process: "stopped",
+          loginLifetime: "test login lifetime",
+          logoutPersistence: "disabled",
+        }),
+        onInstall: () => {
+          serviceStarted = true;
+        },
+      });
+      const sourceRoot = new URL("../../../../", import.meta.url).pathname;
+
+      await expect(
+        Effect.runPromise(
+          manageDaemon(paths, native, hostManagedInstallation, {
+            sourceRoot,
+            bunExecutable: process.execPath,
+          }).install,
+        ),
+      ).rejects.toThrow("symbolic link");
+      expect(serviceStarted).toBe(false);
+      expect(lstatSync(paths.dataRoot).isSymbolicLink()).toBe(true);
+    },
+  );
+
+  it("refuses an unsupported Host before it writes managed content", async () => {
+    const root = mkdtempSync(join(tmpdir(), "kojo-unsupported-install-"));
+    roots.push(root);
+    const installationRoot = join(root, "installation");
+    const paths: DaemonPaths = {
+      installationRoot,
+      dataRoot: join(root, "data"),
+      configurationRoot: join(root, "config"),
+      cacheRoot: join(root, "cache"),
+      runtimeRoot: join(root, "runtime"),
+      serviceDefinition: join(root, "service", "kojo.service"),
+      managedCli: join(installationRoot, "bin", "kojo"),
+      managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
+    };
+    const native = managedNative({
+      supported: false,
+      observation: () => ({
+        automaticStart: "unknown",
+        manager: "unavailable",
+        process: "unknown",
+        loginLifetime: "unsupported",
+        logoutPersistence: "unknown",
+      }),
+    });
+
+    await expect(
+      Effect.runPromise(manageDaemon(paths, native, hostManagedInstallation).install),
+    ).rejects.toThrow("unsupported Host");
+    expect(existsSync(installationRoot)).toBe(false);
+  });
+
+  it("removes only managed installation nodes and preserves Daemon data and configuration", () => {
+    const root = mkdtempSync(join(tmpdir(), "kojo-managed-remove-"));
+    roots.push(root);
+    chmodSync(root, 0o700);
+    const installationRoot = join(root, "installation");
+    const paths: DaemonPaths = {
+      installationRoot,
+      dataRoot: join(installationRoot, "data"),
+      configurationRoot: join(installationRoot, "config"),
+      cacheRoot: join(root, "cache"),
+      runtimeRoot: join(root, "runtime"),
+      serviceDefinition: join(root, "LaunchAgents", "dev.kojo.test.plist"),
+      managedCli: join(installationRoot, "bin", "kojo"),
+      managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
+    };
+    for (const directory of [
+      join(installationRoot, "bin"),
+      join(installationRoot, "releases", "release-1"),
+      paths.dataRoot,
+      paths.configurationRoot,
+      paths.cacheRoot,
+    ]) {
+      mkdirSync(directory, { mode: 0o700, recursive: true });
+      chmodSync(directory, 0o700);
+    }
+    for (const [path, content, mode] of [
+      [paths.managedCli, "cli\n", 0o700],
+      [paths.managedLauncher, "launcher\n", 0o700],
+      [join(installationRoot, "active-release"), "release-1\n", 0o600],
+      [join(installationRoot, "releases", "release-1", "release.json"), "{}\n", 0o600],
+      [join(paths.dataRoot, "kojo.db"), "correctness\n", 0o600],
+      [join(paths.configurationRoot, "credential"), "secret\n", 0o600],
+      [join(paths.cacheRoot, "observation"), "cache\n", 0o600],
+    ] as const) {
+      writeFileSync(path, content, { mode });
+    }
+
+    removeManagedInstallation(paths);
+
+    expect(existsSync(paths.managedCli)).toBe(false);
+    expect(existsSync(paths.managedLauncher)).toBe(false);
+    expect(existsSync(join(installationRoot, "active-release"))).toBe(false);
+    expect(existsSync(join(installationRoot, "releases"))).toBe(false);
+    expect(readFileSync(join(paths.dataRoot, "kojo.db"), "utf8")).toBe("correctness\n");
+    expect(readFileSync(join(paths.configurationRoot, "credential"), "utf8")).toBe("secret\n");
+    expect(readFileSync(join(paths.cacheRoot, "observation"), "utf8")).toBe("cache\n");
+  });
+});

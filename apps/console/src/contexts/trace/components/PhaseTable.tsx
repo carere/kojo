@@ -1,6 +1,7 @@
 import { createColumnHelper, createTable, tableFeatures } from "@tanstack/solid-table";
-import { For, type JSX } from "solid-js";
+import { createMemo, createSignal, For, type JSX } from "solid-js";
 import { Badge, type BadgeTone } from "../../shared/components/Badge.tsx";
+import { DataGrid } from "../../shared/components/data-grid/DataGrid.tsx";
 import {
   Table,
   TableBody,
@@ -79,46 +80,103 @@ const columns = helper.columns([
 ]);
 
 export const PhaseTable = (props: { readonly spans: ReadonlyArray<PhaseSpan> }): JSX.Element => {
+  const [text, setText] = createSignal("");
+  const [outcome, setOutcome] = createSignal("all");
+  const filtered = createMemo(() => {
+    const query = text().trim().toLocaleLowerCase();
+    return props.spans.filter(
+      (span) =>
+        (outcome() === "all" || span.state === outcome()) &&
+        (query === "" ||
+          `${span.name}\n${span.kind}\n${span.state}\n${scopeOf(span)}\n${span.errorTag ?? ""}`
+            .toLocaleLowerCase()
+            .includes(query)),
+    );
+  });
   const table = createTable({
     features,
     columns,
     get data() {
-      return [...props.spans].sort((left, right) => left.startedAt - right.startedAt);
+      return [...filtered()].sort((left, right) => left.startedAt - right.startedAt);
     },
   });
 
   return (
-    <Table>
-      <TableHeader>
-        <For each={table.getHeaderGroups()}>
-          {(group) => (
-            <TableRow>
-              <For each={group.headers}>
-                {(header) => (
-                  <TableHead>
-                    <table.FlexRender header={header} />
-                  </TableHead>
-                )}
-              </For>
-            </TableRow>
-          )}
-        </For>
-      </TableHeader>
-      <TableBody>
-        <For each={table.getRowModel().rows}>
-          {(row) => (
-            <TableRow data-phase-row={row.original.phaseId}>
-              <For each={row.getAllCells()}>
-                {(cell) => (
-                  <TableCell>
-                    <table.FlexRender cell={cell} />
-                  </TableCell>
-                )}
-              </For>
-            </TableRow>
-          )}
-        </For>
-      </TableBody>
-    </Table>
+    <DataGrid
+      matchedCount={filtered().length}
+      recordCount={props.spans.length}
+      resourceName="Phases"
+      selectedCount={0}
+    >
+      <div class="flex flex-wrap gap-2 border-border border-b p-3" data-slot="filters">
+        <label class="grid gap-1 text-muted-foreground text-xs">
+          Find
+          <input
+            aria-label="Find Phases"
+            class="rounded-md border border-border bg-background px-3 py-2 text-foreground text-sm"
+            type="search"
+            value={text()}
+            onInput={(event) => setText(event.currentTarget.value)}
+          />
+        </label>
+        <label class="grid gap-1 text-muted-foreground text-xs">
+          Outcome
+          <select
+            aria-label="Phase outcome"
+            class="rounded-md border border-border bg-background px-3 py-2 text-foreground text-sm"
+            value={outcome()}
+            onChange={(event) => setOutcome(event.currentTarget.value)}
+          >
+            <option value="all">All outcomes</option>
+            <option value="running">Running</option>
+            <option value="succeeded">Succeeded</option>
+            <option value="failed">Failed</option>
+            <option value="interrupted">Interrupted</option>
+          </select>
+        </label>
+        <button
+          type="button"
+          class="self-end rounded-md border border-border px-3 py-2 text-xs"
+          onClick={() => {
+            setText("");
+            setOutcome("all");
+          }}
+        >
+          Clear
+        </button>
+      </div>
+      <Table>
+        <TableHeader>
+          <For each={table.getHeaderGroups()}>
+            {(group) => (
+              <TableRow>
+                <For each={group.headers}>
+                  {(header) => (
+                    <TableHead>
+                      <table.FlexRender header={header} />
+                    </TableHead>
+                  )}
+                </For>
+              </TableRow>
+            )}
+          </For>
+        </TableHeader>
+        <TableBody>
+          <For each={table.getRowModel().rows}>
+            {(row) => (
+              <TableRow data-phase-row={row.original.phaseId}>
+                <For each={row.getAllCells()}>
+                  {(cell) => (
+                    <TableCell>
+                      <table.FlexRender cell={cell} />
+                    </TableCell>
+                  )}
+                </For>
+              </TableRow>
+            )}
+          </For>
+        </TableBody>
+      </Table>
+    </DataGrid>
   );
 };

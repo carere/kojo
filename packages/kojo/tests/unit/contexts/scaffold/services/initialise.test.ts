@@ -17,8 +17,6 @@ const request = (overrides?: Partial<InitialiseRequest>): InitialiseRequest => (
   sandbox: "docker",
   template: "review",
   engine: someEngine,
-  uid: 501,
-  gid: 20,
   ...overrides,
 });
 
@@ -41,7 +39,7 @@ const run = (options: InitialiseRequest, seed?: Readonly<Record<string, string>>
   });
 
 describe("stamping a factory into a repository", () => {
-  it.effect("writes every planned file and makes the data directory", () =>
+  it.effect("writes every planned file without making runtime data", () =>
     Effect.gen(function* () {
       const { initialised, files, directories } = yield* run(request());
 
@@ -49,7 +47,7 @@ describe("stamping a factory into a repository", () => {
       expect(files.has("/repo/.kojo/kojo.config.yaml")).toBe(true);
       expect(files.has("/repo/.kojo/workflows/review.ts")).toBe(true);
       expect(files.has("/repo/.kojo/prompts/drafter/system.md")).toBe(true);
-      expect(directories.has("/repo/.kojo/data")).toBe(true);
+      expect(directories.has("/repo/.kojo/data")).toBe(false);
     }),
   );
 
@@ -145,57 +143,15 @@ describe("the install the instructions create being ignored", () => {
   );
 });
 
-describe("the image initialisation asks for", () => {
-  it.effect("is the one the stamped workflow will ask the provider for", () =>
+describe("safe initialisation", () => {
+  it.effect("records the image contract without building an image", () =>
     Effect.gen(function* () {
       const { initialised, built, files } = yield* run(request({ imageName: "acme:latest" }));
 
-      expect(built).toHaveLength(1);
-      expect(built[0]?.imageName).toBe("acme:latest");
-      expect(Option.getOrUndefined(initialised.image)).toBe("acme:latest");
-      // The same string in the workflow. Two places that must agree, so the agreement is asserted
-      // rather than assumed — a run whose provider asks for an image nobody built fails at its
-      // first sandbox acquisition.
-      expect(files.get("/repo/.kojo/workflows/review.ts")).toContain('imageName: "acme:latest"');
-    }),
-  );
-
-  it.effect("is built from the stamped Dockerfile, not from a copy of it", () =>
-    Effect.gen(function* () {
-      const { built } = yield* run(request());
-
-      // Edge 7 after the first day: a person edits the toolchain block and rebuilds, and gets the
-      // image their edit describes. Building from anything else would make the file a decoration.
-      expect(built[0]?.dockerfile).toBe("/repo/.kojo/sandbox/Dockerfile");
-      expect(built[0]?.context).toBe("/repo/.kojo/sandbox");
-    }),
-  );
-
-  it.effect("carries this machine's uid and gid, which the provider checks", () =>
-    Effect.gen(function* () {
-      const { built } = yield* run(request({ uid: 501, gid: 20 }));
-      expect(built[0]).toMatchObject({ uid: 501, gid: 20 });
-    }),
-  );
-
-  it.effect("is not asked for at all when --skip-image was given", () =>
-    Effect.gen(function* () {
-      const { initialised, built, files } = yield* run(request({ skipImage: true }));
-
       expect(built).toEqual([]);
       expect(Option.isNone(initialised.image)).toBe(true);
-      // Stamped anyway. It is the written record of what the phases assume.
+      expect(files.get("/repo/.kojo/workflows/review.ts")).toContain('imageName: "acme:latest"');
       expect(files.has("/repo/.kojo/sandbox/Dockerfile")).toBe(true);
     }),
-  );
-
-  it.effect.each(["none", "vercel", "daytona"] as const)(
-    "is not asked for by --sandbox %s, which has no local image",
-    (sandbox) =>
-      Effect.gen(function* () {
-        const { built, initialised } = yield* run(request({ sandbox }));
-        expect(built).toEqual([]);
-        expect(Option.isNone(initialised.image)).toBe(true);
-      }),
   );
 });

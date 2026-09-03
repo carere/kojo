@@ -13,6 +13,7 @@ export interface RunRow {
   readonly runId: string;
   readonly workflow: string;
   readonly status: RunStatus;
+  readonly queueReason: string;
   /** The gate this run waits on, or an em dash. Nothing waiting is a fact, not a blank. */
   readonly gate: string;
   /** *in 7h 0m*, *overdue by 2h 0m*, or an em dash when nothing is waiting. */
@@ -29,7 +30,7 @@ const nothing = "—";
 /**
  * The rows, newest run first.
  *
- * The order is the server's — `GET /api/runs` answers newest first — and it is preserved rather than
+ * The order is the Daemon's — `GET /api/v1/runs` answers newest first — and it is preserved rather than
  * re-sorted here, so one rule about what "newest" means lives in one place.
  */
 export const runRows = (options: {
@@ -44,6 +45,7 @@ export const runRows = (options: {
         runId: line.run.runId,
         workflow: line.run.workflow,
         status: statusOf(line),
+        queueReason: line.queueReason ?? "—",
         gate: nothing,
         deadline: nothing,
         overdue: false,
@@ -53,6 +55,7 @@ export const runRows = (options: {
       runId: line.run.runId,
       workflow: line.run.workflow,
       status: statusOf(line),
+      queueReason: line.queueReason ?? "—",
       gate: open.request.gate,
       deadline: deadlineLabel(open.request.deadlineAt, options.now),
       deadlineAt: new Date(open.request.deadlineAt).toISOString(),

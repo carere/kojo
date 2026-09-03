@@ -1,0 +1,95 @@
+#!/usr/bin/env bun
+import { join } from "node:path";
+import { Effect } from "effect";
+import { recoverPurgeSafety, startDaemon } from "../contexts/daemon/adapters/DaemonOwner.ts";
+import { macLaunchAgent } from "../contexts/daemon/adapters/MacLaunchAgent.ts";
+import { ManagedDaemonSupervision } from "../contexts/daemon/adapters/ManagedDaemonSupervision.ts";
+import { systemdUserService } from "../contexts/daemon/adapters/SystemdUserService.ts";
+import { LifecycleError } from "../contexts/daemon/models/LifecycleError.ts";
+import { hostPaths } from "../contexts/daemon/services/hostPaths.ts";
+import { listenForProcessStopSignals } from "../contexts/daemon/services/processStopSignals.ts";
+
+export const runDaemon = async (): Promise<void> => {
+  const installationRoot = process.env.KOJO_MANAGED_INSTALLATION;
+  const dataRoot = process.env.KOJO_DAEMON_DATA;
+  const runtimeRoot = process.env.KOJO_DAEMON_RUNTIME;
+  const configurationRoot = process.env.KOJO_DAEMON_CONFIG;
+  const cacheRoot = process.env.KOJO_DAEMON_CACHE;
+  const paths = hostPaths(
+    installationRoot !== undefined && dataRoot !== undefined && runtimeRoot !== undefined
+      ? {
+          installationRoot,
+          dataRoot,
+          runtimeRoot,
+          ...(configurationRoot === undefined ? {} : { configurationRoot }),
+          ...(cacheRoot === undefined ? {} : { cacheRoot }),
+          managedCli: join(installationRoot, "bin", "kojo"),
+          managedLauncher: join(installationRoot, "bin", "kojo-launcher"),
+        }
+      : {},
+  );
+  const managedAttemptId = process.env.KOJO_DAEMON_ATTEMPT_ID;
+  const purgeRecoveryOperation = process.env.KOJO_PURGE_SAFETY_RECOVERY_OPERATION;
+  if (purgeRecoveryOperation !== undefined) {
+    const planToken = process.env.KOJO_PURGE_SAFETY_RECOVERY_PLAN;
+    const capability = process.env.KOJO_PURGE_SAFETY_RECOVERY_CAPABILITY;
+    if (planToken === undefined || capability === undefined) {
+      throw new LifecycleError(
+        "PURGE_RECOVERY_AUTHORIZATION_INVALID",
+        "the restricted recovery child has no exact one-use authorization",
+      );
+    }
+    const service =
+      process.platform === "darwin"
+        ? macLaunchAgent()
+        : process.platform === "linux"
+          ? systemdUserService()
+          : undefined;
+    if (service === undefined) {
+      throw new LifecycleError("UNSUPPORTED_HOST", "restricted recovery requires macOS or Linux");
+    }
+    await recoverPurgeSafety(paths, purgeRecoveryOperation, planToken, capability, service);
+    return;
+  }
+  const supervision =
+    managedAttemptId === undefined ? undefined : new ManagedDaemonSupervision(paths.dataRoot);
+  const daemon = startDaemon(paths, {
+    ...(supervision === undefined || managedAttemptId === undefined
+      ? {}
+      : {
+          managedSupervision: {
+            recordReady: (policy) => {
+              supervision.recordReady(managedAttemptId);
+              supervision.activatePolicy(managedAttemptId, policy);
+            },
+            recordOperationSuccess: () => supervision.recordOperationSuccess(managedAttemptId),
+            recordPlannedStop: () => supervision.recordPlannedStop(managedAttemptId),
+            activatePolicy: (policy) => supervision.activatePolicy(managedAttemptId, policy),
+          },
+        }),
+  });
+
+  let stopping = false;
+  const stop = (): void => {
+    if (stopping) return;
+    stopping = true;
+    void Effect.runPromise(daemon.stop);
+  };
+  const removeStopListeners = listenForProcessStopSignals(stop);
+  try {
+    try {
+      await Effect.runPromise(daemon.ready);
+    } catch (cause) {
+      await Effect.runPromise(daemon.stop);
+      throw cause;
+    }
+    await Effect.runPromise(daemon.stopped);
+  } finally {
+    removeStopListeners();
+  }
+};
+
+if (import.meta.main) {
+  await runDaemon();
+  process.exit(0);
+}

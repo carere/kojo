@@ -98,12 +98,14 @@ export const manifestFor = (options: {
 }): ManifestDecision => {
   const path = "package.json";
   const wanted = declarations(options.engine);
+  const override = options.engine.runnerContracts;
+  const allWanted = override === undefined ? wanted : [...wanted, override];
 
   if (options.existing === undefined) {
     return {
       path,
       outcome: "created",
-      added: wanted,
+      added: allWanted,
       mismatched: [],
       content: serialise({
         name: manifestName(options.directory),
@@ -112,6 +114,7 @@ export const manifestFor = (options: {
         dependencies: Object.fromEntries(
           wanted.map((entry) => [entry.name, entry.specifier] as const),
         ),
+        ...(override === undefined ? {} : { overrides: { [override.name]: override.specifier } }),
       }),
     };
   }
@@ -129,7 +132,7 @@ export const manifestFor = (options: {
       path,
       outcome: "unreadable",
       added: [],
-      mismatched: wanted.map((entry) => ({
+      mismatched: allWanted.map((entry) => ({
         name: entry.name,
         wanted: entry.specifier,
         declared: "unknown — the file is not a JSON object",
@@ -149,6 +152,32 @@ export const manifestFor = (options: {
       added.push(entry);
     } else if (already !== entry.specifier) {
       mismatched.push({ name: entry.name, wanted: entry.specifier, declared: already });
+    }
+  }
+
+  if (override !== undefined) {
+    const existingOverrides = manifest.overrides;
+    if (
+      existingOverrides !== undefined &&
+      (existingOverrides === null ||
+        typeof existingOverrides !== "object" ||
+        Array.isArray(existingOverrides))
+    ) {
+      mismatched.push({
+        name: override.name,
+        wanted: override.specifier,
+        declared: "unknown — overrides is not a JSON object",
+      });
+    } else {
+      const overrides = { ...objectAt(manifest, "overrides") };
+      const already = overrides[override.name];
+      if (already === undefined) {
+        overrides[override.name] = override.specifier;
+        manifest.overrides = overrides;
+        added.push(override);
+      } else if (already !== override.specifier) {
+        mismatched.push({ name: override.name, wanted: override.specifier, declared: already });
+      }
     }
   }
 

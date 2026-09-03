@@ -4,11 +4,12 @@ import type { FactoryPlan } from "../models/FactoryPlan.ts";
 import { commands } from "../templates/commands.ts";
 import { config } from "../templates/config.ts";
 import { dockerfile } from "../templates/dockerfile.ts";
+import { factoryManifest } from "../templates/factoryManifest.ts";
 import { hotfix } from "../templates/hotfix.ts";
 import { review } from "../templates/review.ts";
 import { authoring, skill, skillsDirectory } from "../templates/skills.ts";
 import type { Starter } from "../templates/starter.ts";
-import { dataDirectory, environment, ignore, readme } from "../templates/support.ts";
+import { environment, ignore, readme } from "../templates/support.ts";
 
 /** Every starter this build can stamp. The template answer names one of these. */
 export const starters: Record<TemplateName, Starter> = { review, hotfix };
@@ -31,11 +32,10 @@ export const plan = (choices: FactoryChoices): FactoryPlan => {
   const skillAt = (...parts: ReadonlyArray<string>) => [skillsDirectory, ...parts].join("/");
 
   return {
-    // Made even though nothing is written into it. A factory whose data directory appears only on
-    // the first run is a factory whose ignore rule is untested until then.
-    directories: [at(dataDirectory)],
+    directories: [],
     files: [
       { path: at("README.md"), content: readme(choices, starter) },
+      { path: at("factory.json"), content: factoryManifest(starter.agents, true) },
       { path: at(".gitignore"), content: ignore() },
       { path: at(".env"), content: environment(choices) },
       { path: at("kojo.config.yaml"), content: config(choices, starter.agents) },
@@ -58,12 +58,6 @@ export const plan = (choices: FactoryChoices): FactoryPlan => {
     ],
   };
 };
-
-/** Where the image is built from, relative to the target repository root. */
-export const imagePaths = {
-  dockerfile: `${factoryDirectory}/sandbox/Dockerfile`,
-  context: `${factoryDirectory}/sandbox`,
-} as const;
 
 /**
  * The default image tag for a repository, derived from its directory name.

@@ -1,0 +1,47 @@
+{
+  "name": "@carere/kojo-runner-contracts",
+  "version": "0.0.0",
+  "description": "Versioned plain-data contracts for Kojo Project Runners",
+  "keywords": [
+    "contract",
+    "kojo",
+    "protocol",
+    "runner"
+  ],
+  "homepage": "https://github.com/carere/kojo#readme",
+  "bugs": "https://github.com/carere/kojo/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/carere/kojo.git",
+    "directory": "packages/kojo-runner-contracts"
+  },
+  "license": "MIT",
+  "author": "Kevin Abatan <contact@carere.dev> (https://github.com/carere)",
+  "type": "module",
+  "exports": {
+    "./contexts/project/codecs/frame": "./src/contexts/project/codecs/frame.ts",
+    "./contexts/project/codecs/framing": "./src/contexts/project/codecs/framing.ts",
+    "./contexts/project/contracts/artifact": "./src/contexts/project/contracts/artifact.ts",
+    "./contexts/project/contracts/execution": "./src/contexts/project/contracts/execution.ts",
+    "./contexts/project/contracts/frame": "./src/contexts/project/contracts/frame.ts",
+    "./contexts/project/contracts/handshake": "./src/contexts/project/contracts/handshake.ts",
+    "./contexts/project/contracts/operations": "./src/contexts/project/contracts/operations.ts",
+    "./contexts/project/contracts/resource": "./src/contexts/project/contracts/resource.ts",
+    "./contexts/project/contracts/trace": "./src/contexts/project/contracts/trace.ts",
+    "./contexts/shared/codecs/json": "./src/contexts/shared/codecs/json.ts",
+    "./contexts/shared/models/identity": "./src/contexts/shared/models/identity.ts"
+  },
+  "files": [
+    "LICENSE",
+    "src"
+  ],
+  "devDependencies": {
+    "vitest": "^4.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "bun": ">=1.3.14"
+  }
+}

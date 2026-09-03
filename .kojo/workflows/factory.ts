@@ -1,6 +1,6 @@
 // This file is Kojo's own factory, and it is the one used to develop Kojo.
 //
-// Start it with `kojo run factory "<what needs doing>"`.
+// Start it with `kojo workflow start <project-id> factory --payload '{"request":"..."}'`.
 //
 // It is architecture.md §3 as a program: a router reads the request and names a lane, the lanes
 // differ from each other on purpose, and every path then passes one human review before a code phase
@@ -18,35 +18,35 @@
 //    resume; only a phase's recorded result is replayed instead of re-run. That is why the target
 //    branch below is *read in a phase* rather than read here.
 
-import { AgentInvocationError } from "@carere/kojo/contexts/agent/models/AgentInvocationError";
-import { RosterError } from "@carere/kojo/contexts/agent/models/RosterError";
-import { GateExpired } from "@carere/kojo/contexts/gate/models/GateExpired";
-import { GateRejected } from "@carere/kojo/contexts/gate/models/GateRejected";
-import { GateUnreachable } from "@carere/kojo/contexts/gate/models/GateUnreachable";
-import * as OnExpiry from "@carere/kojo/contexts/gate/models/OnExpiry";
-import { noSandbox } from "@carere/kojo/contexts/sandbox/adapters/providers";
-import { SandboxError } from "@carere/kojo/contexts/sandbox/models/SandboxError";
-import { WorkspaceError } from "@carere/kojo/contexts/sandbox/models/WorkspaceError";
-import { WorkspaceUnreachable } from "@carere/kojo/contexts/sandbox/models/WorkspaceUnreachable";
-import { WorktreeUnusable } from "@carere/kojo/contexts/sandbox/models/WorktreeUnusable";
-import { Workspace } from "@carere/kojo/contexts/sandbox/ports/Workspace";
-import { runBranch } from "@carere/kojo/contexts/shared/models/RunBranch";
-import { withPermissions } from "@carere/kojo/contexts/workflow/guards/Permissions";
-import { Acceptance } from "@carere/kojo/contexts/workflow/models/Acceptance";
-import { CheckViolation } from "@carere/kojo/contexts/workflow/models/CheckViolation";
-import { CommitRefused } from "@carere/kojo/contexts/workflow/models/CommitRefused";
-import { EnvelopeParseError } from "@carere/kojo/contexts/workflow/models/EnvelopeParseError";
-import { MergeRefused } from "@carere/kojo/contexts/workflow/models/MergeRefused";
-import { NotAccepted } from "@carere/kojo/contexts/workflow/models/NotAccepted";
-import { PermissionBreach } from "@carere/kojo/contexts/workflow/models/PermissionBreach";
-import { fromVerdict } from "@carere/kojo/contexts/workflow/services/acceptance";
-import { CurrentRun } from "@carere/kojo/contexts/workflow/services/CurrentRun";
-import { agent } from "@carere/kojo/contexts/workflow/services/phase/agent";
-import { code } from "@carere/kojo/contexts/workflow/services/phase/code";
-import { gate } from "@carere/kojo/contexts/workflow/services/phase/gate";
-import { merge } from "@carere/kojo/contexts/workflow/services/phase/merge";
-import { sandboxed } from "@carere/kojo/contexts/workflow/services/sandboxed";
-import { workflow } from "@carere/kojo/contexts/workflow/services/workflow";
+import { AgentInvocationError } from "@carere/kojo-runtime/contexts/agent/models/AgentInvocationError";
+import { RosterError } from "@carere/kojo-runtime/contexts/agent/models/RosterError";
+import { GateExpired } from "@carere/kojo-runtime/contexts/gate/models/GateExpired";
+import { GateRejected } from "@carere/kojo-runtime/contexts/gate/models/GateRejected";
+import { GateUnreachable } from "@carere/kojo-runtime/contexts/gate/models/GateUnreachable";
+import * as OnExpiry from "@carere/kojo-runtime/contexts/gate/models/OnExpiry";
+import { noSandbox } from "@carere/kojo-runtime/contexts/sandbox/adapters/providers";
+import { SandboxError } from "@carere/kojo-runtime/contexts/sandbox/models/SandboxError";
+import { WorkspaceError } from "@carere/kojo-runtime/contexts/sandbox/models/WorkspaceError";
+import { WorkspaceUnreachable } from "@carere/kojo-runtime/contexts/sandbox/models/WorkspaceUnreachable";
+import { WorktreeUnusable } from "@carere/kojo-runtime/contexts/sandbox/models/WorktreeUnusable";
+import { Workspace } from "@carere/kojo-runtime/contexts/sandbox/ports/Workspace";
+import { runBranch } from "@carere/kojo-runtime/contexts/shared/models/RunBranch";
+import { withPermissions } from "@carere/kojo-runtime/contexts/workflow/guards/Permissions";
+import { Acceptance } from "@carere/kojo-runtime/contexts/workflow/models/Acceptance";
+import { CheckViolation } from "@carere/kojo-runtime/contexts/workflow/models/CheckViolation";
+import { CommitRefused } from "@carere/kojo-runtime/contexts/workflow/models/CommitRefused";
+import { EnvelopeParseError } from "@carere/kojo-runtime/contexts/workflow/models/EnvelopeParseError";
+import { MergeRefused } from "@carere/kojo-runtime/contexts/workflow/models/MergeRefused";
+import { NotAccepted } from "@carere/kojo-runtime/contexts/workflow/models/NotAccepted";
+import { PermissionBreach } from "@carere/kojo-runtime/contexts/workflow/models/PermissionBreach";
+import { fromVerdict } from "@carere/kojo-runtime/contexts/workflow/services/acceptance";
+import { CurrentRun } from "@carere/kojo-runtime/contexts/workflow/services/CurrentRun";
+import { agent } from "@carere/kojo-runtime/contexts/workflow/services/phase/agent";
+import { code } from "@carere/kojo-runtime/contexts/workflow/services/phase/code";
+import { gate } from "@carere/kojo-runtime/contexts/workflow/services/phase/gate";
+import { merge } from "@carere/kojo-runtime/contexts/workflow/services/phase/merge";
+import { sandboxed } from "@carere/kojo-runtime/contexts/workflow/services/sandboxed";
+import { workflow } from "@carere/kojo-runtime/contexts/workflow/services/workflow";
 import { Duration, Effect, Match, Schema } from "effect";
 import { Routed } from "../envelopes.ts";
 import { chore } from "./lane/chore.ts";
@@ -113,8 +113,8 @@ const failures = Schema.Union([
 /**
  * Kojo's own factory.
  *
- * `@public` because nothing in this repository imports it: `kojo run factory` loads this module by
- * path and reads the one workflow bundle it exports. The loader refuses a file that exports two, and
+ * `@public` because nothing in this repository imports it: the Daemon captures this module as a
+ * Workflow Revision. The loader refuses a file that exports two, and
  * refuses one whose declared name is not the file name — so this export is the whole purpose of the
  * file, and an unused-export report about it would be a report about the design working.
  *
@@ -260,7 +260,7 @@ export const factory = workflow(
        *
        * It is outside every sandbox scope, which is the cheapest place a gate can be: the run holds
        * no worktree and no container while it waits, and the process that started it is free to exit.
-       * `kojo gate answer`, the Console, or `kojo watch` resumes it — an hour later or on Monday.
+       * A Gate answer through the Daemon resumes it — an hour later or on Monday.
        *
        * The description carries what the reviewer needs and nothing they would have to go and find:
        * which lane ran, what the agent said it did, and what this lane's own commands measured.

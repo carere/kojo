@@ -1,15 +1,12 @@
 import { useMutation, useQueryClient } from "@tanstack/solid-query";
-import type { RunnerPresence } from "../../shared/models/Health.ts";
-import { postJson } from "../../shared/services/api.ts";
+import { readDaemon, recordGateVerdict } from "../../daemon/services/browserAccess.ts";
 
 /**
- * What `POST /api/gates/:token/answer` gives back.
+ * What the Daemon Gate-answer endpoint gives back.
  *
  * **There is no `applied` field, and there cannot be one.** Applying is a runner picking the answer
  * up on its own poll, which by definition has not happened when this response is written. What the
- * receipt does carry is `runner`, read at the moment the verdict was written — so the card resolves
- * *recorded — applying…* against *recorded — nothing is running* with no second round trip and no
- * window in which it shows the wrong one.
+ * The receipt reports the durable Verdict. Application remains a separate Daemon-owned state.
  */
 export interface GateReceipt {
   readonly verdict: {
@@ -18,7 +15,6 @@ export interface GateReceipt {
     readonly answerer: string;
     readonly answeredAt: number;
   };
-  readonly runner: RunnerPresence;
 }
 
 /** What a browser sends. The answerer is not in it: the server records the OS user (console.md §9). */
@@ -34,9 +30,8 @@ export interface GateAnswer {
  *
  * - **It does not resolve the deferred.** It posts, and a live runner applies (adr/gate/0001). The
  *   Console is one more answering half and earns no privilege a Slack adapter lacks.
- * - **It does not retry.** The endpoint refuses a second answer with `409 already-answered` because
- *   the first answer is the one that counts, so a retry could only turn a success into a refusal
- *   over a verdict already written. Mutations do not retry by default and this one must not.
+ * - **It does not retry or fall back.** The request identity is the only safe way to recover an
+ *   uncertain reply. A second endpoint call could duplicate a mutation.
  * - **It does not decide what happened.** It hands back the receipt; `answeringState` decides, from
  *   the receipt, the askings and the run document together.
  *
@@ -48,11 +43,29 @@ export const useAnswerGate = (subject: { readonly runId: () => string }) => {
   const client = useQueryClient();
   return useMutation(() => ({
     mutationKey: ["gate-answer"],
-    mutationFn: (given: { readonly token: string; readonly answer: GateAnswer }) =>
-      postJson<GateReceipt>(
-        `/api/gates/${encodeURIComponent(given.token)}/answer`,
-        given.answer satisfies GateAnswer,
-      ),
+    mutationFn: async (given: {
+      readonly token: string;
+      readonly answer: GateAnswer;
+    }): Promise<GateReceipt> => {
+      const daemon = await readDaemon();
+      const result = await recordGateVerdict({
+        requestId: crypto.randomUUID(),
+        dataIdentity: daemon.dataIdentity,
+        token: given.token,
+        choice: given.answer.choice,
+        reason: given.answer.reason,
+      });
+      const verdict = result.asking.verdict;
+      if (verdict === undefined) throw new Error("the Daemon did not return the Recorded Verdict");
+      return {
+        verdict: {
+          choice: verdict.choice,
+          reason: verdict.reason,
+          answerer: verdict.answerer,
+          answeredAt: Date.parse(verdict.recordedAt),
+        },
+      } satisfies GateReceipt;
+    },
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["gates"] });
       void client.invalidateQueries({ queryKey: ["run", subject.runId()] });

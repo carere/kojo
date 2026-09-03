@@ -6,7 +6,16 @@
       "path": "./apps/console"
     },
     {
+      "path": "./packages/kojo-client-contracts"
+    },
+    {
       "path": "./packages/kojo"
+    },
+    {
+      "path": "./packages/kojo-runner-contracts"
+    },
+    {
+      "path": "./packages/kojo-runtime"
     }
   ],
   "compilerOptions": {

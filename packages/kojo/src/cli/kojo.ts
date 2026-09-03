@@ -1,21 +1,25 @@
 import { Command } from "effect/unstable/cli";
+import { retry, status } from "../contexts/daemon/adapters/ClientRequestCommand.ts";
+import { daemon } from "../contexts/daemon/adapters/DaemonCommand.ts";
+import { ui } from "../contexts/daemon/adapters/UiCommand.ts";
+import { gate } from "../contexts/gate/adapters/GateCommand.ts";
+import { project } from "../contexts/project/adapters/ProjectCommand.ts";
+import { doctor } from "../contexts/scaffold/adapters/DoctorCommand.ts";
+import { init } from "../contexts/scaffold/adapters/InitCommand.ts";
 import { thisEngine } from "../contexts/shared/services/resolvePackage.ts";
-import { doctor } from "./doctor.ts";
-import { gate } from "./gate.ts";
-import { init } from "./init.ts";
+import { run } from "../contexts/workflow/adapters/RunCommand.ts";
+import { workflow } from "../contexts/workflow/adapters/WorkflowCommand.ts";
 import { root } from "./root.ts";
-import { run } from "./run.ts";
-import { ui } from "./ui.ts";
-import { watch } from "./watch.ts";
 
 /**
  * The whole command tree.
  *
- * The root and its shared flags live in `root.ts` so a subcommand can read them without importing
- * this module — the handlers do `yield* root`, and building the tree here keeps that from being an
- * import cycle.
+ * Repository-local authoring commands do not start execution. Runtime commands are clients of the
+ * one OS-user Daemon.
  */
-export const kojo = root.pipe(Command.withSubcommands([init, doctor, run, watch, gate, ui]));
+export const kojo = root.pipe(
+  Command.withSubcommands([init, doctor, status, retry, run, gate, ui, daemon, project, workflow]),
+);
 
 /**
  * What `kojo --version` prints: this package's own `version`, read off its own `package.json`.

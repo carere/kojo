@@ -20,24 +20,24 @@
   "license": "MIT",
   "author": "Kevin Abatan <contact@carere.dev> (https://github.com/carere)",
   "type": "module",
-  "exports": {
-    "./*": "./src/*.ts"
-  },
+  "exports": {},
   "bin": {
     "kojo": "./src/main.ts"
   },
   "files": [
     "console",
+    "managed-release.json",
     "src"
   ],
   "dependencies": {
-    "@ai-hero/sandcastle": "0.12.0",
+    "@carere/kojo-client-contracts": "workspace:*",
+    "@carere/kojo-runner-contracts": "workspace:*",
     "@effect/platform-bun": "4.0.0-beta.106",
-    "@effect/sql-sqlite-bun": "4.0.0-beta.106",
     "effect": "4.0.0-beta.106"
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0-beta.106",
+    "@playwright/test": "1.62.1",
     "@types/bun": "^1.3.14",
     "vitest": "^4.1.0"
   },
@@ -45,6 +45,6 @@
     "access": "public"
   },
   "engines": {
-    "bun": ">=1.3.0"
+    "bun": ">=1.3.14"
   }
 }

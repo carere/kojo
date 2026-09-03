@@ -1,9 +1,11 @@
 layer: application
 language: typescript
 
+dependsOn:
+  - kojo-client-contracts
+
 tasks:
-  # The front end alone. The API keeps coming from `kojo ui`, which the Vite config proxies to — a
-  # dev server that also served the trace would be the second runtime console.md §7 rejected.
+  # The front end alone. The API comes from the per-user Daemon, which the Vite config proxies to.
   dev:
     command: vite dev
     preset: server
@@ -21,9 +23,8 @@ tasks:
     outputs:
       - "/packages/kojo/console"
 
-  # The browser tier: Playwright against `kojo ui --fixtures`, which is the real HTTP server serving
-  # the real build over stated records. It depends on the build because the thing under test is the
-  # built page, not a dev server — a dev server would exercise a module graph nobody ships.
+  # The browser tier uses an isolated Daemon fixture. It depends on the build because the thing under
+  # test is the built page, not a development-only module graph.
   test-browser:
     command: playwright test
     deps:

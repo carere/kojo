@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ResolvedPackage, Split } from "../models/ResolvedPackage.ts";
+import type { ResolvedPackage } from "../models/ResolvedPackage.ts";
 
 /**
  * What this process resolves, and what another directory resolves — asked of the machine.
@@ -82,23 +82,3 @@ export const installedPackage = (from: string, name: string): ResolvedPackage | 
 /** This engine: the `kojo` package the process is running out of, wherever that is. */
 export const thisEngine = (): ResolvedPackage | undefined =>
   packageAbove(dirname(fileURLToPath(import.meta.url)));
-
-/** The `effect` this engine itself loaded, which is the copy every port and schema here came from. */
-export const thisEffect = (): ResolvedPackage | undefined => {
-  const engine = thisEngine();
-  return engine === undefined ? undefined : installedPackage(engine.directory, "effect");
-};
-
-/**
- * Whether a directory resolves a different `effect` from the one this process is running on.
- *
- * `undefined` means *no evidence of a split*: either the two agree, or one of them cannot be
- * resolved at all. Not being able to resolve `effect` is a real fault and a different one — the
- * factory has not been installed — and it is reported where it can be told apart from this.
- */
-export const splitEffect = (from: string): Split | undefined => {
-  const mine = thisEffect();
-  const theirs = installedPackage(from, "effect");
-  if (mine === undefined || theirs === undefined) return undefined;
-  return mine.directory === theirs.directory ? undefined : { mine, theirs };
-};

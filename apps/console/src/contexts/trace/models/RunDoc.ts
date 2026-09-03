@@ -1,5 +1,5 @@
 /**
- * `GET /api/runs/:runId` — one whole run, as the wire carries it.
+ * `GET /api/v1/runs/:runId` — one whole Run, as the Daemon wire carries it.
  *
  * Read structurally, never decoded. console.md §10 asks the Console to ignore what a newer factory
  * grew that this build does not know about, which is the whole value of the additive-migration
@@ -114,7 +114,7 @@ export interface SandboxLine {
 }
 
 /**
- * One **settled** asking. A gate still waiting has no record; it comes from `/api/gates`.
+ * One **settled** Asking. A Gate still waiting comes from `/api/v1/askings`.
  *
  * **Its presence is the Console's only proof that an answer was applied.** The record is written by
  * the run itself, in the activity that follows the suspension, so a record keyed by an asking means
@@ -154,6 +154,55 @@ export interface InFlightLine {
 }
 
 export interface RunDoc {
+  readonly daemon?: {
+    readonly projectId: string;
+    readonly revisionId: string;
+    readonly packageGraphId: string;
+    readonly state:
+      | "queued"
+      | "executing"
+      | "suspended"
+      | "held"
+      | "succeeded"
+      | "failed"
+      | "cancelled";
+    readonly queueReason?: string;
+    readonly executionFault?: {
+      readonly code: string;
+      readonly detail: string;
+      readonly remedy: string;
+    };
+    readonly cancellation?: {
+      readonly state: "requested" | "confirmed";
+      readonly source: "run" | "forced-workflow-stop";
+      readonly requestedAt: string;
+      readonly confirmedAt?: string;
+      readonly targetSetId?: string;
+    };
+    readonly recovery?: {
+      readonly state: "interrupted-sibling";
+      readonly interruptedAt: string;
+      readonly detail: string;
+    };
+    readonly cleanup?: {
+      readonly state: "not-required" | "pending" | "confirmed" | "fault";
+      readonly detail?: string;
+    };
+    readonly uncertainty?: {
+      readonly actionId: string;
+      readonly phasePath: string;
+      readonly attempt: number;
+      readonly inputHash: string;
+      readonly recoveryPolicy: string;
+      readonly state: string;
+      readonly uncertaintyRevision: number;
+      readonly evidence?: {
+        readonly kind: string;
+        readonly detail: string;
+        readonly observedAt: string;
+      };
+    };
+  };
   readonly run: {
     readonly run: {
       readonly runId: string;
@@ -174,11 +223,18 @@ export interface RunDoc {
       /** The image the containers were built from, when anything resolved one. */
       readonly imageDigest?: string;
     };
-    readonly outcome?: "succeeded" | "failed" | "suspended";
+    readonly outcome?: "succeeded" | "failed" | "suspended" | "cancelled";
     readonly finishedAt?: number;
     readonly inFlight?: InFlightLine;
   };
   readonly phases: ReadonlyArray<PhaseLine>;
   readonly gates: ReadonlyArray<GateLine>;
   readonly sandboxes: ReadonlyArray<SandboxLine>;
+  readonly artifacts?: ReadonlyArray<{
+    readonly artifactId: string;
+    readonly name: string;
+    readonly mediaType: string;
+    readonly size: number;
+    readonly sha256: string;
+  }>;
 }

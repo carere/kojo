@@ -6,6 +6,7 @@
       "name": "kojo",
       "dependencies": {
         "@carere/kojo": "workspace:*",
+        "@carere/kojo-runtime": "workspace:*",
         "effect": "4.0.0-beta.106",
       },
       "devDependencies": {
@@ -23,6 +24,7 @@
       "name": "@kojo/console",
       "version": "0.0.0",
       "dependencies": {
+        "@carere/kojo-client-contracts": "workspace:*",
         "@carere/solux": "4.0.1",
         "@tanstack/solid-hotkeys": "0.10.0",
         "@tanstack/solid-query": "5.101.4",
@@ -48,15 +50,48 @@
         "kojo": "./src/main.ts",
       },
       "dependencies": {
-        "@ai-hero/sandcastle": "0.12.0",
+        "@carere/kojo-client-contracts": "workspace:*",
+        "@carere/kojo-runner-contracts": "workspace:*",
         "@effect/platform-bun": "4.0.0-beta.106",
-        "@effect/sql-sqlite-bun": "4.0.0-beta.106",
         "effect": "4.0.0-beta.106",
       },
       "devDependencies": {
         "@effect/vitest": "4.0.0-beta.106",
+        "@playwright/test": "1.62.1",
         "@types/bun": "^1.3.14",
         "vitest": "^4.1.0",
+      },
+    },
+    "packages/kojo-client-contracts": {
+      "name": "@carere/kojo-client-contracts",
+      "version": "0.0.0",
+      "devDependencies": {
+        "vitest": "^4.1.0",
+      },
+    },
+    "packages/kojo-runner-contracts": {
+      "name": "@carere/kojo-runner-contracts",
+      "version": "0.0.0",
+      "devDependencies": {
+        "vitest": "^4.1.0",
+      },
+    },
+    "packages/kojo-runtime": {
+      "name": "@carere/kojo-runtime",
+      "version": "0.0.0",
+      "dependencies": {
+        "@ai-hero/sandcastle": "0.12.0",
+        "@carere/kojo-runner-contracts": "workspace:*",
+        "@effect/platform-bun": "4.0.0-beta.106",
+      },
+      "devDependencies": {
+        "@effect/vitest": "4.0.0-beta.106",
+        "@types/bun": "^1.3.14",
+        "effect": "4.0.0-beta.106",
+        "vitest": "^4.1.0",
+      },
+      "peerDependencies": {
+        "effect": "4.0.0-beta.106",
       },
     },
   },
@@ -119,6 +154,12 @@
 
     "@carere/kojo": ["@carere/kojo@workspace:packages/kojo"],
 
+    "@carere/kojo-client-contracts": ["@carere/kojo-client-contracts@workspace:packages/kojo-client-contracts"],
+
+    "@carere/kojo-runner-contracts": ["@carere/kojo-runner-contracts@workspace:packages/kojo-runner-contracts"],
+
+    "@carere/kojo-runtime": ["@carere/kojo-runtime@workspace:packages/kojo-runtime"],
+
     "@carere/solux": ["@carere/solux@4.0.1", "", { "dependencies": { "radash": "^12.1.0", "rxjs": "^7.8.2", "solid-js": "^1.9.5", "ts-pattern": "^5.6.2" } }, "sha512-gvBdl1gtL2WyhuVNtlDr7Qq2slGZD6y4cCFAgUQAnfg7UC2jORKAMNaYWA93602/jvsgZNm6Uwcs4oqroqGFPw=="],
 
     "@clack/core": ["@clack/core@1.4.3", "", { "dependencies": { "fast-wrap-ansi": "^0.2.0", "sisteransi": "^1.0.5" } }, "sha512-/kr3UWNtdJfxZtPgDqUOmG2pvwlmcLGheex5yiZKdwbzZJxhV+HMNR9QNmyY5cGwTNV6LrR7Jtp+KjhUAP1qBQ=="],
@@ -130,8 +171,6 @@
     "@effect/platform-bun": ["@effect/platform-bun@4.0.0-beta.106", "", { "dependencies": { "@effect/platform-node-shared": "^4.0.0-beta.106" }, "peerDependencies": { "effect": "^4.0.0-beta.106" } }, "sha512-zgHH6QKI7vYqneq+IIkEq4hd+tFAdBWGuiaoENSkGEOwnNAzxkTAnuzdENW5g6z6ZPN40uUwAyOqaF4O5MqmBA=="],
 
     "@effect/platform-node-shared": ["@effect/platform-node-shared@4.0.0-beta.106", "", { "dependencies": { "@types/ws": "^8.18.1", "ws": "^8.21.0" }, "peerDependencies": { "effect": "^4.0.0-beta.106" } }, "sha512-TRTzLmhCwVM8G7dXz16lI3wE2vZFSs1jNs/+3WhnuOZgOUeJz9vzBK/KKlGRbbi0QbtEqmW4rAy1y9Fj4MZfsw=="],
-
-    "@effect/sql-sqlite-bun": ["@effect/sql-sqlite-bun@4.0.0-beta.106", "", { "peerDependencies": { "effect": "^4.0.0-beta.106" } }, "sha512-RkZomehIC6VmoAnpd7DjgGy557ld3BC2L+Yf83QY8xaInZRfmU4ChUwGwLh0uZHVaG13XqJU2INt80eunexpvg=="],
 
     "@effect/tsgo": ["@effect/tsgo@0.35.0", "", { "optionalDependencies": { "@effect/tsgo-darwin-arm64": "0.35.0", "@effect/tsgo-darwin-x64": "0.35.0", "@effect/tsgo-linux-arm": "0.35.0", "@effect/tsgo-linux-arm64": "0.35.0", "@effect/tsgo-linux-x64": "0.35.0", "@effect/tsgo-win32-arm64": "0.35.0", "@effect/tsgo-win32-x64": "0.35.0" }, "bin": { "effect-tsgo": "dist/effect-tsgo.cjs" } }, "sha512-10UWtAhbl/AlMSXKwo2xp9HkNtrzXpxgeWTH8vWKo7Ir6DAsOIYAJjTjDxud3sCb2vJtxi2zHg6Qq3/i/MKxzQ=="],
 
