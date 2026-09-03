@@ -88,6 +88,23 @@ const gitOutput = (arguments_: ReadonlyArray<string>): string => {
   return result.stdout.toString();
 };
 
+const assertCocogittoBump = (version: string): void => {
+  const currentRevision = gitOutput(["rev-parse", "HEAD"]).trim();
+  const expectedTags = [
+    `v${version}`,
+    ...publicPackages.map(({ directory }) => `${directory}@v${version}`),
+  ];
+
+  for (const tag of expectedTags) {
+    const taggedRevision = gitOutput(["rev-list", "-n", "1", tag]).trim();
+    if (taggedRevision !== currentRevision) {
+      throw new Error(
+        `Cocogitto tag '${tag}' points to '${taggedRevision}', not the Release revision '${currentRevision}'.`,
+      );
+    }
+  }
+};
+
 const repositoryJsonAt = <Value>(revision: string, path: string): Value =>
   JSON.parse(gitOutput(["show", `${revision}:${path}`])) as Value;
 
@@ -111,9 +128,11 @@ const assertStableSource = (manifestPath: string, currentRevision: string): void
     .split("\n")
     .filter((path) => path.length > 0);
   const allowedFiles = new Set([
+    "CHANGELOG.md",
     "bun.lock",
     "packages/kojo-runtime/runtime-manifest.json",
     ...publicPackages.map(({ directory }) => `packages/${directory}/package.json`),
+    ...publicPackages.map(({ directory }) => `packages/${directory}/CHANGELOG.md`),
   ]);
   const unexpected = changedPaths.filter(
     (path) => !allowedFiles.has(path) && !/^docs\/release-notes\/[^/]+\.md$/.test(path),
@@ -461,6 +480,7 @@ switch (command) {
     assertReleaseStage(version, stage as ReleaseStage);
     assertPrereleaseFollowsCandidate(version, previous);
     assertCoordinatedVersion(version);
+    assertCocogittoBump(version);
     break;
   }
   case "validate-stable": {
@@ -468,6 +488,7 @@ switch (command) {
     if (version === undefined || releaseCandidate === undefined) usage();
     assertStableFollowsCandidate(version, releaseCandidate);
     assertCoordinatedVersion(version);
+    assertCocogittoBump(version);
     break;
   }
   case "validate-stable-source": {

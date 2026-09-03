@@ -10,6 +10,16 @@ Kojo uses one coordinated Release train for these public packages:
 All four packages and `packages/kojo-runtime/runtime-manifest.json` use the same version. Published
 versions are immutable. Publish the packages in the order above so the CLI is last.
 
+## Release ownership
+
+Cocogitto owns the coordinated version change. It updates the four package manifests, the runtime
+manifest, and the lockfile. It also writes the root and package changelogs, makes the
+`chore(version)` commit, and makes one Release tag plus four package tags.
+
+The GitHub workflows own package creation, publication, public Host validation, and promotion. Do
+not publish packages from a Cocogitto hook. Cocogitto does not undo a bump when a later hook fails,
+so publication must stay in the workflows where a failed candidate cannot change `latest`.
+
 ## Release stages
 
 One Release line moves through these stages:
@@ -51,11 +61,14 @@ The stable workflow accepts only an RC manifest from the same Release line.
 
 ## Prerelease runbook
 
-1. Set all four package versions and the runtime manifest to the next exact prerelease version.
-2. Update the lockfile with Bun and merge the version change.
-3. Wait for the complete CI evidence for that exact revision.
-4. Run **Actions → prerelease** first as a dry run. Give it the accepted previous candidate. Leave
-   that input empty for an alpha.
+1. Start from a clean, current `main` branch. Run
+   `cog bump --version <version> --include-packages` with the next exact prerelease version.
+2. Inspect the generated version files, changelogs, `chore(version)` commit, and five tags. Push the
+   commit and all five tags in one atomic push. Cocogitto tags are lightweight, so do not use
+   `--follow-tags`.
+3. Wait for the complete CI evidence for the exact tagged revision.
+4. Run **Actions → prerelease** first as a dry run. In the workflow ref selector, select the
+   `v<version>` tag. Give it the accepted previous candidate. Leave that input empty for an alpha.
 5. Run it again with the same stage, version, and predecessor, with dry run disabled.
 6. Confirm that the workflow creates the GitHub prerelease. This means both supported Hosts
    installed the exact public package set.
@@ -69,9 +82,13 @@ a candidate.
 ## Stable runbook
 
 1. Select the accepted RC that will become stable.
-2. Change only the four package versions, the runtime manifest, the lockfile, and Release notes.
-3. Merge the stable version change and wait for complete CI evidence for that exact revision.
-4. Run **Actions → release** first as a dry run. Enter both the stable version and accepted RC.
+2. From a clean, current `main` branch, run
+   `cog bump --version <stable-version> --include-packages`. Inspect the generated version files,
+   changelogs, commit, and tags. The stable bump can add Release notes, but it must not change code.
+3. Push the commit and all five lightweight tags in one atomic push. Wait for complete CI evidence
+   for the exact tagged revision.
+4. Run **Actions → release** first as a dry run. In the workflow ref selector, select the stable
+   `v<version>` tag. Enter both the stable version and accepted RC.
 5. Run it again with dry run disabled. The workflow publishes under `candidate`, then validates the
    exact public bytes and clean installs on Linux and macOS.
 6. Review the validation result at the `npm-production` environment gate. Approve only when the
@@ -91,6 +108,18 @@ the stable process again. Keep `latest` on the last accepted stable Release.
 
 ## First Release train
 
-The next action is a version-only PR for `0.1.0-alpha.1`. Set that version in all four public
-package manifests, the runtime manifest, and the lockfile. Merge it, wait for complete CI evidence,
-then run the `prerelease` workflow as a dry run with stage `alpha` and no previous candidate.
+The next action is the first Cocogitto bump from a clean, current `main` branch:
+
+```sh
+cog bump --version 0.1.0-alpha.1 --include-packages
+git push --atomic origin main \
+  v0.1.0-alpha.1 \
+  kojo-client-contracts@v0.1.0-alpha.1 \
+  kojo-runner-contracts@v0.1.0-alpha.1 \
+  kojo-runtime@v0.1.0-alpha.1 \
+  kojo@v0.1.0-alpha.1
+```
+
+Inspect the generated commit and tags before the push. After the push, wait for complete CI
+evidence. Then run the `prerelease` workflow as a dry run with stage `alpha`, version
+`0.1.0-alpha.1`, and no previous candidate. Select `v0.1.0-alpha.1` in the workflow ref selector.

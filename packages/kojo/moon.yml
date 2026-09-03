@@ -42,7 +42,9 @@ tasks:
   test-integration:
     command: bun node_modules/.bin/vitest run --project integration
     inputs:
+      - /cog.toml
       - /.github/release-packages.json
+      - /.github/scripts/cocogitto-package-version.ts
       - /.github/scripts/release-tags.ts
       - /.github/scripts/release-train.ts
       - /.github/scripts/verify-accepted-prerelease.sh
