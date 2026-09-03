@@ -11,6 +11,7 @@ import {
   type Issue64Tier,
   issue64RequiredTierAllocation,
 } from "../../../support/release/Issue64TierAllocation.ts";
+import { hostMutationOwnerEvidence } from "../../../support/release/SqliteMutationOwnerEvidence.ts";
 
 const revision = "a".repeat(40);
 const tierNames: ReadonlyArray<EvidenceTier> = [
@@ -180,6 +181,44 @@ describe("complete breaking release evidence", () => {
       expect(observedIssueTiers(check)).toEqual(
         new Set(issue64RequiredTierAllocation[check.checkId]),
       );
+    }
+  });
+
+  it("requires both exact Host mutation-owner leaves for CLIENT-01", () => {
+    const required = requiredReleaseChecks.find((check) => check.checkId === "CLIENT-01");
+    expect(required).toBeDefined();
+    expect(
+      required?.observations.filter(({ operation, owner }) => operation && owner),
+    ).toHaveLength(18);
+    const accepted = completeReleaseEvidence(input()).records.find(
+      (record) => record.checkId === "CLIENT-01",
+    );
+    expect(accepted?.evidence.filter(({ operation, owner }) => operation && owner)).toHaveLength(
+      18,
+    );
+    for (const host of hostMutationOwnerEvidence) {
+      expect(required?.observations).toContainEqual(
+        expect.objectContaining({
+          operation: host.operation,
+          owner: host.owner,
+          path: host.path,
+          name: host.name,
+        }),
+      );
+      const subject = input();
+      const integration = subject.tiers["kojo-integration"] as LoadedTestEvidence;
+      const withoutHostOwner = integration.tests.filter(
+        (test) => test.path !== host.path || test.name !== host.name,
+      );
+      expect(() =>
+        completeReleaseEvidence({
+          ...subject,
+          tiers: {
+            ...subject.tiers,
+            "kojo-integration": { ...integration, tests: withoutHostOwner },
+          },
+        }),
+      ).toThrow(`did not load named observation ${host.name}`);
     }
   });
 });

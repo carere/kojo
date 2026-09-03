@@ -155,8 +155,10 @@ resume refusal, unsafe-command refusal, traversal safety, write, stat, and unlin
 YamlRoster, Daemon Resource, Artifact, sandbox, Git, file-system, and child-process adapters. Its
 scripted Agent Provider is an executable process boundary, not an in-memory port layer.
 `tests/unit/contexts/workflow/services/DaemonWorkflowReplay.test.ts` uses the pure
-`DaemonWorkflowReplay` use case with a Map-backed execution repository and controlled
-Resource lease client. The real `DaemonWorkflowEngine` adapter stays covered by Runner integration.
+`DaemonWorkflowReplay` identity and replay-decision service without any adapter. The substantive
+`DaemonWorkflowEngine` adapter owns Effect Workflow encoding, registration, execution, Activity,
+and deferred composition. The real adapter stays covered by the Runner process integration in
+`tests/integration/contexts/workflow/replay.test.ts`.
 `tests/unit/contexts/daemon/services/launchConsole.test.ts` moved to a mirrored unit path because its Console
 access and Browser Service ports are controlled; authenticated browser and CLI tests keep the real
 Host transport boundary. `removePurge.test.ts` stays in Integration and now uses the concrete systemd
@@ -178,8 +180,10 @@ suite is therefore split without dropping a current behavior.
 
 The exact operation inventory has 18 entries. Sixteen SQLite owners use the real
 `SqliteOperationRepository` receipt boundary. `SqliteMutationOwnerEvidence.ts` is the mechanical
-operation-to-leaf manifest. Its validator fails when one accepted operation has no exact declared
-leaf or when the named leaf is absent. Each named real-owner leaf invokes its domain adapter or
+operation-to-leaf manifest. Its exhaustive typed registry binds every operation to an imported
+production owner identity, including `checkDaemonUpgrade` to `SqliteUpgradePreflightRepository`.
+Its validator fails when one accepted operation has no exact declared leaf, when an owner differs
+from the imported registry identity, or when the named leaf is absent. Each named real-owner leaf invokes its domain adapter or
 private HTTP boundary and proves the initial effect and receipt, same-content replay with the
 original result and no second effect, and changed-content conflict. The generic SQLite transaction
 test is infrastructure evidence only. The two Host-file owners use their own real adapter tests and
@@ -196,12 +200,14 @@ do not enter the SQLite manifest.
 | `retryUncertainAction` | `uncertainAction.test.ts`, `cliContract.test.ts` |
 | `recordGateVerdict` | `application.test.ts` |
 | `checkDaemonUpgrade` | `activation.test.ts` |
-| `repairDaemonSupervision` | `HostClientRequestRepository.test.ts` |
+| `repairDaemonSupervision` | `adapters/HostClientRequestRepository.test.ts` |
 | `repairPurgeSafety` | `removePurge.test.ts` |
 
 The Host supervision and purge tests apply the same request twice and prove that the second call
 uses the retained result without a second external side effect. The purge leaf uses a one-use
 capability, so any repeated child application fails the test.
+`CLIENT-01` names all sixteen SQLite owner observations and both Host owner observations. Its
+collector test removes each Host leaf in turn and proves that either missing leaf closes the gate.
 
 The current CLI command suites are also retained. Their pure command and formatting behavior moved
 from `tests/integration/cli` to mirrored `tests/unit/contexts/{daemon,gate,project,scaffold,shared,

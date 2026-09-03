@@ -3,10 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import { afterEach, describe, expect, it } from "vitest";
-import { replayHostClientRequest } from "../../../../src/contexts/daemon/adapters/HostClientRequestReplay.ts";
-import { HostClientRequestRepository } from "../../../../src/contexts/daemon/adapters/HostClientRequestRepository.ts";
-import { ManagedDaemonSupervision } from "../../../../src/contexts/daemon/adapters/ManagedDaemonSupervision.ts";
-import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
+import { replayHostClientRequest } from "../../../../../src/contexts/daemon/adapters/HostClientRequestReplay.ts";
+import { HostClientRequestRepository } from "../../../../../src/contexts/daemon/adapters/HostClientRequestRepository.ts";
+import { ManagedDaemonSupervision } from "../../../../../src/contexts/daemon/adapters/ManagedDaemonSupervision.ts";
+import type { DaemonPaths } from "../../../../../src/contexts/daemon/models/DaemonPaths.ts";
 
 const roots: Array<string> = [];
 const start = Date.parse("2026-09-02T00:00:00.000Z");

@@ -113,6 +113,7 @@
     "./contexts/workflow/models/PermissionPolicy": "./src/contexts/workflow/models/PermissionPolicy.ts",
     "./contexts/workflow/models/Placeholder": "./src/contexts/workflow/models/Placeholder.ts",
     "./contexts/workflow/models/RunFailure": "./src/contexts/workflow/models/RunFailure.ts",
+    "./contexts/workflow/adapters/DaemonWorkflowEngine": "./src/contexts/workflow/adapters/DaemonWorkflowEngine.ts",
     "./contexts/workflow/adapters/RetainedFactoryAssetRepository": "./src/contexts/workflow/adapters/RetainedFactoryAssetRepository.ts",
     "./contexts/workflow/ports/FactoryAssetRepository": "./src/contexts/workflow/ports/FactoryAssetRepository.ts",
     "./contexts/workflow/ports/DaemonExecutionRepository": "./src/contexts/workflow/ports/DaemonExecutionRepository.ts",

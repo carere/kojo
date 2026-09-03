@@ -4,11 +4,12 @@ import { resolve } from "node:path";
 import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import type { OperationReceipt } from "@carere/kojo-client-contracts/contexts/client/contracts/operation";
 import { describe, expect, it } from "@effect/vitest";
-import { SqliteOperationRepository } from "../../../../src/contexts/daemon/adapters/SqliteOperationRepository.ts";
+import { SqliteOperationRepository } from "../../../../../src/contexts/daemon/adapters/SqliteOperationRepository.ts";
 import {
   sqliteMutationOperations,
   sqliteMutationOwnerEvidence,
-} from "../../../support/release/SqliteMutationOwnerEvidence.ts";
+  sqliteMutationOwnerRegistry,
+} from "../../../../support/release/SqliteMutationOwnerEvidence.ts";
 
 const mutation = (argument = "one"): MutationEnvelope => ({
   mutationVersion: 1,
@@ -37,13 +38,15 @@ describe("SQLite operation receipt boundary", () => {
     expect(new Set(sqliteMutationOwnerEvidence.map(({ operation }) => operation)).size).toBe(
       sqliteMutationOperations.length,
     );
-    const root = resolve(import.meta.dirname, "../../../../../..");
+    const root = resolve(import.meta.dirname, "../../../../../../..");
     for (const observation of sqliteMutationOwnerEvidence) {
       const source = readFileSync(resolve(root, observation.path), "utf8");
       expect(source, observation.operation).toContain(
         JSON.stringify(observation.declaration ?? observation.name),
       );
-      expect(observation.owner, observation.operation).toMatch(/^Sqlite[A-Za-z]+Repository$/);
+      expect(observation.owner, observation.operation).toBe(
+        sqliteMutationOwnerRegistry[observation.operation].name,
+      );
     }
   });
 

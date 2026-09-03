@@ -3,7 +3,10 @@ import {
   type Issue64Tier,
   issue64RequiredTierAllocation,
 } from "./Issue64TierAllocation.ts";
-import { sqliteMutationOwnerEvidence } from "./SqliteMutationOwnerEvidence.ts";
+import {
+  hostMutationOwnerEvidence,
+  sqliteMutationOwnerEvidence,
+} from "./SqliteMutationOwnerEvidence.ts";
 
 export type EvidenceTier =
   | "contract-runtime"
@@ -25,6 +28,8 @@ export interface LoadedTestEvidence {
   readonly cacheHit: boolean;
   readonly log: string;
   readonly tests: ReadonlyArray<TestObservation>;
+  readonly operation?: string;
+  readonly owner?: string;
 }
 
 export interface TestObservation {
@@ -38,6 +43,8 @@ export interface RequiredObservation {
   readonly path: string;
   readonly name: string;
   readonly issueTiers?: ReadonlyArray<Issue64Tier>;
+  readonly operation?: string;
+  readonly owner?: string;
 }
 
 export interface RequiredReleaseCheck {
@@ -72,6 +79,7 @@ const check = (
   testName: string,
   tiers: ReadonlyArray<EvidenceTier>,
   additionalObservations: ReadonlyArray<RequiredObservation> = [],
+  primaryOwner?: { readonly operation: string; readonly owner: string },
 ): RequiredReleaseCheck => {
   const allocatedTiers = issue64RequiredTierAllocation[checkId];
   if (allocatedTiers === undefined) throw new Error(`${checkId} has no issue #64 tier allocation`);
@@ -139,7 +147,15 @@ const check = (
               ]
             : coreTier === undefined
               ? additionalObservations
-              : [{ tier: coreTier, path: testPath, name: testName }, ...additionalObservations];
+              : [
+                  {
+                    tier: coreTier,
+                    path: testPath,
+                    name: testName,
+                    ...(primaryOwner ?? {}),
+                  },
+                  ...additionalObservations,
+                ];
   return { checkId, stage, expected, testPath, testName, tiers, observations };
 };
 
@@ -964,23 +980,25 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "packages/kojo/tests/integration/contexts/project/registration.test.ts",
     "retains exact requests, receipts, and Recent changes across a Daemon replacement",
     ["kojo-integration"],
-    [
-      ...new Map(
-        sqliteMutationOwnerEvidence
-          .slice(1)
-          .map((observation) => [`${observation.path}\0${observation.name}`, observation] as const),
-      ).values(),
-    ].map(({ path, name }) => ({
-      tier: "kojo-integration" as const,
-      path,
-      name,
-    })),
+    [...sqliteMutationOwnerEvidence.slice(1), ...hostMutationOwnerEvidence].map(
+      ({ operation, owner, path, name }) => ({
+        tier: "kojo-integration" as const,
+        operation,
+        owner,
+        path,
+        name,
+      }),
+    ),
+    {
+      operation: sqliteMutationOwnerEvidence[0]?.operation ?? "registerProject",
+      owner: sqliteMutationOwnerEvidence[0]?.owner ?? "SqliteProjectRepository",
+    },
   ),
   check(
     "CLIENT-02",
     6,
     "resolved full requests retain for 30 days then compact without becoming fresh work",
-    "packages/kojo/tests/integration/contexts/daemon/HostClientRequestRepository.test.ts",
+    "packages/kojo/tests/integration/contexts/daemon/adapters/HostClientRequestRepository.test.ts",
     "keeps full resolved content for 30 days then atomically compacts to identity and result references",
     ["kojo-unit", "kojo-integration"],
     [
@@ -1334,7 +1352,8 @@ export const completeReleaseEvidence = (input: CompleteEvidenceInput) => {
       fail(`${required.checkId} does not declare exact observations for its issue #64 allocation`);
     }
     const observationKeys = required.observations.map(
-      (observation) => `${observation.tier}\0${observation.path}\0${observation.name}`,
+      (observation) =>
+        `${observation.tier}\0${observation.operation ?? ""}\0${observation.owner ?? ""}\0${observation.path}\0${observation.name}`,
     );
     if (new Set(observationKeys).size !== observationKeys.length) {
       fail(`${required.checkId} declares a duplicate observation`);
@@ -1385,6 +1404,8 @@ export const completeReleaseEvidence = (input: CompleteEvidenceInput) => {
         cacheHit: receipt.cacheHit,
         log: receipt.log,
         tests: matching,
+        ...(observation.operation === undefined ? {} : { operation: observation.operation }),
+        ...(observation.owner === undefined ? {} : { owner: observation.owner }),
       } satisfies LoadedTestEvidence;
     });
     return {
