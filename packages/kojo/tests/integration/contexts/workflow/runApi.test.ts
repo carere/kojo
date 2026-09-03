@@ -340,12 +340,24 @@ import { workflow } from "@carere/kojo-runtime/contexts/workflow/services/workfl
 appendFileSync(${JSON.stringify(journal)}, "current-pid:${workflowName}:" + process.pid + "\\n");
 appendFileSync(${JSON.stringify(journal)}, "current-imported:${workflowName}\\n");
 const checkpoint = () => readFileSync(${JSON.stringify(checkpoint)}, "utf8").trim();
+const allCurrentPollingRestored: Effect.Effect<void> = Effect.suspend(() => {
+  const observations = readFileSync(${JSON.stringify(journal)}, "utf8")
+    .trim()
+    .split(String.fromCharCode(10));
+  const executedAt = observations.lastIndexOf("historical-executed");
+  const restored = executedAt >= 0 && ["tickets", "alerts"].every(
+    (name) => observations.indexOf("polling-started:" + name + ":1", executedAt + 1) >= 0,
+  );
+  return restored
+    ? Effect.void
+    : Effect.sleep(20).pipe(Effect.andThen(allCurrentPollingRestored));
+});
 const event = Effect.sync(() => {
   const at = checkpoint();
   appendFileSync(${JSON.stringify(journal)}, "polling-started:${workflowName}:" + at + "\\n");
   return at;
 }).pipe(
-  Effect.flatMap((at) => Effect.sleep(500).pipe(
+  Effect.flatMap((at) => allCurrentPollingRestored.pipe(
     Effect.flatMap(() => at === "1"
       ? Effect.succeed(new TriggerEvent({ source: "checkpoint", key: "${workflowName}-1", payload: { ticket: "${workflowName}-1" }, receivedAt: Date.now() }))
       : Effect.never),
@@ -604,12 +616,12 @@ describe("Daemon no-Trigger Run API", () => {
     expect(stopped).toBeGreaterThanOrEqual(0);
     expect(imported).toBeGreaterThan(stopped);
     expect(executed).toBeGreaterThan(imported);
-    expect(resumedTickets).toBeGreaterThan(executed);
-    expect(resumedAlerts).toBeGreaterThan(executed);
-    expect(resumedTickets).toBeLessThan(firstAcknowledged);
-    expect(resumedAlerts).toBeLessThan(firstAcknowledged);
-    expect(acknowledgedTickets).toBeGreaterThan(resumedTickets);
-    expect(acknowledgedAlerts).toBeGreaterThan(resumedAlerts);
+    expect(resumedTickets, events.join("\n")).toBeGreaterThan(executed);
+    expect(resumedAlerts, events.join("\n")).toBeGreaterThan(executed);
+    expect(resumedTickets, events.join("\n")).toBeLessThan(firstAcknowledged);
+    expect(resumedAlerts, events.join("\n")).toBeLessThan(firstAcknowledged);
+    expect(acknowledgedTickets, events.join("\n")).toBeGreaterThan(resumedTickets);
+    expect(acknowledgedAlerts, events.join("\n")).toBeGreaterThan(resumedAlerts);
     expect([...new Set(initialPids.map(({ workflowName }) => workflowName))].sort()).toEqual([
       "alerts",
       "tickets",
