@@ -40,6 +40,7 @@ describe("HostClientRequestRepository", () => {
         kind: "clientRequestResult",
         parts: [request.requestId],
       },
+      result: { outcome: "original" },
     });
 
     now += 15 * 24 * 60 * 60 * 1_000;
@@ -51,6 +52,7 @@ describe("HostClientRequestRepository", () => {
         kind: "clientRequestResult",
         parts: [request.requestId],
       },
+      result: { outcome: "original" },
     });
     now += 15 * 24 * 60 * 60 * 1_000 - 1;
     expect(repository.lookup(request.requestId)?.request).toEqual(request);
@@ -64,6 +66,7 @@ describe("HostClientRequestRepository", () => {
       resolution: {
         status: "committed",
         resultReference: { kind: "clientRequestResult", parts: [request.requestId] },
+        result: { outcome: "original" },
       },
     });
     expect(compacted?.request).toBeUndefined();
@@ -155,11 +158,17 @@ describe("HostClientRequestRepository", () => {
       status: "committed",
       resultReference: { kind: "clientRequestResult", parts: [mutation.requestId] },
     });
-    expect(await replayHostClientRequest(paths, mutation.requestId)).toMatchObject({
-      operation: "repairDaemonSupervision",
-      status: "committed",
-      result: { identityVersion: 1, kind: "clientRequestResult", parts: [mutation.requestId] },
-    });
+    const statePath = join(dataRoot, "launcher-supervision", "state.json");
+    const stateAfterFirst = readFileSync(statePath, "utf8");
+    const replayed = await replayHostClientRequest(paths, mutation.requestId);
+    expect(replayed).toEqual(receipt);
+    new HostClientRequestRepository(
+      join(dataRoot, "client-requests"),
+      request.dataIdentity,
+      () => Date.now() + 30 * 24 * 60 * 60 * 1_000,
+    ).lookup(mutation.requestId);
+    expect(await replayHostClientRequest(paths, mutation.requestId)).toEqual(receipt);
+    expect(readFileSync(statePath, "utf8")).toBe(stateAfterFirst);
     expect(supervision.checkRepair()).toMatchObject({ state: "idle", repairRequired: false });
   });
 });

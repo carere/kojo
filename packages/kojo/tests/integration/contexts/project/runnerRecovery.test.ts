@@ -241,7 +241,29 @@ describe("real Project Runner recovery", () => {
       },
     );
     expect(repair.status, await repair.clone().text()).toBe(202);
-    expect(await repair.json()).toMatchObject({ cycle: 1, attempts: 1, state: "recovering" });
+    const repairBody = await repair.json();
+    expect(repairBody).toMatchObject({ cycle: 1, attempts: 1, state: "recovering" });
+    expect(
+      (await (
+        await call(daemon, "/api/v1/client-requests/repair-recovery-project/retry", {
+          method: "POST",
+        })
+      ).json()) as { readonly result: unknown },
+    ).toMatchObject({ result: repairBody });
+    const repairConflict = await call(daemon, "/api/v1/client-requests/repair-recovery-project", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        mutationVersion: 1,
+        requestId: "repair-recovery-project",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation: "repairProject",
+        target: { identityVersion: 1, kind: "project", parts: [registered.project.projectId] },
+        arguments: { replacement: true },
+        preconditions: { mode: "no-trigger", revisionId: captured.revisionId },
+      }),
+    });
+    expect(repairConflict.status).toBe(409);
     const afterRepair = (await (
       await call(daemon, `/api/v1/projects/${registered.project.projectId}/workflows`)
     ).json()) as WorkflowSnapshot;

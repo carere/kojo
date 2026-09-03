@@ -118,6 +118,7 @@ export class ClientMutationBoundary {
         kind: "operationOutcome",
         parts: [request.requestId],
       },
+      ...(receipt.result === undefined ? {} : { result: receipt.result }),
     });
     return receipt;
   }

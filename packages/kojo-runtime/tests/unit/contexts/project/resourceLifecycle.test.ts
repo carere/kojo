@@ -1,9 +1,12 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, Layer, Option } from "effect";
 import { ResourceLeaseClient } from "../../../../src/contexts/project/ports/ResourceLeaseClient.ts";
-import { noSandbox } from "../../../../src/contexts/sandbox/adapters/providers.ts";
 import { workspaceProbe } from "../../../../src/contexts/sandbox/guards/workspaceIsReachable.ts";
 import { ExecResult } from "../../../../src/contexts/sandbox/models/ExecResult.ts";
+import {
+  SandboxCapabilities,
+  type SandboxProvider,
+} from "../../../../src/contexts/sandbox/models/SandboxProvider.ts";
 import { WorktreeState } from "../../../../src/contexts/sandbox/models/WorktreeState.ts";
 import { SandboxSource } from "../../../../src/contexts/sandbox/ports/SandboxSource.ts";
 import { Workspace } from "../../../../src/contexts/sandbox/ports/Workspace.ts";
@@ -100,12 +103,18 @@ describe("controlled Resource lifecycle", () => {
       occurrence: () => Effect.void,
     });
 
+    const provider: SandboxProvider = {
+      name: "unit-fixture",
+      capabilities: new SandboxCapabilities({
+        kind: "none",
+        capturesSessions: false,
+        resumesSessions: true,
+      }),
+      sandcastle: { name: "unit-fixture" } as SandboxProvider["sandcastle"],
+    };
     await Effect.runPromise(
       Effect.scoped(
-        sandboxed(
-          { name: "controlled", branch: "kojo/run-controlled", provider: noSandbox() },
-          Effect.void,
-        ),
+        sandboxed({ name: "controlled", branch: "kojo/run-controlled", provider }, Effect.void),
       ).pipe(
         Effect.provide(Layer.mergeAll(resources, source, tracer)),
         Effect.provideService(CurrentRun, { runId: "run-controlled" as never }),

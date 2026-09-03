@@ -62,13 +62,19 @@ export const replayHostClientRequest = async (
   const retained = repository.lookup(requestId);
   if (retained === undefined) return undefined;
   if (retained.resolution !== undefined) {
+    if (retained.resolution.result === undefined) {
+      throw new LifecycleError(
+        "CLIENT_REQUEST_DAMAGED",
+        "the retained Host repair resolution has no exact result",
+      );
+    }
     return {
       receiptVersion: 1,
       requestId,
       dataIdentity,
       operation: retained.subject.operation,
       status: retained.resolution.status,
-      result: retained.resolution.resultReference as unknown as JsonValue,
+      result: retained.resolution.result,
     };
   }
   if (retained.request === undefined) {
@@ -106,6 +112,7 @@ export const replayHostClientRequest = async (
     resolvedAt: new Date().toISOString(),
     status: "committed",
     resultReference: { identityVersion: 1, kind: "clientRequestResult", parts: [requestId] },
+    result,
   });
   return {
     receiptVersion: 1,

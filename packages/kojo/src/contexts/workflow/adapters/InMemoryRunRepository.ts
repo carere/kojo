@@ -100,53 +100,55 @@ export const layer: Layer.Layer<RunRepository> = Layer.effect(
       continuationStreaks: new Map(),
       sequence: 0,
     };
-    return {
-      admit: (request) =>
-        attempt(() => {
-          const receiptKey = JSON.stringify([request.dataIdentity, request.requestId]);
-          const prior = state.receipts.get(receiptKey);
-          if (prior !== undefined) {
-            if (prior.canonical !== request.canonicalRequest) {
-              throw new RunStoreError({
-                code: "REQUEST_CONFLICT",
-                message: "the request ID already names different canonical content",
-              });
-            }
-            return prior.admission;
-          }
-          const tuple = tupleOf(request);
-          const runId = runIdOf(request.projectId, request.workflowName, request.idempotencyKey);
-          const tupleRunId = state.tupleRunIds.get(tuple);
-          const existing = state.runs.get(runId);
-          if (tupleRunId !== undefined && tupleRunId !== runId) {
+    const admit: RunRepository["Service"]["admit"] = (request) =>
+      attempt(() => {
+        const receiptKey = JSON.stringify([request.dataIdentity, request.requestId]);
+        const prior = state.receipts.get(receiptKey);
+        if (prior !== undefined) {
+          if (prior.canonical !== request.canonicalRequest) {
             throw new RunStoreError({
-              code: "DEDUP_COLLISION",
-              message: "the deduplication tuple is bound to a different Run",
+              code: "REQUEST_CONFLICT",
+              message: "the request ID already names different canonical content",
             });
           }
-          if (existing === undefined) state.sequence += 1;
-          const run: DaemonRun =
-            existing ??
-            ({
-              runId,
-              projectId: request.projectId,
-              workflowName: request.workflowName,
-              idempotencyKey: request.idempotencyKey,
-              payload: request.payload,
-              revisionId: request.revisionId,
-              packageGraphId: request.packageGraphId,
-              state: "queued",
-              queueKind: "new",
-              queueReason: "runner-starting",
-              admissionSequence: state.sequence,
-              admittedAt: request.admittedAt,
-            } satisfies DaemonRun);
-          state.runs.set(runId, run);
-          state.tupleRunIds.set(tuple, runId);
-          const admission = { run, duplicate: existing !== undefined };
-          state.receipts.set(receiptKey, { canonical: request.canonicalRequest, admission });
-          return admission;
-        }),
+          return prior.admission;
+        }
+        const tuple = tupleOf(request);
+        const runId = runIdOf(request.projectId, request.workflowName, request.idempotencyKey);
+        const tupleRunId = state.tupleRunIds.get(tuple);
+        const existing = state.runs.get(runId);
+        if (tupleRunId !== undefined && tupleRunId !== runId) {
+          throw new RunStoreError({
+            code: "DEDUP_COLLISION",
+            message: "the deduplication tuple is bound to a different Run",
+          });
+        }
+        if (existing === undefined) state.sequence += 1;
+        const run: DaemonRun =
+          existing ??
+          ({
+            runId,
+            projectId: request.projectId,
+            workflowName: request.workflowName,
+            idempotencyKey: request.idempotencyKey,
+            payload: request.payload,
+            revisionId: request.revisionId,
+            packageGraphId: request.packageGraphId,
+            state: "queued",
+            queueKind: "new",
+            queueReason: "runner-starting",
+            admissionSequence: state.sequence,
+            admittedAt: request.admittedAt,
+          } satisfies DaemonRun);
+        state.runs.set(runId, run);
+        state.tupleRunIds.set(tuple, runId);
+        const admission = { run, duplicate: existing !== undefined };
+        state.receipts.set(receiptKey, { canonical: request.canonicalRequest, admission });
+        return admission;
+      });
+    return {
+      admit,
+      admitAndActivateWorkflow: admit,
       claim: (runId, runnerInstanceId, claimedAt) =>
         attempt(() => {
           const run = state.runs.get(runId);

@@ -1,10 +1,14 @@
 import { Database } from "bun:sqlite";
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
+import { SqliteOperationRepository } from "../../../../src/contexts/daemon/adapters/SqliteOperationRepository.ts";
 import { SqliteProjectRepository } from "../../../../src/contexts/project/adapters/SqliteProjectRepository.ts";
 import { SqliteRunRepository } from "../../../../src/contexts/workflow/adapters/SqliteRunRepository.ts";
 
-const fixture = (): {
+const fixture = (
+  triggerState: "not-declared" | "not-observed" = "not-observed",
+): {
   readonly database: Database;
   readonly projects: SqliteProjectRepository;
   readonly runs: SqliteRunRepository;
@@ -13,7 +17,8 @@ const fixture = (): {
   database.run(
     "CREATE TABLE daemon_metadata (name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT",
   );
-  const projects = new SqliteProjectRepository(database);
+  const operations = new SqliteOperationRepository(database);
+  const projects = new SqliteProjectRepository(database, operations);
   database.run(
     `INSERT INTO projects (
        project_id, location, project_state, factory_state, refresh_state,
@@ -25,12 +30,98 @@ const fixture = (): {
     [JSON.stringify({ entrySource: "workflows/review.ts" })],
   );
   database.run(
-    "INSERT INTO project_workflows VALUES ('project', 'review', 'inactive', 'available', 'workflows/review.ts', NULL, NULL, 'revision', NULL, 'not-observed', NULL, NULL, 'now')",
+    "INSERT INTO project_workflows VALUES ('project', 'review', 'inactive', 'available', 'workflows/review.ts', NULL, NULL, 'revision', NULL, ?, NULL, NULL, 'now')",
+    [triggerState],
   );
-  return { database, projects, runs: new SqliteRunRepository(database) };
+  return {
+    database,
+    projects,
+    runs: new SqliteRunRepository(database, { operations }),
+  };
 };
 
+const startMutation = (requestId: string): MutationEnvelope => ({
+  mutationVersion: 1,
+  requestId,
+  dataIdentity: "data",
+  operation: "startWorkflow",
+  target: { identityVersion: 1, kind: "workflow", parts: ["project", "review"] },
+  arguments: { payload: { change: "reviewed" } },
+  preconditions: { workflowMode: "no-trigger", revisionId: "revision" },
+});
+
 describe("durable Workflow activity", () => {
+  it("atomically admits a no-Trigger Run, activates its Workflow, and records its exact replay", async () => {
+    for (const [name, trigger] of [
+      [
+        "operation",
+        "CREATE TRIGGER kill_operation BEFORE INSERT ON daemon_operations BEGIN SELECT RAISE(ABORT, 'kill before operation receipt'); END",
+      ],
+      [
+        "activity",
+        "CREATE TRIGGER kill_activity BEFORE UPDATE ON project_workflows BEGIN SELECT RAISE(ABORT, 'kill before Workflow Activity'); END",
+      ],
+      [
+        "activity_receipt",
+        "CREATE TRIGGER kill_activity_receipt BEFORE INSERT ON workflow_activity_receipts BEGIN SELECT RAISE(ABORT, 'kill before Activity receipt'); END",
+      ],
+    ] as const) {
+      const { database, projects, runs } = fixture("not-declared");
+      const requestId = `atomic-${name}`;
+      const mutation = startMutation(requestId);
+      const request = {
+        dataIdentity: "data",
+        requestId,
+        canonicalRequest: JSON.stringify(mutation),
+        projectId: "project",
+        workflowName: "review",
+        idempotencyKey: `run-${name}`,
+        payload: { change: "reviewed" },
+        revisionId: "revision",
+        packageGraphId: "graph",
+        admittedAt: "2026-09-01T00:00:00.000Z",
+        mutation,
+        reviewedMode: "no-trigger" as const,
+        reviewedRevisionId: "revision",
+      };
+      database.run(trigger);
+      await expect(Effect.runPromise(runs.admitAndActivateWorkflow(request))).rejects.toThrow(
+        /kill/,
+      );
+      expect(await Effect.runPromise(runs.list)).toHaveLength(0);
+      expect((await Effect.runPromise(projects.workflow("project", "review")))?.activity).toBe(
+        "inactive",
+      );
+      expect(
+        database
+          .query<{ readonly count: number }, []>("SELECT COUNT(*) AS count FROM daemon_operations")
+          .get()?.count,
+      ).toBe(0);
+      database.run(`DROP TRIGGER kill_${name}`);
+      const first = await Effect.runPromise(runs.admitAndActivateWorkflow(request));
+      const replay = await Effect.runPromise(runs.admitAndActivateWorkflow(request));
+      expect(replay).toEqual(first);
+      expect(await Effect.runPromise(runs.list)).toHaveLength(1);
+      expect((await Effect.runPromise(projects.workflow("project", "review")))?.activity).toBe(
+        "active",
+      );
+      expect(
+        database
+          .query<{ readonly count: number }, []>("SELECT COUNT(*) AS count FROM daemon_operations")
+          .get()?.count,
+      ).toBe(1);
+      await expect(
+        Effect.runPromise(
+          runs.admitAndActivateWorkflow({
+            ...request,
+            canonicalRequest: `${request.canonicalRequest}-changed`,
+          }),
+        ),
+      ).rejects.toThrow(/different canonical content/);
+      database.close(false);
+    }
+  });
+
   it.effect("starts one Trigger poller without an immediate Run and repeats by receipt", () =>
     Effect.gen(function* () {
       const { database, projects, runs } = fixture();

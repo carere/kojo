@@ -11,8 +11,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import { afterEach, describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
+import { SqliteOperationRepository } from "../../../../src/contexts/daemon/adapters/SqliteOperationRepository.ts";
 import { SqliteProjectRepository } from "../../../../src/contexts/project/adapters/SqliteProjectRepository.ts";
 import { SqliteRevisionRepository } from "../../../../src/contexts/workflow/adapters/SqliteRevisionRepository.ts";
 import { SqliteRunRepository } from "../../../../src/contexts/workflow/adapters/SqliteRunRepository.ts";
@@ -147,7 +149,8 @@ const fixture = (): {
     "CREATE TABLE daemon_metadata (name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT",
   );
   database.run("INSERT INTO daemon_metadata VALUES ('data_identity', 'data-1')");
-  new SqliteProjectRepository(database);
+  const operations = new SqliteOperationRepository(database);
+  new SqliteProjectRepository(database, operations);
   new SqliteRunRepository(database);
   const insertRevision = (revision: FixtureRevision, current = false): void => {
     const projectId = `project-${revision.manifest.workflowName}`;
@@ -194,7 +197,7 @@ const fixture = (): {
     dataRoot,
     insertRevision,
     get revisions() {
-      return new SqliteRevisionRepository(database, dataRoot);
+      return new SqliteRevisionRepository(database, dataRoot, operations);
     },
   };
 };
@@ -377,10 +380,36 @@ describe("Workflow Revision protection and collection", () => {
       (await Effect.runPromise(repository.collect(first.revisionId, "2026-09-02T23:59:59.999Z")))
         .state,
     ).toBe("grace");
+    const collectMutation: MutationEnvelope = {
+      mutationVersion: 1,
+      requestId: "collect-first-revision",
+      dataIdentity: "data-1",
+      operation: "collectRevision",
+      target: {
+        identityVersion: 1,
+        kind: "workflowRevision",
+        parts: ["project-first", first.revisionId],
+      },
+      arguments: {},
+      preconditions: {},
+    };
     const collected = await Effect.runPromise(
-      repository.collect(first.revisionId, "2026-09-03T00:00:00.000Z"),
+      repository.collect(first.revisionId, "2026-09-03T00:00:00.000Z", collectMutation),
     );
     expect(collected.state).toBe("collected");
+    expect(
+      await Effect.runPromise(
+        repository.collect(first.revisionId, "2026-09-03T00:00:00.000Z", collectMutation),
+      ),
+    ).toEqual(collected);
+    await expect(
+      Effect.runPromise(
+        repository.collect(first.revisionId, "2026-09-03T00:00:00.000Z", {
+          ...collectMutation,
+          arguments: { replacement: true },
+        }),
+      ),
+    ).rejects.toThrow(/different request content/);
     expect(existsSync(first.publishedPath)).toBe(false);
     expect(existsSync(join(test.dataRoot, "objects", first.packageHash))).toBe(true);
     await expect(

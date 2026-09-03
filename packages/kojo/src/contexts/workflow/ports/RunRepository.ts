@@ -39,6 +39,9 @@ export class RunRepository extends Context.Service<
   RunRepository,
   {
     readonly admit: (request: AdmitRunRequest) => Effect.Effect<Admission, RunStoreError>;
+    readonly admitAndActivateWorkflow: (
+      request: AdmitRunRequest,
+    ) => Effect.Effect<Admission, RunStoreError>;
     readonly claim: (
       runId: string,
       runnerInstanceId: string,

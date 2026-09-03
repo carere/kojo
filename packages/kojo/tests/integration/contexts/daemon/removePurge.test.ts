@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
+import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { afterEach, describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 import {
@@ -26,6 +27,8 @@ import {
   startDaemon,
 } from "../../../../src/contexts/daemon/adapters/DaemonOwner.ts";
 import { FileLifecycleJournalRepository } from "../../../../src/contexts/daemon/adapters/FileLifecycleJournalRepository.ts";
+import { replayHostClientRequest } from "../../../../src/contexts/daemon/adapters/HostClientRequestReplay.ts";
+import { HostClientRequestRepository } from "../../../../src/contexts/daemon/adapters/HostClientRequestRepository.ts";
 import {
   installManagedRelease,
   removeManagedInstallation,
@@ -234,7 +237,7 @@ describe("remove safety and exact offline purge", () => {
     removeManagedInstallation(test.paths);
   });
 
-  it("recovers stale safety from the identity-bound capsule after managed removal", async () => {
+  it("recovers stale safety once and replays the exact Host result after loss and compaction", async () => {
     const test = fixture();
     mkdirSync(join(test.root, "service"), { mode: 0o700 });
     writeFileSync(
@@ -348,6 +351,47 @@ describe("remove safety and exact offline purge", () => {
     const missingEvidenceRecovery = recovery.check();
     const recoveredFromMissing = await recovery.apply(missingEvidenceRecovery.planToken);
     expect(purger.check().plan.evidenceId).toBe(recoveredFromMissing.evidenceId);
+
+    const finalPlan = recovery.check();
+    const requestId = "repair-purge-host-replay";
+    const mutation: MutationEnvelope = {
+      mutationVersion: 1,
+      requestId,
+      dataIdentity: test.dataIdentity,
+      operation: "repairPurgeSafety",
+      target: { identityVersion: 1, kind: "daemonData", parts: [test.dataIdentity] },
+      arguments: { planToken: finalPlan.planToken },
+      preconditions: {},
+    };
+    const hostRequests = new HostClientRequestRepository(
+      join(test.paths.dataRoot, "client-requests"),
+      test.dataIdentity,
+    );
+    hostRequests.prepare(mutation);
+    const hostResult = await recovery.apply(finalPlan.planToken);
+    expect(await recovery.apply(finalPlan.planToken)).toEqual(hostResult);
+    const exactResult = JSON.parse(JSON.stringify(hostResult)) as JsonValue;
+    hostRequests.resolve(requestId, {
+      resolvedAt: new Date().toISOString(),
+      status: "committed",
+      resultReference: {
+        identityVersion: 1,
+        kind: "clientRequestResult",
+        parts: [requestId],
+      },
+      result: exactResult,
+    });
+    const safetyPath = join(test.paths.dataRoot, "lifecycle", "purge-safety.json");
+    const safetyAfterFirst = readFileSync(safetyPath, "utf8");
+    expect((await replayHostClientRequest(test.paths, requestId))?.result).toEqual(exactResult);
+    const afterRetention = Date.now() + 30 * 24 * 60 * 60 * 1_000;
+    new HostClientRequestRepository(
+      join(test.paths.dataRoot, "client-requests"),
+      test.dataIdentity,
+      () => afterRetention,
+    ).lookup(requestId);
+    expect((await replayHostClientRequest(test.paths, requestId))?.result).toEqual(exactResult);
+    expect(readFileSync(safetyPath, "utf8")).toBe(safetyAfterFirst);
   });
 
   it("refuses an old mutation envelope in the fresh post-purge data lifetime", async () => {

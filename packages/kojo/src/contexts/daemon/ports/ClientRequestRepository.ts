@@ -1,10 +1,13 @@
 import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
+import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import type { StructuredIdentity } from "@carere/kojo-client-contracts/contexts/shared/models/identity";
 
 export interface ClientRequestResolution {
   readonly resolvedAt: string;
   readonly status: "accepted" | "committed";
   readonly resultReference: StructuredIdentity;
+  /** The private, exact result used by Host-only replay after the Daemon is unavailable. */
+  readonly result?: JsonValue;
 }
 
 export interface RetainedClientRequest {

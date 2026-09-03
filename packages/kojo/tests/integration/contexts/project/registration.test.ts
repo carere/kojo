@@ -397,7 +397,8 @@ describe("durable Project registration", () => {
       },
     );
     expect(confirmResponse.status, await confirmResponse.clone().text()).toBe(200);
-    expect((await confirmResponse.json()) as OperationReceipt).toMatchObject({
+    const confirmBody = await confirmResponse.json();
+    expect(confirmBody as OperationReceipt).toMatchObject({
       operation: "relocateProject",
       status: "committed",
       result: {
@@ -409,6 +410,21 @@ describe("durable Project registration", () => {
         },
       },
     });
+    expect((await retry(daemon, "confirm-same-location")).status).toBe(200);
+    expect(await (await retry(daemon, "confirm-same-location")).json()).toEqual(confirmBody);
+    expect(
+      (
+        await prepare(daemon, {
+          mutationVersion: 1,
+          requestId: "confirm-same-location",
+          dataIdentity: daemon.endpoint.dataIdentity,
+          operation: "relocateProject",
+          target: { identityVersion: 1, kind: "project", parts: [originalId] },
+          arguments: { location: alternateLocation },
+          preconditions: { confirm: true },
+        })
+      ).status,
+    ).toBe(409);
 
     const archiveMutation: MutationEnvelope = {
       mutationVersion: 1,
@@ -538,6 +554,21 @@ describe("durable Project registration", () => {
         },
       },
     });
+    const archivedReplay = await retry(daemon, "archive-original");
+    expect(archivedReplay.status).toBe(200);
+    expect((await archivedReplay.json()) as OperationReceipt).toMatchObject({
+      requestId: "archive-original",
+      operation: "archiveProject",
+      status: "committed",
+    });
+    expect(
+      (
+        await prepare(daemon, {
+          ...archiveMutation,
+          arguments: { replacement: true },
+        })
+      ).status,
+    ).toBe(409);
     database.close();
 
     const replacement = await register("new-project-at-released-location", firstLocation);
@@ -581,7 +612,8 @@ describe("durable Project registration", () => {
       },
     );
     expect(restored.status, await restored.clone().text()).toBe(200);
-    expect((await restored.json()) as OperationReceipt).toMatchObject({
+    const restoredBody = await restored.json();
+    expect(restoredBody as OperationReceipt).toMatchObject({
       status: "committed",
       result: {
         project: {
@@ -595,6 +627,20 @@ describe("durable Project registration", () => {
         },
       },
     });
+    expect(await (await retry(daemon, "restore-alternate")).json()).toEqual(restoredBody);
+    expect(
+      (
+        await prepare(daemon, {
+          mutationVersion: 1,
+          requestId: "restore-alternate",
+          dataIdentity: daemon.endpoint.dataIdentity,
+          operation: "restoreProject",
+          target: { identityVersion: 1, kind: "project", parts: [originalId] },
+          arguments: { location: firstLocation },
+          preconditions: { confirm: true },
+        })
+      ).status,
+    ).toBe(409);
 
     const secondArchive = await sendPreparedMutation(
       daemon,

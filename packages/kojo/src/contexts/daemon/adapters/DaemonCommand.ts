@@ -684,6 +684,7 @@ const repair = Command.make(
             kind: "clientRequestResult",
             parts: [requestId],
           },
+          result: result as unknown as JsonValue,
         });
         if (json) yield* Console.log(JSON.stringify({ formatVersion: 1, purgeSafety: result }));
         else yield* Console.log(`Recovered purge safety evidence: ${result.evidenceId}.`);
@@ -750,6 +751,7 @@ const repair = Command.make(
           kind: "clientRequestResult",
           parts: [preparedSupervision.requestId],
         },
+        result: result as unknown as JsonValue,
       });
     }
     if (json) yield* Console.log(JSON.stringify({ formatVersion: 1, supervision: result }));

@@ -17,6 +17,8 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 import { startDaemon } from "../../../../src/contexts/daemon/adapters/DaemonOwner.ts";
+import { FileLifecycleJournalRepository } from "../../../../src/contexts/daemon/adapters/FileLifecycleJournalRepository.ts";
+import { SocketDaemonUpgradeControl } from "../../../../src/contexts/daemon/adapters/LifecycleControlTransport.ts";
 import {
   managedReleaseSelection,
   stageManagedRelease,
@@ -91,27 +93,52 @@ describe("recoverable managed upgrade activation", () => {
       );
 
       sourceDaemon = startDaemon(paths, { automaticRefresh: false });
+      const checkMutation = {
+        mutationVersion: 1 as const,
+        requestId: "upgrade-activation-check",
+        dataIdentity: sourceDaemon.endpoint.dataIdentity,
+        operation: "checkDaemonUpgrade" as const,
+        target: {
+          identityVersion: 1 as const,
+          kind: "daemonData" as const,
+          parts: [sourceDaemon.endpoint.dataIdentity],
+        },
+        arguments: { candidateReleaseId: candidate.releaseId },
+        preconditions: {},
+      };
       const checkResponse = await sendPreparedMutation(
         sourceDaemon,
         "/api/v1/daemon/upgrade-check",
-        {
-          mutationVersion: 1,
-          requestId: "upgrade-activation-check",
-          dataIdentity: sourceDaemon.endpoint.dataIdentity,
-          operation: "checkDaemonUpgrade",
-          target: {
-            identityVersion: 1,
-            kind: "daemonData",
-            parts: [sourceDaemon.endpoint.dataIdentity],
-          },
-          arguments: { candidateReleaseId: candidate.releaseId },
-          preconditions: {},
-        },
+        checkMutation,
       );
       const checked = (await checkResponse.json()) as {
         readonly report: { readonly outcome: string; readonly retainedSetHash: string };
       };
       expect(checked.report.outcome).toBe("staged");
+      const checkReplayResponse = await fetch(
+        "http://localhost/api/v1/client-requests/upgrade-activation-check/retry",
+        {
+          unix: sourceDaemon.endpoint.socketPath,
+          method: "POST",
+        } as RequestInit & { readonly unix: string },
+      );
+      expect(checkReplayResponse.status, await checkReplayResponse.clone().text()).toBe(200);
+      expect((await checkReplayResponse.json()) as { readonly result: unknown }).toMatchObject({
+        result: checked,
+      });
+      const checkConflict = await fetch(
+        "http://localhost/api/v1/client-requests/upgrade-activation-check",
+        {
+          unix: sourceDaemon.endpoint.socketPath,
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            ...checkMutation,
+            arguments: { candidateReleaseId: "replacement-release" },
+          }),
+        } as RequestInit & { readonly unix: string },
+      );
+      expect(checkConflict.status).toBe(409);
 
       const operationId = "upgrade-activation-one";
       const requestHash = "a".repeat(64);
@@ -127,8 +154,22 @@ describe("recoverable managed upgrade activation", () => {
           ),
         ),
       ).rejects.toThrow(/matching accepted managed upgrade check/);
+      const lifecycleJournal = new FileLifecycleJournalRepository(
+        join(paths.dataRoot, "lifecycle"),
+      );
+      lifecycleJournal.begin({
+        operationId,
+        dataIdentity: sourceDaemon.endpoint.dataIdentity,
+        originalRequestHash: requestHash,
+        kind: "upgrade",
+        sourceReleaseId: "kojo-test",
+        candidateReleaseId: candidate.releaseId,
+        checkedRetainedSetHash: checked.report.retainedSetHash,
+        startedAt: "2026-09-01T10:00:00.000Z",
+      });
+      const upgradeControl = new SocketDaemonUpgradeControl(paths.runtimeRoot, lifecycleJournal);
       const sourceOwner = await Effect.runPromise(
-        sourceDaemon.upgradeControl.inspectPreflight(
+        upgradeControl.inspectPreflight(
           operationId,
           sourceDaemon.endpoint.dataIdentity,
           requestHash,
@@ -137,10 +178,10 @@ describe("recoverable managed upgrade activation", () => {
           checked.report.retainedSetHash,
         ),
       );
-      await Effect.runPromise(sourceDaemon.upgradeControl.beginDrain(operationId));
-      await Effect.runPromise(sourceDaemon.upgradeControl.beginDrain(operationId));
-      await Effect.runPromise(sourceDaemon.upgradeControl.holdMutations(operationId));
-      await Effect.runPromise(sourceDaemon.upgradeControl.holdMutations(operationId));
+      await Effect.runPromise(upgradeControl.beginDrain(operationId));
+      await Effect.runPromise(upgradeControl.beginDrain(operationId));
+      await Effect.runPromise(upgradeControl.holdMutations(operationId));
+      await Effect.runPromise(upgradeControl.holdMutations(operationId));
 
       const heldResponse = await fetch("http://localhost/api/v1/gate-answers", {
         unix: sourceDaemon.endpoint.socketPath,
@@ -151,7 +192,7 @@ describe("recoverable managed upgrade activation", () => {
       expect(await heldResponse.json()).toMatchObject({ code: "daemon-mutations-held" });
 
       const finalPreflight = await Effect.runPromise(
-        sourceDaemon.upgradeControl.repeatFinalPreflight(
+        upgradeControl.repeatFinalPreflight(
           operationId,
           candidate.releaseId,
           checked.report.retainedSetHash,
@@ -160,38 +201,28 @@ describe("recoverable managed upgrade activation", () => {
       expect(finalPreflight.outcome).toBe("accepted");
       expect(
         await Effect.runPromise(
-          sourceDaemon.upgradeControl.repeatFinalPreflight(
+          upgradeControl.repeatFinalPreflight(
             operationId,
             candidate.releaseId,
             checked.report.retainedSetHash,
           ),
         ),
       ).toEqual(finalPreflight);
-      const handoff = await Effect.runPromise(
-        sourceDaemon.upgradeControl.prepareHandoff(operationId),
-      );
-      expect(
-        await Effect.runPromise(sourceDaemon.upgradeControl.prepareHandoff(operationId)),
-      ).toEqual(handoff);
-      await Effect.runPromise(
-        sourceDaemon.upgradeControl.confirmControllerReady(operationId, handoff.digest),
-      );
-      await Effect.runPromise(
-        sourceDaemon.upgradeControl.confirmControllerReady(operationId, handoff.digest),
-      );
+      const handoff = await Effect.runPromise(upgradeControl.prepareHandoff(operationId));
+      expect(await Effect.runPromise(upgradeControl.prepareHandoff(operationId))).toEqual(handoff);
+      await Effect.runPromise(upgradeControl.confirmControllerReady(operationId, handoff.digest));
+      await Effect.runPromise(upgradeControl.confirmControllerReady(operationId, handoff.digest));
       write(
         join(paths.dataRoot, "lifecycle", "backups", `${operationId}.sqlite.staging`),
         "interrupted backup",
       );
-      const backup = await Effect.runPromise(
-        sourceDaemon.upgradeControl.createVerifiedBackup(operationId),
-      );
+      const backup = await Effect.runPromise(upgradeControl.createVerifiedBackup(operationId));
       expect(backup.sha256).toMatch(/^[a-f0-9]{64}$/);
-      expect(
-        await Effect.runPromise(sourceDaemon.upgradeControl.createVerifiedBackup(operationId)),
-      ).toEqual(backup);
-      await Effect.runPromise(sourceDaemon.upgradeControl.stopOwnedProcesses(operationId, 30_000));
-      await Effect.runPromise(sourceDaemon.upgradeControl.stopOwnedProcesses(operationId, 30_000));
+      expect(await Effect.runPromise(upgradeControl.createVerifiedBackup(operationId))).toEqual(
+        backup,
+      );
+      await Effect.runPromise(upgradeControl.stopOwnedProcesses(operationId, 30_000));
+      await Effect.runPromise(upgradeControl.stopOwnedProcesses(operationId, 30_000));
       await Effect.runPromise(sourceDaemon.stop);
       sourceDaemon = undefined;
 
@@ -227,19 +258,13 @@ describe("recoverable managed upgrade activation", () => {
       expect(candidateReadyCalls).toBe(0);
       await expect(
         Effect.runPromise(
-          candidateDaemon.upgradeControl.readCandidateReadiness(
-            operationId,
-            candidateDaemon.endpoint.instanceId,
-          ),
+          upgradeControl.readCandidateReadiness(operationId, candidateDaemon.endpoint.instanceId),
         ),
       ).rejects.toThrow(/new Daemon owner/);
       expect(candidateRestoreCalls).toBe(0);
       expect(candidateReadyCalls).toBe(0);
       const candidateReadiness = await Effect.runPromise(
-        candidateDaemon.upgradeControl.readCandidateReadiness(
-          operationId,
-          sourceOwner.daemonInstanceId,
-        ),
+        upgradeControl.readCandidateReadiness(operationId, sourceOwner.daemonInstanceId),
       );
       expect(candidateReadiness).toMatchObject({
         daemonInstanceId: candidateDaemon.endpoint.instanceId,
@@ -253,19 +278,12 @@ describe("recoverable managed upgrade activation", () => {
       expect(candidateReadyCalls).toBe(1);
       expect(
         await Effect.runPromise(
-          candidateDaemon.upgradeControl.readCandidateReadiness(
-            operationId,
-            sourceOwner.daemonInstanceId,
-          ),
+          upgradeControl.readCandidateReadiness(operationId, sourceOwner.daemonInstanceId),
         ),
       ).toEqual(candidateReadiness);
-      await Effect.runPromise(
-        candidateDaemon.upgradeControl.authorizeActivation(operationId, candidateReadiness),
-      );
+      await Effect.runPromise(upgradeControl.authorizeActivation(operationId, candidateReadiness));
       expect(candidateRestoreCalls).toBe(1);
-      await Effect.runPromise(
-        candidateDaemon.upgradeControl.authorizeActivation(operationId, candidateReadiness),
-      );
+      await Effect.runPromise(upgradeControl.authorizeActivation(operationId, candidateReadiness));
 
       const noLongerHeld = await fetch("http://localhost/api/v1/gate-answers", {
         unix: candidateDaemon.endpoint.socketPath,

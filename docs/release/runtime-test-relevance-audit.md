@@ -153,10 +153,11 @@ barred historic Project path. The restored in-memory adapter suites retain scrip
 resume refusal, unsafe-command refusal, traversal safety, write, stat, and unlink coverage.
 `SandcastleAgentInvoker.test.ts` stays in the integration tier because it uses the real Sandcastle,
 YamlRoster, Daemon Resource, Artifact, sandbox, Git, file-system, and child-process adapters. Its
-scripted Agent Provider is an executable process boundary, not an in-memory port layer. `replayAdapter.test.ts`
-uses the pure `DaemonWorkflowReplay` use case with a Map-backed execution repository and controlled
+scripted Agent Provider is an executable process boundary, not an in-memory port layer.
+`tests/unit/contexts/workflow/services/DaemonWorkflowReplay.test.ts` uses the pure
+`DaemonWorkflowReplay` use case with a Map-backed execution repository and controlled
 Resource lease client. The real `DaemonWorkflowEngine` adapter stays covered by Runner integration.
-`launchConsole.test.ts` moved to a mirrored unit path because its Console
+`tests/unit/contexts/daemon/services/launchConsole.test.ts` moved to a mirrored unit path because its Console
 access and Browser Service ports are controlled; authenticated browser and CLI tests keep the real
 Host transport boundary. `removePurge.test.ts` stays in Integration and now uses the concrete systemd
 service adapter with controlled native command results, together with its real SQLite, file-system,
@@ -166,31 +167,35 @@ hand-built port as a real boundary.
 
 The lifecycle-control test boundary follows the same rule. Pure request and owner-byte validation
 lives in the unit `LifecycleControlProtocol.test.ts` suite. Endpoint loss and durable resume stay in
-the unit `LifecycleController.test.ts` use-case suite. The real Unix-socket adapter remains in the
-integration `ownership.test.ts` suite with a real Daemon owner. Managed upgrade activation keeps its
-real staged-release integration case. Controlled readiness and rollback outcomes stay in the unit
+the unit `LifecycleController.test.ts` use-case suite. The real Unix-socket lifecycle adapter remains
+in `ownership.test.ts`. The real `SocketDaemonUpgradeControl` client runs against a private Daemon
+socket in the staged-release `activation.test.ts` integration case. Controlled readiness and rollback
+outcomes stay in the unit
 `UpgradeActivationController.test.ts` suite. The old mixed socket-plus-fake-control integration
 suite is therefore split without dropping a current behavior.
 
 ## Prepared mutation replay matrix
 
 The exact operation inventory has 18 entries. Sixteen SQLite owners use the real
-`SqliteOperationRepository` receipt boundary. Its exhaustive integration matrix proves one atomic
-side effect, the original result on retry, and changed-content conflict for every operation below.
-Each domain suite then proves the named owner action. The two Host-file owners use their own real
-adapter tests and do not enter the SQLite matrix.
+`SqliteOperationRepository` receipt boundary. `SqliteMutationOwnerEvidence.ts` is the mechanical
+operation-to-leaf manifest. Its validator fails when one accepted operation has no exact declared
+leaf or when the named leaf is absent. Each named real-owner leaf invokes its domain adapter or
+private HTTP boundary and proves the initial effect and receipt, same-content replay with the
+original result and no second effect, and changed-content conflict. The generic SQLite transaction
+test is infrastructure evidence only. The two Host-file owners use their own real adapter tests and
+do not enter the SQLite manifest.
 
 | Operation | Real owner evidence |
 | --- | --- |
 | `registerProject`, `relocateProject`, `archiveProject`, `restoreProject` | `registration.test.ts` |
-| `configureProject`, `configureDaemon`, `confirmDaemonConfiguration` | `configurationRetention.test.ts`, `ownership.test.ts` |
+| `configureProject`, `configureDaemon`, `confirmDaemonConfiguration` | `ownership.test.ts` |
 | `repairProject` | `runnerRecovery.test.ts` |
 | `repairRevision`, `collectRevision` | `runApi.test.ts`, `revisionRepair.test.ts` |
-| `startWorkflow`, `stopWorkflow` | `runApi.test.ts` |
+| `startWorkflow`, `stopWorkflow` | `activity.test.ts`, `runApi.test.ts` |
 | `cancelRun` | `forcedStop.test.ts` |
 | `retryUncertainAction` | `uncertainAction.test.ts`, `cliContract.test.ts` |
-| `recordGateVerdict` | `resourceDaemon.test.ts`, `gateAndResume.test.ts` |
-| `checkDaemonUpgrade` | `preflight.test.ts`, `activation.test.ts` |
+| `recordGateVerdict` | `application.test.ts` |
+| `checkDaemonUpgrade` | `activation.test.ts` |
 | `repairDaemonSupervision` | `HostClientRequestRepository.test.ts` |
 | `repairPurgeSafety` | `removePurge.test.ts` |
 

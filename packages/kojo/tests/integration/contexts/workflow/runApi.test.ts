@@ -865,25 +865,42 @@ describe("Daemon no-Trigger Run API", () => {
       "current-workflow",
       "retained-run",
     ]);
+    const repairMutation: MutationEnvelope = {
+      mutationVersion: 1,
+      requestId: "repair-exact-revision",
+      dataIdentity: daemon.endpoint.dataIdentity,
+      operation: "repairRevision",
+      target: {
+        identityVersion: 1,
+        kind: "workflowRevision",
+        parts: [registered.project.projectId, captured.revisionId],
+      },
+      arguments: { from: captured.publishedPath },
+      preconditions: {},
+    };
     const repairResponse = await mutate(
       daemon,
       `/api/v1/projects/${registered.project.projectId}/revisions/${captured.revisionId}/actions/repair`,
-      {
-        mutationVersion: 1,
-        requestId: "repair-exact-revision",
-        dataIdentity: daemon.endpoint.dataIdentity,
-        operation: "repairRevision",
-        target: {
-          identityVersion: 1,
-          kind: "workflowRevision",
-          parts: [registered.project.projectId, captured.revisionId],
-        },
-        arguments: { from: captured.publishedPath },
-        preconditions: {},
-      },
+      repairMutation,
     );
     expect(repairResponse.status, await repairResponse.clone().text()).toBe(200);
-    expect((await repairResponse.json()) as RevisionDetails).toMatchObject({ faults: [] });
+    const repairBody = (await repairResponse.json()) as RevisionDetails;
+    expect(repairBody).toMatchObject({ faults: [] });
+    const repairReplay = (await (
+      await call(daemon, "/api/v1/client-requests/repair-exact-revision/retry", {
+        method: "POST",
+      })
+    ).json()) as { readonly result: unknown };
+    expect(repairReplay).toMatchObject({ result: repairBody });
+    const repairConflict = await call(daemon, "/api/v1/client-requests/repair-exact-revision", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...repairMutation,
+        arguments: { from: join(hostPaths.dataRoot, "replacement") },
+      }),
+    });
+    expect(repairConflict.status).toBe(409);
 
     const snapshot = (await (await call(daemon, "/api/v1/runs")).json()) as RunSnapshot;
     expect(snapshot.runs).toEqual([run]);
@@ -1132,6 +1149,29 @@ describe("Daemon no-Trigger Run API", () => {
       preconditions: {},
     });
     expect(stop.status, await stop.clone().text()).toBe(202);
+    const stopBody = await stop.json();
+    const stopReplay = (await (
+      await call(daemon, "/api/v1/client-requests/stop-trigger/retry", { method: "POST" })
+    ).json()) as { readonly result: unknown };
+    expect(stopReplay).toMatchObject({ result: stopBody });
+    const stopConflict = await call(daemon, "/api/v1/client-requests/stop-trigger", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        mutationVersion: 1,
+        requestId: "stop-trigger",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation: "stopWorkflow",
+        target: {
+          identityVersion: 1,
+          kind: "workflow",
+          parts: [registered.project.projectId, "tickets"],
+        },
+        arguments: { force: true },
+        preconditions: {},
+      }),
+    });
+    expect(stopConflict.status).toBe(409);
     await Bun.sleep(700);
     const runs = (await (await call(daemon, "/api/v1/runs")).json()) as RunSnapshot;
     expect(runs.runs.map((run) => run.runId)).toEqual([firstAcknowledgement.run?.runId]);

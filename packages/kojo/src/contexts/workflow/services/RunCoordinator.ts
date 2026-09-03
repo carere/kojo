@@ -752,7 +752,7 @@ export class RunCoordinator {
       );
       const admittedAt = new Date(this.#now()).toISOString();
       const admission = await Effect.runPromise(
-        this.#runs.admit({
+        this.#runs.admitAndActivateWorkflow({
           dataIdentity: options.dataIdentity,
           requestId: options.requestId,
           canonicalRequest: canonicalJson({
@@ -775,15 +775,6 @@ export class RunCoordinator {
           ...(options.reviewedRevisionId === undefined
             ? {}
             : { reviewedRevisionId: options.reviewedRevisionId }),
-        }),
-      );
-      await Effect.runPromise(
-        this.#projects.startActivity({
-          dataIdentity: options.dataIdentity,
-          requestId: `${options.requestId}:activity`,
-          projectId: options.projectId,
-          workflowName: options.workflowName,
-          changedAt: admittedAt,
         }),
       );
       void this.#pump();

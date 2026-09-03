@@ -1,8 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import type { BrowserService } from "../../../../src/contexts/daemon/ports/BrowserService.ts";
-import type { ConsoleAccessService } from "../../../../src/contexts/daemon/ports/ConsoleAccessService.ts";
-import { launchConsole } from "../../../../src/contexts/daemon/services/launchConsole.ts";
+import type { BrowserService } from "../../../../../src/contexts/daemon/ports/BrowserService.ts";
+import type { ConsoleAccessService } from "../../../../../src/contexts/daemon/ports/ConsoleAccessService.ts";
+import { launchConsole } from "../../../../../src/contexts/daemon/services/launchConsole.ts";
 
 const endpoint = {
   formatVersion: 1 as const,

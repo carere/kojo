@@ -2,13 +2,13 @@ import type { JsonValue } from "@carere/kojo-runner-contracts/contexts/shared/co
 import { describe, expect, it } from "@effect/vitest";
 import { Context, Effect, Layer, Schema } from "effect";
 import { Activity, Workflow, WorkflowEngine } from "effect/unstable/workflow";
-import { ResourceLeaseClient } from "../../../../src/contexts/project/ports/ResourceLeaseClient.ts";
-import { ActionRecoveryPolicy } from "../../../../src/contexts/workflow/models/ActionRecoveryPolicy.ts";
-import { DaemonExecutionRepository } from "../../../../src/contexts/workflow/ports/DaemonExecutionRepository.ts";
-import { replayLayer } from "../../../../src/contexts/workflow/services/DaemonWorkflowReplay.ts";
-import { code } from "../../../../src/contexts/workflow/services/phase/code.ts";
+import { ResourceLeaseClient } from "../../../../../src/contexts/project/ports/ResourceLeaseClient.ts";
+import { ActionRecoveryPolicy } from "../../../../../src/contexts/workflow/models/ActionRecoveryPolicy.ts";
+import { DaemonExecutionRepository } from "../../../../../src/contexts/workflow/ports/DaemonExecutionRepository.ts";
+import { replayLayer } from "../../../../../src/contexts/workflow/services/DaemonWorkflowReplay.ts";
+import { code } from "../../../../../src/contexts/workflow/services/phase/code.ts";
 
-describe("Daemon Workflow engine replay", () => {
+describe("Daemon Workflow replay", () => {
   it("provides Daemon execution services inside the registered Workflow fiber", async () => {
     let acquisitionCount = 0;
     const resources = Layer.succeedContext(

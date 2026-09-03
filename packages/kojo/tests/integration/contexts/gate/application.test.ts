@@ -87,6 +87,33 @@ describe("SQLite Gate application", () => {
         }),
       );
       expect(receipt.asking.state).toBe("recorded");
+      const replayedReceipt = await Effect.runPromise(
+        repository.recordVerdictAndSchedule({
+          dataIdentity: "data-1",
+          requestId: "answer-1",
+          canonicalRequest: "answer-1-content",
+          token: "atomic-verdict-token",
+          choice: "approve",
+          reason: "green evidence",
+          answerer: "operator",
+          now: "2026-09-01T20:01:00.000Z",
+        }),
+      );
+      expect(replayedReceipt).toMatchObject({ duplicate: true, asking: receipt.asking });
+      await expect(
+        Effect.runPromise(
+          repository.recordVerdictAndSchedule({
+            dataIdentity: "data-1",
+            requestId: "answer-1",
+            canonicalRequest: "replacement-content",
+            token: "atomic-verdict-token",
+            choice: "approve",
+            reason: "replacement",
+            answerer: "operator",
+            now: "2026-09-01T20:01:00.000Z",
+          }),
+        ),
+      ).rejects.toThrow(/different canonical content/);
       expect(database.query("SELECT count(*) AS count FROM gate_answer_receipts").get()).toEqual({
         count: 1,
       });

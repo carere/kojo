@@ -30,9 +30,9 @@ import {
 } from "../contexts/trace/adapters/DaemonArtifactPublisher.ts";
 import { Tracer } from "../contexts/trace/ports/Tracer.ts";
 import { Trigger } from "../contexts/trigger/ports/Trigger.ts";
-import { layer as daemonEngine } from "../contexts/workflow/adapters/DaemonWorkflowEngine.ts";
 import { withRetainedFactoryRoot } from "../contexts/workflow/adapters/RetainedFactoryAssetRepository.ts";
 import { DaemonExecutionRepository } from "../contexts/workflow/ports/DaemonExecutionRepository.ts";
+import { replayLayer as daemonEngine } from "../contexts/workflow/services/DaemonWorkflowReplay.ts";
 
 /** Stable Project Runner composition entry point. Importing it cannot execute a Workflow. */
 /** @public */

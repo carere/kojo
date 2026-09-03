@@ -1,5 +1,8 @@
 import { LifecycleError } from "../models/LifecycleError.ts";
-import type { LifecycleRecordedOwner } from "../models/LifecycleOperation.ts";
+import type {
+  LifecycleRecordedOwner,
+  UpgradeReadinessEvidence,
+} from "../models/LifecycleOperation.ts";
 
 export type LifecycleControlAction =
   | "inspect-preflight"
@@ -25,12 +28,47 @@ export interface LifecycleControlRequest {
   readonly priorDaemonInstanceId?: string;
 }
 
-const record = (value: unknown): Record<string, unknown> | undefined =>
+export type UpgradeControlAction =
+  | "upgrade-inspect-preflight"
+  | "upgrade-begin-drain"
+  | "upgrade-read-drain"
+  | "upgrade-force-drain"
+  | "upgrade-hold-mutations"
+  | "upgrade-repeat-final-preflight"
+  | "upgrade-release-holds"
+  | "upgrade-prepare-handoff"
+  | "upgrade-confirm-controller-ready"
+  | "upgrade-create-backup"
+  | "upgrade-stop-owned-processes"
+  | "upgrade-read-candidate-readiness"
+  | "upgrade-authorize-activation"
+  | "upgrade-inspect-rollback-safety"
+  | "upgrade-read-rollback-readiness"
+  | "upgrade-authorize-rollback";
+
+export interface UpgradeControlRequest {
+  readonly formatVersion: 1;
+  readonly operationId: string;
+  readonly controlSecret: string;
+  readonly action: UpgradeControlAction;
+  readonly dataIdentity?: string;
+  readonly requestHash?: string;
+  readonly sourceReleaseId?: string;
+  readonly candidateReleaseId?: string;
+  readonly checkedRetainedSetHash?: string;
+  readonly handoffDigest?: string;
+  readonly cleanupMillis?: number;
+  readonly forceAuthorizationId?: string;
+  readonly priorDaemonInstanceId?: string;
+  readonly readiness?: UpgradeReadinessEvidence;
+}
+
+export const record = (value: unknown): Record<string, unknown> | undefined =>
   value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
 
-const exactKeys = (value: Record<string, unknown>, keys: ReadonlyArray<string>): boolean => {
+export const exactKeys = (value: Record<string, unknown>, keys: ReadonlyArray<string>): boolean => {
   const expected = new Set(keys);
   return (
     Object.keys(value).length === expected.size &&

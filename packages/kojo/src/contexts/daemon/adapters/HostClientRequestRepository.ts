@@ -330,6 +330,9 @@ export class HostClientRequestRepository implements ClientRequestRepository {
         const sameReference =
           encodeCanonicalJson(retained.resolution.resultReference as unknown as JsonValue) ===
           encodeCanonicalJson(resolution.resultReference as unknown as JsonValue);
+        const sameResult =
+          encodeCanonicalJson((retained.resolution.result ?? null) as JsonValue) ===
+          encodeCanonicalJson((resolution.result ?? null) as JsonValue);
         if (
           retained.resolution.status === "accepted" &&
           resolution.status === "committed" &&
@@ -341,7 +344,7 @@ export class HostClientRequestRepository implements ClientRequestRepository {
           );
           return;
         }
-        if (retained.resolution.status !== resolution.status || !sameReference) {
+        if (retained.resolution.status !== resolution.status || !sameReference || !sameResult) {
           throw new Error("The client request already has different resolution metadata.");
         }
         return;

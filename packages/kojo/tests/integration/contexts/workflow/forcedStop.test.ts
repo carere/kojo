@@ -216,12 +216,32 @@ describe("real Project Runner cancellation", () => {
       },
     );
     expect(cancelled.status, await cancelled.clone().text()).toBe(202);
-    expect((await cancelled.json()) as CancelRunResult).toMatchObject({
+    const cancelledBody = await cancelled.json();
+    expect(cancelledBody as CancelRunResult).toMatchObject({
       runId: admitted.runId,
       cancellation: "confirmed",
       executionStopped: true,
       state: "cancelled",
     });
+    expect(
+      (await (
+        await call(daemon, "/api/v1/client-requests/cancel-blocked/retry", { method: "POST" })
+      ).json()) as { readonly result: unknown },
+    ).toMatchObject({ result: cancelledBody });
+    const cancellationConflict = await call(daemon, "/api/v1/client-requests/cancel-blocked", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        mutationVersion: 1,
+        requestId: "cancel-blocked",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation: "cancelRun",
+        target: { identityVersion: 1, kind: "run", parts: [admitted.runId] },
+        arguments: { replacement: true },
+        preconditions: {},
+      }),
+    });
+    expect(cancellationConflict.status).toBe(409);
     expect(alive(processEvidence.runnerPid)).toBe(false);
     expect(alive(processEvidence.childPid)).toBe(false);
     const run = (await (

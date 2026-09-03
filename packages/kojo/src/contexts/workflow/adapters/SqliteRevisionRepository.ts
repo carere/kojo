@@ -63,6 +63,31 @@ const failed = (cause: unknown): RevisionMaintenanceError =>
         cause,
       });
 
+const collectionResultOf = (value: JsonValue): CollectionResult => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("The recorded revision collection result is damaged.");
+  }
+  const fields = value as { readonly [key: string]: JsonValue | undefined };
+  const revisionId = fields.revisionId;
+  const state = fields.state;
+  const eligibleAt = fields.eligibleAt;
+  const removedObjects = fields.removedObjects;
+  if (
+    typeof revisionId !== "string" ||
+    (state !== "protected" && state !== "grace" && state !== "collected") ||
+    (eligibleAt !== undefined && typeof eligibleAt !== "string") ||
+    (removedObjects !== undefined && typeof removedObjects !== "number")
+  ) {
+    throw new Error("The recorded revision collection result is damaged.");
+  }
+  return {
+    revisionId,
+    state,
+    ...(eligibleAt === undefined ? {} : { eligibleAt }),
+    ...(removedObjects === undefined ? {} : { removedObjects }),
+  };
+};
+
 const hash = (bytes: Uint8Array | string): string =>
   new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
 
@@ -439,14 +464,22 @@ export class SqliteRevisionRepository {
     mutation?: MutationEnvelope,
   ): Effect.Effect<CollectionResult, RevisionMaintenanceError> =>
     Effect.try({
-      try: () =>
-        this.#database
+      try: () => {
+        const prior = mutation === undefined ? undefined : this.#operations?.readExact(mutation);
+        if (prior?.status === "committed") {
+          if (prior.result === undefined) {
+            throw new Error("The recorded revision collection result is missing.");
+          }
+          return collectionResultOf(prior.result);
+        }
+        return this.#database
           .transaction(() => {
             const result = this.#collect(revisionId, observedAt);
             this.#record(mutation, "committed", result as unknown as JsonValue, observedAt);
             return result;
           })
-          .immediate(),
+          .immediate();
+      },
       catch: failed,
     });
 

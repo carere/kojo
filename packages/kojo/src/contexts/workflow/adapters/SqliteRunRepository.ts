@@ -715,6 +715,76 @@ export class SqliteRunRepository {
       catch: failure,
     });
 
+  /**
+   * Admit a no-Trigger Run and activate its Workflow in one SQLite transaction.
+   * The nested admission transaction is a savepoint on this repository connection.
+   */
+  readonly admitAndActivateWorkflow = (
+    request: AdmitRunRequest,
+  ): Effect.Effect<Admission, RunStoreError> =>
+    Effect.try({
+      try: () =>
+        this.#database
+          .transaction(() => {
+            const admission = Effect.runSync(this.admit(request));
+            const activityRequest = JSON.stringify([
+              request.projectId,
+              request.workflowName,
+              "start",
+            ]);
+            const priorActivity = this.#database
+              .query<{ readonly request_json: string }, [string, string]>(
+                `SELECT request_json FROM workflow_activity_receipts
+                  WHERE data_identity = ? AND request_id = ?`,
+              )
+              .get(request.dataIdentity, request.requestId);
+            if (priorActivity !== null) {
+              if (priorActivity.request_json !== activityRequest) {
+                throw new RunStoreError({
+                  code: "REQUEST_CONFLICT",
+                  message: "the request ID already names different Workflow Activity content",
+                });
+              }
+              return admission;
+            }
+            const updated = this.#database.run(
+              `UPDATE project_workflows SET activity = 'active'
+                WHERE project_id = ? AND workflow_name = ?
+                  AND availability = 'available' AND trigger_state = 'not-declared'`,
+              [request.projectId, request.workflowName],
+            );
+            if (updated.changes !== 1) {
+              throw new RunStoreError({
+                code: "RUN_NOT_ELIGIBLE",
+                message: "the no-Trigger Workflow cannot become active",
+              });
+            }
+            const activityReceipt = {
+              projectId: request.projectId,
+              workflowName: request.workflowName,
+              activity: "active" as const,
+              trigger: false,
+              pollerStarted: false,
+              changedAt: request.admittedAt,
+            };
+            this.#database.run(
+              `INSERT INTO workflow_activity_receipts
+                 (data_identity, request_id, request_json, receipt_json, committed_at)
+               VALUES (?, ?, ?, ?, ?)`,
+              [
+                request.dataIdentity,
+                request.requestId,
+                activityRequest,
+                JSON.stringify(activityReceipt),
+                request.admittedAt,
+              ],
+            );
+            return admission;
+          })
+          .immediate(),
+      catch: failure,
+    });
+
   readonly claim = (
     runId: string,
     runnerInstanceId: string,

@@ -160,6 +160,34 @@ describe("uncertain external actions", () => {
             possibleDuplicationAcknowledged: true,
             uncertaintyRevision: 1,
           });
+          expect(
+            yield* actions.authorizeRetry({
+              dataIdentity: "data",
+              requestId: "retry-exact",
+              canonicalRequest: "retry-exact-content",
+              runId: first.run.runId,
+              actionId: request.actionId,
+              reason: "The destination has no query API; retry this exact publish.",
+              possibleDuplicationAcknowledged: true,
+              authorizedAt: new Date(5).toISOString(),
+            }),
+          ).toEqual(authorized);
+          expect(
+            Result.isFailure(
+              yield* Effect.result(
+                actions.authorizeRetry({
+                  dataIdentity: "data",
+                  requestId: "retry-exact",
+                  canonicalRequest: "replacement-content",
+                  runId: first.run.runId,
+                  actionId: request.actionId,
+                  reason: "replacement",
+                  possibleDuplicationAcknowledged: true,
+                  authorizedAt: new Date(5).toISOString(),
+                }),
+              ),
+            ),
+          ).toBe(true);
           const secondAuthority = yield* runs.claim(
             first.run.runId,
             "runner-2",

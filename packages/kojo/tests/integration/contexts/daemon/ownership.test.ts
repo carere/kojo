@@ -1,8 +1,11 @@
+import { Database } from "bun:sqlite";
+import { execFileSync } from "node:child_process";
 import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -214,7 +217,7 @@ describe("one idle Daemon owns one data root", () => {
     }
   });
 
-  it("serves atomic configuration only through the private Daemon socket", async () => {
+  it("executes and replays exact Daemon and Project configuration owners through the private socket", async () => {
     const hostPaths = paths();
     const daemon = startDaemon(hostPaths);
     const request = (path: string, init: RequestInit = {}) =>
@@ -269,6 +272,185 @@ describe("one idle Daemon owns one data root", () => {
       expect(
         result.status.fields.find((field) => field.path === "limits.executingRuns")?.effective,
       ).toBe(2);
+      const appliedReplay = await request("/api/v1/client-requests/configure-limits/retry", {
+        method: "POST",
+      });
+      expect((await appliedReplay.json()) as { readonly result: unknown }).toMatchObject({
+        result,
+      });
+      const changedDaemon = await request("/api/v1/client-requests/configure-limits", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          mutationVersion: 1,
+          requestId: "configure-limits",
+          dataIdentity: daemon.endpoint.dataIdentity,
+          operation: "configureDaemon",
+          target: {
+            identityVersion: 1,
+            kind: "daemonData",
+            parts: [daemon.endpoint.dataIdentity],
+          },
+          arguments: { patch: { set: { limits: { executingRuns: 3 } } } },
+          preconditions: {},
+        }),
+      });
+      expect(changedDaemon.status).toBe(409);
+
+      const location = join(roots[0] ?? "", "configured-project");
+      mkdirSync(location, { recursive: true });
+      execFileSync("git", ["-C", location, "init", "--quiet"]);
+      const projectLocation = realpathSync(location);
+      const register = {
+        mutationVersion: 1 as const,
+        requestId: "configure-project-registration",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation: "registerProject",
+        target: {
+          identityVersion: 1 as const,
+          kind: "daemonData",
+          parts: [daemon.endpoint.dataIdentity],
+        },
+        arguments: { location: projectLocation },
+        preconditions: {},
+      };
+      await request(`/api/v1/client-requests/${register.requestId}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(register),
+      });
+      const registeredResponse = await request(
+        `/api/v1/client-requests/${register.requestId}/retry`,
+        { method: "POST" },
+      );
+      expect(registeredResponse.status, await registeredResponse.clone().text()).toBe(200);
+      const registered = (await registeredResponse.json()) as {
+        readonly result: { readonly project: { readonly projectId: string } };
+      };
+      const projectId = registered.result.project.projectId;
+      const projectConfiguration = {
+        mutationVersion: 1 as const,
+        requestId: "configure-project-owner",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation: "configureProject",
+        target: { identityVersion: 1 as const, kind: "project", parts: [projectId] },
+        arguments: { patch: { set: { limits: { executingRuns: 1 } } } },
+        preconditions: {},
+      };
+      const configuredProject = await sendPreparedMutation(
+        daemon,
+        `/api/v1/projects/${projectId}/actions/configure`,
+        projectConfiguration,
+      );
+      expect(configuredProject.status).toBe(202);
+      const configuredProjectBody = await configuredProject.json();
+      const projectReplay = (await (
+        await request(`/api/v1/client-requests/${projectConfiguration.requestId}/retry`, {
+          method: "POST",
+        })
+      ).json()) as { readonly result: unknown };
+      expect(projectReplay).toMatchObject({ result: configuredProjectBody });
+      expect(
+        (
+          await request(`/api/v1/client-requests/${projectConfiguration.requestId}`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              ...projectConfiguration,
+              arguments: { patch: { set: { limits: { executingRuns: 2 } } } },
+            }),
+          })
+        ).status,
+      ).toBe(409);
+
+      const ownerDatabase = new Database(join(hostPaths.dataRoot, "kojo.db"), { strict: true });
+      ownerDatabase.run(
+        "INSERT INTO workflow_revisions VALUES (?, ?, ?, '/retained/configuration', ?)",
+        ["a".repeat(64), "b".repeat(64), "{}", "2020-01-01T00:00:00.000Z"],
+      );
+      ownerDatabase.run(
+        "INSERT INTO project_workflows VALUES (?, 'retention', 'inactive', 'available', 'workflows/retention.ts', NULL, NULL, ?, NULL, 'not-declared', NULL, NULL, ?)",
+        [projectId, "a".repeat(64), "2020-01-01T00:00:00.000Z"],
+      );
+      ownerDatabase.run(
+        `INSERT INTO workflow_runs
+           (run_id, project_id, workflow_name, idempotency_key, payload_json,
+            revision_id, package_graph_id, state, admission_sequence, admitted_at,
+            started_at, finished_at)
+         VALUES ('retention-owner-run', ?, 'retention', 'retention-owner-run', 'null', ?, ?,
+                 'succeeded', 1, ?, ?, ?)`,
+        [
+          projectId,
+          "a".repeat(64),
+          "b".repeat(64),
+          "2020-01-01T00:00:00.000Z",
+          "2020-01-01T00:00:01.000Z",
+          "2020-01-01T00:00:02.000Z",
+        ],
+      );
+      ownerDatabase.close(false);
+
+      const checkedConfiguration = {
+        mutationVersion: 1 as const,
+        requestId: "configure-retention-check",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation: "configureDaemon",
+        target: {
+          identityVersion: 1 as const,
+          kind: "daemonData",
+          parts: [daemon.endpoint.dataIdentity],
+        },
+        arguments: { patch: { set: { retention: { runHistoryMs: 1 } } }, check: true },
+        preconditions: {},
+      };
+      const checkedResponse = await sendPreparedMutation(
+        daemon,
+        "/api/v1/daemon/actions/configure",
+        checkedConfiguration,
+      );
+      const checkedBody = (await checkedResponse.json()) as {
+        readonly plan?: { readonly planId: string };
+      };
+      const planId = checkedBody.plan?.planId;
+      expect(planId).toBeDefined();
+      const confirmation = {
+        mutationVersion: 1 as const,
+        requestId: "confirm-retention-plan",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation: "confirmDaemonConfiguration",
+        target: {
+          identityVersion: 1 as const,
+          kind: "daemonData",
+          parts: [daemon.endpoint.dataIdentity],
+        },
+        arguments: { confirm: planId ?? "missing" },
+        preconditions: {},
+      };
+      const confirmed = await sendPreparedMutation(
+        daemon,
+        "/api/v1/daemon/actions/configure",
+        confirmation,
+      );
+      expect(confirmed.status, await confirmed.clone().text()).toBe(202);
+      const confirmedBody = await confirmed.json();
+      const confirmationReplay = (await (
+        await request(`/api/v1/client-requests/${confirmation.requestId}/retry`, {
+          method: "POST",
+        })
+      ).json()) as { readonly result: unknown };
+      expect(confirmationReplay).toMatchObject({ result: confirmedBody });
+      expect(
+        (
+          await request(`/api/v1/client-requests/${confirmation.requestId}`, {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              ...confirmation,
+              arguments: { confirm: "replacement-plan" },
+            }),
+          })
+        ).status,
+      ).toBe(409);
     } finally {
       await Effect.runPromise(daemon.stop);
     }

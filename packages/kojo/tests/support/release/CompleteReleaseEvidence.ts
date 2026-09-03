@@ -3,6 +3,7 @@ import {
   type Issue64Tier,
   issue64RequiredTierAllocation,
 } from "./Issue64TierAllocation.ts";
+import { sqliteMutationOwnerEvidence } from "./SqliteMutationOwnerEvidence.ts";
 
 export type EvidenceTier =
   | "contract-runtime"
@@ -963,6 +964,17 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "packages/kojo/tests/integration/contexts/project/registration.test.ts",
     "retains exact requests, receipts, and Recent changes across a Daemon replacement",
     ["kojo-integration"],
+    [
+      ...new Map(
+        sqliteMutationOwnerEvidence
+          .slice(1)
+          .map((observation) => [`${observation.path}\0${observation.name}`, observation] as const),
+      ).values(),
+    ].map(({ path, name }) => ({
+      tier: "kojo-integration" as const,
+      path,
+      name,
+    })),
   ),
   check(
     "CLIENT-02",
