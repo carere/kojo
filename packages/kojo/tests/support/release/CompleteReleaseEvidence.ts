@@ -1241,6 +1241,11 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         path: "packages/kojo/tests/integration/release/contractCutover.test.ts",
         name: "propagates every piped CI test failure before evidence collection",
       },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/release/contractCutover.test.ts",
+        name: "keeps Moon on the exact Bun version pinned for release evidence",
+      },
     ],
   ),
 ];

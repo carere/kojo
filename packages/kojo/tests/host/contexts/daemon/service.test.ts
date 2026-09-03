@@ -10,6 +10,11 @@ import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonP
 import { launchAgentDocument } from "../../../../src/contexts/daemon/services/launchAgentDocument.ts";
 import { systemdUnitDocument } from "../../../../src/contexts/daemon/services/systemdUnitDocument.ts";
 import {
+  type NativeHostChildProcess,
+  nativeHostKillDiagnostic,
+  selectManagedDaemonChild,
+} from "../../../support/daemon/nativeHostProcess.ts";
+import {
   NATIVE_HOST_TEST_TIMEOUT_MILLIS,
   NATIVE_HOST_TRANSITION_TIMEOUT_MILLIS,
 } from "../../../support/daemon/nativeHostTiming.ts";
@@ -53,16 +58,27 @@ const nativeHostStage: NativeHostStage = async (stage, action) => {
   }
 };
 
-const childOf = (ownerProcessId: number): number | undefined => {
+const childrenOf = (ownerProcessId: number): ReadonlyArray<NativeHostChildProcess> => {
   const children = Bun.spawnSync(["/usr/bin/pgrep", "-P", String(ownerProcessId)]);
-  if (children.exitCode !== 0) return undefined;
+  if (children.exitCode !== 0) return [];
+  const found: Array<NativeHostChildProcess> = [];
   for (const line of children.stdout.toString().trim().split("\n")) {
     const processId = Number(line);
     if (!Number.isSafeInteger(processId)) continue;
     const command = Bun.spawnSync(["/bin/ps", "-o", "command=", "-p", String(processId)]);
-    if (command.stdout.toString().includes("launcher/main.ts")) return processId;
+    found.push({ processId, command: command.stdout.toString().trim() });
   }
-  return undefined;
+  return found;
+};
+
+const processIsAlive = (processId: number): boolean => {
+  try {
+    process.kill(processId, 0);
+    return true;
+  } catch (cause) {
+    if (cause instanceof Error && "code" in cause && cause.code === "ESRCH") return false;
+    throw cause;
+  }
 };
 
 const exerciseNativeRestartBudget = async (
@@ -93,23 +109,55 @@ const exerciseNativeRestartBudget = async (
     return found;
   };
   const failAttempt = async (attemptId: string, expectedBudgetIndex: number): Promise<void> => {
-    let daemonProcessId: number | undefined;
-    await waitFor(() => {
-      const launcher = launcherProcessId();
-      if (launcher === undefined) return false;
-      daemonProcessId = childOf(launcher);
-      return daemonProcessId !== undefined;
-    });
-    process.kill(daemonProcessId as number, "SIGKILL");
-    await waitFor(() => {
-      const status = supervision().status();
-      const attempt = status.attempt;
-      return (
-        status.lastFailure?.attemptId === attemptId &&
-        attempt?.phase === "waiting" &&
-        attempt.budgetIndex === expectedBudgetIndex
+    let ownerProcessId: number | undefined;
+    let childrenBefore: ReadonlyArray<NativeHostChildProcess> = [];
+    let selectedChild: NativeHostChildProcess | undefined;
+    let killReceipt: boolean | undefined;
+    let selectedChildLiveAfterKill: boolean | undefined;
+    const supervisionBefore = supervision().status();
+    try {
+      await waitFor(() => {
+        ownerProcessId = launcherProcessId();
+        if (ownerProcessId === undefined) return false;
+        childrenBefore = childrenOf(ownerProcessId);
+        selectedChild = selectManagedDaemonChild(childrenBefore);
+        return selectedChild !== undefined;
+      });
+      if (selectedChild === undefined) throw new Error("the managed Daemon child was not selected");
+      const killedChild = selectedChild;
+      killReceipt = process.kill(killedChild.processId, "SIGKILL");
+      await waitFor(() => {
+        selectedChildLiveAfterKill = processIsAlive(killedChild.processId);
+        return !selectedChildLiveAfterKill;
+      });
+      await waitFor(() => {
+        const status = supervision().status();
+        const attempt = status.attempt;
+        return (
+          status.lastFailure?.attemptId === attemptId &&
+          attempt?.phase === "waiting" &&
+          attempt.budgetIndex === expectedBudgetIndex
+        );
+      });
+    } catch (cause) {
+      const supervisionAfter = supervision().status();
+      const childrenAfter = ownerProcessId === undefined ? [] : childrenOf(ownerProcessId);
+      throw new Error(
+        [
+          cause instanceof Error ? cause.message : String(cause),
+          nativeHostKillDiagnostic({
+            ownerProcessId,
+            childrenBefore,
+            selectedChild,
+            killReceipt,
+            selectedChildLiveAfterKill,
+            supervisionBefore,
+            supervisionAfter,
+            childrenAfter,
+          }),
+        ].join("\n"),
       );
-    });
+    }
   };
 
   const first = await runStage("restart-budget first Daemon ready", () => runningAttempt());

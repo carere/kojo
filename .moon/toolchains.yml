@@ -7,7 +7,7 @@ javascript:
   syncProjectWorkspaceDependencies: true
 
 bun:
-  version: latest
+  version: "1.3.14"
 
 typescript:
   routeOutDirToCache: true

@@ -168,6 +168,17 @@ describe("the Daemon contract cutover", () => {
     expect(pipedRunBlocks[4]).toContain(["status=$", "{PIPESTATUS[0]}"].join(""));
   });
 
+  it("keeps Moon on the exact Bun version pinned for release evidence", () => {
+    const root = new URL("../../../../../", import.meta.url);
+    const protoTools = readFileSync(new URL(".prototools", root), "utf8");
+    const moonToolchains = readFileSync(new URL(".moon/toolchains.yml", root), "utf8");
+    const pinnedBun = /^bun = "([^"]+)"$/m.exec(protoTools)?.[1];
+    const moonBun = /^bun:\n {2}version: "?([^"\n]+)"?$/m.exec(moonToolchains)?.[1];
+
+    expect(pinnedBun).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(moonBun).toBe(pinnedBun);
+  });
+
   it("fails when test support retains a legacy agent-spend policy helper", () => {
     const root = mkdtempSync(join(tmpdir(), "kojo-cutover-support-"));
     temporaryRoots.push(root);

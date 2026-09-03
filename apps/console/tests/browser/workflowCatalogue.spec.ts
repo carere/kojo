@@ -4,8 +4,9 @@ import { expect, test } from "@playwright/test";
 test.describe.configure({ mode: "serial" });
 
 const root = "/tmp/kojo-ticket-71-browser";
-// A two-core CI host can render this catalogue while another Daemon fixture uses the other worker.
-// Keep its first-render bound below the 60-second test bound; later assertions keep Playwright's default.
+// A two-core CI Host can take more than five seconds to finish a cross-catalogue navigation after
+// the real Daemon has completed the earlier Workflow actions. Keep each navigation bound below the
+// 60-second test bound and require the destination URL and exact catalogue header.
 const catalogueNavigationTimeout = 30_000;
 const grantScript = new URL(
   "../../../../packages/kojo/tests/support/daemon/consoleGrant.ts",
@@ -130,7 +131,12 @@ test("filters Workflow state and proves safe Trigger Start, Stop, force, and Run
 
   await page.getByLabel("Workflow availability").selectOption("all");
   await page.getByRole("link", { name: "Current Runs (1)" }).click();
-  await expect(page.getByRole("columnheader", { name: "Queue reason" })).toBeVisible();
+  await expect(page).toHaveURL(/\/runs\?project=.*workflow=available/, {
+    timeout: catalogueNavigationTimeout,
+  });
+  await expect(page.getByRole("columnheader", { name: "Queue reason" })).toBeVisible({
+    timeout: catalogueNavigationTimeout,
+  });
   await expect(page.getByText("runner-starting", { exact: true })).toBeVisible();
   await page.getByLabel("Find Runs").fill("runner-starting");
   await page.getByLabel("Run status").selectOption("queued");
