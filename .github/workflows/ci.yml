@@ -87,6 +87,7 @@ jobs:
 
       - name: Contract and runtime tests
         run: |
+          set -o pipefail
           mkdir -p .release-evidence/logs
           moon run kojo-client-contracts:test --force -- --reporter=verbose 2>&1 | tee .release-evidence/logs/contract-runtime.log
           moon run kojo-runner-contracts:test --force -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
@@ -95,6 +96,7 @@ jobs:
 
       - name: Unit tests and package graph
         run: |
+          set -o pipefail
           moon run kojo:test --force -- --reporter=verbose 2>&1 | tee .release-evidence/logs/kojo-unit.log
           moon run kojo:check-packages --force 2>&1 | tee -a .release-evidence/logs/kojo-unit.log
 
@@ -108,13 +110,17 @@ jobs:
         working-directory: apps/console
 
       - name: Browser tests
-        run: moon run console:test-browser --force -- --reporter=list 2>&1 | tee .release-evidence/logs/console-browser.log
+        run: |
+          set -o pipefail
+          moon run console:test-browser --force -- --reporter=list 2>&1 | tee .release-evidence/logs/console-browser.log
 
       # Last because it is the slowest and the only one that needs a container daemon. `ubuntu-latest`
       # ships Docker; the suites build the one image they need and skip with a stated reason if the
       # daemon is missing, so a runner without one says so rather than passing quietly.
       - name: Container tests
-        run: moon run kojo:test-integration --force -- --reporter=verbose 2>&1 | tee .release-evidence/logs/kojo-integration.log
+        run: |
+          set -o pipefail
+          moon run kojo:test-integration --force -- --reporter=verbose 2>&1 | tee .release-evidence/logs/kojo-integration.log
 
       - name: Record uncached core release evidence
         run: bun .github/scripts/complete-release-evidence.ts collect-core .release-evidence/core-evidence.json "$(git rev-parse HEAD)" .release-evidence/logs

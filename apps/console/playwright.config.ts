@@ -18,6 +18,10 @@ export default defineConfig({
     "waterfall.spec.ts",
   ],
   fullyParallel: true,
+  // The browser files share four real Daemon fixtures. A two-core CI Host cannot run two complete
+  // Console clients and their Daemon query loops without starving hydration and stable DOM updates.
+  // One worker keeps the acceptance boundary real and makes each assertion observe its own fixture.
+  workers: 1,
   reporter: [["list"]],
   // The two catalogue flows each completed near 23 seconds on a two-core GitHub runner. Keep the
   // assertion timeout strict, but do not let the 30-second whole-test budget interrupt a final

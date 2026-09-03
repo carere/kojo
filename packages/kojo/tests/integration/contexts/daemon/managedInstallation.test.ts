@@ -23,6 +23,7 @@ import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonP
 import type { NativeServiceObservation } from "../../../../src/contexts/daemon/ports/NativeService.ts";
 import { manageDaemon } from "../../../../src/contexts/daemon/services/manageDaemon.ts";
 import {
+  managedLauncherReadinessTimeoutMillis,
   observeManagedLauncherReadiness,
   waitForManagedLauncherExit,
 } from "../../../support/daemon/managedLauncherReadiness.ts";
@@ -70,10 +71,14 @@ const managedNative = (options: {
     },
   });
 
-const waitFor = async (predicate: () => boolean, timeout = 10_000): Promise<void> => {
+const waitFor = async (
+  predicate: () => boolean,
+  timeout: number,
+  failure: () => string,
+): Promise<void> => {
   const deadline = Date.now() + timeout;
   while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error("the managed Daemon did not become ready");
+    if (Date.now() >= deadline) throw new Error(failure());
     await Bun.sleep(25);
   }
 };
@@ -268,14 +273,24 @@ describe("the managed Daemon installation", () => {
         await launcher.exited;
       },
     });
-    await waitFor(() => !existsSync(endpointPath));
+    await waitFor(
+      () => !existsSync(endpointPath),
+      managedLauncherReadinessTimeoutMillis,
+      () =>
+        [
+          `the installed managed launcher left ${endpointPath} published after ${managedLauncherReadinessTimeoutMillis}ms`,
+          `launcher pid: ${launcher.pid}`,
+          `launcher exit: ${String(launcher.exitCode)}`,
+          `process group present: ${String(processGroupExists(launcher.pid))}`,
+        ].join("; "),
+    );
     expect(processGroupExists(launcher.pid)).toBe(false);
     if (readinessFailure !== undefined) throw readinessFailure.cause;
     if (signalFailure !== undefined) throw signalFailure.cause;
     if (!exitedGracefully) {
       throw new Error("the installed managed launcher did not stop its process group in 5000ms");
     }
-  }, 60_000);
+  }, 90_000);
 
   it.each([
     ["systemd compatibility", "configuration"],

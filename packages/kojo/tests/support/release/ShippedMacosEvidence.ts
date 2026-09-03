@@ -896,7 +896,7 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
     recorder.write("package-registry-requests.json", registry.requests);
     const registered = await recorder.run(
       "printed-project-register",
-      [globalKojo, "project", "register", "--path", "."],
+      [globalKojo, "project", "register", "."],
       {
         cwd: project,
         env: environment,

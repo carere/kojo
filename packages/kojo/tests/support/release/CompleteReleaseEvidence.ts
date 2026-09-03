@@ -1231,6 +1231,16 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         path: "packages/kojo/tests/integration/release/contractCutover.test.ts",
         name: "fails when test support retains a legacy agent-spend policy helper",
       },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/release/contractCutover.test.ts",
+        name: "uses the positional Project path in every shipped acceptance helper",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/release/contractCutover.test.ts",
+        name: "propagates every piped CI test failure before evidence collection",
+      },
     ],
   ),
 ];

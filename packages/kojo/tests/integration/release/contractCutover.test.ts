@@ -114,6 +114,38 @@ describe("the Daemon contract cutover", () => {
     expect(supportResult.status, supportResult.stdout || supportResult.stderr).toBe(1);
   });
 
+  it("uses the positional Project path in every shipped acceptance helper", () => {
+    const root = new URL("../../../../../", import.meta.url);
+    const macos = readFileSync(
+      new URL("packages/kojo/tests/support/release/ShippedMacosEvidence.ts", root),
+      "utf8",
+    );
+    const systemd = readFileSync(
+      new URL(".github/scripts/systemd-shipped-user-evidence.sh", root),
+      "utf8",
+    );
+    const removedRegisterFlag = ["project", "register", ["--", "path"].join("")].join(" ");
+
+    expect(macos).toMatch(/"project",\s*"register",\s*"\."/);
+    expect(systemd).toContain("project register .)");
+    expect(macos).not.toContain(removedRegisterFlag);
+    expect(systemd).not.toContain(removedRegisterFlag);
+  });
+
+  it("propagates every piped CI test failure before evidence collection", () => {
+    const workflow = readFileSync(
+      new URL("../../../../../.github/workflows/ci.yml", import.meta.url),
+      "utf8",
+    );
+    const pipedRunBlocks = [...workflow.matchAll(/run: \|\n((?: {10}.*\n)+)/g)]
+      .map((match) => match[1] ?? "")
+      .filter((block) => block.includes("| tee"));
+
+    expect(pipedRunBlocks).toHaveLength(5);
+    for (const block of pipedRunBlocks.slice(0, 4)) expect(block).toContain("set -o pipefail");
+    expect(pipedRunBlocks[4]).toContain(["status=$", "{PIPESTATUS[0]}"].join(""));
+  });
+
   it("fails when test support retains a legacy agent-spend policy helper", () => {
     const root = mkdtempSync(join(tmpdir(), "kojo-cutover-support-"));
     temporaryRoots.push(root);

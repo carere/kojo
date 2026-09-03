@@ -196,7 +196,7 @@ jq -e '
 test -S "$socket"
 test -f "$endpoint"
 
-(cd "$project" && "$candidate_kojo" project register --path .) \
+(cd "$project" && "$candidate_kojo" project register .) \
   >"$evidence_directory/project-register.log"
 project_id=$(awk '/registered Project / { print $3 }' "$evidence_directory/project-register.log")
 if [[ -z $project_id ]]; then

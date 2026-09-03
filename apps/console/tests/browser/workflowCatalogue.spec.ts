@@ -189,11 +189,17 @@ test("validates JSON before a no-Trigger Start and submits one accepted Run payl
     });
   });
   await page.goto(launch());
+  await expect(page.getByText("Access active", { exact: true })).toBeVisible({
+    timeout: catalogueNavigationTimeout,
+  });
   await page.goto("http://127.0.0.1:47243/");
   await page.getByRole("link", { name: "project-missing" }).click();
   const row = page.locator("[data-workflow-id]").filter({ hasText: "available" }).first();
+  await expect(row).toBeVisible({ timeout: catalogueNavigationTimeout });
   const payload = row.getByLabel("JSON payload for available");
+  await expect(payload).toHaveValue("{}");
   await payload.fill("{");
+  await expect(payload).toHaveValue("{");
   await row.getByRole("button", { name: "Start Run" }).click();
   await expect(row.getByRole("status")).toBeVisible();
   expect(starts).toBe(0);

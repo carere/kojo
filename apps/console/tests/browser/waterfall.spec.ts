@@ -15,6 +15,7 @@ const grantScript = new URL(
 const base = Date.parse("2026-03-01T00:00:00.000Z");
 const hour = 60 * 60 * 1_000;
 const minute = 60 * 1_000;
+const runReadyTimeout = 30_000;
 
 const launch = (): string => {
   const result = spawnSync("bun", [grantScript, root], { encoding: "utf8" });
@@ -283,7 +284,7 @@ const openRun = async (
   );
   await page.goto(launch());
   await page.goto(`${origin}/runs/${runId}?view=${options.view ?? "timeline"}`);
-  await page.waitForSelector("[data-waterfall], [data-notice], table");
+  await expect(page.locator("[data-run-header]")).toBeVisible({ timeout: runReadyTimeout });
 };
 
 const span = (page: Page, phaseId: string): Locator => page.locator(`[data-phase="${phaseId}"]`);
@@ -541,7 +542,9 @@ test("a Run catalogue row opens the Waterfall", async ({ page }) => {
   );
   await page.goto(launch());
   await page.goto(`${origin}/runs`);
-  await page.locator('[data-run="run-merged"] a').click();
+  const runLink = page.locator('[data-run="run-merged"] a');
+  await expect(runLink).toBeVisible({ timeout: runReadyTimeout });
+  await runLink.click();
   await expect(page.locator("[data-waterfall]")).toBeVisible();
 });
 

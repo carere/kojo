@@ -5,6 +5,7 @@ import { expect, test } from "@playwright/test";
 test.describe.configure({ mode: "serial" });
 
 const root = "/tmp/kojo-ticket-74-browser";
+const catalogueReadyTimeout = 30_000;
 const grantScript = new URL(
   "../../../../packages/kojo/tests/support/daemon/consoleGrant.ts",
   import.meta.url,
@@ -42,7 +43,10 @@ test("paginates and filters every Gate state with durable URL state", async ({ p
     });
   });
   await page.goto(launchUrl());
-  await expect(page.locator("[data-queued]")).toHaveCount(50);
+  await expect(page.getByLabel("Find Gates")).toBeVisible({ timeout: catalogueReadyTimeout });
+  await expect(page.locator("[data-queued]")).toHaveCount(50, {
+    timeout: catalogueReadyTimeout,
+  });
   await page.getByRole("button", { name: "Next" }).click();
   await expect(page.locator("[data-queued]")).toHaveCount(1);
   await expect(page).toHaveURL(/cursor=50/);
