@@ -11,7 +11,7 @@ import {
   type Issue64Tier,
   issue64RequiredTierAllocation,
 } from "../../../support/release/Issue64TierAllocation.ts";
-import { hostMutationOwnerEvidence } from "../../../support/release/SqliteMutationOwnerEvidence.ts";
+import { hostMutationOwnerEvidence } from "../../../support/release/MutationOwnerEvidence.ts";
 
 const revision = "a".repeat(40);
 const tierNames: ReadonlyArray<EvidenceTier> = [

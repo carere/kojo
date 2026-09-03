@@ -9,7 +9,7 @@ import {
   sqliteMutationOperations,
   sqliteMutationOwnerEvidence,
   sqliteMutationOwnerRegistry,
-} from "../../../../support/release/SqliteMutationOwnerEvidence.ts";
+} from "../../../../support/release/MutationOwnerEvidence.ts";
 
 const mutation = (argument = "one"): MutationEnvelope => ({
   mutationVersion: 1,
@@ -41,9 +41,7 @@ describe("SQLite operation receipt boundary", () => {
     const root = resolve(import.meta.dirname, "../../../../../../..");
     for (const observation of sqliteMutationOwnerEvidence) {
       const source = readFileSync(resolve(root, observation.path), "utf8");
-      expect(source, observation.operation).toContain(
-        JSON.stringify(observation.declaration ?? observation.name),
-      );
+      expect(source, observation.operation).toContain(JSON.stringify(observation.name));
       expect(observation.owner, observation.operation).toBe(
         sqliteMutationOwnerRegistry[observation.operation].name,
       );

@@ -59,7 +59,6 @@ interface MutationOwnerEvidence {
   readonly owner: string;
   readonly path: string;
   readonly name: string;
-  readonly declaration?: string;
 }
 
 const evidence = (
@@ -67,13 +66,11 @@ const evidence = (
   owner: OwnerIdentity,
   path: string,
   name: string,
-  declaration?: string,
 ): MutationOwnerEvidence => ({
   operation,
   owner: owner.name,
   path,
   name,
-  ...(declaration === undefined ? {} : { declaration }),
 });
 
 const projectLocationLeaf =

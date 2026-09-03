@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 
 interface PackageManifest {
   readonly bin?: Readonly<Record<string, string>>;
@@ -10,6 +12,78 @@ interface PackageManifest {
 
 const manifest = (url: URL): PackageManifest =>
   JSON.parse(readFileSync(url, "utf8")) as PackageManifest;
+
+const cutoverPaths = [
+  "README.md",
+  ".agents",
+  ".kojo",
+  ".github/workflows",
+  "apps/console/src",
+  "apps/console/vite.config.ts",
+  "packages/kojo/src",
+  "packages/kojo/package.json",
+  "packages/kojo-runtime/src",
+  "packages/kojo-runtime/package.json",
+  "docs/adr",
+  "docs/design",
+  "docs/release-notes",
+] as const;
+
+const legacySpendSupportPattern = [
+  ["KOJO", "AGENT", "SPEND"].join("_"),
+  ["Agent", "Spend"].join(""),
+  ["may", "Spawn"].join(""),
+  ["stand", "in:"].join("-"),
+].join("|");
+
+const forbiddenCutoverPattern = [
+  ["no", "terminal", "on", "stdin"].join(" "),
+  ["guard", "is", "not", "relying"].join(" "),
+  ["@carere/kojo", "contexts"].join("/"),
+  ["File", "Run", "Lock"].join(""),
+  ["Single", "Node", "Engine"].join(""),
+  ["engine", "Package"].join(""),
+  ["default", "Database"].join(""),
+  ["--", "data", "base"].join(""),
+  ["kojo", "watch"].join(" "),
+  ["kojo run", "<workflow>"].join(" "),
+  ["/api", "health"].join("/"),
+  ["/api", "runs"].join("/"),
+  ["/api", "gates"].join("/"),
+  ["answer", "Gate"].join(""),
+  ["one", "Runner"].join(""),
+  ["Terminal", "Gate"].join(""),
+  ["Recording", "Gate"].join(""),
+  ["run", "Own", "Paths"].join(""),
+  [".kojo", "data"].join("/"),
+  ["skip", "image"].join("-"),
+].join("|");
+
+const scanCutoverResidue = (root: string, paths: ReadonlyArray<string> = cutoverPaths) =>
+  spawnSync(
+    "git",
+    ["grep", "--no-index", "-n", "-I", "-E", forbiddenCutoverPattern, "--", ...paths],
+    { cwd: root, encoding: "utf8" },
+  );
+
+const scanLegacySpendSupport = (
+  root: string,
+  paths: ReadonlyArray<string> = [
+    "packages/kojo/tests/support",
+    "packages/kojo-runtime/tests/support",
+  ],
+) =>
+  spawnSync(
+    "git",
+    ["grep", "--no-index", "-n", "-I", "-E", legacySpendSupportPattern, "--", ...paths],
+    { cwd: root, encoding: "utf8" },
+  );
+
+const temporaryRoots: Array<string> = [];
+
+afterEach(() => {
+  for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 describe("the Daemon contract cutover", () => {
   it("leaves the global package with no authoring compatibility exports", () => {
@@ -32,59 +106,31 @@ describe("the Daemon contract cutover", () => {
   });
 
   it("ships no legacy execution path or client fallback", () => {
-    const forbidden = [
-      ["KOJO", "AGENT", "SPEND"].join("_"),
-      ["Agent", "Spend"].join(""),
-      ["may", "Spawn"].join(""),
-      ["no", "terminal", "on", "stdin"].join(" "),
-      ["guard", "is", "not", "relying"].join(" "),
-      ["@carere/kojo", "contexts"].join("/"),
-      ["File", "Run", "Lock"].join(""),
-      ["Single", "Node", "Engine"].join(""),
-      ["engine", "Package"].join(""),
-      ["default", "Database"].join(""),
-      ["--", "data", "base"].join(""),
-      ["kojo", "watch"].join(" "),
-      ["kojo run", "<workflow>"].join(" "),
-      ["/api", "health"].join("/"),
-      ["/api", "runs"].join("/"),
-      ["/api", "gates"].join("/"),
-      ["answer", "Gate"].join(""),
-      ["one", "Runner"].join(""),
-      ["Terminal", "Gate"].join(""),
-      ["Recording", "Gate"].join(""),
-      ["run", "Own", "Paths"].join(""),
-      [".kojo", "data"].join("/"),
-      ["skip", "image"].join("-"),
-    ].join("|");
     const root = new URL("../../../../../", import.meta.url).pathname;
-    const result = spawnSync(
-      "git",
-      [
-        "grep",
-        "-n",
-        "-I",
-        "-E",
-        forbidden,
-        "--",
-        "README.md",
-        ".agents",
-        ".kojo",
-        ".github/workflows",
-        "apps/console/src",
-        "apps/console/vite.config.ts",
-        "packages/kojo/src",
-        "packages/kojo/package.json",
-        "packages/kojo-runtime/src",
-        "packages/kojo-runtime/package.json",
-        "docs/adr",
-        "docs/design",
-        "docs/release-notes",
-      ],
-      { cwd: root, encoding: "utf8" },
-    );
+    const result = scanCutoverResidue(root);
+    const supportResult = scanLegacySpendSupport(root);
 
     expect(result.status, result.stdout || result.stderr).toBe(1);
+    expect(supportResult.status, supportResult.stdout || supportResult.stderr).toBe(1);
+  });
+
+  it("fails when test support retains a legacy agent-spend policy helper", () => {
+    const root = mkdtempSync(join(tmpdir(), "kojo-cutover-support-"));
+    temporaryRoots.push(root);
+    const support = join(root, "packages/kojo-runtime/tests/support");
+    mkdirSync(support, { recursive: true });
+    writeFileSync(
+      join(support, "legacyAgentPolicy.ts"),
+      `export const flag = ${JSON.stringify(["KOJO", "AGENT", "SPEND"].join("_"))};\n` +
+        `export const policy = ${JSON.stringify(["stand", "in:/tmp/agent"].join("-"))};\n`,
+    );
+
+    const result = scanLegacySpendSupport(root, ["packages/kojo-runtime/tests/support"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("legacyAgentPolicy.ts");
+    expect(result.stdout).toContain(["KOJO", "AGENT", "SPEND"].join("_"));
+    expect(result.stdout).toContain(["stand", "in:/tmp/agent"].join("-"));
   });
 
   it("keeps public guidance and package entry points on the one-Daemon release", () => {

@@ -179,7 +179,7 @@ suite is therefore split without dropping a current behavior.
 ## Prepared mutation replay matrix
 
 The exact operation inventory has 18 entries. Sixteen SQLite owners use the real
-`SqliteOperationRepository` receipt boundary. `SqliteMutationOwnerEvidence.ts` is the mechanical
+`SqliteOperationRepository` receipt boundary. `MutationOwnerEvidence.ts` is the mechanical
 operation-to-leaf manifest. Its exhaustive typed registry binds every operation to an imported
 production owner identity, including `checkDaemonUpgrade` to `SqliteUpgradePreflightRepository`.
 Its validator fails when one accepted operation has no exact declared leaf, when an owner differs
@@ -226,6 +226,13 @@ case is fully present in `kojoPiProcess.test.ts`, together with command, system 
 standard input, and session checks. This removal does not change the 38 restored-suite mapping:
 `kojoPiProcess.test.ts` is still the current target for the old `kojoPi.test.ts` behavior. No Gate,
 cutover, evidence, recovery, or safety test was removed.
+
+The Runtime throwaway-repository helper no longer carries the obsolete test-only Agent spend
+consent field, environment injection, or stand-in policy text. Current callers already select a
+controlled executable through the child process path, so this cleanup removes no current behavior
+or test declaration. The RELEASE-04 scan now includes both package test-support trees and has an
+exact negative test for reintroduced legacy policy residue. The 38 restored and 68 obsolete Runtime
+suite counts do not change.
 
 ## Obsolete old-codebase suites
 

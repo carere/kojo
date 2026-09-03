@@ -61,20 +61,9 @@ export const kojo = (
      * The child's `PATH`, when the caller needs to decide which `claude` the run reaches.
      *
      * A stamped `review` wires the stock Claude Code provider, so the binary it spawns is whatever
-     * `claude` is on this variable. Left unset the operator's own is used, and the call costs money;
-     * a rehearsal puts a script in front of it instead.
+     * `claude` is on this variable. A test puts its controlled process in this path.
      */
     readonly path?: string | undefined;
-    /**
-     * What the child may spawn — the value of `KOJO_AGENT_SPEND`.
-     *
-     * **Left unset the child refuses every agent call**, because a Vitest worker's child has no
-     * terminal and an unattended process is refused by default (ticket 49). A rehearsal that wants
-     * its script to run says `stand-in:<absolute path>` and the invoker checks that the name really
-     * resolves there — which a `PATH` in front of the operator's own binary does not prove, and
-     * twice did not.
-     */
-    readonly spend?: string | undefined;
     /**
      * The child's `HOME`, when the caller needs the agent's session transcripts somewhere else.
      *
@@ -83,20 +72,18 @@ export const kojo = (
      * turn when no transcript is there. So a rehearsal that wants its scripted agent to be handed a
      * correction gives the child a home of its own and lets the script write the transcript into it.
      * Pointing that at the operator's real `~/.claude/projects` instead would put fabricated
-     * transcripts in the directory this build counts its real spend from, so it is a temporary
-     * directory or nothing.
+     * transcripts in real session storage, so it is a temporary directory or nothing.
      */
     readonly home?: string | undefined;
   },
 ): Effect.Effect<Ran> =>
   Effect.sync(() => {
     const environment =
-      options?.path === undefined && options?.spend === undefined && options?.home === undefined
+      options?.path === undefined && options?.home === undefined
         ? undefined
         : ({
             ...process.env,
             ...(options?.path === undefined ? {} : { PATH: options.path }),
-            ...(options?.spend === undefined ? {} : { KOJO_AGENT_SPEND: options.spend }),
             ...(options?.home === undefined ? {} : { HOME: options.home }),
           } as NodeJS.ProcessEnv);
     const finished = spawnSync(bun(), [cli, ...args], {

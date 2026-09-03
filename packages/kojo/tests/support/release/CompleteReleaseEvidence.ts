@@ -3,10 +3,7 @@ import {
   type Issue64Tier,
   issue64RequiredTierAllocation,
 } from "./Issue64TierAllocation.ts";
-import {
-  hostMutationOwnerEvidence,
-  sqliteMutationOwnerEvidence,
-} from "./SqliteMutationOwnerEvidence.ts";
+import { hostMutationOwnerEvidence, sqliteMutationOwnerEvidence } from "./MutationOwnerEvidence.ts";
 
 export type EvidenceTier =
   | "contract-runtime"
@@ -1228,6 +1225,11 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
         tier: "kojo-integration",
         path: "packages/kojo/tests/integration/release/contractCutover.test.ts",
         name: "keeps public guidance and package entry points on the one-Daemon release",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/release/contractCutover.test.ts",
+        name: "fails when test support retains a legacy agent-spend policy helper",
       },
     ],
   ),
