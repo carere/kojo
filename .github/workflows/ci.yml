@@ -130,6 +130,7 @@ jobs:
         with:
           name: core-release-evidence
           path: .release-evidence
+          include-hidden-files: true
           if-no-files-found: error
 
   native-systemd-host:
@@ -317,4 +318,5 @@ jobs:
         with:
           name: complete-breaking-release-evidence
           path: .release-evidence-output/artifacts/verification/daemon
+          include-hidden-files: true
           if-no-files-found: error

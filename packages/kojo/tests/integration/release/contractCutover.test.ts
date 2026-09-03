@@ -81,6 +81,15 @@ const scanLegacySpendSupport = (
 
 const temporaryRoots: Array<string> = [];
 
+const namedWorkflowStep = (workflow: string, name: string): string => {
+  const marker = `      - name: ${name}\n`;
+  const start = workflow.indexOf(marker);
+  if (start < 0) throw new Error(`workflow step '${name}' is missing`);
+  const step = workflow.slice(start);
+  const boundary = /\n(?: {6}- name:| {2}\S)/.exec(step);
+  return step.slice(0, boundary?.index ?? step.length);
+};
+
 afterEach(() => {
   for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -166,6 +175,30 @@ describe("the Daemon contract cutover", () => {
     expect(pipedRunBlocks).toHaveLength(5);
     for (const block of pipedRunBlocks.slice(0, 4)) expect(block).toContain("set -o pipefail");
     expect(pipedRunBlocks[4]).toContain(["status=$", "{PIPESTATUS[0]}"].join(""));
+  });
+
+  it("uploads the hidden core release evidence from its exact collection path", () => {
+    const workflow = readFileSync(
+      new URL("../../../../../.github/workflows/ci.yml", import.meta.url),
+      "utf8",
+    );
+    const upload = namedWorkflowStep(workflow, "Upload core release evidence");
+
+    expect(upload).toContain("uses: actions/upload-artifact@");
+    expect(upload).toContain("path: .release-evidence\n");
+    expect(upload).toContain("include-hidden-files: true\n");
+  });
+
+  it("uploads the hidden complete release evidence from its exact accepted path", () => {
+    const workflow = readFileSync(
+      new URL("../../../../../.github/workflows/ci.yml", import.meta.url),
+      "utf8",
+    );
+    const upload = namedWorkflowStep(workflow, "Upload complete breaking release evidence");
+
+    expect(upload).toContain("uses: actions/upload-artifact@");
+    expect(upload).toContain("path: .release-evidence-output/artifacts/verification/daemon\n");
+    expect(upload).toContain("include-hidden-files: true\n");
   });
 
   it("keeps Moon on the exact Bun version pinned for release evidence", () => {
