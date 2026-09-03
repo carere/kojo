@@ -272,8 +272,9 @@ describe("answering a Gate from another process", () => {
     ]);
   });
 
-  it("exits non-zero and names terminal inability when the answer ends in failure", async () => {
+  it("uses a CLI-safe Gate token and names terminal inability when the answer ends in failure", async () => {
     const test = await harness("failure", "failure");
+    expect(test.asking.token).toMatch(/^gate_/);
     const database = new Database(join(test.root, "data", "kojo.db"), { strict: true });
     database.run("UPDATE workflow_runs SET state = 'failed' WHERE run_id = ?", [
       test.admission.runId,

@@ -15,6 +15,7 @@ import type {
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Data, Effect } from "effect";
 import type { DaemonGateRepository } from "../../gate/ports/DaemonGateRepository.ts";
+import { createGateToken } from "../../gate/services/createGateToken.ts";
 import type { ProjectRecovery } from "../../project/models/ProjectRecovery.ts";
 import type { DaemonProjectRepository } from "../../project/ports/DaemonProjectRepository.ts";
 import type { ProjectRecoveryRepository } from "../../project/ports/ProjectRecoveryRepository.ts";
@@ -1193,7 +1194,7 @@ export class RunCoordinator {
         }
         const gatePath = parts.slice(1, numberAt).join("/");
         if (gatePath.length === 0) throw new Error("the Runner returned an empty Gate path");
-        const token = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
+        const token = createGateToken();
         await Effect.runPromise(
           this.#gates.createAskingAndSuspend(authority, {
             identity: {
