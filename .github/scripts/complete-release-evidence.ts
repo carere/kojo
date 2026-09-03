@@ -36,6 +36,28 @@ const environment = (): Readonly<Record<string, string>> => ({
   moon: Bun.spawnSync(["moon", "--version"]).stdout.toString().trim(),
 });
 
+const repositoryBunVersion = (): string => {
+  const matches = [
+    ...readFileSync(resolve(process.cwd(), ".prototools"), "utf8").matchAll(
+      /^bun = "(\d+\.\d+\.\d+)"$/gm,
+    ),
+  ];
+  if (matches.length !== 1 || matches[0]?.[1] === undefined) {
+    fail("the repository does not declare one exact Bun pin");
+  }
+  return matches[0][1];
+};
+
+const requirePinnedHostBun = (
+  tier: "native-systemd" | "shipped-systemd" | "shipped-macos",
+  recorded: string | undefined,
+  pinned: string,
+): void => {
+  if (recorded !== pinned) {
+    fail(`${tier} recorded Bun ${recorded ?? "unknown"}, not repository pin ${pinned}`);
+  }
+};
+
 const collectCore = (arguments_: ReadonlyArray<string>): void => {
   const [output, testedRevision, logDirectory] = arguments_;
   if (output === undefined || testedRevision === undefined || logDirectory === undefined) {
@@ -199,6 +221,7 @@ const hostTier = (
           check.actual.startsWith("rendered")
         ? "passed"
         : "failed",
+      log,
     })),
   };
 };
@@ -210,6 +233,7 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
   }
   const core = readJson<CoreEvidence>(join(inputRoot, "core", "core-evidence.json"));
   if (core.cache !== "bypassed-by-moon-force") fail("core evidence did not bypass the cache");
+  const pinnedBun = repositoryBunVersion();
 
   const nativeFactsPath = join(inputRoot, "native-systemd", "host-facts.log");
   const native = facts(nativeFactsPath);
@@ -234,10 +258,12 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
     nativeTier.skipped !== Number(nativeCounts[2]) ||
     nativeTier.loaded !== Number(nativeCounts[3])
   ) fail("native systemd Host log differs from its recorded counts");
+  requirePinnedHostBun("native-systemd", nativeEnvironment.bun, pinnedBun);
 
   const systemdManifestPath = join(inputRoot, "shipped-systemd", "evidence.json");
   const systemd = readJson<HostManifest>(systemdManifestPath);
   if (systemd.noHiddenRepairs === undefined) fail("shipped systemd hidden-repair evidence is absent");
+  requirePinnedHostBun("shipped-systemd", systemd.environment.bun, pinnedBun);
   const macManifests = filesUnder(join(inputRoot, "shipped-macos"))
     .filter((path) => basename(path) === "evidence-manifest.json")
     .map((path) => readJson<HostManifest & { readonly checkId?: string }>(path));
@@ -252,6 +278,7 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
     if (manifest.noHiddenRepairs !== true) {
       fail(`shipped macOS ${checkId} hidden-repair evidence is absent`);
     }
+    requirePinnedHostBun("shipped-macos", manifest.environment.bun, pinnedBun);
   }
   const mac = macManifests[0];
   if (mac === undefined) fail("shipped macOS evidence is absent");
@@ -259,7 +286,7 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
     hostTier(
       "shipped-macos",
       manifest,
-      `shipped-macos/<revision>/${manifest.checkId ?? "unknown"}/evidence-manifest.json`,
+      `shipped-macos/${manifest.testedRevision}/${manifest.checkId ?? "unknown"}/evidence-manifest.json`,
     ),
   );
 
@@ -269,6 +296,7 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
     "shipped-systemd": hostTier("shipped-systemd", systemd, "shipped-systemd/evidence.json"),
     "shipped-macos": {
       ...macTiers[0],
+      log: `shipped-macos/${testedRevision}/*/evidence-manifest.json`,
       loaded: macTiers.reduce((sum, tier) => sum + tier.loaded, 0),
       passed: macTiers.reduce((sum, tier) => sum + tier.passed, 0),
       skipped: macTiers.reduce((sum, tier) => sum + tier.skipped, 0),

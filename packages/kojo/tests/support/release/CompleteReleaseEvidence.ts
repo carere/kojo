@@ -33,6 +33,7 @@ export interface TestObservation {
   readonly path: string;
   readonly name: string;
   readonly status: "failed" | "passed" | "skipped";
+  readonly log?: string;
 }
 
 export interface RequiredObservation {
@@ -1429,7 +1430,7 @@ export const completeReleaseEvidence = (input: CompleteEvidenceInput) => {
         skipped: matching[0]?.status === "skipped" ? 1 : 0,
         namedSkips: matching[0]?.status === "skipped" ? [matching[0].name] : [],
         cacheHit: receipt.cacheHit,
-        log: receipt.log,
+        log: matching[0]?.log ?? receipt.log,
         tests: matching,
         ...(observation.operation === undefined ? {} : { operation: observation.operation }),
         ...(observation.owner === undefined ? {} : { owner: observation.owner }),

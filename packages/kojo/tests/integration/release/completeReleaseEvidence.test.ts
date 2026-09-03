@@ -10,6 +10,22 @@ import {
 const roots: Array<string> = [];
 const revision = "a".repeat(40);
 const repository = new URL("../../../../../", import.meta.url).pathname;
+const repositoryBun = /^bun = "(\d+\.\d+\.\d+)"$/m.exec(
+  readFileSync(join(repository, ".prototools"), "utf8"),
+)?.[1];
+if (repositoryBun === undefined) throw new Error("the test repository has no exact Bun pin");
+
+interface CompleteIndex {
+  readonly acceptedChecks: number;
+  readonly records: ReadonlyArray<{
+    readonly checkId: string;
+    readonly evidence: ReadonlyArray<{
+      readonly tier: EvidenceTier;
+      readonly log: string;
+      readonly tests: ReadonlyArray<{ readonly path: string; readonly name: string }>;
+    }>;
+  }>;
+}
 
 const writeJson = (path: string, value: unknown): void => {
   mkdirSync(join(path, ".."), { recursive: true });
@@ -28,7 +44,7 @@ const loaded = (tier: EvidenceTier) => {
   return {
     tier,
     testedRevision: revision,
-    environment: { os: "controlled", architecture: "arm64", bun: "1.4.0", moon: "2.5.0" },
+    environment: { os: "controlled", architecture: "arm64", bun: repositoryBun, moon: "2.5.0" },
     loaded: tests.length,
     passed: tests.length,
     skipped: 0,
@@ -74,7 +90,7 @@ describe("the complete breaking release evidence executable", () => {
         "OS=controlled Linux",
         "Architecture=x86_64",
         "Kernel=controlled",
-        "Bun=1.4.0",
+        `Bun=${repositoryBun}`,
         "Moon=2.5.0",
         `TestedRevision=${revision}`,
         "HostTests=1 passed, 1 skipped, 2 loaded",
@@ -94,7 +110,7 @@ describe("the complete breaking release evidence executable", () => {
       environment: {
         os: "controlled Linux",
         architecture: "x86_64",
-        bun: "1.4.0",
+        bun: repositoryBun,
         moon: "2.5.0",
       },
       loadedTests: [
@@ -139,7 +155,7 @@ describe("the complete breaking release evidence executable", () => {
         environment: {
           os: "controlled macOS",
           architecture: "arm64",
-          bun: "1.4.0",
+          bun: repositoryBun,
           moon: "2.5.0",
         },
         loadedTests: [{ loaded: 1, passed: 1, skipped: 0, namedSkips: [] }],
@@ -178,8 +194,25 @@ describe("the complete breaking release evidence executable", () => {
         ),
         "utf8",
       ),
-    ) as { readonly acceptedChecks: number };
+    ) as CompleteIndex;
     expect(index.acceptedChecks).toBe(56);
+    for (const required of requiredReleaseChecks) {
+      for (const observation of required.observations.filter(
+        (candidate) => candidate.tier === "shipped-macos",
+      )) {
+        const record = index.records.find((candidate) => candidate.checkId === required.checkId);
+        const receipt = record?.evidence.find(
+          (candidate) =>
+            candidate.tier === "shipped-macos" &&
+            candidate.tests.some(
+              (test) => test.path === observation.path && test.name === observation.name,
+            ),
+        );
+        expect(receipt?.log, `${required.checkId} > ${observation.name}`).toBe(
+          `shipped-macos/${revision}/${observation.path}`,
+        );
+      }
+    }
     expect(
       JSON.parse(
         readFileSync(
@@ -208,5 +241,50 @@ describe("the complete breaking release evidence executable", () => {
       { cwd: repository },
     );
     expect(verified.exitCode, verified.stderr.toString()).toBe(0);
+
+    const completeWith = (name: string) =>
+      Bun.spawnSync(
+        [
+          "bun",
+          ".github/scripts/complete-release-evidence.ts",
+          "complete",
+          input,
+          join(root, name),
+          revision,
+        ],
+        { cwd: repository },
+      );
+    const nativeFactsPath = join(input, "native-systemd", "host-facts.log");
+    const nativeFacts = readFileSync(nativeFactsPath, "utf8");
+    writeFileSync(nativeFactsPath, nativeFacts.replace(`Bun=${repositoryBun}`, "Bun=9.9.9"));
+    const nativeDrift = completeWith("native-drift");
+    expect(nativeDrift.exitCode).not.toBe(0);
+    expect(nativeDrift.stderr.toString()).toContain(
+      `native-systemd recorded Bun 9.9.9, not repository pin ${repositoryBun}`,
+    );
+    writeFileSync(nativeFactsPath, nativeFacts);
+
+    const systemdPath = join(input, "shipped-systemd", "evidence.json");
+    const systemd = JSON.parse(readFileSync(systemdPath, "utf8")) as {
+      readonly environment: Readonly<Record<string, string>>;
+    } & Readonly<Record<string, unknown>>;
+    writeJson(systemdPath, { ...systemd, environment: { ...systemd.environment, bun: "9.9.9" } });
+    const systemdDrift = completeWith("systemd-drift");
+    expect(systemdDrift.exitCode).not.toBe(0);
+    expect(systemdDrift.stderr.toString()).toContain(
+      `shipped-systemd recorded Bun 9.9.9, not repository pin ${repositoryBun}`,
+    );
+    writeJson(systemdPath, systemd);
+
+    const macPath = join(input, "shipped-macos", revision, "RELEASE-02", "evidence-manifest.json");
+    const mac = JSON.parse(readFileSync(macPath, "utf8")) as {
+      readonly environment: Readonly<Record<string, string>>;
+    } & Readonly<Record<string, unknown>>;
+    writeJson(macPath, { ...mac, environment: { ...mac.environment, bun: "9.9.9" } });
+    const macDrift = completeWith("mac-drift");
+    expect(macDrift.exitCode).not.toBe(0);
+    expect(macDrift.stderr.toString()).toContain(
+      `shipped-macos recorded Bun 9.9.9, not repository pin ${repositoryBun}`,
+    );
   });
 });
