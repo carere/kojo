@@ -30,29 +30,38 @@ const run = (state: "queued" | "succeeded") => ({
     : { queueReason: "runner-starting" }),
 });
 
-const intervalSeparatedRequestCount = (requestedAt: ReadonlyArray<number>): number => {
-  let count = 0;
-  let previous: number | undefined;
-  for (const observedAt of requestedAt) {
-    if (previous === undefined || observedAt - previous >= 750) {
-      count += 1;
-      previous = observedAt;
-    }
-  }
-  return count;
-};
+const minimumPollingIntervalMillis = 750;
+const maximumPollingIntervalMillis = 5_000;
+
+const hasOneSecondPollingCadence = (requestedAt: ReadonlyArray<number>): boolean =>
+  requestedAt.length >= 3 &&
+  requestedAt
+    .slice(1)
+    .every(
+      (observedAt, index) =>
+        observedAt - (requestedAt[index] ?? observedAt) >= minimumPollingIntervalMillis &&
+        observedAt - (requestedAt[index] ?? observedAt) <= maximumPollingIntervalMillis,
+    );
 
 test("asks the authenticated Daemon again every second while a Run can still move", async ({
   page,
 }) => {
-  // Reproduce the two-core CI scheduling pressure. The assertion below observes requests rather
-  // than assuming that three browser timer callbacks fit inside one fixed sleep.
-  const devtools = await page.context().newCDPSession(page);
-  await devtools.send("Emulation.setCPUThrottlingRate", { rate: 6 });
+  test.setTimeout(30_000);
+
+  expect(hasOneSecondPollingCadence([0, 100, 1_100])).toBe(false);
+  expect(hasOneSecondPollingCadence([0, 7_000, 14_000])).toBe(false);
+
+  let observePolling = false;
   const requestedAt: number[] = [];
+  let observeThreeRequests: (() => void) | undefined;
+  const threeRequestsObserved = new Promise<void>((resolve) => {
+    observeThreeRequests = resolve;
+  });
   await page.route("**/api/v1/runs", async (route) => {
-    requestedAt.push(Date.now());
-    await new Promise((resolve) => setTimeout(resolve, 1_800));
+    if (observePolling) {
+      requestedAt.push(Date.now());
+      if (requestedAt.length >= 3) observeThreeRequests?.();
+    }
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({ runs: [run("queued")] }),
@@ -61,14 +70,15 @@ test("asks the authenticated Daemon again every second while a Run can still mov
 
   await page.goto(launch());
   await page.goto(`${origin}/runs`);
-  await expect(page.locator('[data-run="run-queued"]')).toBeVisible({ timeout: 15_000 });
-  await expect
-    .poll(() => intervalSeparatedRequestCount(requestedAt), {
-      message:
-        "a nonterminal Run must make three distinct authenticated Run requests at polling intervals",
-      timeout: 15_000,
-    })
-    .toBeGreaterThanOrEqual(3);
+  await expect(page.locator('[data-run="run-queued"]')).toBeVisible();
+
+  // Establish the authenticated snapshot before reproducing slow two-core CI scheduling.
+  const devtools = await page.context().newCDPSession(page);
+  await devtools.send("Emulation.setCPUThrottlingRate", { rate: 6 });
+  observePolling = true;
+  await threeRequestsObserved;
+
+  expect(hasOneSecondPollingCadence(requestedAt)).toBe(true);
 });
 
 test("stops authenticated Daemon polling after every Run reaches a terminal state", async ({
