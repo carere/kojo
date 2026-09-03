@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/solid-router";
-import { createMemo, createSignal, For, type JSX, Show } from "solid-js";
+import { createMemo, createSignal, Index, type JSX, Show } from "solid-js";
 import { Badge } from "../../shared/components/Badge.tsx";
 import { ConsoleNavigation } from "../../shared/components/ConsoleNavigation.tsx";
 import { DataGrid } from "../../shared/components/data-grid/DataGrid.tsx";
@@ -190,17 +190,17 @@ const QueueTable = (props: { readonly rows: ReadonlyArray<QueueRow> }): JSX.Elem
       </TableRow>
     </TableHeader>
     <TableBody>
-      <For each={props.rows}>
+      <Index each={props.rows}>
         {(row) => (
-          <TableRow data-queued={row.runId} data-queued-asking={row.asking}>
+          <TableRow data-queued={row().runId} data-queued-asking={row().asking}>
             <TableCell>
               <Link
                 to="/runs/$runId"
-                params={{ runId: row.runId }}
+                params={{ runId: row().runId }}
                 search={{ view: "timeline" as const }}
                 class="font-mono text-xs hover:underline"
               >
-                {row.runId}
+                {row().runId}
               </Link>
             </TableCell>
             <TableCell>
@@ -210,21 +210,21 @@ const QueueTable = (props: { readonly rows: ReadonlyArray<QueueRow> }): JSX.Elem
                */}
               <Link
                 to="/runs/$runId/gates/$gate/$asking"
-                params={{ runId: row.runId, gate: row.gate, asking: row.asking }}
+                params={{ runId: row().runId, gate: row().gate, asking: row().asking }}
                 search={{ view: "timeline" as const }}
                 data-queued-open
                 class="text-xs hover:underline"
-                title={row.description}
+                title={row().description}
               >
-                {row.gate}
+                {row().gate}
               </Link>
             </TableCell>
             <TableCell>
-              <span class="text-xs">{row.actor}</span>
+              <span class="text-xs">{row().actor}</span>
             </TableCell>
             <TableCell>
               <span data-queued-waited class="text-xs">
-                {row.waited}
+                {row().waited}
               </span>
             </TableCell>
             <TableCell>
@@ -235,13 +235,13 @@ const QueueTable = (props: { readonly rows: ReadonlyArray<QueueRow> }): JSX.Elem
                * waiting list above, because an answer may still land on them.
                */}
               <Show
-                when={row.answerer === undefined && !row.expired}
+                when={row().answerer === undefined && !row().expired}
                 fallback={
                   <Show
-                    when={row.expired}
+                    when={row().expired}
                     fallback={
-                      <Badge tone="waiting" data-queued-recorded={row.answerer}>
-                        recorded by {row.answerer}
+                      <Badge tone="waiting" data-queued-recorded={row().answerer}>
+                        recorded by {row().answerer}
                       </Badge>
                     }
                   >
@@ -251,14 +251,14 @@ const QueueTable = (props: { readonly rows: ReadonlyArray<QueueRow> }): JSX.Elem
                   </Show>
                 }
               >
-                <span class={row.overdue ? "text-xs text-red-700 dark:text-red-300" : "text-xs"}>
-                  {row.deadline}
+                <span class={row().overdue ? "text-xs text-red-700 dark:text-red-300" : "text-xs"}>
+                  {row().deadline}
                 </span>
               </Show>
             </TableCell>
           </TableRow>
         )}
-      </For>
+      </Index>
     </TableBody>
   </Table>
 );

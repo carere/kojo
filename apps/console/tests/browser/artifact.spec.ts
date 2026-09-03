@@ -25,7 +25,18 @@ test("serves an Artifact only through authenticated bounded display and download
   await page.goto(new URL("/runs/run-applied", page.url()).href);
   const displayButton = page.locator(`[data-published-artifact-display="${artifactId}"]`);
   await expect(displayButton).toBeVisible();
-  await displayButton.click();
+  const displayResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "GET" &&
+      new URL(response.url()).pathname === path &&
+      new URL(response.url()).search === "",
+  );
+  const [, authenticatedArtifact] = await Promise.all([displayButton.click(), displayResponse]);
+  expect(authenticatedArtifact.status()).toBe(200);
+  expect(await authenticatedArtifact.json()).toMatchObject({
+    artifactId,
+    content: "<script>window.__artifactExecuted = true</script>\n",
+  });
   const displayed = page.locator(`[data-published-artifact-content="${artifactId}"]`);
   await expect(displayed).toHaveText("<script>window.__artifactExecuted = true</script>\n");
   expect(await page.evaluate(() => "__artifactExecuted" in window)).toBe(false);

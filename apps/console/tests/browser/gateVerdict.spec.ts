@@ -121,7 +121,11 @@ test("defaults the Gate table to every status and keeps complete review links an
 
 test("records a Verdict with the Daemon OS user as Answerer", async ({ page }) => {
   await page.goto(launchUrl());
-  await page.locator('[data-queued="run-answerable"] [data-queued-open]').click();
+  const answerable = page.locator('[data-queued="run-answerable"] [data-queued-open]');
+  await answerable.evaluate((element) => element.setAttribute("data-live-row-probe", "stable"));
+  await page.waitForTimeout(1_200);
+  await expect(answerable).toHaveAttribute("data-live-row-probe", "stable");
+  await answerable.click();
   const panel = page.locator("[data-detail-panel]");
   await panel.locator('[data-gate-choice="approve"]').click();
   await expect(panel.locator("[data-answering-verdict]")).toContainText(userInfo().username);

@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,7 @@ import {
 } from "../../../../src/contexts/daemon/adapters/DaemonOwner.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
 import { browserSessionLifetimeMs } from "../../../../src/contexts/daemon/services/browserAuthority.ts";
+import { AtomicArtifactRepository } from "../../../../src/contexts/trace/adapters/AtomicArtifactRepository.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
 
 const roots: Array<string> = [];
@@ -201,5 +203,54 @@ describe("instance-bound browser access", () => {
       headers: { authorization: `Bearer ${oldSession.credential}` },
     });
     expect(oldRead.status).toBe(401);
+  });
+
+  it("serves one retained Artifact through a fresh session after Daemon replacement", async () => {
+    const hostPaths = paths();
+    const first = start(hostPaths);
+    const port = Number(new URL(first.endpoint.consoleOrigin).port);
+    const database = new Database(join(hostPaths.dataRoot, "kojo.db"), { strict: true });
+    database.run("PRAGMA foreign_keys = OFF");
+    database.run(
+      `INSERT INTO workflow_runs (
+         run_id, project_id, workflow_name, idempotency_key, payload_json, revision_id,
+         package_graph_id, state, admission_sequence, admitted_at, started_at, finished_at
+       ) VALUES (
+         'run-replacement-artifact', 'project-replacement', 'retention', 'one', '{}',
+         'revision-replacement', 'graph-replacement', 'succeeded', 1,
+         '2026-09-01T10:00:00.000Z', '2026-09-01T10:00:00.000Z',
+         '2026-09-01T10:00:01.000Z'
+       )`,
+    );
+    const content = new TextEncoder().encode("retained through replacement\n");
+    const artifacts = new AtomicArtifactRepository(database, hostPaths.dataRoot);
+    artifacts.begin({
+      transferId: "replacement-artifact",
+      runId: "run-replacement-artifact",
+      name: "replacement.txt",
+      mediaType: "text/plain; charset=utf-8",
+      totalSize: content.byteLength,
+      sha256: new Bun.CryptoHasher("sha256").update(content).digest("hex"),
+    });
+    artifacts.write("replacement-artifact", 0, content);
+    const published = artifacts.finish("replacement-artifact", "2026-09-01T10:00:00.000Z");
+    database.close(false);
+
+    await Effect.runPromise(first.stop);
+    daemons.splice(daemons.indexOf(first), 1);
+    const replacement = start(hostPaths, { consolePort: port });
+    const accepted = await exchange(replacement, await grant(replacement));
+    const session = (await accepted.json()) as BrowserSessionResponse;
+    const response = await fetch(
+      `${replacement.endpoint.consoleOrigin}/api/v1/runs/run-replacement-artifact/artifacts/${published.artifactId}`,
+      { headers: { authorization: `Bearer ${session.credential}` } },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      artifactId: published.artifactId,
+      name: "replacement.txt",
+      content: "retained through replacement\n",
+    });
   });
 });

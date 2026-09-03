@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { type Browser, chromium } from "@playwright/test";
 import { DAEMON_CLEANUP_MILLIS } from "../../../src/contexts/daemon/services/LifecycleController.ts";
 import { startShippedPackageRegistry } from "./ShippedPackageRegistry.ts";
@@ -567,29 +567,165 @@ const renderRun = async (options: {
 }): Promise<{ readonly text: string; readonly origin: string }> => {
   const context = await options.browser.newContext();
   const page = await context.newPage();
-  await page.goto(options.launchUrl);
-  await page.getByText("Access active", { exact: true }).waitFor();
   const origin = new URL(options.launchUrl).origin;
-  await page.goto(`${origin}/runs/${options.runId}`);
-  await page.locator(`[data-run-header="${options.runId}"]`).waitFor();
-  await page.getByText(options.expectedState, { exact: true }).first().waitFor();
-  await page.getByText("Captured Artifacts", { exact: true }).waitFor();
-  await page.getByText("release-evidence.txt", { exact: true }).waitFor();
-  await page.locator("[data-published-artifact-display]").click();
-  await page.getByText("actual Daemon artifact: shipped macOS", { exact: false }).waitFor();
-  const text = (await page.locator("body").innerText()).trim();
-  for (const expected of [
-    "release-evidence",
-    "publish-evidence",
-    "shipped-macos",
-    ...(options.expectedText ?? []),
-  ]) {
-    if (!text.includes(expected))
-      throw new Error(`the authenticated Console did not render ${expected}`);
+  const diagnosticName = basename(options.screenshot, ".png");
+  const diagnosticPath = join(
+    dirname(options.screenshot),
+    "records",
+    `${diagnosticName}-render.json`,
+  );
+  const failureScreenshot = join(dirname(options.screenshot), `${diagnosticName}-failure.png`);
+  const observations: Array<Record<string, unknown>> = [];
+  let stage = "open authenticated Console";
+  let artifactResponse: Record<string, unknown> | undefined;
+  page.on("requestfailed", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path.startsWith("/api/") || path.startsWith("/_kojo/")) {
+      observations.push({
+        kind: "request-failed",
+        method: request.method(),
+        path,
+        error: request.failure()?.errorText ?? "unknown",
+      });
+    }
+  });
+  page.on("response", (response) => {
+    const path = new URL(response.url()).pathname;
+    if (path.startsWith("/api/") || path.startsWith("/_kojo/")) {
+      observations.push({ kind: "response", path, status: response.status() });
+    }
+  });
+  page.on("pageerror", (error) => {
+    observations.push({ kind: "page-error", message: error.message });
+  });
+  try {
+    await page.goto(options.launchUrl);
+    await page.getByText("Access active", { exact: true }).waitFor();
+    const notificationEstablished = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/v1/notifications" &&
+        response.status() === 200 &&
+        new URL(response.request().headers().referer ?? origin).pathname ===
+          `/runs/${options.runId}`,
+      { timeout: 10_000 },
+    );
+    stage = "render retained Run after authenticated notification handshake";
+    await page.goto(`${origin}/runs/${options.runId}`);
+    await notificationEstablished;
+    await page.locator(`[data-run-header="${options.runId}"]`).waitFor();
+    await page.getByText(options.expectedState, { exact: true }).first().waitFor();
+    await page.getByText("Captured Artifacts", { exact: true }).waitFor();
+    await page.getByText("release-evidence.txt", { exact: true }).waitFor();
+
+    const display = page.locator("[data-published-artifact-display]");
+    const artifactId = await display.getAttribute("data-published-artifact-display");
+    if (artifactId === null || artifactId.length === 0) {
+      throw new Error("the retained Artifact display action has no Artifact identity");
+    }
+    const artifactPath = `/api/v1/runs/${encodeURIComponent(options.runId)}/artifacts/${encodeURIComponent(artifactId)}`;
+    const responsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === "GET" &&
+        new URL(response.url()).pathname === artifactPath &&
+        new URL(response.url()).search === "",
+      { timeout: 10_000 },
+    );
+    stage = "read retained Artifact through the authenticated Console API";
+    const [, response] = await Promise.all([display.click(), responsePromise]);
+    artifactResponse = {
+      path: artifactPath,
+      status: response.status(),
+      contentType: response.headers()["content-type"] ?? null,
+    };
+    if (response.status() !== 200) {
+      throw new Error(`the authenticated Artifact response returned ${response.status()}`);
+    }
+    const wire = (await response.json()) as {
+      readonly artifactId?: unknown;
+      readonly content?: unknown;
+    };
+    if (
+      wire.artifactId !== artifactId ||
+      typeof wire.content !== "string" ||
+      !wire.content.includes("actual Daemon artifact: shipped macOS")
+    ) {
+      throw new Error("the authenticated Artifact response did not carry the retained content");
+    }
+
+    stage = "render retained Artifact content in the Console";
+    const visibleArtifact = page.locator(`[data-published-artifact-content="${artifactId}"]`);
+    await visibleArtifact.waitFor({ state: "visible", timeout: 5_000 });
+    const visibleContent = await visibleArtifact.innerText();
+    if (!visibleContent.includes("actual Daemon artifact: shipped macOS")) {
+      throw new Error("the authenticated Console showed different retained Artifact content");
+    }
+    const text = (await page.locator("body").innerText()).trim();
+    for (const expected of [
+      "release-evidence",
+      "publish-evidence",
+      "shipped-macos",
+      ...(options.expectedText ?? []),
+    ]) {
+      if (!text.includes(expected))
+        throw new Error(`the authenticated Console did not render ${expected}`);
+    }
+    await page.screenshot({ path: options.screenshot, fullPage: true });
+    writeFileSync(
+      diagnosticPath,
+      `${JSON.stringify(
+        {
+          outcome: "rendered",
+          stage,
+          artifactResponse,
+          visibleContent: true,
+          observations,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    return { text, origin };
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    const visibleState = {
+      runHeader: await page
+        .locator(`[data-run-header="${options.runId}"]`)
+        .isVisible()
+        .catch(() => false),
+      artifactAction: await page
+        .locator("[data-published-artifact-display]")
+        .isVisible()
+        .catch(() => false),
+      artifactContent: await page
+        .locator("[data-published-artifact-content]")
+        .isVisible()
+        .catch(() => false),
+      reconnect: await page
+        .getByText("Reconnect", { exact: true })
+        .isVisible()
+        .catch(() => false),
+    };
+    await page.screenshot({ path: failureScreenshot, fullPage: true }).catch(() => undefined);
+    writeFileSync(
+      diagnosticPath,
+      `${JSON.stringify(
+        {
+          outcome: "failed",
+          stage,
+          message,
+          artifactResponse,
+          location: new URL(page.url()).pathname,
+          visibleState,
+          observations,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    throw new Error(`${stage}: ${message}; see ${diagnosticPath}`, { cause });
+  } finally {
+    await context.close();
   }
-  await page.screenshot({ path: options.screenshot, fullPage: true });
-  await context.close();
-  return { text, origin };
 };
 
 const sanitizeGateSnapshot = (snapshot: GateSnapshot): object => ({

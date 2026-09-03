@@ -69,7 +69,21 @@ test("renders actual shipped Daemon records through one authenticated browser se
   await page.goto(`${origin}/runs/${runId}`);
   const artifact = page.locator("[data-published-artifact-display]");
   await expect(artifact).toHaveCount(1);
-  await artifact.click();
+  const artifactId = await artifact.getAttribute("data-published-artifact-display");
+  expect(artifactId).not.toBeNull();
+  const artifactPath = `/api/v1/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId ?? "missing")}`;
+  const artifactResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === "GET" &&
+      new URL(response.url()).pathname === artifactPath &&
+      new URL(response.url()).search === "",
+  );
+  const [, authenticatedArtifact] = await Promise.all([artifact.click(), artifactResponse]);
+  expect(authenticatedArtifact.status()).toBe(200);
+  expect(await authenticatedArtifact.json()).toMatchObject({
+    artifactId,
+    content: "actual shipped Daemon record for native-release-evidence\n",
+  });
   await expect(page.locator("[data-published-artifact-content]")).toHaveText(
     "actual shipped Daemon record for native-release-evidence\n",
   );

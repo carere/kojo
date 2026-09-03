@@ -69,10 +69,19 @@ test("asks the authenticated Daemon again every second while a Run can still mov
   });
 
   await page.goto(launch());
+  const notificationsEstablished = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/notifications" &&
+      response.status() === 200 &&
+      new URL(response.request().headers().referer ?? origin).pathname === "/runs",
+  );
   await page.goto(`${origin}/runs`);
   await expect(page.locator('[data-run="run-queued"]')).toBeVisible();
+  await notificationsEstablished;
 
-  // Establish the authenticated snapshot before reproducing slow two-core CI scheduling.
+  // Establish the authenticated snapshot and notification stream before reproducing slow two-core
+  // CI scheduling. Otherwise the CPU probe can consume the separate five-second handshake budget
+  // and put the Console into Reconnect before this test begins to observe polling.
   const devtools = await page.context().newCDPSession(page);
   await devtools.send("Emulation.setCPUThrottlingRate", { rate: 6 });
   observePolling = true;
