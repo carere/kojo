@@ -1,22 +1,13 @@
 branch_whitelist = ["main"]
 monorepo_version_separator = "@"
-pre_bump_hooks = [
-  "bun pm version {{version}} --no-git-tag-version",
-  "git add package.json",
-]
-pre_package_bump_hooks = [
-  "bun pm version {{version}} --no-git-tag-version",
-  "git add package.json",
-]
-# `main` by name rather than `$GITHUB_REF_NAME`. That variable is set only inside GitHub Actions,
-# so a bump run by hand — which is the only way this repository bumps — pushed to `origin HEAD:`
-# and failed. `branch_whitelist` above already refuses a bump from anywhere but `main`, so naming
-# the branch here says nothing new; it just says it somewhere that works off a runner.
-#
-# **Nothing here publishes.** A bump writes a version, a changelog and two tags, and stops. The
-# tarball goes out when a human runs the `release` workflow from the Actions tab and types the
-# version — see `.github/workflows/release.yml`.
-post_bump_hooks = ["git push origin HEAD:main", "git push --tags"]
+tag_prefix = "v"
+pre_bump_hooks = []
+pre_package_bump_hooks = ["bun ../../.github/scripts/cocogitto-package-version.ts {{version}}"]
+# A bump owns versions, changelogs, its commit, and Git tags. It does not publish packages or push
+# refs. The operator inspects the result and pushes the commit and tags atomically. Publication then
+# runs in the manual prerelease or release workflow, where Host validation and promotion can stop
+# without making `latest` point to an invalid package set.
+post_bump_hooks = []
 
 [commit_types.build]
 bump_patch = true
@@ -39,27 +30,13 @@ bump_patch = true
 [monorepo]
 resolver = "Npm"
 
-# The packages, and declaring them is what makes a per-package bump exist at all.
-#
-# While this block was commented out, cog was in monorepo mode with nothing in it:
-# `cog bump --package kojo` answered `invalid value 'kojo'`, and `cog bump --auto` bumped the
-# repository globally — running `bun pm version` at the root, which writes `kojo-workspace`, the
-# private manifest nothing publishes. **The version cocogitto computed never reached the package
-# being released.** Uncommenting this is the whole fix; the hooks above were already correct, and
-# `pre_package_bump_hooks` runs in the package's own directory, which is what makes them so.
-#
-# The key is `kojo` rather than `@carere/kojo`, so the tag reads `kojo@0.1.0`. It names the package
-# in this repository, not the package on the registry — `packages/kojo/package.json` is the only
-# place the registry name is written.
-#
-# `console` is here so a bump reaches it too, and `public_api = false` because it is `private: true`
-# and is built *into* the engine's tarball rather than published beside it.
+# These are exactly the coordinated public packages. The private Console is content inside the
+# Kojo archive, not a separately versioned Release package.
 [monorepo.packages]
 kojo = { path = "packages/kojo", public_api = true }
 kojo-client-contracts = { path = "packages/kojo-client-contracts", public_api = true }
 kojo-runner-contracts = { path = "packages/kojo-runner-contracts", public_api = true }
 kojo-runtime = { path = "packages/kojo-runtime", public_api = true }
-console = { path = "apps/console", public_api = false }
 
 [[changelog.authors]]
 signature = "abatan.k@gmail.com"

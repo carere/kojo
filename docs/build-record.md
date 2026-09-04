@@ -43,6 +43,8 @@ regression result. The release artifact also contains one index with the complet
 The breaking changes and supported command surface are in
 [`release-notes/daemon-cutover.md`](release-notes/daemon-cutover.md).
 
+The staged publication and promotion gates are in [`release-process.md`](release-process.md).
+
 ### Shipped macOS evidence
 
 The `Shipped macOS release evidence` CI job runs only on a disposable macOS runner account. It

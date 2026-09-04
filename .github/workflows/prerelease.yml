@@ -1,22 +1,29 @@
-name: release
+name: prerelease
 
-# A stable Release is a promotion, not the first public test. This manual workflow accepts one
-# validated RC, publishes the stable package set under `candidate`, validates exact public bytes on
-# both supported Hosts, and waits at the protected `npm-production` environment before it moves
-# `latest` and creates the final GitHub Release.
+# Publishing is always a manual action. A successful run publishes one immutable package set,
+# validates that exact set from the public registry on both supported Hosts, and records an accepted
+# GitHub prerelease. The active prerelease tag and `next` then point to this package set.
 on:
   workflow_dispatch:
     inputs:
+      stage:
+        description: "Release stage"
+        required: true
+        type: choice
+        options:
+          - alpha
+          - beta
+          - rc
       version:
-        description: "Exact stable version, for example 0.1.0"
+        description: "Exact prerelease version, for example 0.1.0-alpha.1"
         required: true
         type: string
-      release_candidate:
-        description: "Accepted RC version, for example 0.1.0-rc.2"
-        required: true
+      previous_candidate:
+        description: "Accepted previous candidate; leave empty for an alpha"
+        required: false
         type: string
       dry_run:
-        description: "Build the stable candidate but do not publish it"
+        description: "Build the candidate but do not publish it"
         required: false
         default: true
         type: boolean
@@ -30,8 +37,8 @@ permissions:
   contents: write
 
 jobs:
-  publish-candidate:
-    name: Publish stable candidate
+  publish:
+    name: Publish ${{ inputs.stage }} candidate
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -48,27 +55,21 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Validate the stable version and coordinated package set
-        run: bun .github/scripts/release-train.ts validate-stable "${{ inputs.version }}" "${{ inputs.release_candidate }}"
+      - name: Validate the Release stage and coordinated version
+        run: bun .github/scripts/release-train.ts validate-prerelease "${{ inputs.stage }}" "${{ inputs.version }}" "${{ inputs.previous_candidate }}"
 
-      - name: Load the accepted Release Candidate
+      - name: Load the accepted previous candidate
+        if: ${{ inputs.previous_candidate != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p .release-train/accepted-rc
-          gh release download "v${{ inputs.release_candidate }}" \
+          mkdir -p .release-train/previous
+          gh release download "v${{ inputs.previous_candidate }}" \
             --repo "$GITHUB_REPOSITORY" \
             --pattern release-manifest.json \
-            --dir .release-train/accepted-rc
-          bun .github/scripts/release-train.ts verify-manifest .release-train/accepted-rc/release-manifest.json rc "${{ inputs.release_candidate }}"
-
-      - name: Prove that validation accepted the Release Candidate
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash .github/scripts/verify-accepted-prerelease.sh .release-train/accepted-rc/release-manifest.json
-
-      - name: Refuse code changes after the accepted Release Candidate
-        run: bun .github/scripts/release-train.ts validate-stable-source .release-train/accepted-rc/release-manifest.json "$GITHUB_SHA"
+            --dir .release-train/previous
+          bun .github/scripts/release-train.ts verify-predecessor .release-train/previous/release-manifest.json "${{ inputs.version }}" "${{ inputs.previous_candidate }}"
+          bash .github/scripts/verify-accepted-prerelease.sh .release-train/previous/release-manifest.json
 
       - name: Require complete evidence for this revision
         env:
@@ -106,31 +107,31 @@ jobs:
       - name: Public types and package build
         run: moon run kojo:check-public-types kojo:build
 
-      - name: Pack the stable candidate
+      - name: Pack the coordinated package set
         run: bun .github/scripts/release-train.ts pack "${{ inputs.version }}" .release-train/packages
 
-      - name: Write the stable candidate manifest
-        run: bun .github/scripts/release-train.ts create-manifest stable "${{ inputs.version }}" "$GITHUB_SHA" .release-train/packages .release-train/release-manifest.json
+      - name: Write the candidate manifest
+        run: bun .github/scripts/release-train.ts create-manifest "${{ inputs.stage }}" "${{ inputs.version }}" "$GITHUB_SHA" .release-train/packages .release-train/release-manifest.json
 
-      - name: Upload the stable candidate
+      - name: Upload the candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: stable-release-candidate
+          name: release-candidate
           path: .release-train
           if-no-files-found: error
           retention-days: 30
 
-      - name: Confirm that the stable version is unused
+      - name: Confirm that the version is unused
         if: ${{ !inputs.dry_run }}
         run: bun .github/scripts/release-train.ts assert-unpublished "${{ inputs.version }}"
 
-      - name: Publish with the candidate tag
+      - name: Publish under the candidate tag
         if: ${{ !inputs.dry_run }}
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: bun .github/scripts/release-train.ts publish .release-train/release-manifest.json candidate
 
-      - name: Verify the public stable candidate and protect latest
+      - name: Verify the public candidate and protect latest
         if: ${{ !inputs.dry_run }}
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -140,12 +141,12 @@ jobs:
 
       - name: Dry run notice
         if: ${{ inputs.dry_run }}
-        run: echo "::notice::the stable candidate was built but was not published."
+        run: echo "::notice::the candidate was built but was not published."
 
-  validate-candidate:
-    name: Validate stable candidate on ${{ matrix.host }}
+  validate:
+    name: Validate public candidate on ${{ matrix.host }}
     if: ${{ !inputs.dry_run }}
-    needs: publish-candidate
+    needs: publish
     strategy:
       fail-fast: false
       matrix:
@@ -165,56 +166,63 @@ jobs:
         with:
           auto-install: true
 
-      - name: Download the stable candidate
+      - name: Download the candidate manifest
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: stable-release-candidate
+          name: release-candidate
           path: .release-train
 
       - name: Verify and install the exact public package set
         env:
           BUN_INSTALL: ${{ runner.temp }}/kojo-release-validation
         run: |
-          bun .github/scripts/release-train.ts verify-manifest .release-train/release-manifest.json stable "${{ inputs.version }}" "$GITHUB_SHA"
+          bun .github/scripts/release-train.ts verify-manifest .release-train/release-manifest.json "${{ inputs.stage }}" "${{ inputs.version }}" "$GITHUB_SHA"
           bun .github/scripts/release-train.ts verify-published .release-train/release-manifest.json
           bun .github/scripts/release-train.ts install .release-train/release-manifest.json "$RUNNER_TEMP/project" "$BUN_INSTALL"
 
-  promote:
-    name: Promote stable Release
+  accept:
+    name: Accept the prerelease
     if: ${{ !inputs.dry_run }}
-    needs: validate-candidate
+    needs: validate
     runs-on: ubuntu-latest
-    environment: npm-production
     permissions:
       contents: write
     steps:
       - name: Git checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Setup toolchain
         uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
         with:
           auto-install: true
 
-      - name: Download the validated stable candidate
+      - name: Download the candidate manifest
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: stable-release-candidate
+          name: release-candidate
           path: .release-train
 
-      - name: Recheck the public bytes and promote the tags
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          bun .github/scripts/release-train.ts verify-published .release-train/release-manifest.json
-          bun .github/scripts/release-tags.ts .release-train/release-manifest.json
-
-      - name: Create the stable GitHub Release
+      - name: Record the accepted prerelease
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v${{ inputs.version }}" .release-train/release-manifest.json \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "Kojo ${{ inputs.version }}" \
-            --generate-notes
+          release_tag="v${{ inputs.version }}"
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            test "$(gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)" = true
+            test "$(git rev-list -n 1 "$release_tag")" = "$GITHUB_SHA"
+            gh release upload "$release_tag" .release-train/release-manifest.json --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$release_tag" .release-train/release-manifest.json \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Kojo ${{ inputs.version }}" \
+              --notes "Validated ${{ inputs.stage }} package set for revision $GITHUB_SHA." \
+              --prerelease
+          fi
+
+      - name: Activate the accepted prerelease tags
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: bun .github/scripts/release-tags.ts .release-train/release-manifest.json
