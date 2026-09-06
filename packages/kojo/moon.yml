@@ -87,16 +87,15 @@ tasks:
     options:
       cache: false
   # Sandcastle's build asserts Effect never leaks out of its published types. This asserts the
-  # inverse for Kojo: no bare promise reaches ours, so the boundary in
-  # contexts/sandbox/adapters/boundary.ts cannot quietly spread.
+  # inverse for the Runtime: no bare promise reaches its authoring declarations.
   #
-  # It grades the emitted declarations, so it depends on the inherited `tsc` task. Its real inputs
+  # It grades Runtime declarations, so it depends on `kojo-runtime:tsc`. Its real inputs
   # live in the workspace type cache rather than in this project, so it is not cached — a guard that
   # reports a stale answer is worse than one that always runs.
   check-public-types:
     command: bun src/scripts/check-public-types.ts
     deps:
-      - ~:tsc
+      - kojo-runtime:tsc
     options:
       cache: false
   # The published CLI package contains its sources and the Console assets that the Daemon serves.

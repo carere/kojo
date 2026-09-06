@@ -1,4 +1,4 @@
-import { Effect, type FileSystem, Option, Path } from "effect";
+import { Effect, type FileSystem, Path } from "effect";
 import type { EngineDependency } from "../models/EngineDependency.ts";
 import type {
   AgentName,
@@ -42,8 +42,6 @@ export interface InitialiseRequest {
 export interface Initialised {
   readonly choices: FactoryChoices;
   readonly stamped: ReadonlyArray<Stamped>;
-  /** Always absent. Initialisation records the image contract but does not build it. */
-  readonly image: Option.Option<string>;
   /** What became of the repository's own `package.json`, which is what makes the rest resolve. */
   readonly manifest: ManifestReport;
   /** What became of the repository's own `.gitignore` — the install this asks for must be ignored. */
@@ -90,5 +88,5 @@ export const initialise = (
     const ignore = yield* ignoreInstall({ root });
     const stamped = yield* stamp(root, plan(choices));
 
-    return { choices, stamped, manifest, ignore, image: Option.none() };
+    return { choices, stamped, manifest, ignore };
   });

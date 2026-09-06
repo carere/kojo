@@ -16,12 +16,12 @@ import { SqliteProjectRepository } from "../../../../src/contexts/project/adapte
 import { SqliteExternalActionRepository } from "../../../../src/contexts/workflow/adapters/SqliteExternalActionRepository.ts";
 import { SqliteRunRepository } from "../../../../src/contexts/workflow/adapters/SqliteRunRepository.ts";
 import { captureWorkflowRevision } from "../../../../src/contexts/workflow/services/captureRevision.ts";
+import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
+import { linkEngine } from "../../../support/linkEngine.ts";
 import {
   externalActionId,
   externalActionInputHash,
-} from "../../../../src/contexts/workflow/services/externalActionIdentity.ts";
-import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
-import { linkEngine } from "../../../support/linkEngine.ts";
+} from "../../../support/workflow/externalActionIdentity.ts";
 
 const clientCli = new URL("../../../support/daemon/clientCli.ts", import.meta.url).pathname;
 const packageRoot = new URL("../../../../", import.meta.url).pathname.replace(/\/$/, "");

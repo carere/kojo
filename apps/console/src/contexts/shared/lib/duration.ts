@@ -40,23 +40,7 @@ const coarse = (span: number): string => {
   return `${Math.floor(span / year)}y ${Math.floor((span % year) / week)}w`;
 };
 
-/**
- * A span of time, at two units of precision and no more.
- *
- * Two units because one is too coarse to act on — a gate that says *41h* hides twelve minutes that
- * decide whether it has already expired — and three is noise nobody reads. The units are seconds up
- * to a minute, then minutes, then hours, then days, which is the range a run actually occupies:
- * console.md's worked example spans 0.2 seconds to 41 hours.
- *
- * **Below a second it prints milliseconds, and that floor moved because it was making the UI lie.**
- * The rounding below turns everything under 500 ms into `0s`, so a phase that took 403 ms and a
- * phase that took 252 ms both read *0s* — and a person then reports the run as having "two 0 ms
- * phases", because the Console told them so. That happened. A duration of zero is a real answer and
- * still reads `0s`; a duration that is merely small now says how small.
- *
- * One unit here rather than two, and the doctrine survives: `400ms` has no second unit to carry.
- * Rounded to 10 ms because the millisecond digit is noise from a clock nobody synchronised.
- */
+/** Format a duration with two units, from milliseconds through days. */
 export const humanDuration = (millis: number): string => {
   const exact = Math.max(0, Math.abs(millis));
   // Rounded first, then re-tested: 999 ms rounds to 1000, and `1000ms` is a worse answer than `1s`
@@ -70,23 +54,7 @@ export const humanDuration = (millis: number): string => {
   return coarse(span);
 };
 
-/**
- * A duration on the time axis, in hours rather than days.
- *
- * The same two units, and hours are held **past** the day step rather than for ever. console.md's
- * break says *41h 12m* and it has to: *1d 17h* is the same quantity written so that nobody can
- * compare it with the *2m 0s* phase beside it without doing arithmetic, and comparing is the only
- * reason the number is there.
- *
- * **That argument was written assuming a factory run is measured in hours, and a waiting one is
- * not.** A gate nobody answers keeps counting, and the label on its break printed *4164h 41m* —
- * a hundred and seventy three days, in a unit that has stopped meaning anything. Hours hold to two
- * days, which covers every break the design record and the fixtures carry, and {@link coarse} takes
- * it from there.
- *
- * Below a minute it falls back to {@link humanDuration}, because a break that elided eight seconds
- * would otherwise read *0h 0m*.
- */
+/** Format axis durations with hours across the day boundary so waits remain easy to compare. */
 export const axisDuration = (millis: number): string => {
   const span = Math.max(0, Math.abs(millis));
   if (span < hour) return humanDuration(span);

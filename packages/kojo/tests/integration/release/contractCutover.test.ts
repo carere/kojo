@@ -112,11 +112,13 @@ describe("the Daemon contract cutover", () => {
   it("keeps the repository Kojo router equal to the stamped skill", () => {
     const root = new URL("../../../../../", import.meta.url);
 
-    expect(readFileSync(new URL(".agents/skills/SKILL.md", root), "utf8")).toBe(stampedSkill());
-    expect(readFileSync(new URL(".agents/skills/operations.md", root), "utf8")).toBe(
+    expect(readFileSync(new URL(".agents/skills/kojo/SKILL.md", root), "utf8")).toBe(
+      stampedSkill(),
+    );
+    expect(readFileSync(new URL(".agents/skills/kojo/operations.md", root), "utf8")).toBe(
       stampedOperations(),
     );
-    expect(readFileSync(new URL(".agents/skills/authoring.md", root), "utf8")).toBe(
+    expect(readFileSync(new URL(".agents/skills/kojo/authoring.md", root), "utf8")).toBe(
       stampedAuthoring(),
     );
   });
@@ -154,7 +156,7 @@ describe("the Daemon contract cutover", () => {
     const removedRegisterFlag = ["project", "register", ["--", "path"].join("")].join(" ");
     const guidance = [
       { path: "README.md", positional: /kojo project register \./ },
-      { path: ".agents/skills/operations.md", positional: /kojo project register \./ },
+      { path: ".agents/skills/kojo/operations.md", positional: /kojo project register \./ },
       { path: ".kojo/README.md", positional: /kojo project register \./ },
       {
         path: ".github/scripts/systemd-shipped-user-evidence.sh",

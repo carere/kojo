@@ -12,7 +12,7 @@ import type {
   WorkflowDocument,
   WorkflowMode,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
-import { Effect, Layer } from "effect";
+import { Effect } from "effect";
 import type { OperationRepository } from "../../daemon/ports/OperationRepository.ts";
 import type { FactoryRefreshObservation } from "../../workflow/models/FactoryRefresh.ts";
 import type {
@@ -22,7 +22,6 @@ import type {
 import type { RegisteredProject, RegisterProjectRequest } from "../models/Project.ts";
 import { ProjectStoreError } from "../models/ProjectStoreError.ts";
 import type { ExecutionRevision } from "../ports/DaemonProjectRepository.ts";
-import { ProjectRepository } from "../ports/ProjectRepository.ts";
 
 interface ProjectRow {
   readonly project_id: string;
@@ -1512,13 +1511,6 @@ export class SqliteProjectRepository {
       return Number(row?.value ?? "0");
     },
     catch: failed,
-  });
-
-  readonly layer = Layer.succeed(ProjectRepository, {
-    register: this.register,
-    projects: this.projects,
-    receipt: this.receipt,
-    snapshotVersion: this.snapshotVersion,
   });
 
   #workflowRow(

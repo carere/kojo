@@ -32,23 +32,7 @@ import {
   zoomReset,
 } from "../services/waterfallStore.ts";
 
-/**
- * The centre of the product: what happened, left to right, on the row of the scope it happened in.
- *
- * The geometry is all in `models/waterfall.ts` and none of it is here — this file is markup plus the
- * grammar console.md §5 tabulates, and every element it draws carries the fact it is drawing as a
- * data attribute, so the browser tier grades the grammar rather than the colours.
- *
- * | Element | Drawn as |
- * |---|---|
- * | phase kind | span colour — `agent`, `code`, `actor` |
- * | scope | row; a sandbox row carries a band behind its spans |
- * | corrections | marks inside the **one** span, never separate spans |
- * | failure | span outline, plus the terminal error tag on the label |
- * | permission breach | its own mark — a breach is not a check violation |
- * | the in-flight phase | a span that grows to *now* |
- * | gate wait | a break carrying its duration |
- */
+/** Render the geometry from models/waterfall.ts. Data attributes expose each recorded fact to browser tests. */
 
 /**
  * How wide the axis is at zoom 1 when nothing has measured the card yet.

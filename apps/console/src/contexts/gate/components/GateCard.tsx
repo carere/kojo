@@ -9,21 +9,7 @@ import { type Asking, waitedMillis } from "../models/Asking.ts";
 import type { SettledAsking } from "../models/answering.ts";
 import { GateAnswering } from "./GateAnswering.tsx";
 
-/**
- * What this run is stopped on, directly beneath the header — console.md §4.
- *
- * It is placed there because it is the one thing on the page a person can *act* on. Everything below
- * it says what happened; this says what is being decided, how long it has already cost, when the
- * decision stops being possible, and which way the run goes if nobody makes it.
- *
- * **Human latency is the number a factory lives or dies by**, so the wait is stated on the card
- * rather than left to be worked out from two timestamps — and it is stated while the wait is still
- * happening, which is the only time anybody can shorten it.
- *
- * The card is not the whole record. The gate has a route of its own, and the link into it is what
- * makes the deeper facts — the token, the asking, the exact instants — one click away without
- * putting them all in the header of a run somebody is trying to read.
- */
+/** Show the Gates on which this Run waits below the Run header. */
 export const GateCard = (props: {
   readonly asking: Asking;
   readonly settled: ReadonlyArray<SettledAsking>;

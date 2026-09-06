@@ -1,8 +1,8 @@
 # Context Map
 
 Kojo uses the multi-context layout. The context slugs name the bounded contexts of
-`src/contexts/<bounded-context>/`. This map includes the accepted Daemon design; the existing code
-and [earlier package layout](../design/typescript-effect.md) do not yet implement all these boundaries.
+`src/contexts/<bounded-context>/`. The [package layout](../design/typescript-effect.md) describes
+how the packages implement these boundaries.
 
 ## Contexts
 
@@ -20,8 +20,8 @@ and [earlier package layout](../design/typescript-effect.md) do not yet implemen
 - [**trace**](./trace.md): observability records and their read models, plus Artifact metadata,
   content access, and retention separate from Trace-record retention
 
-Until a context file exists, the vocabulary table in
-[docs/design/architecture.md §6](../design/architecture.md) is authoritative for that context.
+Until a context file exists, use the terms in the [architecture](../design/architecture.md) and
+applicable [ADRs](../adr/).
 
 `shared` is a code bucket for elements used by several contexts. It is not a bounded context, so
 it has no context file and no ADR directory.

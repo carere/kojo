@@ -1,7 +1,7 @@
 {
   "name": "@kojo/console",
   "version": "0.0.0",
-  "description": "The Kojo Console — one factory's trace, read from a browser",
+  "description": "The Daemon-hosted operator view for Kojo Projects, Workflows, Runs, and Gates",
   "license": "MIT",
   "author": "Kevin Abatan <contact@carere.dev> (https://github.com/carere)",
   "type": "module",

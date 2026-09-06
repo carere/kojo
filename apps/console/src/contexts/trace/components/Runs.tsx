@@ -13,18 +13,7 @@ import { allSettled } from "../models/RunLine.ts";
 import { runRows } from "../models/RunRow.ts";
 import { RunList } from "./RunList.tsx";
 
-/**
- * The Daemon Run catalogue, and what each Run waits on.
- *
- * Four states, and console.md §10 makes three of them part of the feature rather than polish:
- *
- * - **No Runs yet.** No registered Project has admitted a Run.
- * - **The API is unreachable.** The table stays exactly as it was and a banner says the Console is
- *   still trying. Never a blank view, and never an error page over data that is still on screen.
- *
- * The fourth is the ordinary one. The rows are rebuilt whenever the runs, the askings or the clock
- * move, so a gate crossing its deadline turns red without anything being refetched.
- */
+/** Show the Daemon Run catalogue, its waiting reasons, and its empty or connection states. */
 export const Runs = (): JSX.Element => {
   const now = useNow();
   const runs = useRuns();

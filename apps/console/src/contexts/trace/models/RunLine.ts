@@ -53,15 +53,6 @@ export const statusOf = (line: RunLine): RunStatus =>
 export const isTerminal = (status: RunStatus): boolean =>
   status === "succeeded" || status === "failed" || status === "cancelled";
 
-/**
- * Is there nothing left to watch?
- *
- * This is the whole poll rule: the list asks again once a second while any run can still move, and
- * stops entirely when none can, so a finished run costs nothing to leave open on screen
- * (console.md §7).
- *
- * **An empty list is not settled.** A factory with no runs in it is exactly where the first one is
- * about to appear, and there is no finished run there whose cost this rule was written to remove.
- */
+/** Poll while a Run can change. An empty list also polls so the first Run can appear. */
 export const allSettled = (lines: ReadonlyArray<RunLine>): boolean =>
   lines.length > 0 && lines.every((line) => isTerminal(statusOf(line)));

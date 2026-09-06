@@ -4,6 +4,12 @@ This audit compares the tests removed from `origin/main` with the breaking Daemo
 tests when their production concept still exists in `packages/kojo-runtime`. It does not restore a
 test only because its old file can compile.
 
+This record describes the Daemon cutover audit. The later
+[alpha cleanup audit](alpha-cleanup-audit.md) removes the obsolete Runtime `AskedGate` model and
+its tests. Current Deadline behavior belongs to the Daemon Gate repository. It also moves the
+shared decode and identity tests from the CLI package to their active Runtime implementations.
+The tables below retain the earlier audit's scope.
+
 ## Console fixed-point audit
 
 The seven removed browser suites contain 113 test declarations. The audit keeps 104 current

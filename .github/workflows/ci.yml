@@ -26,9 +26,7 @@ jobs:
     # The name branch protection matches on. Changing it silently un-gates `main`.
     name: Test
     runs-on: ubuntu-latest
-    # The container tier builds an image and starts real containers; the browser tier builds the
-    # Console first. Twenty minutes is roughly four times the observed run, which leaves room for a
-    # slow runner without letting a hung daemon hold the queue all day.
+    # Tests start real processes and build the Console. Allow 30 minutes for slow runners.
     timeout-minutes: 30
     env:
       NO_COLOR: "1"
@@ -90,18 +88,15 @@ jobs:
 
       - name: Contract and runtime tests
         run: |
-          set -o pipefail
-          mkdir -p .release-evidence/logs
-          moon run kojo-client-contracts:test -- --reporter=verbose 2>&1 | tee .release-evidence/logs/contract-runtime.log
-          moon run kojo-runner-contracts:test -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
-          moon run kojo-runtime:test -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
-          moon run kojo-runtime:test-integration -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
+          moon run kojo-client-contracts:test -- --reporter=verbose
+          moon run kojo-runner-contracts:test -- --reporter=verbose
+          moon run kojo-runtime:test -- --reporter=verbose
+          moon run kojo-runtime:test-integration -- --reporter=verbose
 
       - name: Unit tests and package graph
         run: |
-          set -o pipefail
-          moon run kojo:test -- --reporter=verbose 2>&1 | tee .release-evidence/logs/kojo-unit.log
-          moon run kojo:check-packages 2>&1 | tee -a .release-evidence/logs/kojo-unit.log
+          moon run kojo:test -- --reporter=verbose
+          moon run kojo:check-packages
 
       # Two guards that are neither a test tier nor a lint: no bare promise reaches Kojo's published
       # declarations, and the package refuses to build without the Console in it.
@@ -114,8 +109,7 @@ jobs:
 
       - name: Browser tests
         run: |
-          set -o pipefail
-          moon run console:test-browser -- --reporter=list 2>&1 | tee .release-evidence/logs/console-browser.log
+          moon run console:test-browser -- --reporter=list
 
       - name: Browser failure traces
         if: failure()
@@ -125,10 +119,7 @@ jobs:
           path: apps/console/test-results
           retention-days: 7
 
-      # Last because it is the slowest and the only one that needs a container daemon. `ubuntu-latest`
-      # ships Docker; the suites build the one image they need and skip with a stated reason if the
-      # daemon is missing, so a runner without one says so rather than passing quietly.
-      - name: Container tests
+      # CLI integration tests exercise real adapters and processes.
+      - name: CLI integration tests
         run: |
-          set -o pipefail
-          moon run kojo:test-integration -- --reporter=verbose 2>&1 | tee .release-evidence/logs/kojo-integration.log
+          moon run kojo:test-integration -- --reporter=verbose

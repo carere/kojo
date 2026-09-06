@@ -3,21 +3,9 @@
 
   // `includeEntryExports` is what makes this a dead-code check at all, and it is not optional here.
   //
-  // The published package declares `"exports": { "./*": "./src/*.ts" }` — every source file is a
-  // deep-import entry point, which is the promise the no-barrel rule makes to consumers. The side
-  // effect is that knip can never report a file under `src/` as unused: an entry point is reachable
-  // by definition. Without this option knip runs clean over the whole source tree no matter what is
-  // in it, which is worse than not running it — three separate agents read that green as proof
-  // their code was reachable, and it proved nothing.
-  //
-  // Turning it on moves the question from "is this file reachable" to "is this export used", which
-  // is the answerable one for a deep-import library. Verified by mutation: an unused export under
-  // `src/` is reported, and the real tree is clean.
-  //
-  // The escape hatch for something deliberately public that nothing internal uses is the JSDoc
-  // `@public` tag on the export. Also verified: `@public` suppresses the finding, `@internal` does
-  // not. Reach for it only when an export really is consumer surface — the default answer to an
-  // unused export is to delete it.
+  // Runtime and contract packages publish explicit deep-import entry points. Check their exports
+  // too, so an export cannot hide from this check merely because it is in a package export map.
+  // Use `@public` only for an intentional consumer API with no internal caller.
   "includeEntryExports": true,
 
   // An export used only inside its own file is a local, not a public surface.
@@ -59,7 +47,7 @@
       "entry": ["playwright.release.config.ts", "tests/release/*.spec.ts"]
     },
     "packages/kojo-runtime": {
-      // Imported only by the fresh Runner-process tests through an exact filesystem registration.
+      // Fresh Runner-process tests load these Factory files by filesystem registration.
       "ignoreFiles": ["tests/fixtures/runner/**"]
     }
   }

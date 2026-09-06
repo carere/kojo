@@ -217,10 +217,7 @@ export const init = Command.make(
         : `\n${created} written, ${kept} kept — nothing you had edited was replaced`,
     );
 
-    yield* Option.match(factory.image, {
-      onNone: () => Console.log("no image was built"),
-      onSome: (name: string) => Console.log(`image ${name} built from .kojo/sandbox/Dockerfile`),
-    });
+    yield* Console.log("no image was built");
 
     yield* Console.log(
       [

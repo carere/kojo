@@ -16,12 +16,7 @@ import { Context } from "effect";
 export interface BuildInfo {
   readonly version: string;
   readonly commit: string;
-  /**
-   * A digest of the factory's configuration file.
-   *
-   * `unconfigured` until `kojo init` writes one and stamps it. A run under no configuration is a
-   * real case — every test in this repository is one — so the default says exactly that.
-   */
+  /** Author-supplied configuration digest. Defaults to `unconfigured` when none is supplied. */
   readonly configDigest: string;
   /** The machine the run started on. */
   readonly host: string;

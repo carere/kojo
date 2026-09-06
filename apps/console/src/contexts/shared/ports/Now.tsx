@@ -1,17 +1,6 @@
 import { type Accessor, createContext, type JSX, useContext } from "solid-js";
 
-/**
- * The current time, as the Console reads it.
- *
- * **A component never calls `Date.now()`**, and that is a hard requirement rather than a style
- * (console.md §11). The whole Console is timestamps — a deadline, a wait, a duration on a waterfall
- * span — and every one of them is unreadable in a test and unstable in a screenshot if the clock is
- * whatever the machine says at the moment of render. So the clock is a value passed in, the browser
- * tier freezes it, and the fixtures carry fixed timestamps against it.
- *
- * It is an `Accessor` and not a number because a live Console has to redraw as the clock moves: a
- * gate that goes overdue while somebody watches must change on screen without a refetch.
- */
+/** Supply one clock to Console components. Browser time and a fixed test clock use the same port. */
 export type Now = Accessor<number>;
 
 const NowContext = createContext<Now>();

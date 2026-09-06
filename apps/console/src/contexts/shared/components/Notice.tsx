@@ -1,17 +1,7 @@
 import { type JSX, splitProps } from "solid-js";
 import { cn } from "../lib/cn.ts";
 
-/**
- * A statement about the world, put where the data would have been.
- *
- * console.md §10 is emphatic that none of the Console's broken states is an error page: a repository
- * with no factory, a factory with no runs, and an API that cannot be reached are all ordinary
- * conditions with something useful to say. This component exists so that saying them is the cheap
- * option and throwing an error page is the one nobody reaches for.
- *
- * `role` follows the tone. A `retrying` notice appears while a person is already looking at the
- * table, so it is a live region; the other two replace the table and are read in place.
- */
+/** Show an empty or retry state where its data would appear. */
 export type NoticeTone = "empty" | "retrying";
 
 const tones: Record<NoticeTone, string> = {

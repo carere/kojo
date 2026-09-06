@@ -16,16 +16,7 @@ import { keepView } from "../models/view.ts";
 import { deselected, selected, type WaterfallState } from "../services/waterfallStore.ts";
 import { DetailPanel } from "./DetailPanel.tsx";
 
-/**
- * Everything known about one phase — console.md §6, in the order somebody investigating reads it.
- *
- * **The record is already in hand.** The run document carries every phase, and this panel is a second
- * reader of the query the run view already made — same key, same cache, no second request. So opening
- * a phase costs nothing, and nothing in the panel can fail in a way that takes the waterfall with it.
- *
- * Captured Artifacts are fetched through the authenticated Run Artifact API and are shown at Run
- * level. This panel does not call repository-local trace endpoints.
- */
+/** Show one Phase from the Run snapshot. */
 
 const stateTones: Record<PhaseState, BadgeTone> = {
   running: "running",
@@ -58,14 +49,7 @@ export const PhasePanel = (props: {
   };
   const known = () => record() !== undefined || inFlight() !== undefined;
 
-  /**
-   * The URL is the subject; the store follows it.
-   *
-   * console.md §8 gives selection to Solux — it is what synchronises the axis, the rows and this
-   * panel — but the *route* is what a person pastes, so a deep link has to select the span it names.
-   * One direction, decided here: the panel says what is open and the waterfall draws the ring. The
-   * click that opened it navigated; it did not dispatch.
-   */
+  /** Make the Waterfall selection follow the Phase route so a deep link selects its span. */
   createEffect(() => {
     const open = phaseId();
     if (store.state.selected !== open) store.dispatch(selected(open));

@@ -10,17 +10,7 @@ import { NowProvider } from "../contexts/shared/ports/Now.tsx";
 import { consoleQueryClient } from "../contexts/shared/services/queryClient.ts";
 import appCss from "../styles/app.css?url";
 
-/**
- * The document every view of the Console lives in.
- *
- * **This is the whole of what gets prerendered.** In SPA mode the build fetches this shell once,
- * with no route matched, and writes the HTML; every route below it renders in the browser. So the
- * two providers go here rather than in a route, and nothing in this file may depend on data.
- *
- * The clock is built here, once, and handed down. That is the injection point console.md §11 asks
- * for: a test freezes it before the page loads and every duration on every view below becomes a
- * fixed string.
- */
+/** Provide the shared query cache and clock above all routes. Tests can replace the clock before the page loads. */
 
 const queryClient = consoleQueryClient();
 

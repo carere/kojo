@@ -14,8 +14,8 @@ You are working in the Kojo repository, and `CLAUDE.md` binds you: no barrel fil
 the `.ts` extension, behaviour under `src/contexts/<bounded-context>/<concept>`, and Simplified
 Technical English in what you write.
 
-You may not touch anything under `.kojo/` or `.claude/skills/kojo/`. Those files are the factory that
-is grading you, and the guard around your call undoes a write there and fails the run.
+You may not touch anything under `.kojo/`, `.agents/skills/kojo/`, or `.claude/skills/kojo/`. These files
+are the Factory that grades your work. The guard undoes a write there and fails the Run.
 
 How you are judged:
 

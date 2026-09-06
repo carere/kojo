@@ -1,13 +1,7 @@
 import { axisDuration, deadlineLabel } from "../../shared/lib/duration.ts";
 import { type Asking, waitedMillis } from "./Asking.ts";
 
-/**
- * One line of the queue — console.md §3's *"what waits on a human, and for how long"*.
- *
- * **Every field is already a string, and the clock is an argument.** The same rule the run list
- * follows, for the same reason: a cell renderer that reached for a clock would make a screenshot
- * move, and there is nothing left in this row to compute.
- */
+/** Build a Gate queue row from an Asking and the supplied clock. */
 export interface QueueRow {
   readonly state: "unanswered" | "recorded" | "applied" | "expired";
   readonly runId: string;

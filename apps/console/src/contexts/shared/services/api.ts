@@ -27,14 +27,7 @@ export class ApiError extends Error {
   }
 }
 
-/**
- * Did the server *answer*, rather than fail to be reached?
- *
- * A 4xx is an answer: the request named something that is not there, or is not allowed, and asking
- * again cannot change it. A 5xx is not — `503 trace-unreadable` is precisely the class console.md
- * §10 says to survive by asking again — and neither is a connection that never completed, which
- * arrives as a `TypeError` from `fetch` and is not an `ApiError` at all.
- */
+/** Identify a 4xx refusal. Server failures and failed connections use the bounded retry policy. */
 export const refused = (error: unknown): error is ApiError =>
   error instanceof ApiError && error.status >= 400 && error.status < 500;
 

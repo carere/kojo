@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { canonicalJson } from "./canonicalJson.ts";
+import { canonicalJson } from "../../../src/contexts/workflow/services/canonicalJson.ts";
 
-/** Stable identity for one authored Phase action. It does not contain user-readable input. */
+/** Build synthetic action identities for Daemon recovery fixtures. */
 export const externalActionId = (input: {
   readonly runId: string;
   readonly revisionId: string;

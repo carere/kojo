@@ -14,15 +14,7 @@ import {
 import type { RunStatus } from "../models/RunLine.ts";
 import type { RunRow } from "../models/RunRow.ts";
 
-/**
- * Every run this factory has, as the five columns console.md §3 names.
- *
- * **The rows arrive finished.** Every value here is already a string, computed against an injected
- * clock by `runRows`, so no cell renderer reaches for the time and no screenshot can move under a
- * test. The table is headless — it owns the row model and this file owns the markup — and no
- * feature beyond the core is switched on, because sorting and filtering belong in the URL
- * (console.md §8) rather than in component state.
- */
+/** Render the supplied Run rows. Their values use the injected clock. */
 
 const features = tableFeatures({});
 const helper = createColumnHelper<typeof features, RunRow>();

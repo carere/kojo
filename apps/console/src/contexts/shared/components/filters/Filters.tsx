@@ -6,7 +6,7 @@ export interface ProjectFilters {
   readonly text: string;
 }
 
-/** A deep local adaptation of Zaidan Filters for the three Project fields in this ticket. */
+/** Project filters built from the local Zaidan controls. */
 export const Filters = (props: {
   readonly filters: ProjectFilters;
   readonly onChange: (next: ProjectFilters) => void;

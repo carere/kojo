@@ -11,7 +11,7 @@ import type { RunAuthority } from "../../../../src/contexts/workflow/models/Daem
 import {
   externalActionId,
   externalActionInputHash,
-} from "../../../../src/contexts/workflow/services/externalActionIdentity.ts";
+} from "../../../support/workflow/externalActionIdentity.ts";
 
 const fixture = () => {
   const database = new Database(":memory:", { strict: true });

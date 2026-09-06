@@ -16,21 +16,7 @@ import { keepView } from "../models/view.ts";
 import { deselected, scoped, type WaterfallState } from "../services/waterfallStore.ts";
 import { DetailPanel } from "./DetailPanel.tsx";
 
-/**
- * One **acquisition** of one sandbox — the panel's second subject.
- *
- * console.md §6 is emphatic that the band on the waterfall is not scenery. It is a whole record, and
- * the reason it deserves a panel of its own is the run this Console was designed around: a hotfix
- * that suspends at a gate tears its container down and builds it again on resume, so the same scope
- * of the same run produces two acquisitions. **The second one is what a mid-lane gate cost.** That is
- * a number nobody would go looking for, and it is stated here as the gap between the first release
- * and this acquisition.
- *
- * An acquisition the trace has no record of is drawn too, and says why: a sandbox row is written when
- * the sandbox is **released**, so a container in use right now is named by its phases and by nothing
- * else. Refusing to render it would make the panel disagree with the waterfall, which already draws
- * that row.
- */
+/** Show one Sandbox acquisition. A resumed Run can have several acquisitions of the same scope. */
 
 const outcomeTones: Record<string, BadgeTone> = {
   released: "good",
@@ -68,13 +54,7 @@ export const SandboxPanel = (props: {
       .filter((sandbox) => nameOf(sandbox.sandboxId) === props.name)
       .sort((left, right) => left.acquiredAt - right.acquiredAt);
   const ordinal = () => siblings().findIndex((one) => one.sandboxId === sandboxId()) + 1;
-  /**
-   * How long this scope stood torn down before it was built again.
-   *
-   * The dead time between the release of the previous acquisition of this scope and this one. On the
-   * run console.md is built around, that number *is* the gate: forty-one hours during which the
-   * factory held nothing at all.
-   */
+  /** Measure the time between the previous release of this scope and this acquisition. */
   const idleBefore = (): number | undefined => {
     const previous = siblings()[ordinal() - 2];
     const acquired = acquiredAt();

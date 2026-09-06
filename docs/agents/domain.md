@@ -42,8 +42,7 @@ docs/
 `docs/context/map.md` is the multi-context discriminator. Use context slugs consistently between
 `docs/context/<context>.md` and `docs/adr/<context>/`.
 
-The context map names the accepted bounded contexts of `src/contexts/<bounded-context>/`, including
-planned boundaries not yet implemented in the earlier design or code. `shared` is a code bucket
+The context map names the bounded contexts of `src/contexts/<bounded-context>/`. `shared` is a code bucket
 for elements used by several contexts, not a bounded context, so it has no context file and no ADR
 directory. The tree above shows the layout; create an ADR directory only when a decision needs it.
 
@@ -53,8 +52,8 @@ Use the relevant context file's terms when naming domain concepts in issues, pro
 tests, and code. Do not drift to synonyms the context explicitly avoids.
 
 `docs/context/map.md` exists, and it marks which context files are written. For a context that has
-no file yet, the vocabulary table in
-[docs/design/architecture.md §6](../design/architecture.md) is authoritative.
+no file yet, use the terms in the [architecture](../design/architecture.md) and applicable
+[ADRs](../adr/).
 
 If a needed concept is absent, reconsider whether the output invents language the project does not
 use. If the gap is real, note it for `/domain-modeling`.

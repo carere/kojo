@@ -29,9 +29,7 @@ jobs:
   ci:
     name: Test
     runs-on: ubuntu-latest
-    # The container tier builds an image and starts real containers; the browser tier builds the
-    # Console first. Twenty minutes is roughly four times the observed run, which leaves room for a
-    # slow runner without letting a hung daemon hold the queue all day.
+    # Tests start real processes and build the Console. Allow 30 minutes for slow runners.
     timeout-minutes: 30
     env:
       NO_COLOR: "1"
@@ -131,10 +129,8 @@ jobs:
           path: apps/console/test-results
           retention-days: 7
 
-      # Last because it is the slowest and the only one that needs a container daemon. `ubuntu-latest`
-      # ships Docker; the suites build the one image they need and skip with a stated reason if the
-      # daemon is missing, so a runner without one says so rather than passing quietly.
-      - name: Container tests
+      # CLI integration tests exercise real adapters and processes.
+      - name: CLI integration tests
         run: |
           set -o pipefail
           moon run kojo:test-integration --force -- --reporter=verbose 2>&1 | tee .release-evidence/logs/kojo-integration.log

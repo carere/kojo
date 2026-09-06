@@ -56,7 +56,6 @@ interface RegistryVersion {
 }
 
 interface RegistryMetadata {
-  readonly "dist-tags"?: Readonly<Record<string, string>>;
   readonly versions?: Readonly<Record<string, RegistryVersion>>;
 }
 
@@ -533,21 +532,9 @@ const verifyPublished = async (manifest: ReleaseManifest): Promise<void> => {
   }
 };
 
-const verifyActiveTags = async (manifest: ReleaseManifest): Promise<void> => {
-  assertManifest(manifest, manifest.version, manifest.stage);
-  if (manifest.stage === "stable")
-    throw new Error("A stable Release is not a prerelease candidate.");
-  for (const releasePackage of manifest.packages) {
-    const tags = (await registryMetadata(releasePackage.name))?.["dist-tags"];
-    if (tags?.[manifest.stage] !== manifest.version || tags.next !== manifest.version) {
-      throw new Error(`${releasePackage.name}@${manifest.version} is not the active candidate.`);
-    }
-  }
-};
-
 const usage = (): never => {
   throw new Error(
-    "Usage: release-train.ts validate-prerelease <stage> <version> [previous] | validate-stable <version> <rc-version> | validate-stable-source <manifest> <revision> | verify-predecessor <manifest> <version> <previous> | pack <version> <archive-directory> | create-manifest <stage> <version> <revision> <archive-directory> <output> | verify-manifest <manifest> <stage> <version> [revision] | assert-unpublished <version> | publish <manifest> <tag> | verify-published <manifest> | verify-active-tags <manifest> | install <manifest> <project-directory> <global-directory>",
+    "Usage: release-train.ts validate-prerelease <stage> <version> [previous] | validate-stable <version> <rc-version> | validate-stable-source <manifest> <revision> | pack <version> <archive-directory> | create-manifest <stage> <version> <revision> <archive-directory> <output> | verify-manifest <manifest> <stage> <version> [revision] | auth-mode <version> | assert-unpublished <version> | publish <manifest> <tag> | verify-published <manifest> | install <manifest> <project-directory> <global-directory>",
   );
 };
 
@@ -613,14 +600,6 @@ switch (command) {
     assertManifest(readManifest(path), version, stage as ReleaseStage, revision);
     break;
   }
-  case "verify-predecessor": {
-    const [path, version, previous] = arguments_;
-    if (path === undefined || version === undefined || previous === undefined) usage();
-    assertPrereleaseFollowsCandidate(version, previous);
-    const previousRelease = parseReleaseVersion(previous);
-    assertManifest(readManifest(path), previous, previousRelease.stage);
-    break;
-  }
   case "assert-unpublished": {
     const [version] = arguments_;
     if (version === undefined) usage();
@@ -637,12 +616,6 @@ switch (command) {
     const [path] = arguments_;
     if (path === undefined) usage();
     await verifyPublished(readManifest(path));
-    break;
-  }
-  case "verify-active-tags": {
-    const [path] = arguments_;
-    if (path === undefined) usage();
-    await verifyActiveTags(readManifest(path));
     break;
   }
   case "install": {

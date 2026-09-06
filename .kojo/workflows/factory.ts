@@ -327,11 +327,8 @@ export const factory = workflow(
        * Ship: say what landed, read back off the target rather than assumed from what the run believed
        * it did.
        *
-       * **Kojo publishes nothing yet, and this phase says so honestly instead of miming a release.**
-       * When there is a registry version to cut, this body is the one line that changes — it is where
-       * a `bun publish` or a tag goes. Until then it earns its place by *verifying* the merge: it
-       * reads the target's own log, so a landing this run reported and git did not perform is a
-       * failure here rather than a sentence in a success message.
+       * The GitHub release workflow owns package publication. This Phase checks the landed commit
+       * and reports its changed files; it does not publish a Release.
        */
       const shipped = yield* code(
         {

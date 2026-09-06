@@ -12,7 +12,6 @@ import { Data, Effect, Layer, Option, Schema, Stream } from "effect";
 import { WorkflowEngine } from "effect/unstable/workflow";
 import type { GateRequest } from "../contexts/gate/models/GateRequest.ts";
 import { Gate } from "../contexts/gate/ports/Gate.ts";
-import { GateRepository } from "../contexts/gate/ports/GateRepository.ts";
 import {
   layer as daemonResources,
   type SendResourceMutation,
@@ -315,13 +314,6 @@ export const executeRegisteredRevision = async (
       }),
     describe: (asking) => asking.description,
   });
-  const gateRepositoryLayer = Layer.succeed(GateRepository, {
-    asked: () => Effect.void,
-    recorded: () => Effect.succeed(false),
-    expired: () => Effect.succeed(false),
-    byToken: () => Effect.succeed(Option.none()),
-    all: Effect.succeed([]),
-  });
   const tracerLayer = Layer.succeed(Tracer, {
     runStarted: (record) =>
       Effect.promise(() =>
@@ -388,13 +380,7 @@ export const executeRegisteredRevision = async (
     never,
     Tracer | WorkflowEngine.WorkflowEngine
   >;
-  const runnerServices = Layer.mergeAll(
-    engineLayer,
-    tracerLayer,
-    gateLayer,
-    gateRepositoryLayer,
-    executionServices,
-  );
+  const runnerServices = Layer.mergeAll(engineLayer, tracerLayer, gateLayer, executionServices);
   const registration = authoredLayer.pipe(Layer.provideMerge(runnerServices));
   const execution = Effect.gen(function* () {
     const engine = yield* WorkflowEngine.WorkflowEngine;
