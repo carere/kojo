@@ -1,0 +1,78 @@
+name: CLI integration
+
+on:
+  workflow_call:
+    inputs:
+      revision:
+        type: string
+        required: true
+      prepared_release:
+        type: boolean
+        default: false
+    secrets:
+      MOON_REMOTE_CACHE_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  MOON_REMOTE_CACHE_TOKEN: ${{ secrets.MOON_REMOTE_CACHE_TOKEN }}
+  NO_COLOR: "1"
+
+jobs:
+  integration:
+    name: CLI integration (${{ matrix.shard }}/8)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.prepared_release && github.sha || inputs.revision }}
+
+      - name: Load prepared Release
+        if: ${{ inputs.prepared_release }}
+        uses: ./.github/actions/release-checkout
+        with:
+          revision: ${{ inputs.revision }}
+
+      - name: Git identity for the fixtures
+        run: |
+          git config --global user.name "kojo ci"
+          git config --global user.email "ci@kojo.invalid"
+
+      - name: Setup toolchain
+        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        with:
+          auto-install: true
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build packaged Console
+        run: moon run kojo:build
+
+      # Each Host runs one file at a time. CI and release checks use identical cache keys.
+      - name: CLI integration tests
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -o pipefail
+          mkdir -p .release-evidence/logs
+          moon run kojo:test-integration -- --reporter=verbose --shard="$SHARD/8" 2>&1 | tee ".release-evidence/logs/kojo-integration-$SHARD.log"
+
+      - name: Upload integration log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cli-integration-${{ matrix.shard }}
+          path: .release-evidence/logs/kojo-integration-${{ matrix.shard }}.log
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7

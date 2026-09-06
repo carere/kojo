@@ -97,6 +97,10 @@ the ignored root `.env` file; Proto loads it when Moon starts. GitHub Actions us
 secret with the same name. Without a token, Moon uses its local cache. Release checks reuse valid
 Moon cache results. Changed task inputs invalidate their cached results.
 
+CI runs CLI integration tests in eight shards on separate Hosts, alongside core checks. Each shard
+runs one test file at a time. The required `Test` status accepts only a successful core job and all
+eight shards. Release checks use the same shard commands and collect all eight logs as evidence.
+
 The main paths are:
 
 - `apps/console/`: the Console.

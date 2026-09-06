@@ -200,9 +200,57 @@ describe("the Daemon contract cutover", () => {
       .map((match) => match[1] ?? "")
       .filter((block) => block.includes("| tee"));
 
-    expect(pipedRunBlocks).toHaveLength(4);
-    for (const block of pipedRunBlocks.slice(0, 3)) expect(block).toContain("set -o pipefail");
-    expect(pipedRunBlocks[3]).toContain(["status=$", "{PIPESTATUS[0]}"].join(""));
+    expect(pipedRunBlocks).toHaveLength(3);
+    for (const block of pipedRunBlocks.slice(0, 2)) expect(block).toContain("set -o pipefail");
+    expect(pipedRunBlocks[2]).toContain(["status=$", "{PIPESTATUS[0]}"].join(""));
+  });
+
+  it("requires every integration shard before CI success and release evidence", () => {
+    const readWorkflow = (name: string) =>
+      Bun.YAML.parse(
+        readFileSync(
+          new URL(`../../../../../.github/workflows/${name}.yml`, import.meta.url),
+          "utf8",
+        ),
+      ) as {
+        jobs: Record<
+          string,
+          {
+            name?: string;
+            if?: string;
+            needs?: string | string[];
+            uses?: string;
+            strategy?: { "fail-fast": boolean; matrix: { shard: number[] } };
+            steps?: Array<{ name?: string; run?: string; with?: Record<string, unknown> }>;
+          }
+        >;
+      };
+    const ci = readWorkflow("ci");
+    const release = readWorkflow("release-checks");
+    const shards = readWorkflow("cli-integration");
+    expect(ci.jobs["cli-integration"]?.uses).toBe("./.github/workflows/cli-integration.yml");
+    expect(release.jobs["cli-integration"]?.uses).toBe(ci.jobs["cli-integration"]?.uses);
+    expect(ci.jobs.required?.name).toBe("Test");
+    expect(ci.jobs.required?.if).toBe(`\${{ always() }}`);
+    expect(ci.jobs.required?.needs).toEqual(["ci", "cli-integration"]);
+    expect(ci.jobs.required?.steps?.[0]?.run).toBe(
+      'test "$CORE_RESULT" = success && test "$INTEGRATION_RESULT" = success',
+    );
+    expect(release.jobs.ci?.needs).toBe("cli-integration");
+    expect(shards.jobs.integration?.strategy).toEqual({
+      "fail-fast": false,
+      matrix: { shard: [1, 2, 3, 4, 5, 6, 7, 8] },
+    });
+    const execute = shards.jobs.integration?.steps?.find(
+      (step) => step.name === "CLI integration tests",
+    );
+    expect(execute?.run).toContain("set -o pipefail");
+    expect(execute?.run).toContain('--shard="$SHARD/8"');
+    const combine = release.jobs.ci?.steps?.find(
+      (step) => step.name === "Combine integration logs",
+    );
+    expect(combine?.run).toContain("for shard in 1 2 3 4 5 6 7 8; do");
+    expect(combine?.run).toContain('test -s ".release-evidence/logs/kojo-integration-$shard.log"');
   });
 
   it("uploads the hidden core release evidence from its exact collection path", () => {

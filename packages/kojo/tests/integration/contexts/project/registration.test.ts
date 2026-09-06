@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import type { OperationReceipt } from "@carere/kojo-client-contracts/contexts/client/contracts/operation";
 import type {
@@ -31,6 +32,7 @@ import { SqliteResourceLeaseRepository } from "../../../../src/contexts/project/
 import { SqliteRunRepository } from "../../../../src/contexts/workflow/adapters/SqliteRunRepository.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
 import { sendPreparedMutation } from "../../../support/daemon/preparedMutation.ts";
+import { linkEngine } from "../../../support/linkEngine.ts";
 
 const roots: string[] = [];
 const daemons: RunningDaemon[] = [];
@@ -154,6 +156,11 @@ describe("durable Project registration", () => {
     execFileSync("git", ["-C", missing, "worktree", "add", "-b", "linked", linked]);
     const invalid = repository(parent, "invalid-factory");
     mkdirSync(join(invalid, ".kojo"));
+    // Validate the incomplete Factory with the workspace Runtime, never an ambient cached package.
+    linkEngine({
+      root: invalid,
+      packageRoot: fileURLToPath(new URL("../../../../", import.meta.url)),
+    });
 
     const firstRequest = mutation(daemon, "request-one", missing);
     expect((await prepare(daemon, firstRequest)).status).toBe(201);
@@ -210,6 +217,11 @@ describe("durable Project registration", () => {
     expect((await prepare(daemon, collision)).status).toBe(409);
 
     const snapshot = (await (await call(daemon, "/api/v1/projects")).json()) as ProjectSnapshot;
+    const invalidProject = snapshot.projects.find((project) => project.label === "invalid-factory");
+    expect(invalidProject, JSON.stringify(invalidProject)).toMatchObject({
+      factoryState: "invalid",
+      refreshState: "current",
+    });
     expect(snapshot.counts).toMatchObject({
       total: 3,
       available: 3,

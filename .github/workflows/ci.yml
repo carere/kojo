@@ -23,8 +23,7 @@ env:
 
 jobs:
   ci:
-    # The name branch protection matches on. Changing it silently un-gates `main`.
-    name: Test
+    name: Core checks
     runs-on: ubuntu-latest
     # Tests start real processes and build the Console. Allow 30 minutes for slow runners.
     timeout-minutes: 30
@@ -103,7 +102,23 @@ jobs:
       - name: Public types and package build
         run: moon run kojo:check-public-types kojo:build
 
-      # CLI integration tests exercise real adapters and processes.
-      - name: CLI integration tests
-        run: |
-          moon run kojo:test-integration -- --reporter=verbose
+  cli-integration:
+    uses: ./.github/workflows/cli-integration.yml
+    secrets:
+      MOON_REMOTE_CACHE_TOKEN: ${{ secrets.MOON_REMOTE_CACHE_TOKEN }}
+    with:
+      revision: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+  required:
+    # Keep the branch protection status and fail it if any required job fails or is skipped.
+    name: Test
+    if: ${{ always() }}
+    needs: [ci, cli-integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Require every check
+        env:
+          CORE_RESULT: ${{ needs.ci.result }}
+          INTEGRATION_RESULT: ${{ needs.cli-integration.result }}
+        run: test "$CORE_RESULT" = success && test "$INTEGRATION_RESULT" = success

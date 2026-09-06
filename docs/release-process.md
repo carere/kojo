@@ -29,6 +29,8 @@ results; release workflows do not force test execution.
 Beta, RC, and stable also run native systemd, shipped systemd, and shipped macOS evidence.
 The complete evidence index must accept every required check at the prepared version commit.
 Normal pull request and main CI run the core checks; they do not run full Host evidence.
+CLI integration tests run in eight shards on separate Hosts in CI and Release checks. Every shard
+must pass. Full Release evidence combines all eight logs before checking the named test results.
 
 Automated release evidence excludes UI-01, UI-02, UI-03, and RELEASE-02 while browser testing is
 deferred. ACCESS-04 retains Artifact publication integration coverage. These UI checks are not

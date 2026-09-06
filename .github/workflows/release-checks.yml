@@ -26,7 +26,16 @@ env:
   MOON_REMOTE_CACHE_TOKEN: ${{ secrets.MOON_REMOTE_CACHE_TOKEN }}
 
 jobs:
+  cli-integration:
+    uses: ./.github/workflows/cli-integration.yml
+    secrets:
+      MOON_REMOTE_CACHE_TOKEN: ${{ secrets.MOON_REMOTE_CACHE_TOKEN }}
+    with:
+      revision: ${{ inputs.revision }}
+      prepared_release: true
+
   ci:
+    needs: cli-integration
     name: Test
     runs-on: ubuntu-latest
     # Tests start real processes and build the Console. Allow 30 minutes for slow runners.
@@ -113,11 +122,21 @@ jobs:
       - name: Public types and package build
         run: moon run kojo:check-public-types kojo:build
 
-      # CLI integration tests exercise real adapters and processes.
-      - name: CLI integration tests
+      - name: Download integration logs
+        if: ${{ inputs.full_evidence }}
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: cli-integration-*
+          path: .release-evidence/logs
+          merge-multiple: true
+
+      - name: Combine integration logs
+        if: ${{ inputs.full_evidence }}
         run: |
-          set -o pipefail
-          moon run kojo:test-integration -- --reporter=verbose 2>&1 | tee .release-evidence/logs/kojo-integration.log
+          for shard in 1 2 3 4 5 6 7 8; do
+            test -s ".release-evidence/logs/kojo-integration-$shard.log"
+          done
+          cat .release-evidence/logs/kojo-integration-{1,2,3,4,5,6,7,8}.log > .release-evidence/logs/kojo-integration.log
 
       - name: Record core release evidence
         if: ${{ inputs.full_evidence }}
