@@ -5,6 +5,10 @@ dependsOn:
   - kojo-client-contracts
 
 tasks:
+  tsc:
+    outputs:
+      - /.moon/cache/types/apps/console
+
   # The front end alone. The API comes from the per-user Daemon, which the Vite config proxies to.
   dev:
     command: vite dev
@@ -20,6 +24,8 @@ tasks:
       - vite.config.ts
       - tsconfig.json
       - package.json
+      - /packages/kojo-client-contracts/src/**/*
+      - /packages/kojo-client-contracts/package.json
     outputs:
       - "/packages/kojo/console"
 
@@ -33,5 +39,13 @@ tasks:
       - src/**/*
       - tests/**/*
       - playwright.config.ts
-    options:
-      cache: false
+      - /packages/kojo/src/**/*
+      - /packages/kojo/tests/support/daemon/**/*
+      - /packages/kojo/package.json
+      - /packages/kojo-runtime/src/**/*
+      - /packages/kojo-runtime/package.json
+      - /packages/kojo-runtime/runtime-manifest.json
+      - /packages/kojo-client-contracts/src/**/*
+      - /packages/kojo-client-contracts/package.json
+      - /packages/kojo-runner-contracts/src/**/*
+      - /packages/kojo-runner-contracts/package.json

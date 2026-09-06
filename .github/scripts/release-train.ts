@@ -406,7 +406,9 @@ const assertManifest = (
 
 const registryMetadata = async (name: string): Promise<RegistryMetadata | undefined> => {
   const response = await fetch(`${registry}/${encodeURIComponent(name)}`, {
-    headers: { accept: "application/vnd.npm.install-v1+json" },
+    // Full metadata is authoritative for publication and integrity checks. The abbreviated
+    // install view can still return 404 for a newly published package.
+    headers: { accept: "application/json" },
   });
   if (response.status === 404) return undefined;
   if (!response.ok) throw new Error(`Registry lookup for ${name} failed with ${response.status}.`);

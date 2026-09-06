@@ -76,8 +76,19 @@ describe("complete breaking release evidence", () => {
     expect(result.supportedHosts).toEqual(["darwin", "linux-systemd"]);
   });
 
+  it("accepts matching cached test observations", () => {
+    const subject = input();
+    const result = completeReleaseEvidence({
+      ...subject,
+      tiers: {
+        ...subject.tiers,
+        "kojo-integration": { ...tier("kojo-integration"), cacheHit: true },
+      },
+    });
+    expect(result.records).toHaveLength(requiredReleaseChecks.length);
+  });
+
   it.each([
-    ["cache hit", { cacheHit: true }, "used a cache hit"],
     ["zero tests", { loaded: 0, passed: 0, skipped: 0, namedSkips: [] }, "loaded zero tests"],
     [
       "all skipped tests",
@@ -245,6 +256,25 @@ describe("loaded release tests", () => {
     expect(result).toMatchObject({ loaded: 7, passed: 6, skipped: 1 });
     expect(result.namedSkips).toEqual(["tests/unit/example.test.ts > current skipped behavior"]);
     expect(result.tests).toHaveLength(6);
+  });
+
+  it("records a Moon cache hit and retains the replayed named results", () => {
+    const result = loadedTestsFromLog(
+      "kojo-unit",
+      revision,
+      { os: "linux" },
+      "unit.log",
+      [
+        "kojo:test | ✓ tests/unit/example.test.ts > current behavior 2ms",
+        "kojo:test | Tests 1 passed (1)",
+        "▮▮▮▮ kojo:test (cached, 12345678)",
+      ].join("\n"),
+    );
+    expect(result.cacheHit).toBe(true);
+    expect(result.tests).toEqual([
+      { path: "tests/unit/example.test.ts", name: "current behavior", status: "passed" },
+    ]);
+    expect(result.loaded).toBe(1);
   });
 
   it("counts Playwright tests and rejects zero-test output", () => {

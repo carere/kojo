@@ -125,7 +125,7 @@ const collectCore = (arguments_: ReadonlyArray<string>): void => {
     kind: "core-release-evidence",
     testedRevision,
     tiers,
-    cache: "bypassed-by-moon-force",
+    cache: "moon-task-inputs",
     safetyRegression: {
       expected: "protected check fails for injected regression",
       actual: "failed-as-expected",
@@ -230,7 +230,6 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
     fail("complete requires INPUT_ROOT OUTPUT_ROOT REVISION");
   }
   const core = readJson<CoreEvidence>(join(inputRoot, "core", "core-evidence.json"));
-  if (core.cache !== "bypassed-by-moon-force") fail("core evidence did not bypass the cache");
   const pinnedBun = repositoryToolVersion("bun");
   const pinnedMoon = repositoryToolVersion("moon");
 

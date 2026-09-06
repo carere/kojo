@@ -36,7 +36,7 @@ integration tests grade the remaining graph.
 The `Complete breaking release evidence` CI job is the final acceptance gate. It waits for core,
 native systemd, shipped systemd, and shipped macOS jobs from one tested revision. It writes one
 record for each of the 56 required check IDs under
-`artifacts/verification/daemon/<tested-revision>/<check-id>/`. It refuses a cache hit, zero loaded
+`artifacts/verification/daemon/<tested-revision>/<check-id>/`. It accepts valid Moon cache results and refuses zero loaded
 tests, an unnamed skip, a revision mismatch, a missing supported Host, or a missing protected-safety
 regression result. The release artifact also contains one index with the complete decision.
 

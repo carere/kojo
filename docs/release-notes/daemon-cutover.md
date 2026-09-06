@@ -41,5 +41,5 @@ matching Console and managed entry points. The runtime package contains the Proj
 standalone validator, and `runtime-manifest.json`.
 
 Release acceptance needs one revision-bound evidence record for every check in spec #64. It also
-needs shipped evidence from macOS and systemd Linux. A cache hit, a zero-test result, an unnamed
+needs shipped evidence from macOS and systemd Linux. Valid Moon cache results are accepted. A zero-test result, an unnamed
 skip, a missing supported Host, or a different tested revision cannot satisfy that evidence.

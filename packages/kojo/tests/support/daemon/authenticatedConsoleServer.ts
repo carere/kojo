@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Effect } from "effect";
 import { startDaemon } from "../../../src/contexts/daemon/adapters/DaemonOwner.ts";
@@ -41,7 +41,17 @@ if (fixture === "projects") {
     writeFileSync(join(project, "README.md"), `${state}\n`);
     execFileSync("git", ["-C", project, "add", "README.md"]);
     execFileSync("git", ["-C", project, "commit", "-m", "test: initial"]);
-    if (state === "invalid") mkdirSync(join(project, ".kojo"));
+    if (state === "invalid") {
+      mkdirSync(join(project, ".kojo"));
+      // Pin validation to this workspace instead of Bun's ambient package cache.
+      symlinkSync(
+        resolve(import.meta.dir, "../../../../../node_modules"),
+        join(project, "node_modules"),
+        "dir",
+      );
+      // Use malformed metadata so the invalid observation does not depend on missing packages.
+      writeFileSync(join(project, ".kojo", "factory.json"), "{invalid json\n");
+    }
     const requestId = `browser-project-${index}`;
     const mutation = {
       mutationVersion: 1,

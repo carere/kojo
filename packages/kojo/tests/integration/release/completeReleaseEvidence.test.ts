@@ -77,7 +77,7 @@ describe("the complete breaking release evidence executable", () => {
     const output = join(root, "output");
     writeJson(join(input, "core", "core-evidence.json"), {
       testedRevision: revision,
-      cache: "bypassed-by-moon-force",
+      cache: "moon-task-inputs",
       tiers: {
         "contract-runtime": loaded("contract-runtime"),
         "kojo-unit": loaded("kojo-unit"),

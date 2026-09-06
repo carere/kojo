@@ -69,6 +69,36 @@ const execute = async (
   return { status, stdout, stderr };
 };
 
+describe("npm registry verification", () => {
+  it("verifies public archives through full metadata when the install view is absent", async () => {
+    const f = fixture();
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        if (request.headers.get("accept") !== "application/json") {
+          return new Response(null, { status: 404 });
+        }
+        const name = decodeURIComponent(new URL(request.url).pathname.slice(1));
+        const pkg = f.manifest.packages.find((candidate) => candidate.name === name);
+        return Response.json({
+          versions: { [f.manifest.version]: { dist: { integrity: pkg?.integrity } } },
+        });
+      },
+    });
+    try {
+      const env = { KOJO_NPM_REGISTRY: server.url.origin };
+      const result = await execute(["verify-published", f.path], env);
+      expect(result.status, result.stderr).toBe(0);
+      expect((await execute(["auth-mode", f.manifest.version], env)).stdout.trim()).toBe("oidc");
+      const reused = await execute(["assert-unpublished", f.manifest.version], env);
+      expect(reused.status).not.toBe(0);
+      expect(reused.stderr).toContain("already exists");
+    } finally {
+      server.stop(true);
+    }
+  }, 45_000);
+});
+
 describe("npm publication authentication", () => {
   it("exchanges a GitHub identity for a separate npm credential per package", async () => {
     const f = fixture();

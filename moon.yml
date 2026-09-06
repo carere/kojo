@@ -13,16 +13,22 @@ dependsOn:
   - kojo-runner-contracts
   - kojo-runtime
 
-# `apps/console` cannot be added to `dependsOn` above: moon's layer constraint refuses one
-# `application` depending on another, and the Console is an application. So the mechanism the comment
-# above relies on cannot cover it, and the failure it warns about came back in exactly the shape it
-# describes — measured while ticket 27 landed: `moon run root:tsc` rewrote the references to
-# `packages/kojo` alone, and the next `bun tsc --build --force --verbose` printed "Projects in this
-# build: packages/kojo, ." and exited 0 with the whole Console, TSX and all, compiled by nothing.
-#
-# So the root `tsconfig.json` is hand-held from here on. It is committed, it lists every project that
-# has one, and nothing rewrites it. Adding a project now means adding a reference by hand — which is
-# one line, and is visible in a diff, unlike a check that silently stops checking.
+# The root reference list also includes the Console application.
 toolchains:
   typescript:
     syncProjectReferences: false
+
+tasks:
+  check:
+    inputs:
+      - /apps/**/*
+      - /packages/**/*
+      - /.github/**/*
+      - /.kojo/**/*
+      - /*.json
+  tsc:
+    deps:
+      - console:tsc
+    outputs: []
+    options:
+      mergeOutputs: replace

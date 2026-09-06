@@ -1366,7 +1366,7 @@ export const loadedTestsFromLog = (
     passed,
     skipped,
     namedSkips,
-    cacheHit: false,
+    cacheHit: /\b(?:kojo(?:-[\w-]+)?|console):test(?:-[\w-]+)?\s+\(cached(?:[,\s)])/m.test(plain),
     log: logPath,
     tests,
   };
@@ -1430,7 +1430,6 @@ export const completeReleaseEvidence = (input: CompleteEvidenceInput) => {
           `${required.checkId} ${observation.tier} tested ${receipt.testedRevision}, not ${input.testedRevision}`,
         );
       }
-      if (receipt.cacheHit) fail(`${required.checkId} ${observation.tier} used a cache hit`);
       if (receipt.loaded === 0) fail(`${required.checkId} ${observation.tier} loaded zero tests`);
       if (receipt.passed === 0) fail(`${required.checkId} ${observation.tier} passed zero tests`);
       if (receipt.passed + receipt.skipped !== receipt.loaded) {

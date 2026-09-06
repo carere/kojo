@@ -5,15 +5,31 @@ dependsOn:
   - kojo-runner-contracts
 
 tasks:
+  tsc:
+    outputs:
+      - /.moon/cache/types/packages/kojo-runtime
   test:
     command: bun node_modules/.bin/vitest run --project unit
     inputs:
       - src/**/*
+      - tests/support/**/*
+      - runtime-manifest.json
+      - package.json
+      - tsconfig.json
+      - /packages/kojo-runner-contracts/src/**/*
+      - /packages/kojo-runner-contracts/package.json
       - tests/unit/**/*
       - vitest.config.ts
   test-integration:
     command: bun node_modules/.bin/vitest run --project integration
     inputs:
       - src/**/*
+      - tests/support/**/*
+      - runtime-manifest.json
+      - package.json
+      - tsconfig.json
+      - /packages/kojo-runner-contracts/src/**/*
+      - /packages/kojo-runner-contracts/package.json
       - tests/integration/**/*
+      - tests/fixtures/**/*
       - vitest.config.ts

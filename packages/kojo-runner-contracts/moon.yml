@@ -2,9 +2,14 @@ layer: library
 language: typescript
 
 tasks:
+  tsc:
+    outputs:
+      - /.moon/cache/types/packages/kojo-runner-contracts
   test:
     command: bun node_modules/.bin/vitest run --project unit
     inputs:
       - src/**/*
+      - package.json
+      - tsconfig.json
       - tests/unit/**/*
       - vitest.config.ts
