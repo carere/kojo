@@ -17,4 +17,3 @@ gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" \
 gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" \
   --jq '.jobs[] | select(.name == "Accept Release" and .conclusion == "success") | .id' | grep -q '[0-9]'
 bun .github/scripts/release-train.ts verify-published "$manifest"
-bun .github/scripts/release-jsr.ts verify "$manifest"

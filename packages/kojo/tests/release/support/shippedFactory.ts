@@ -28,7 +28,6 @@ const write = (path: string, content: string): void => {
 const prepare = (): void => {
   mkdirSync(root, { recursive: true });
   const runtime = packageTarball("carere-kojo-runtime");
-  const contracts = packageTarball("carere-kojo-runner-contracts");
   write(
     join(root, "package.json"),
     `${JSON.stringify(
@@ -41,7 +40,6 @@ const prepare = (): void => {
           "@carere/kojo-runtime": `file:${runtime}`,
           effect: "4.0.0-rc.112",
         },
-        overrides: { "@carere/kojo-runner-contracts": `file:${contracts}` },
       },
       undefined,
       2,

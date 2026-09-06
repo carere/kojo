@@ -1,13 +1,5 @@
 [
   {
-    "directory": "kojo-client-contracts",
-    "name": "@carere/kojo-client-contracts"
-  },
-  {
-    "directory": "kojo-runner-contracts",
-    "name": "@carere/kojo-runner-contracts"
-  },
-  {
     "directory": "kojo-runtime",
     "name": "@carere/kojo-runtime"
   },

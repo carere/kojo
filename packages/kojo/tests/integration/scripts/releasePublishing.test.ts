@@ -51,16 +51,15 @@ const fixture = () => {
   chmodSync(publisher, 0o755);
   return { directory, path, manifest };
 };
-const execute = async (
-  args: string[],
-  env: Record<string, string>,
-  script = "release-train.ts",
-) => {
-  const child = Bun.spawn([process.execPath, join(root, ".github/scripts", script), ...args], {
-    env: { ...process.env, ...env },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+const execute = async (args: string[], env: Record<string, string>) => {
+  const child = Bun.spawn(
+    [process.execPath, join(root, ".github/scripts/release-train.ts"), ...args],
+    {
+      env: { ...process.env, ...env },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
   const [status, stdout, stderr] = await Promise.all([
     child.exited,
     new Response(child.stdout).text(),
@@ -135,12 +134,7 @@ describe("npm publication authentication", () => {
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line));
-      expect(published.map((entry) => entry.token)).toEqual([
-        "temporary-1",
-        "temporary-2",
-        "temporary-3",
-        "temporary-4",
-      ]);
+      expect(published.map((entry) => entry.token)).toEqual(["temporary-1", "temporary-2"]);
       expect(published.every((entry) => entry.args.includes("candidate"))).toBe(true);
     } finally {
       server.stop(true);
@@ -194,47 +188,6 @@ describe("npm publication authentication", () => {
       expect((await execute(["auth-mode", "0.1.0-beta.1"], env)).status).not.toBe(0);
       absent = false;
       expect((await execute(["auth-mode", "0.1.0-beta.1"], env)).stdout.trim()).toBe("oidc");
-    } finally {
-      server.stop(true);
-    }
-  });
-});
-
-describe("JSR source verification", () => {
-  it("checks every source hash and refuses absent package entries", async () => {
-    const f = fixture();
-    const jsr = ["kojo-client-contracts", "kojo-runner-contracts", "kojo-runtime"].map(
-      (directory) => ({
-        directory,
-        name: `@carere/${directory}`,
-        version: f.manifest.version,
-        files: { "/jsr.json": "a".repeat(64), "/src/example.ts": "b".repeat(64) },
-      }),
-    );
-    writeFileSync(f.path, JSON.stringify({ ...f.manifest, jsr }));
-    let changed = false;
-    const server = Bun.serve({
-      port: 0,
-      fetch() {
-        return Response.json({
-          manifest: {
-            "/jsr.json": { checksum: `sha256-${"a".repeat(64)}` },
-            "/src/example.ts": { checksum: `sha256-${(changed ? "c" : "b").repeat(64)}` },
-          },
-        });
-      },
-    });
-    try {
-      const env = { KOJO_JSR_REGISTRY: server.url.origin };
-      expect((await execute(["verify", f.path], env, "release-jsr.ts")).status).toBe(0);
-      changed = true;
-      expect((await execute(["verify", f.path], env, "release-jsr.ts")).stderr).toContain(
-        "differs from the validated source",
-      );
-      writeFileSync(f.path, JSON.stringify(f.manifest));
-      expect((await execute(["verify", f.path], env, "release-jsr.ts")).stderr).toContain(
-        "invalid JSR package set",
-      );
     } finally {
       server.stop(true);
     }

@@ -66,7 +66,6 @@ tasks:
       - /docs/release-notes/**/*
       - /docs/release-process.md
       - /packages/*/package.json
-      - /packages/*/jsr.json
       - /packages/kojo-client-contracts/src/**/*
       - /packages/kojo-runner-contracts/src/**/*
       - /packages/kojo-runtime/src/**/*
@@ -99,6 +98,9 @@ tasks:
     deps:
       - console:build
     inputs:
+      - /.github/release-packages.json
+      - /.github/scripts/release-train.ts
+      - /.github/scripts/stage-release-package.ts
       - /README.md
       - /.release-train/packages/**/*
       - $KOJO_SHIPPED_MACOS_EVIDENCE

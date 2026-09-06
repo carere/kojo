@@ -14,11 +14,28 @@ describe("the Release train", () => {
       jobs: Record<string, { needs?: string[]; environment?: string }>;
     };
     expect(Object.keys(workflow.on)).toEqual(["workflow_dispatch"]);
-    expect(workflow.jobs["publish-npm"]?.needs).toEqual(["prepare", "checks", "jsr-checks"]);
+    expect(workflow.jobs["publish-npm"]?.needs).toEqual(["prepare", "checks"]);
     expect(workflow.jobs["validate-public"]?.needs).toContain("publish-npm");
-    expect(workflow.jobs["publish-jsr"]?.needs).toContain("validate-public");
-    expect(workflow.jobs.accept?.needs).toContain("validate-jsr");
-    expect(workflow.jobs["publish-jsr"]?.environment).toContain("npm-production");
+    expect(workflow.jobs.accept?.needs).toEqual(["prepare", "validate-public"]);
+    expect(workflow.jobs.accept?.environment).toBe(
+      `\${{ needs.prepare.outputs.stage == 'stable' && 'npm-production' || 'npm-prerelease' }}`,
+    );
+    expect(workflow.jobs["dry-run"]?.needs).toEqual(["checks"]);
+    expect(Object.keys(workflow.jobs).some((name) => name.includes("jsr"))).toBe(false);
+  });
+
+  it("uses the checked npm archives in each publication and acceptance job", () => {
+    const workflow = Bun.YAML.parse(repositoryFile(".github/workflows/release.yml")) as {
+      jobs: Record<string, { steps: Array<{ uses?: string; with?: { name?: string } }> }>;
+    };
+    for (const job of ["publish-npm", "validate-public", "accept"]) {
+      const downloads = workflow.jobs[job]?.steps.filter((step) =>
+        step.uses?.startsWith("actions/download-artifact@"),
+      );
+      expect(downloads?.[0]?.with?.name).toBe("release-candidate");
+    }
+    const checks = repositoryFile(".github/workflows/release-checks.yml");
+    expect(checks).toContain("name: release-candidate");
   });
 
   it("limits full Host evidence to Release checks", () => {
@@ -91,10 +108,6 @@ describe("the Release train", () => {
         resolve(fixture, "bun.lock"),
         '{\n  "lockfileVersion": 1,\n  "workspaces": {\n    "packages/kojo-runtime": {\n      "name": "@carere/kojo-runtime",\n      "version": "0.0.0"\n    }\n  }\n}\n',
       );
-      writeFileSync(
-        resolve(runtime, "jsr.json"),
-        JSON.stringify({ name: "@carere/kojo-runtime", version: "0.0.0", exports: {} }),
-      );
       expect(spawnSync("git", ["init", "--initial-branch=main"], { cwd: fixture }).status).toBe(0);
       expect(spawnSync("git", ["add", "."], { cwd: fixture }).status).toBe(0);
 
@@ -110,29 +123,14 @@ describe("the Release train", () => {
         JSON.parse(readFileSync(resolve(runtime, "runtime-manifest.json"), "utf8")).packageVersion,
       ).toBe(targetVersion);
       expect(readFileSync(resolve(fixture, "bun.lock"), "utf8")).toContain(targetVersion);
-      expect(JSON.parse(readFileSync(resolve(runtime, "jsr.json"), "utf8")).version).toBe(
-        targetVersion,
-      );
       expect(spawnSync("git", ["diff", "--cached", "--quiet"], { cwd: fixture }).status).toBe(1);
     } finally {
       rmSync(fixture, { recursive: true, force: true });
     }
   });
 
-  it("keeps the same deep library exports on npm and JSR", () => {
-    for (const directory of ["kojo-client-contracts", "kojo-runner-contracts", "kojo-runtime"]) {
-      const npm = JSON.parse(repositoryFile(`packages/${directory}/package.json`));
-      const jsr = JSON.parse(repositoryFile(`packages/${directory}/jsr.json`));
-      expect(jsr.name).toBe(npm.name);
-      expect(jsr.version).toBe(npm.version);
-      expect(jsr.exports).toEqual(npm.exports);
-    }
-  });
-
   it("keeps one machine-readable package order", () => {
     expect(JSON.parse(repositoryFile(".github/release-packages.json"))).toEqual([
-      { directory: "kojo-client-contracts", name: "@carere/kojo-client-contracts" },
-      { directory: "kojo-runner-contracts", name: "@carere/kojo-runner-contracts" },
       { directory: "kojo-runtime", name: "@carere/kojo-runtime" },
       { directory: "kojo", name: "@carere/kojo" },
     ]);
@@ -145,6 +143,6 @@ describe("the Release train", () => {
     expect(verification).toContain('git rev-list -n 1 "$release_tag"');
     expect(verification).toContain('.name == "Accept Release"');
     expect(verification).toContain('release-train.ts verify-published "$manifest"');
-    expect(verification).toContain('release-jsr.ts verify "$manifest"');
+    expect(verification).not.toContain("release-jsr");
   });
 });

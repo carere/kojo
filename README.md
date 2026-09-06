@@ -5,7 +5,9 @@ is one executable entry in that Factory. A Project is a registered repository. O
 owns Run execution, Gate application, the Console, and all correctness storage.
 
 Factory authors import the runtime from `@carere/kojo-runtime`. The `@carere/kojo` package owns
-only the CLI, scaffolding, and Daemon lifecycle.
+only the CLI, scaffolding, and Daemon lifecycle. These are the only published packages.
+The client and Runner contract packages stay private in the workspace. Release preparation includes
+the required contract source inside each public package.
 
 ## Design
 
@@ -24,7 +26,7 @@ The current release is a breaking cutover from repository-local execution to one
 See the [Daemon cutover release notes](docs/release-notes/daemon-cutover.md).
 
 Maintainers launch the GitHub `release` workflow to create alpha, beta, Release Candidate, and stable
-versions. See the [Release process](docs/release-process.md) for inputs, evidence, and npm/JSR setup.
+versions. See the [Release process](docs/release-process.md) for inputs, evidence, and npm setup.
 
 ```bash
 bun add -g @carere/kojo
