@@ -16,7 +16,6 @@ import {
   assertPrereleaseFollowsCandidate,
   assertReleaseStage,
   assertStableFollowsCandidate,
-  parseReleaseVersion,
 } from "../../packages/kojo/src/scripts/release/ReleaseVersion.ts";
 import { stageReleasePackage } from "./stage-release-package.ts";
 
@@ -433,7 +432,7 @@ const waitForPublishedVersion = async (
   return undefined;
 };
 
-const publishRelease = async (manifestPath: string, tag: string): Promise<void> => {
+const publishRelease = async (manifestPath: string): Promise<void> => {
   const manifest = readManifest(manifestPath);
   assertManifest(manifest, manifest.version, manifest.stage);
   for (const releasePackage of manifest.packages) {
@@ -444,41 +443,33 @@ const publishRelease = async (manifestPath: string, tag: string): Promise<void> 
       statSync(archive).size !== releasePackage.size
     )
       throw new Error(`${releasePackage.name} archive changed after validation.`);
-    let token: string | undefined;
-    if (process.env.RELEASE_NPM_AUTH === "bootstrap") {
-      if (manifest.stage !== "alpha")
-        throw new Error("Bootstrap authentication is limited to alpha.");
-      token = process.env.NPM_TOKEN;
-    } else {
-      if (process.env.RELEASE_NPM_AUTH !== "oidc")
-        throw new Error("Select bootstrap or oidc authentication.");
-      const requestUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
-      const requestToken = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
-      if (!requestUrl || !requestToken)
-        throw new Error("GitHub OIDC permission id-token: write is required.");
-      const url = new URL(requestUrl);
-      url.searchParams.set("audience", "npm:registry.npmjs.org");
-      const identityResponse = await fetch(url, {
-        headers: { authorization: `Bearer ${requestToken}` },
-      });
-      if (!identityResponse.ok)
-        throw new Error(`GitHub OIDC request failed (${identityResponse.status}).`);
-      const identity = (await identityResponse.json()) as { value: string };
-      const exchange = await fetch(
-        `${registry}/-/npm/v1/oidc/token/exchange/package/${encodeURIComponent(releasePackage.name)}`,
-        {
-          method: "POST",
-          headers: { authorization: `Bearer ${identity.value}` },
-        },
+    const requestUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+    const requestToken = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+    if (!requestUrl || !requestToken)
+      throw new Error("GitHub OIDC permission id-token: write is required.");
+    const url = new URL(requestUrl);
+    url.searchParams.set("audience", "npm:registry.npmjs.org");
+    const identityResponse = await fetch(url, {
+      headers: { authorization: `Bearer ${requestToken}` },
+    });
+    if (!identityResponse.ok)
+      throw new Error(`GitHub OIDC request failed (${identityResponse.status}).`);
+    const identity = (await identityResponse.json()) as { value: string };
+    const exchange = await fetch(
+      `${registry}/-/npm/v1/oidc/token/exchange/package/${encodeURIComponent(releasePackage.name)}`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${identity.value}` },
+      },
+    );
+    if (!exchange.ok)
+      throw new Error(
+        `npm OIDC exchange failed for ${releasePackage.name} (${exchange.status}). Check its Trusted Publisher settings.`,
       );
-      if (!exchange.ok)
-        throw new Error(
-          `npm OIDC exchange failed for ${releasePackage.name} (${exchange.status}). Check its Trusted Publisher settings.`,
-        );
-      token = ((await exchange.json()) as { token: string }).token;
-    }
+    const token = ((await exchange.json()) as { token: string }).token;
     if (!token) throw new Error("npm publication credential is missing.");
     if (process.env.GITHUB_ACTIONS === "true") process.stdout.write(`::add-mask::${token}\n`);
+    const tag = manifest.stage === "stable" ? "latest" : manifest.stage;
     run(["bun", "publish", "--access", "public", "--tag", tag, archive], {
       env: { ...process.env, NPM_CONFIG_TOKEN: token },
     });
@@ -533,23 +524,13 @@ const verifyPublished = async (manifest: ReleaseManifest): Promise<void> => {
 
 function usage(): never {
   throw new Error(
-    "Usage: release-train.ts validate-prerelease <stage> <version> [previous] | validate-stable <version> <rc-version> | validate-stable-source <manifest> <revision> | pack <version> <archive-directory> | create-manifest <stage> <version> <revision> <archive-directory> <output> | verify-manifest <manifest> <stage> <version> [revision] | auth-mode <version> | assert-unpublished <version> | publish <manifest> <tag> | verify-published <manifest> | install <manifest> <project-directory> <global-directory>",
+    "Usage: release-train.ts validate-prerelease <stage> <version> [previous] | validate-stable <version> <rc-version> | validate-stable-source <manifest> <revision> | pack <version> <archive-directory> | create-manifest <stage> <version> <revision> <archive-directory> <output> | verify-manifest <manifest> <stage> <version> [revision] | assert-unpublished <version> | publish <manifest> | verify-published <manifest> | install <manifest> <project-directory> <global-directory>",
   );
 }
 
 const [command, ...arguments_] = Bun.argv.slice(2);
 
 switch (command) {
-  case "auth-mode": {
-    const missing = [];
-    for (const { name } of publicPackages)
-      if ((await registryMetadata(name)) === undefined) missing.push(name);
-    const mode = missing.length > 0 ? "bootstrap" : "oidc";
-    if (mode === "bootstrap" && parseReleaseVersion(arguments_[0] ?? "").stage !== "alpha")
-      throw new Error("Only alpha may create the initial npm packages.");
-    process.stdout.write(`${mode}\n`);
-    break;
-  }
   case "validate-prerelease": {
     const [stage, version, previous] = arguments_;
     if (stage === undefined || version === undefined) usage();
@@ -606,9 +587,9 @@ switch (command) {
     break;
   }
   case "publish": {
-    const [path, tag] = arguments_;
-    if (path === undefined || tag === undefined) usage();
-    await publishRelease(path, tag);
+    const [path] = arguments_;
+    if (path === undefined || arguments_.length !== 1) usage();
+    await publishRelease(path);
     break;
   }
   case "verify-published": {

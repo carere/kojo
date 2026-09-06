@@ -9,7 +9,7 @@ const temporary: string[] = [];
 afterEach(() => {
   for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true });
 });
-const fixture = () => {
+const fixture = (stage: "alpha" | "beta" | "rc" | "stable" = "alpha") => {
   const directory = mkdtempSync(join(tmpdir(), "kojo-release-publish-"));
   temporary.push(directory);
   mkdirSync(join(directory, "packages"));
@@ -17,7 +17,7 @@ const fixture = () => {
   const names = JSON.parse(
     readFileSync(join(root, ".github/release-packages.json"), "utf8"),
   ) as Array<{ name: string }>;
-  const version = "0.1.0-alpha.1";
+  const version = stage === "stable" ? "0.1.0" : `0.1.0-${stage}.1`;
   const packages = names.map(({ name }, index) => {
     const bytes = Buffer.from(`tested package ${index}`);
     const archive = `package-${index}.tgz`;
@@ -35,9 +35,12 @@ const fixture = () => {
     formatVersion: 1,
     version,
     baseVersion: "0.1.0",
-    stage: "alpha",
+    stage,
     testedRevision: "a".repeat(40),
-    evidence: { policy: "core", fullHostEvidence: "not-required" },
+    evidence: {
+      policy: stage === "alpha" ? "core" : "full",
+      fullHostEvidence: stage === "alpha" ? "not-required" : "required",
+    },
     packages,
   };
   const path = join(directory, "release-manifest.json");
@@ -88,7 +91,6 @@ describe("npm registry verification", () => {
       const env = { KOJO_NPM_REGISTRY: server.url.origin };
       const result = await execute(["verify-published", f.path], env);
       expect(result.status, result.stderr).toBe(0);
-      expect((await execute(["auth-mode", f.manifest.version], env)).stdout.trim()).toBe("oidc");
       const reused = await execute(["assert-unpublished", f.manifest.version], env);
       expect(reused.status).not.toBe(0);
       expect(reused.stderr).toContain("already exists");
@@ -99,47 +101,59 @@ describe("npm registry verification", () => {
 });
 
 describe("npm publication authentication", () => {
-  it("exchanges a GitHub identity for a separate npm credential per package", async () => {
-    const f = fixture();
-    const exchanged: string[] = [];
-    const server = Bun.serve({
-      port: 0,
-      fetch(request) {
-        const url = new URL(request.url);
-        if (url.pathname === "/identity") {
-          expect(url.searchParams.get("audience")).toBe("npm:registry.npmjs.org");
-          expect(request.headers.get("authorization")).toBe("Bearer github-request");
-          return Response.json({ value: "github-identity" });
-        }
-        expect(request.method).toBe("POST");
-        expect(request.headers.get("authorization")).toBe("Bearer github-identity");
-        const name = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
-        exchanged.push(name);
-        return Response.json({ token: `temporary-${exchanged.length}` });
-      },
-    });
-    try {
-      const result = await execute(["publish", f.path, "candidate"], {
-        PATH: `${join(f.directory, "bin")}${delimiter}${process.env.PATH}`,
-        PUBLISH_LOG: join(f.directory, "published.jsonl"),
-        KOJO_NPM_REGISTRY: server.url.origin,
-        RELEASE_NPM_AUTH: "oidc",
-        ACTIONS_ID_TOKEN_REQUEST_URL: `${server.url.origin}/identity`,
-        ACTIONS_ID_TOKEN_REQUEST_TOKEN: "github-request",
-        NPM_TOKEN: "must-not-be-used",
+  it.each(["alpha", "beta", "rc", "stable"] as const)(
+    "publishes %s directly with a separate OIDC credential per package",
+    async (stage) => {
+      const f = fixture(stage);
+      const exchanged: string[] = [];
+      const server = Bun.serve({
+        port: 0,
+        fetch(request) {
+          const url = new URL(request.url);
+          if (url.pathname === "/identity") {
+            expect(url.searchParams.get("audience")).toBe("npm:registry.npmjs.org");
+            expect(request.headers.get("authorization")).toBe("Bearer github-request");
+            return Response.json({ value: "github-identity" });
+          }
+          expect(request.method).toBe("POST");
+          expect(request.headers.get("authorization")).toBe("Bearer github-identity");
+          const name = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
+          exchanged.push(name);
+          return Response.json({ token: `temporary-${exchanged.length}` });
+        },
       });
-      expect(result.status, result.stderr).toBe(0);
-      expect(exchanged).toEqual(f.manifest.packages.map((pkg) => pkg.name));
-      const published = readFileSync(join(f.directory, "published.jsonl"), "utf8")
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
-      expect(published.map((entry) => entry.token)).toEqual(["temporary-1", "temporary-2"]);
-      expect(published.every((entry) => entry.args.includes("candidate"))).toBe(true);
-    } finally {
-      server.stop(true);
-    }
-  });
+      try {
+        const result = await execute(["publish", f.path], {
+          PATH: `${join(f.directory, "bin")}${delimiter}${process.env.PATH}`,
+          PUBLISH_LOG: join(f.directory, "published.jsonl"),
+          KOJO_NPM_REGISTRY: server.url.origin,
+          ACTIONS_ID_TOKEN_REQUEST_URL: `${server.url.origin}/identity`,
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: "github-request",
+          NPM_TOKEN: "must-not-be-used",
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(exchanged).toEqual(f.manifest.packages.map((pkg) => pkg.name));
+        const published = readFileSync(join(f.directory, "published.jsonl"), "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        expect(published.map((entry) => entry.token)).toEqual(["temporary-1", "temporary-2"]);
+        const tag = stage === "stable" ? "latest" : stage;
+        for (const [index, entry] of published.entries()) {
+          expect(entry.args).toEqual([
+            "publish",
+            "--access",
+            "public",
+            "--tag",
+            tag,
+            join(f.directory, "packages", `package-${index}.tgz`),
+          ]);
+        }
+      } finally {
+        server.stop(true);
+      }
+    },
+  );
 
   it("does not fall back to NPM_TOKEN after an OIDC refusal", async () => {
     const f = fixture();
@@ -152,8 +166,7 @@ describe("npm publication authentication", () => {
       },
     });
     try {
-      const result = await execute(["publish", f.path, "candidate"], {
-        RELEASE_NPM_AUTH: "oidc",
+      const result = await execute(["publish", f.path], {
         NPM_TOKEN: "must-not-be-used",
         KOJO_NPM_REGISTRY: server.url.origin,
         ACTIONS_ID_TOKEN_REQUEST_URL: `${server.url.origin}/identity`,
@@ -169,27 +182,19 @@ describe("npm publication authentication", () => {
   it("refuses modified archives before authentication or publication", async () => {
     const f = fixture();
     writeFileSync(join(f.directory, "packages/package-0.tgz"), "changed bytes");
-    const result = await execute(["publish", f.path, "candidate"], { RELEASE_NPM_AUTH: "oidc" });
+    const result = await execute(["publish", f.path], {});
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("archive changed after validation");
   });
 
-  it("chooses bootstrap only for absent packages and only in alpha", async () => {
-    let absent = true;
-    const server = Bun.serve({
-      port: 0,
-      fetch() {
-        return absent ? new Response(null, { status: 404 }) : Response.json({ versions: {} });
-      },
+  it("requires GitHub identity even when NPM_TOKEN is set", async () => {
+    const f = fixture();
+    const result = await execute(["publish", f.path], {
+      NPM_TOKEN: "must-not-be-used",
+      ACTIONS_ID_TOKEN_REQUEST_URL: "",
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: "",
     });
-    try {
-      const env = { KOJO_NPM_REGISTRY: server.url.origin };
-      expect((await execute(["auth-mode", "0.1.0-alpha.1"], env)).stdout.trim()).toBe("bootstrap");
-      expect((await execute(["auth-mode", "0.1.0-beta.1"], env)).status).not.toBe(0);
-      absent = false;
-      expect((await execute(["auth-mode", "0.1.0-beta.1"], env)).stdout.trim()).toBe("oidc");
-    } finally {
-      server.stop(true);
-    }
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("GitHub OIDC permission id-token: write is required");
   });
 });

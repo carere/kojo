@@ -56,7 +56,7 @@ and stable releases still require them. Removing them would remove release evide
 | `verify-accepted-prerelease.sh` | Release preparation; verifies accepted predecessor bytes. |
 | `release-train.ts` | Release workflow and preparation; packs, checks, installs, and publishes npm packages. |
 | `release-jsr.ts` | Release workflow and preparation; stages, checks, installs, and publishes JSR packages. |
-| `release-tags.ts` | Release workflow; protects and promotes npm tags. |
+| `release-tags.ts` | Removed by the direct publication change; no separate npm tag writes remain. |
 | `complete-release-evidence.ts` | Release checks and acceptance; collects and verifies evidence. |
 | `systemd-native-evidence.sh` | Release checks; tests native Host lifecycle. |
 | `systemd-shipped-evidence.sh` | Release checks; tests shipped packages on systemd. |
