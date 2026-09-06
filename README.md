@@ -92,7 +92,7 @@ local Daemon, then check Project and Workflow lists, Run details, Gate answers, 
 behavior after a Daemon restart. CI checks the Console build and types, plus backend API tests;
 it does not run browser tests. Restore browser automation when the UI is stable.
 
-Moon uses the Remoshu remote cache configured in `.moon/workspace.yml`. Set `REMOSHU_TOKEN` in
+Moon uses the Remoshu remote cache configured in `.moon/workspace.yml`. Set `MOON_REMOTE_CACHE_TOKEN` in
 the ignored root `.env` file; Proto loads it when Moon starts. GitHub Actions uses the repository
 secret with the same name. Without a token, Moon uses its local cache. Release checks reuse valid
 Moon cache results. Changed task inputs invalidate their cached results.

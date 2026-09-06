@@ -64,7 +64,7 @@ jobs:
     needs: prepare
     uses: ./.github/workflows/release-checks.yml
     secrets:
-      REMOSHU_TOKEN: ${{ secrets.REMOSHU_TOKEN }}
+      MOON_REMOTE_CACHE_TOKEN: ${{ secrets.MOON_REMOTE_CACHE_TOKEN }}
     with:
       revision: ${{ needs.prepare.outputs.revision }}
       version: ${{ inputs.version }}

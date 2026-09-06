@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 env:
-  REMOSHU_TOKEN: ${{ secrets.REMOSHU_TOKEN }}
+  MOON_REMOTE_CACHE_TOKEN: ${{ secrets.MOON_REMOTE_CACHE_TOKEN }}
 
 jobs:
   ci:

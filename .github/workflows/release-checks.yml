@@ -16,14 +16,14 @@ on:
         type: boolean
         required: true
     secrets:
-      REMOSHU_TOKEN:
+      MOON_REMOTE_CACHE_TOKEN:
         required: false
 
 permissions:
   contents: read
 
 env:
-  REMOSHU_TOKEN: ${{ secrets.REMOSHU_TOKEN }}
+  MOON_REMOTE_CACHE_TOKEN: ${{ secrets.MOON_REMOTE_CACHE_TOKEN }}
 
 jobs:
   ci:
@@ -323,7 +323,8 @@ jobs:
   complete-release-evidence:
     if: ${{ inputs.full_evidence }}
     name: Complete breaking release evidence
-    needs: [ci, native-systemd-host, shipped-systemd-release, shipped-macos-release]
+    needs:
+      [ci, native-systemd-host, shipped-systemd-release, shipped-macos-release]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
