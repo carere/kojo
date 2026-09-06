@@ -72,7 +72,8 @@ jobs:
       full_evidence: ${{ needs.prepare.outputs.full_evidence == 'true' }}
 
   publish-npm:
-    name: Publish npm candidate
+    name: Publish npm packages
+    environment: ${{ needs.prepare.outputs.stage == 'stable' && 'npm-production' || 'npm-prerelease' }}
     if: ${{ !inputs.dry_run }}
     needs: [prepare, checks]
     runs-on: ubuntu-latest
@@ -93,10 +94,9 @@ jobs:
           auto-install: true
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: release-candidate
+          name: release-packages
           path: .release-train
-      - name: Verify version and choose authentication
-        id: auth
+      - name: Verify unpublished version
         env:
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_STAGE: ${{ needs.prepare.outputs.stage }}
@@ -104,11 +104,6 @@ jobs:
         run: |
           bun .github/scripts/release-train.ts verify-manifest .release-train/release-manifest.json "$RELEASE_STAGE" "$RELEASE_VERSION" "$RELEASE_REVISION"
           bun .github/scripts/release-train.ts assert-unpublished "$RELEASE_VERSION"
-          echo "mode=$(bun .github/scripts/release-train.ts auth-mode "$RELEASE_VERSION")" >> "$GITHUB_OUTPUT"
-      - name: Check tag credential before remote changes
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: test -n "$NPM_TOKEN"
       - name: Push validated version commit and three tags
         env:
           RELEASE_VERSION: ${{ inputs.version }}
@@ -119,27 +114,13 @@ jobs:
             "v$RELEASE_VERSION" \
             "kojo-runtime@v$RELEASE_VERSION" \
             "kojo@v$RELEASE_VERSION"
-      - name: Bootstrap first npm package set
-        if: ${{ steps.auth.outputs.mode == 'bootstrap' }}
-        env:
-          RELEASE_NPM_AUTH: bootstrap
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: bun .github/scripts/release-train.ts publish .release-train/release-manifest.json candidate
       - name: Publish through npm Trusted Publishing
-        if: ${{ steps.auth.outputs.mode == 'oidc' }}
-        env:
-          RELEASE_NPM_AUTH: oidc
-        run: bun .github/scripts/release-train.ts publish .release-train/release-manifest.json candidate
+        run: bun .github/scripts/release-train.ts publish .release-train/release-manifest.json
       - name: Verify public bytes
         run: bun .github/scripts/release-train.ts verify-published .release-train/release-manifest.json
-      - name: Protect latest, including a partially published first package set
-        if: ${{ always() && steps.auth.outcome == 'success' }}
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: bun .github/scripts/release-tags.ts .release-train/release-manifest.json protect-latest
 
   validate-public:
-    name: Validate public candidate on ${{ matrix.host }}
+    name: Validate public packages on ${{ matrix.host }}
     needs: [prepare, publish-npm]
     strategy:
       fail-fast: false
@@ -161,7 +142,7 @@ jobs:
           auto-install: true
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: release-candidate
+          name: release-packages
           path: .release-train
       - name: Install exact public npm package set
         env:
@@ -172,7 +153,6 @@ jobs:
 
   accept:
     name: Accept Release
-    environment: ${{ needs.prepare.outputs.stage == 'stable' && 'npm-production' || 'npm-prerelease' }}
     needs: [prepare, validate-public]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -188,7 +168,7 @@ jobs:
           auto-install: true
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: release-candidate
+          name: release-packages
           path: .release-train
       - name: Download full Host evidence
         if: ${{ needs.prepare.outputs.full_evidence == 'true' }}
@@ -204,12 +184,8 @@ jobs:
           bun install --frozen-lockfile
           bun .github/scripts/complete-release-evidence.ts verify-complete .release-evidence "$RELEASE_REVISION"
           tar -czf .release-train/release-evidence.tgz -C .release-evidence .
-      - name: Recheck public bytes and promote registry tags
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          bun .github/scripts/release-train.ts verify-published .release-train/release-manifest.json
-          bun .github/scripts/release-tags.ts .release-train/release-manifest.json
+      - name: Recheck public bytes
+        run: bun .github/scripts/release-train.ts verify-published .release-train/release-manifest.json
       - name: Record accepted Release
         env:
           GH_TOKEN: ${{ github.token }}

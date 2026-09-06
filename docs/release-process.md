@@ -10,12 +10,12 @@ that version again before publication.
 
 ## Stages and evidence
 
-| Stage | Example | Required accepted predecessor | Full Host evidence | npm tags after acceptance |
+| Stage | Example | Required accepted predecessor | Full Host evidence | npm tag used at publication |
 | --- | --- | --- | --- | --- |
-| Alpha | `0.1.0-alpha.1` | None for the first alpha | No | `alpha`, `next` |
-| Beta | `0.1.0-beta.1` | Alpha or an earlier beta in the same version line | Yes | `beta`, `next` |
-| Release Candidate | `0.1.0-rc.1` | Beta or an earlier RC in the same version line | Yes | `rc`, `next` |
-| Stable | `0.1.0` | RC in the same version line | Yes | `latest`, `next` |
+| Alpha | `0.1.0-alpha.2` | None for the first alpha | No | `alpha` |
+| Beta | `0.1.0-beta.1` | Alpha or an earlier beta in the same version line | Yes | `beta` |
+| Release Candidate | `0.1.0-rc.1` | Beta or an earlier RC in the same version line | Yes | `rc` |
+| Stable | `0.1.0` | RC in the same version line | Yes | `latest` |
 
 The workflow selects the newest accepted predecessor. It checks that predecessor's GitHub Release,
 workflow result, tag, npm archive integrity. Mutable npm tags do not prove
@@ -59,30 +59,20 @@ These settings are maintained through npm and GitHub websites:
 - GitHub Actions secret `RELEASE_GITHUB_TOKEN`: a fine-grained user token for this repository with
   **Contents: read and write**. Its owner must be allowed to bypass the protected `main` rule.
   Checkout uses it to push the validated version commit and three tags atomically.
-- GitHub Actions secret `NPM_TOKEN`: the initial alpha bootstrap used a granular token with
-  read/write access and bypass 2FA to create the four packages. npm rejected this credential for
-  tag removal. The current tag steps need a supported authentication path before another release;
-  see **Recovery after alpha.1** below.
 - npm Trusted Publisher on `kojo` and `kojo-runtime`: GitHub owner `carere`, repository `kojo`, workflow
-  filename `release.yml`, with no environment restriction. The publication job has `id-token: write`.
-  After the initial alpha creates the packages, configure these publishers before the next Release.
-- GitHub environment `npm-production`: required reviewers before stable npm promotion in the
-  acceptance job. The `npm-prerelease` environment must not require a reviewer if prereleases
-  should run unattended.
-  Keep `NPM_TOKEN` available as a repository Actions secret because candidate cleanup also needs it.
+  filename `release.yml`, with no environment restriction. Allow direct publication. Both packages
+  must exist and have this setup before the workflow runs. The publication job has `id-token: write`.
+- GitHub environment `npm-production`: required reviewers before stable publication.
+  The `npm-prerelease` environment must not require a reviewer for unattended prereleases.
 
-Each npm publication uses exactly one credential method. Existing package sets use npm Trusted
-Publishing. The script exchanges GitHub OIDC for a short-lived, package-specific npm credential
-through the [npm Registry API](https://api-docs.npmjs.com/), then passes it to `bun publish`.
-An OIDC failure stops publication; it does not fall back to `NPM_TOKEN`.
+The workflow uses npm Trusted Publishing only. It exchanges GitHub OIDC for a short-lived,
+package-specific npm credential through the [npm Registry API](https://api-docs.npmjs.com/),
+then passes it to `bun publish`. An OIDC failure stops publication. No `NPM_TOKEN` secret or
+manual npm tag commands are required.
 
 Bun's publisher does not generate npm provenance attestations in this setup. The GitHub Release
 manifest binds tested archives to their commit and workflow run. Authentication and provenance
 are separate properties.
-
-As of September 2026, bypass-2FA tokens can still publish directly. npm plans to remove that ability
-around January 2027. The initial-package bootstrap must then move to the supported staged or
-interactive approval process. See the [npm deprecation notice](https://github.blog/changelog/2026-07-08-npm-install-time-security-and-gat-bypass2fa-deprecation/).
 
 ## What the workflow does
 
@@ -90,19 +80,21 @@ interactive approval process. See the [npm deprecation notice](https://github.bl
    versions, the lockfile, and the Runtime manifest. It creates the global `vVERSION`
    tag and two `PACKAGE@vVERSION` tags. A Git bundle gives each job the exact prepared commit.
 2. Run the required checks. Pack the npm archives once. Shipped Host checks use these archives.
-3. After all checks pass, verify that remote `main` has not moved, then push the version commit and
-   tags. Publish the npm archives with the `candidate` tag. Check their public integrity and protect
-   `latest` from an unaccepted version, including a partially published first package set.
-4. Install the exact public npm versions on Linux and macOS. For stable, wait for the
-   `npm-production` reviewer before acceptance and tag promotion.
-5. Recheck public content, promote npm tags,
-   and create the accepted GitHub Release with its manifest. Full-evidence stages also attach the
-   complete Host evidence archive.
+3. After all checks pass, obtain approval for stable publication if configured. Verify that remote
+   `main` has not moved, then push the version commit and tags. Publish the checked npm archives
+   directly under `alpha`, `beta`, `rc`, or `latest`, as determined by the version.
+4. Check public integrity and install the exact public npm versions on Linux and macOS.
+5. Recheck public content and create the accepted GitHub Release with its manifest.
+   Full-evidence stages also attach the complete Host evidence archive.
+
+There is no temporary npm tag or separate tag promotion. Publication makes the version available
+on its channel immediately. The workflow does not delete `latest` or change other channels.
+Use `@alpha` or an exact version to install an alpha; an unqualified installation uses `latest`.
 
 After acceptance, test another system with the exact installation command in the workflow summary:
 
 ```bash
-bun add -g @carere/kojo@0.1.0-alpha.1
+bun add -g @carere/kojo@0.1.0-alpha.2
 kojo daemon install
 ```
 
@@ -113,39 +105,35 @@ version, Host, and result with each UI issue. These manual checks are separate f
 To install the Runtime in a Factory Project:
 
 ```bash
-bun add --exact @carere/kojo-runtime@0.1.0-alpha.1
+bun add --exact @carere/kojo-runtime@0.1.0-alpha.2
 ```
 
 ## Failed runs
 
 Do not reuse a published version. If publication is partial, fix the failure and launch `release`
-with a higher sequence number. A partially published candidate is not an accepted predecessor.
+with a higher sequence number. A partially published version is not an accepted predecessor.
 Do not delete or move published tags to make a failed version appear valid.
 
 A failure before the remote push leaves no remote version changes. Fix the issue and launch the
 workflow again. If `main` moved during validation, start a new run against current `main`.
 
-After publication, a failed install, evidence check, or promotion blocks acceptance.
-Inspect the failing job and its artifacts. Registry publication is not transactional across the two npm
-packages: some packages can exist while the Release remains unaccepted. Dist-tag promotion restores
-its previous tag snapshot if a write fails. A failure while creating the GitHub Release can occur
-after promotion; inspect registry tags before starting a replacement version.
+After publication, a failed public install or evidence check blocks GitHub Release acceptance.
+Inspect the failing job and its artifacts. Registry publication is not transactional across the two
+packages: one package can exist, and a channel can point to it, while the Release remains unaccepted.
+No automatic tag rollback is attempted. Publish a corrected version with a higher sequence number
+when package content must change.
 
 The old `prerelease.yml` entry point is removed. All stages use `release.yml`.
 
-## Recovery after alpha.1
+## One-time alpha.1 cleanup
 
-The first publication uploaded all four npm packages, but release acceptance failed. Full npm
-metadata exposes their versions and integrity values; the abbreviated install view returned 404.
-Release scripts now request full metadata for registry checks.
+The first publication uploaded four packages, but acceptance failed. The new workflow publishes
+only `kojo` and `kojo-runtime`, with the required contract source included in those archives.
 
-The `NPM_TOKEN` used for bootstrap has bypass 2FA enabled. npm refused its attempt to remove
-`latest` with HTTP 403. This token is not a verified credential for the tag-management steps above.
-Those steps must be corrected before another publication. Configure Trusted Publishing for the two public
-packages for subsequent uploads; do not assume that upload authority also permits tag edits.
-Remove the unintended `latest` tags through an authenticated npm session with the required 2FA.
-Keep the published alpha.1 packages and Git tags. Use alpha.2 after the release fixes are merged
-and tag management is verified. Do not rerun the failed publication unchanged.
+Publish and validate alpha.2 before permanently unpublishing the old alpha.1 versions. Remove
+`@carere/kojo@0.1.0-alpha.1` and `@carere/kojo-runtime@0.1.0-alpha.1` first, then the alpha.1 versions
+of `@carere/kojo-client-contracts` and `@carere/kojo-runner-contracts`. This is a separate registry
+administration task with interactive authentication, subject to npm's unpublish rules. It is not
+part of the release workflow. Do not delete `latest` as a prerequisite for alpha.2 publication.
 
-The previously published contract versions and Git tags remain as release history. New releases
-publish only `kojo` and `kojo-runtime`; they do not require those old contract versions.
+Keep Git tags as source history. Published version numbers cannot be reused, even after unpublication.

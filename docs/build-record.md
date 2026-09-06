@@ -46,7 +46,7 @@ regression result. The release artifact also contains one index with the complet
 The breaking changes and supported command surface are in
 [`release-notes/daemon-cutover.md`](release-notes/daemon-cutover.md).
 
-The staged publication and promotion gates are in [`release-process.md`](release-process.md).
+The publication checks and approval gates are in [`release-process.md`](release-process.md).
 
 ### Shipped macOS evidence
 

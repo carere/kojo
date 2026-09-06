@@ -8,7 +8,7 @@ const repositoryFile = (path: string): string =>
   readFileSync(new URL(`../../../../../${path}`, import.meta.url), "utf8");
 
 describe("the Release train", () => {
-  it("runs one manual Release pipeline with candidate validation before promotion", () => {
+  it("runs one manual Release pipeline with checks before direct publication", () => {
     const workflow = Bun.YAML.parse(repositoryFile(".github/workflows/release.yml")) as {
       on: Record<string, unknown>;
       jobs: Record<string, { needs?: string[]; environment?: string }>;
@@ -17,9 +17,15 @@ describe("the Release train", () => {
     expect(workflow.jobs["publish-npm"]?.needs).toEqual(["prepare", "checks"]);
     expect(workflow.jobs["validate-public"]?.needs).toContain("publish-npm");
     expect(workflow.jobs.accept?.needs).toEqual(["prepare", "validate-public"]);
-    expect(workflow.jobs.accept?.environment).toBe(
+    expect(workflow.jobs["publish-npm"]?.environment).toBe(
       `\${{ needs.prepare.outputs.stage == 'stable' && 'npm-production' || 'npm-prerelease' }}`,
     );
+    expect(workflow.jobs.accept?.environment).toBeUndefined();
+    const source = repositoryFile(".github/workflows/release.yml");
+    expect(source).not.toContain("NPM_TOKEN");
+    expect(source).not.toContain("release-tags.ts");
+    expect(source).not.toContain("protect-latest");
+    expect(source).toContain("release-train.ts publish .release-train/release-manifest.json\n");
     expect(workflow.jobs["dry-run"]?.needs).toEqual(["checks"]);
     expect(Object.keys(workflow.jobs).some((name) => name.includes("jsr"))).toBe(false);
   });
@@ -32,10 +38,10 @@ describe("the Release train", () => {
       const downloads = workflow.jobs[job]?.steps.filter((step) =>
         step.uses?.startsWith("actions/download-artifact@"),
       );
-      expect(downloads?.[0]?.with?.name).toBe("release-candidate");
+      expect(downloads?.[0]?.with?.name).toBe("release-packages");
     }
     const checks = repositoryFile(".github/workflows/release-checks.yml");
-    expect(checks).toContain("name: release-candidate");
+    expect(checks).toContain("name: release-packages");
   });
 
   it("limits full Host evidence to Release checks", () => {
