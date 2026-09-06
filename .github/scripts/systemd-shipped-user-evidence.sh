@@ -318,30 +318,6 @@ jq -e '.run.state == "succeeded"' "$evidence_directory/run-succeeded.json" >/dev
 jq -e '.valid == true' "$evidence_directory/run-succeeded-validation.json" >/dev/null
 jq -e '.asking.state == "applied"' "$evidence_directory/gate-applied.json" >/dev/null
 
-gate_name=$(jq -er '.run.gates[0].gate' "$evidence_directory/run-succeeded.json")
-gate_asking=$(jq -er '.run.gates[0].asking' "$evidence_directory/run-succeeded.json")
-sandbox_id=$(jq -er '.run.sandboxes | map(select(.outcome == "released")) | last | .sandboxId' \
-  "$evidence_directory/run-succeeded.json")
-sandbox_name=$(cut -d/ -f2 <<<"$sandbox_id")
-sandbox_acquisition=${sandbox_id##*/}
-
-launch_url=$("$managed_kojo" ui --no-open)
-printf '%s\n' "Authenticated launch grant issued; the secret was not retained." \
-  >"$evidence_directory/console-launch.log"
-(cd "$workspace/apps/console" && \
-  KOJO_SHIPPED_LAUNCH_URL="$launch_url" \
-  KOJO_SHIPPED_PROJECT_ID="$project_id" \
-  KOJO_SHIPPED_RUN_ID="$run_id" \
-  KOJO_SHIPPED_GATE_NAME="$gate_name" \
-  KOJO_SHIPPED_GATE_ASKING="$gate_asking" \
-  KOJO_SHIPPED_SANDBOX_NAME="$sandbox_name" \
-  KOJO_SHIPPED_SANDBOX_ACQUISITION="$sandbox_acquisition" \
-  PLAYWRIGHT_BROWSERS_PATH=/opt/kojo-playwright \
-  "$candidate_bun" ./node_modules/@playwright/test/cli.js test \
-    --config playwright.release.config.ts) \
-  >"$evidence_directory/browser-tests.log" 2>&1
-grep -E "1 passed" "$evidence_directory/browser-tests.log" >/dev/null
-
 replacement_url=$("$managed_kojo" ui --no-open)
 old_origin=${replacement_url%%/daemon*}
 grant=${replacement_url##*#grant=}

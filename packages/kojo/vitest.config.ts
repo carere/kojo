@@ -2,7 +2,7 @@ import { defineConfig } from "vitest/config";
 
 // One Vitest project per test tier, per AGENTS.md. Unit tests never touch a real adapter, so
 // they get no setup file and no environment beyond the default. Integration, native Host, and
-// shipped macOS checks have separate projects. The Console owns browser tests.
+// shipped macOS checks have separate projects. The Console uses manual UI checks.
 export default defineConfig({
   test: {
     projects: [

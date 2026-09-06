@@ -19,12 +19,11 @@ permissions:
   contents: read
 
 env:
-  REMOSHU_TOKEN: ${{ secrets.REMOSHU_TOKEN }}
+  MOON_REMOTE_CACHE_TOKEN: ${{ secrets.MOON_REMOTE_CACHE_TOKEN }}
 
 jobs:
   ci:
-    # The name branch protection matches on. Changing it silently un-gates `main`.
-    name: Test
+    name: Core checks
     runs-on: ubuntu-latest
     # Tests start real processes and build the Console. Allow 30 minutes for slow runners.
     timeout-minutes: 30
@@ -103,23 +102,23 @@ jobs:
       - name: Public types and package build
         run: moon run kojo:check-public-types kojo:build
 
-      - name: Install Chromium for the browser tier
-        run: bun x playwright install --with-deps chromium
-        working-directory: apps/console
+  cli-integration:
+    uses: ./.github/workflows/cli-integration.yml
+    secrets:
+      MOON_REMOTE_CACHE_TOKEN: ${{ secrets.MOON_REMOTE_CACHE_TOKEN }}
+    with:
+      revision: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
-      - name: Browser tests
-        run: |
-          moon run console:test-browser -- --reporter=list
-
-      - name: Browser failure traces
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: browser-failure-traces
-          path: apps/console/test-results
-          retention-days: 7
-
-      # CLI integration tests exercise real adapters and processes.
-      - name: CLI integration tests
-        run: |
-          moon run kojo:test-integration -- --reporter=verbose
+  required:
+    # Keep the branch protection status and fail it if any required job fails or is skipped.
+    name: Test
+    if: ${{ always() }}
+    needs: [ci, cli-integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Require every check
+        env:
+          CORE_RESULT: ${{ needs.ci.result }}
+          INTEGRATION_RESULT: ${{ needs.cli-integration.result }}
+        run: test "$CORE_RESULT" = success && test "$INTEGRATION_RESULT" = success

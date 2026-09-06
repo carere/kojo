@@ -1,9 +1,9 @@
-export type Issue64Tier = "U" | "I" | "H" | "B" | "R";
+export type Issue64Tier = "U" | "I" | "H" | "R";
 
 const tiers = (...values: ReadonlyArray<Issue64Tier>): ReadonlyArray<Issue64Tier> =>
   Object.freeze(values);
 
-/** Immutable required tier allocation copied from issue #64, independent of evidence mappings. */
+/** Active release allocation from issue #64. UI browser checks are deferred until the UI is stable. */
 export const issue64RequiredTierAllocation = Object.freeze({
   "PKG-01": tiers("I"),
   "PKG-02": tiers("I"),
@@ -48,17 +48,13 @@ export const issue64RequiredTierAllocation = Object.freeze({
   "ACCESS-01": tiers("I", "H"),
   "ACCESS-02": tiers("I"),
   "ACCESS-03": tiers("I"),
-  "ACCESS-04": tiers("I", "B"),
+  "ACCESS-04": tiers("I"),
   "CLIENT-01": tiers("I"),
   "CLIENT-02": tiers("U", "I"),
   "CLIENT-03": tiers("I"),
   "CLI-01": tiers("I"),
   "CLI-02": tiers("U", "I"),
-  "UI-01": tiers("B"),
-  "UI-02": tiers("B"),
-  "UI-03": tiers("B"),
   "RELEASE-01": tiers("R", "H"),
-  "RELEASE-02": tiers("R"),
   "RELEASE-03": tiers("R", "H"),
   "RELEASE-04": tiers("I", "R"),
 } as const);

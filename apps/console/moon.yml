@@ -5,6 +5,10 @@ dependsOn:
   - kojo-client-contracts
 
 tasks:
+  tsc:
+    outputs:
+      - /.moon/cache/types/apps/console
+
   # The front end alone. The API comes from the per-user Daemon, which the Vite config proxies to.
   dev:
     command: vite dev
@@ -20,18 +24,7 @@ tasks:
       - vite.config.ts
       - tsconfig.json
       - package.json
+      - /packages/kojo-client-contracts/src/**/*
+      - /packages/kojo-client-contracts/package.json
     outputs:
       - "/packages/kojo/console"
-
-  # The browser tier uses an isolated Daemon fixture. It depends on the build because the thing under
-  # test is the built page, not a development-only module graph.
-  test-browser:
-    command: playwright test
-    deps:
-      - ~:build
-    inputs:
-      - src/**/*
-      - tests/**/*
-      - playwright.config.ts
-    options:
-      cache: false

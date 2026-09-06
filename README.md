@@ -87,10 +87,19 @@ moon run kojo:test-integration
 moon run console:build
 ```
 
-Moon uses the Remoshu remote cache configured in `.moon/workspace.yml`. Set `REMOSHU_TOKEN` in
+Test the Console manually while its UI is under active development. Run `kojo ui` against a
+local Daemon, then check Project and Workflow lists, Run details, Gate answers, and reconnect
+behavior after a Daemon restart. CI checks the Console build and types, plus backend API tests;
+it does not run browser tests. Restore browser automation when the UI is stable.
+
+Moon uses the Remoshu remote cache configured in `.moon/workspace.yml`. Set `MOON_REMOTE_CACHE_TOKEN` in
 the ignored root `.env` file; Proto loads it when Moon starts. GitHub Actions uses the repository
-secret with the same name. Without a token, Moon uses its local cache. Full Release evidence runs
-with `--force` and does not use cached test results.
+secret with the same name. Without a token, Moon uses its local cache. Release checks reuse valid
+Moon cache results. Changed task inputs invalidate their cached results.
+
+CI runs CLI integration tests in eight shards on separate Hosts, alongside core checks. Each shard
+runs one test file at a time. The required `Test` status accepts only a successful core job and all
+eight shards. Release checks use the same shard commands and collect all eight logs as evidence.
 
 The main paths are:
 

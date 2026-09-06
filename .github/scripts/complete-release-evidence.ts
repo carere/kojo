@@ -65,7 +65,6 @@ const collectCore = (arguments_: ReadonlyArray<string>): void => {
     "contract-runtime": "contract-runtime.log",
     "kojo-unit": "kojo-unit.log",
     "kojo-integration": "kojo-integration.log",
-    "console-browser": "console-browser.log",
   } as const;
   const tiers = Object.fromEntries(
     Object.entries(tierLogs).map(([tier, file]) => {
@@ -125,7 +124,7 @@ const collectCore = (arguments_: ReadonlyArray<string>): void => {
     kind: "core-release-evidence",
     testedRevision,
     tiers,
-    cache: "bypassed-by-moon-force",
+    cache: "moon-task-inputs",
     safetyRegression: {
       expected: "protected check fails for injected regression",
       actual: "failed-as-expected",
@@ -214,11 +213,9 @@ const hostTier = (tier: EvidenceTier, manifest: HostManifest, log: string): Load
           ? "evidence.json"
           : `${manifest.checkId}/evidence-manifest.json`,
       name: check.name,
-      status:
-        ["passed", "installed", "recorded", "usable"].includes(check.actual) ||
-        check.actual.startsWith("rendered")
-          ? "passed"
-          : "failed",
+      status: ["passed", "installed", "recorded", "usable"].includes(check.actual)
+        ? "passed"
+        : "failed",
       log,
     })),
   };
@@ -230,7 +227,6 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
     fail("complete requires INPUT_ROOT OUTPUT_ROOT REVISION");
   }
   const core = readJson<CoreEvidence>(join(inputRoot, "core", "core-evidence.json"));
-  if (core.cache !== "bypassed-by-moon-force") fail("core evidence did not bypass the cache");
   const pinnedBun = repositoryToolVersion("bun");
   const pinnedMoon = repositoryToolVersion("moon");
 
@@ -271,7 +267,7 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
   const macManifests = filesUnder(join(inputRoot, "shipped-macos"))
     .filter((path) => basename(path) === "evidence-manifest.json")
     .map((path) => readJson<HostManifest & { readonly checkId?: string }>(path));
-  for (const checkId of ["RELEASE-01", "RELEASE-02", "RELEASE-03"]) {
+  for (const checkId of ["RELEASE-01", "RELEASE-03"]) {
     const manifest = macManifests.find((candidate) => candidate.checkId === checkId);
     if (manifest === undefined) {
       fail(`shipped macOS ${checkId} evidence is absent`);

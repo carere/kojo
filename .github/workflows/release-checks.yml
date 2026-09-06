@@ -16,17 +16,26 @@ on:
         type: boolean
         required: true
     secrets:
-      REMOSHU_TOKEN:
+      MOON_REMOTE_CACHE_TOKEN:
         required: false
 
 permissions:
   contents: read
 
 env:
-  REMOSHU_TOKEN: ${{ secrets.REMOSHU_TOKEN }}
+  MOON_REMOTE_CACHE_TOKEN: ${{ secrets.MOON_REMOTE_CACHE_TOKEN }}
 
 jobs:
+  cli-integration:
+    uses: ./.github/workflows/cli-integration.yml
+    secrets:
+      MOON_REMOTE_CACHE_TOKEN: ${{ secrets.MOON_REMOTE_CACHE_TOKEN }}
+    with:
+      revision: ${{ inputs.revision }}
+      prepared_release: true
+
   ci:
+    needs: cli-integration
     name: Test
     runs-on: ubuntu-latest
     # Tests start real processes and build the Console. Allow 30 minutes for slow runners.
@@ -92,50 +101,44 @@ jobs:
       # Every task is run **by name**, because a tier that is not named here is a tier nobody runs.
       # Discover the list with `moon query tasks`; it is not hardcoded anywhere else.
 
+      # Moon reuses test results when task inputs and the execution platform match.
       - name: Contract and runtime tests
         run: |
           set -o pipefail
           mkdir -p .release-evidence/logs
-          moon run kojo-client-contracts:test --force -- --reporter=verbose 2>&1 | tee .release-evidence/logs/contract-runtime.log
-          moon run kojo-runner-contracts:test --force -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
-          moon run kojo-runtime:test --force -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
-          moon run kojo-runtime:test-integration --force -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
+          moon run kojo-client-contracts:test -- --reporter=verbose 2>&1 | tee .release-evidence/logs/contract-runtime.log
+          moon run kojo-runner-contracts:test -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
+          moon run kojo-runtime:test -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
+          moon run kojo-runtime:test-integration -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
 
       - name: Unit tests and package graph
         run: |
           set -o pipefail
-          moon run kojo:test --force -- --reporter=verbose 2>&1 | tee .release-evidence/logs/kojo-unit.log
-          moon run kojo:check-packages --force 2>&1 | tee -a .release-evidence/logs/kojo-unit.log
+          moon run kojo:test -- --reporter=verbose 2>&1 | tee .release-evidence/logs/kojo-unit.log
+          moon run kojo:check-packages 2>&1 | tee -a .release-evidence/logs/kojo-unit.log
 
       # Two guards that are neither a test tier nor a lint: no bare promise reaches Kojo's published
       # declarations, and the package refuses to build without the Console in it.
       - name: Public types and package build
         run: moon run kojo:check-public-types kojo:build
 
-      - name: Install Chromium for the browser tier
-        run: bun x playwright install --with-deps chromium
-        working-directory: apps/console
-
-      - name: Browser tests
-        run: |
-          set -o pipefail
-          moon run console:test-browser --force -- --reporter=list 2>&1 | tee .release-evidence/logs/console-browser.log
-
-      - name: Browser failure traces
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Download integration logs
+        if: ${{ inputs.full_evidence }}
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: release-browser-failure-traces
-          path: apps/console/test-results
-          retention-days: 7
+          pattern: cli-integration-*
+          path: .release-evidence/logs
+          merge-multiple: true
 
-      # CLI integration tests exercise real adapters and processes.
-      - name: CLI integration tests
+      - name: Combine integration logs
+        if: ${{ inputs.full_evidence }}
         run: |
-          set -o pipefail
-          moon run kojo:test-integration --force -- --reporter=verbose 2>&1 | tee .release-evidence/logs/kojo-integration.log
+          for shard in 1 2 3 4 5 6 7 8; do
+            test -s ".release-evidence/logs/kojo-integration-$shard.log"
+          done
+          cat .release-evidence/logs/kojo-integration-{1,2,3,4,5,6,7,8}.log > .release-evidence/logs/kojo-integration.log
 
-      - name: Record uncached core release evidence
+      - name: Record core release evidence
         if: ${{ inputs.full_evidence }}
         run: bun .github/scripts/complete-release-evidence.ts collect-core .release-evidence/core-evidence.json "$(git rev-parse HEAD)" .release-evidence/logs
 
@@ -307,9 +310,6 @@ jobs:
       - name: Install repository dependencies
         run: bun install --frozen-lockfile
 
-      - name: Install Chromium
-        run: bun x playwright install chromium
-
       - name: Download tested npm archives
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
@@ -342,7 +342,8 @@ jobs:
   complete-release-evidence:
     if: ${{ inputs.full_evidence }}
     name: Complete breaking release evidence
-    needs: [ci, native-systemd-host, shipped-systemd-release, shipped-macos-release]
+    needs:
+      [ci, native-systemd-host, shipped-systemd-release, shipped-macos-release]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

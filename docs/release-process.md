@@ -22,10 +22,19 @@ workflow result, tag, npm archive integrity, and JSR source hashes. Mutable npm 
 acceptance. A stable version permits only version metadata and Release notes after its accepted RC.
 Any code change requires another RC.
 
-Every version runs TypeScript, Biome, Knip, package checks, unit tests, integration tests, and browser
-tests. Beta, RC, and stable also run native systemd, shipped systemd, and shipped macOS evidence.
+Every version checks TypeScript, Biome, Knip, packages, unit tests, and integration tests.
+The Console build and types are checked in CI. Test the UI manually while it is under active
+development; browser automation is paused until the UI is stable. Moon can reuse valid cached test
+results; release workflows do not force test execution.
+Beta, RC, and stable also run native systemd, shipped systemd, and shipped macOS evidence.
 The complete evidence index must accept every required check at the prepared version commit.
 Normal pull request and main CI run the core checks; they do not run full Host evidence.
+CLI integration tests run in eight shards on separate Hosts in CI and Release checks. Every shard
+must pass. Full Release evidence combines all eight logs before checking the named test results.
+
+Automated release evidence excludes UI-01, UI-02, UI-03, and RELEASE-02 while browser testing is
+deferred. ACCESS-04 retains Artifact publication integration coverage. These UI checks are not
+reported as passed; the maintainer checks UI changes manually during development.
 
 ## Registry package sets
 
@@ -51,9 +60,10 @@ These settings are maintained through npm, JSR, and GitHub websites:
 - GitHub Actions secret `RELEASE_GITHUB_TOKEN`: a fine-grained user token for this repository with
   **Contents: read and write**. Its owner must be allowed to bypass the protected `main` rule.
   Checkout uses it to push the validated version commit and five tags atomically.
-- GitHub Actions secret `NPM_TOKEN`: a granular token with read/write access to the four npm
-  packages, used for dist-tag promotion. The initial alpha also uses it to create packages when
-  they do not yet exist. That bootstrap requires direct publication permission and bypass 2FA.
+- GitHub Actions secret `NPM_TOKEN`: the initial alpha bootstrap used a granular token with
+  read/write access and bypass 2FA to create the four packages. npm rejected this credential for
+  tag removal. The current tag steps need a supported authentication path before another release;
+  see **Recovery after alpha.1** below.
 - npm Trusted Publisher on each existing package: GitHub owner `carere`, repository `kojo`, workflow
   filename `release.yml`, with no environment restriction. The publication job has `id-token: write`.
   After the initial alpha creates the packages, configure these publishers before the next Release.
@@ -101,6 +111,10 @@ bun add -g @carere/kojo@0.1.0-alpha.1
 kojo daemon install
 ```
 
+On each test system, run `kojo ui`. Check Project and Workflow lists, Start and Stop actions,
+Run details, Gate answers, and reconnect behavior after a Daemon restart. Record the package
+version, Host, and result with each UI issue. These manual checks are separate from CI acceptance.
+
 To install the Runtime through JSR in a Factory Project:
 
 ```bash
@@ -127,3 +141,17 @@ its previous tag snapshot if a write fails. A failure while creating the GitHub 
 after promotion; inspect registry tags before starting a replacement version.
 
 The old `prerelease.yml` entry point is removed. All stages use `release.yml`.
+
+## Recovery after alpha.1
+
+The first publication uploaded all four npm packages, but release acceptance failed. Full npm
+metadata exposes their versions and integrity values; the abbreviated install view returned 404.
+Release scripts now request full metadata for registry checks.
+
+The `NPM_TOKEN` used for bootstrap has bypass 2FA enabled. npm refused its attempt to remove
+`latest` with HTTP 403. This token is not a verified credential for the tag-management steps above.
+Those steps must be corrected before another publication. Configure Trusted Publishing for all four
+existing packages for subsequent uploads; do not assume that upload authority also permits tag edits.
+Remove the unintended `latest` tags through an authenticated npm session with the required 2FA.
+Keep the published alpha.1 packages and Git tags. Use alpha.2 after the release fixes are merged
+and tag management is verified. Do not rerun the failed publication unchanged.

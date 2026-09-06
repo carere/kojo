@@ -9,7 +9,6 @@ export type EvidenceTier =
   | "contract-runtime"
   | "kojo-unit"
   | "kojo-integration"
-  | "console-browser"
   | "native-systemd"
   | "shipped-systemd"
   | "shipped-macos";
@@ -81,17 +80,15 @@ const check = (
 ): RequiredReleaseCheck => {
   const allocatedTiers = issue64RequiredTierAllocation[checkId];
   if (allocatedTiers === undefined) throw new Error(`${checkId} has no issue #64 tier allocation`);
-  const coreTier: EvidenceTier | undefined = testPath.startsWith("apps/console/tests/browser/")
-    ? "console-browser"
-    : testPath.startsWith("packages/kojo-runtime/tests/")
-      ? "contract-runtime"
-      : testPath.startsWith("packages/kojo/tests/unit/")
-        ? "kojo-unit"
-        : testPath.startsWith("packages/kojo/tests/integration/")
-          ? "kojo-integration"
-          : testPath.startsWith("packages/kojo/tests/host/")
-            ? "native-systemd"
-            : undefined;
+  const coreTier: EvidenceTier | undefined = testPath.startsWith("packages/kojo-runtime/tests/")
+    ? "contract-runtime"
+    : testPath.startsWith("packages/kojo/tests/unit/")
+      ? "kojo-unit"
+      : testPath.startsWith("packages/kojo/tests/integration/")
+        ? "kojo-integration"
+        : testPath.startsWith("packages/kojo/tests/host/")
+          ? "native-systemd"
+          : undefined;
   const observations: ReadonlyArray<RequiredObservation> =
     checkId === "RELEASE-01"
       ? [
@@ -108,52 +105,43 @@ const check = (
             issueTiers: ["R", "H"],
           },
         ]
-      : checkId === "RELEASE-02"
+      : checkId === "RELEASE-03"
         ? [
-            { tier: "shipped-systemd", path: "evidence.json", name: "real-daemon-records" },
+            {
+              tier: "shipped-systemd",
+              path: "evidence.json",
+              name: "global-tool-independence",
+              issueTiers: ["R", "H"],
+            },
             {
               tier: "shipped-macos",
-              path: "RELEASE-02/evidence-manifest.json",
-              name: "real persisted records",
+              path: "RELEASE-03/evidence-manifest.json",
+              name: "managed tools after global removal",
+              issueTiers: ["R", "H"],
             },
           ]
-        : checkId === "RELEASE-03"
+        : checkId === "RELEASE-04" && coreTier !== undefined
           ? [
+              { tier: coreTier, path: testPath, name: testName },
               {
                 tier: "shipped-systemd",
                 path: "evidence.json",
-                name: "global-tool-independence",
-                issueTiers: ["R", "H"],
+                name: "printed-fresh-install",
+                issueTiers: ["R"],
               },
-              {
-                tier: "shipped-macos",
-                path: "RELEASE-03/evidence-manifest.json",
-                name: "managed tools after global removal",
-                issueTiers: ["R", "H"],
-              },
+              ...additionalObservations,
             ]
-          : checkId === "RELEASE-04" && coreTier !== undefined
-            ? [
-                { tier: coreTier, path: testPath, name: testName },
+          : coreTier === undefined
+            ? additionalObservations
+            : [
                 {
-                  tier: "shipped-systemd",
-                  path: "evidence.json",
-                  name: "printed-fresh-install",
-                  issueTiers: ["R"],
+                  tier: coreTier,
+                  path: testPath,
+                  name: testName,
+                  ...(primaryOwner ?? {}),
                 },
                 ...additionalObservations,
-              ]
-            : coreTier === undefined
-              ? additionalObservations
-              : [
-                  {
-                    tier: coreTier,
-                    path: testPath,
-                    name: testName,
-                    ...(primaryOwner ?? {}),
-                  },
-                  ...additionalObservations,
-                ];
+              ];
   return { checkId, stage, expected, testPath, testName, tiers, observations };
 };
 
@@ -161,7 +149,6 @@ const issueTiersForObservation = (observation: RequiredObservation): ReadonlyArr
   if (observation.issueTiers !== undefined) return observation.issueTiers;
   if (observation.path.includes("/tests/unit/")) return ["U"];
   if (observation.path.includes("/tests/integration/")) return ["I"];
-  if (observation.path.includes("/tests/browser/")) return ["B"];
   if (observation.path.includes("/tests/host/")) return ["H"];
   if (observation.tier === "shipped-systemd" || observation.tier === "shipped-macos") return ["R"];
   return [];
@@ -984,17 +971,10 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
   check(
     "ACCESS-04",
     6,
-    "Artifact publication and browser display preserve safe exact bytes",
-    "apps/console/tests/browser/artifact.spec.ts",
-    "serves an Artifact only through authenticated bounded display and download responses",
-    ["kojo-integration", "console-browser"],
-    [
-      {
-        tier: "kojo-integration",
-        path: "packages/kojo/tests/integration/contexts/trace/adapters/AtomicArtifactRepository.test.ts",
-        name: "publishes only complete content with the declared size and digest",
-      },
-    ],
+    "Artifact publication preserves complete content with the declared size and digest",
+    "packages/kojo/tests/integration/contexts/trace/adapters/AtomicArtifactRepository.test.ts",
+    "publishes only complete content with the declared size and digest",
+    ["kojo-integration"],
   ),
   check(
     "CLIENT-01",
@@ -1096,157 +1076,19 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     ],
   ),
   check(
-    "UI-01",
-    6,
-    "flat navigation and filtered Project, Workflow, Run, and Gate tables preserve links",
-    "apps/console/tests/browser/projectCatalogue.spec.ts",
-    "keeps flat resource navigation and durable links out of every Project row",
-    ["console-browser"],
-    [
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/projectCatalogue.spec.ts",
-        name: "filters an authoritative Project grid and keeps stable URL selection",
-      },
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/projectCatalogue.spec.ts",
-        name: "paginates fifty filtered Projects and keeps the cursor in the URL",
-      },
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/workflowCatalogue.spec.ts",
-        name: "filters Workflow state and preserves current Run links",
-      },
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/workflowCatalogue.spec.ts",
-        name: "paginates the complete Workflow table and keeps its cursor in the URL",
-      },
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/runConsole.spec.ts",
-        name: "paginates and filters the complete Run table with durable URL state",
-      },
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/gateVerdict.spec.ts",
-        name: "defaults the Gate table to every status and keeps complete review links and states",
-      },
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/gateVerdict.spec.ts",
-        name: "paginates and filters every Gate state with durable URL state",
-      },
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/gateVerdict.spec.ts",
-        name: "records a Verdict with the Daemon OS user as Answerer",
-      },
-    ],
-  ),
-  check(
-    "UI-02",
-    6,
-    "safe Daemon actions keep stale and Recorded or Applied states distinct",
-    "apps/console/tests/browser/gateVerdict.spec.ts",
-    "defaults the Gate table to every status and keeps complete review links and states",
-    ["console-browser"],
-    [
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/workflowCatalogue.spec.ts",
-        name: "explains that ordinary Workflow Stop keeps admitted Runs eligible",
-      },
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/workflowCatalogue.spec.ts",
-        name: "requires acknowledgement before forced Workflow Stop",
-      },
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/workflowCatalogue.spec.ts",
-        name: "starts a Trigger without creating an immediate Run",
-      },
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/workflowCatalogue.spec.ts",
-        name: "validates JSON before a no-Trigger Start and submits one accepted Run payload",
-      },
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/reconnect.spec.ts",
-        name: "bounds reconnect attempts, preserves the snapshot, and disables all mutations",
-      },
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/runConsole.spec.ts",
-        name: "requires acknowledgement and separates durable cancellation intent from confirmation",
-      },
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/runConsole.spec.ts",
-        name: "requires the exact Action ID, reason, and possible-duplication acknowledgement",
-      },
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/runConsole.spec.ts",
-        name: "shows an interrupted sibling as recovery and never as the cancelled target",
-      },
-    ],
-  ),
-  check(
-    "UI-03",
-    6,
-    "the Console uses its Zaidan grids and filters at browser seams",
-    "apps/console/tests/browser/daemonComponents.spec.ts",
-    "uses Zaidan composition for every catalogue and keeps it keyboard-operable on narrow layouts",
-    ["console-browser"],
-    [
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/daemonComponents.spec.ts",
-        name: "uses filtered Zaidan lists for Phases, Artifacts, and detail resources",
-      },
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/daemonComponents.spec.ts",
-        name: "reads Recent changes from durable Daemon history after reload and filters by request ID",
-      },
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/waterfall.spec.ts",
-        name: "a Phase panel shows Agent session, token, correction, and repository facts",
-      },
-      {
-        tier: "console-browser",
-        path: "apps/console/tests/browser/waterfall.spec.ts",
-        name: "a Phase and its Sandbox acquisition remain one link apart",
-      },
-    ],
-  ),
-  check(
     "RELEASE-01",
     7,
     "fresh shipped installs follow printed supported commands without fixture repair",
     "packages/kojo/tests/release/freshInstall.test.ts",
-    "follows the printed install and Factory path through native lifecycle and real browser evidence",
-    ["shipped-systemd", "shipped-macos"],
-  ),
-  check(
-    "RELEASE-02",
-    7,
-    "actual persisted records and absent optional wire fields render in the shipped Console",
-    "apps/console/tests/release/shippedDaemon.spec.ts",
-    "renders actual shipped Daemon records through one authenticated browser session",
+    "follows the printed install and Factory path through native lifecycle evidence",
     ["shipped-systemd", "shipped-macos"],
   ),
   check(
     "RELEASE-03",
     7,
-    "managed Daemon, Console, recovery, and CLI work after global tool removal",
+    "managed Daemon, recovery, and CLI work after global tool removal",
     "packages/kojo/tests/release/freshInstall.test.ts",
-    "follows the printed install and Factory path through native lifecycle and real browser evidence",
+    "follows the printed install and Factory path through native lifecycle evidence",
     ["shipped-systemd", "shipped-macos"],
   ),
   check(
@@ -1341,11 +1183,6 @@ export const loadedTestsFromLog = (
       }
     }
   }
-  if (loaded === 0 && tier === "console-browser") {
-    passed = Number(plain.match(/\b(\d+)\s+passed(?:\s|$)/m)?.[1] ?? 0);
-    skipped = Number(plain.match(/\b(\d+)\s+skipped(?:\s|$)/m)?.[1] ?? 0);
-    loaded = passed + skipped;
-  }
   const namedSkips = [...plain.matchAll(/(?:^|\|)\s*↓\s+(.+)$/gm)].map(
     (match) => match[1]?.trim() ?? "",
   );
@@ -1366,7 +1203,7 @@ export const loadedTestsFromLog = (
     passed,
     skipped,
     namedSkips,
-    cacheHit: false,
+    cacheHit: /\b(?:kojo(?:-[\w-]+)?|console):test(?:-[\w-]+)?\s+\(cached(?:[,\s)])/m.test(plain),
     log: logPath,
     tests,
   };
@@ -1430,7 +1267,6 @@ export const completeReleaseEvidence = (input: CompleteEvidenceInput) => {
           `${required.checkId} ${observation.tier} tested ${receipt.testedRevision}, not ${input.testedRevision}`,
         );
       }
-      if (receipt.cacheHit) fail(`${required.checkId} ${observation.tier} used a cache hit`);
       if (receipt.loaded === 0) fail(`${required.checkId} ${observation.tier} loaded zero tests`);
       if (receipt.passed === 0) fail(`${required.checkId} ${observation.tier} passed zero tests`);
       if (receipt.passed + receipt.skipped !== receipt.loaded) {

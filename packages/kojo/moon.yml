@@ -6,6 +6,9 @@ dependsOn:
   - kojo-runner-contracts
 
 tasks:
+  tsc:
+    outputs:
+      - /.moon/cache/types/packages/kojo
   check-packages:
     command: bun src/scripts/check-package-graph.ts
     inputs:
@@ -13,11 +16,11 @@ tasks:
       - /apps/console/package.json
       - /moon.yml
       - /packages/*/package.json
+      - /packages/*/src/**/*
       - /packages/kojo/managed-release.json
       - /packages/*/runtime-manifest.json
       - /tsconfig.json
-    options:
-      cache: false
+      - src/scripts/check-package-graph.ts
   # Both test tasks launch Vitest through `bun`, and the `bun` is not decoration. `vitest.mjs` has a
   # `#!/usr/bin/env node` shebang, so invoking the binary directly runs the whole suite — workers and
   # all — under Node. Kojo's runtime is Bun: it depends on `@effect/platform-bun` and
@@ -36,45 +39,75 @@ tasks:
       - /.github/scripts/systemd-shipped-linger-authorization.sh
       - /.github/scripts/systemd-shipped-logout-readiness.sh
       - /.github/scripts/systemd-shipped-singleton-evidence.sh
+      - /packages/kojo-client-contracts/src/**/*
+      - /packages/kojo-runner-contracts/src/**/*
+      - /packages/*/package.json
+      - package.json
       - src/**/*
       - tests/unit/**/*
       - tests/support/**/*
       - vitest.config.ts
+      - tsconfig.json
   test-integration:
     command: bun node_modules/.bin/vitest run --project integration
     inputs:
-      - /cog.toml
-      - /.github/release-packages.json
-      - /.github/scripts/cocogitto-package-version.ts
-      - /.github/scripts/release-tags.ts
-      - /.github/scripts/release-train.ts
-      - /.github/scripts/verify-accepted-prerelease.sh
-      - /.github/scripts/prepare-release.ts
-      - /.github/scripts/release-jsr.ts
+      - /.agents/**/*
       - /.github/actions/release-checkout/action.yml
-      - /.github/workflows/release-checks.yml
-      - /packages/*/jsr.json
-      - /.github/workflows/release.yml
+      - /.github/release-packages.json
+      - /.github/scripts/**/*
+      - /.github/workflows/**/*
+      - /.kojo/**/*
+      - /README.md
+      - /apps/console/src/**/*
+      - /apps/console/vite.config.ts
+      - /cog.toml
+      - /docs/adr/**/*
+      - /docs/design/**/*
+      - /docs/release-notes/**/*
       - /docs/release-process.md
+      - /packages/*/package.json
+      - /packages/*/jsr.json
+      - /packages/kojo-client-contracts/src/**/*
+      - /packages/kojo-runner-contracts/src/**/*
+      - /packages/kojo-runtime/src/**/*
+      - /packages/kojo-runtime/runtime-manifest.json
+      - /packages/kojo-runtime/tests/support/**/*
+      - managed-release.json
       - src/**/*
       - tests/fixtures/**/*
       - tests/integration/**/*
       - tests/support/**/*
       - vitest.config.ts
+      - tsconfig.json
+  # This task checks the current native service manager, which is outside the workspace.
   test-host:
     command: bun node_modules/.bin/vitest run --project host --reporter=verbose
     inputs:
       - src/**/*
       - tests/host/**/*
+      - tests/support/daemon/**/*
+      - /packages/kojo-client-contracts/src/**/*
+      - /packages/kojo-runner-contracts/src/**/*
+      - /packages/*/package.json
       - vitest.config.ts
+      - tsconfig.json
     options:
       cache: false
+  # Native installation state and evidence under RUNNER_TEMP cannot be restored by Moon.
   test-release-macos:
     command: bun node_modules/.bin/vitest run --project release-macos --reporter=verbose
     deps:
       - console:build
     inputs:
       - /README.md
+      - /.release-train/packages/**/*
+      - $KOJO_SHIPPED_MACOS_EVIDENCE
+      - $KOJO_RELEASE_ARCHIVES
+      - $KOJO_RELEASE_EVIDENCE_ROOT
+      - $GITHUB_ACTIONS
+      - $RUNNER_ENVIRONMENT
+      - $RUNNER_OS
+      - $RUNNER_TEMP
       - /packages/kojo-client-contracts/**/*
       - /packages/kojo-runner-contracts/**/*
       - /packages/kojo-runtime/**/*
@@ -85,27 +118,21 @@ tasks:
       - tests/release/**/*
       - tests/support/release/**/*
       - vitest.config.ts
+      - tsconfig.json
     options:
       cache: false
-  # Sandcastle's build asserts Effect never leaks out of its published types. This asserts the
-  # inverse for the Runtime: no bare promise reaches its authoring declarations.
-  #
-  # It grades Runtime declarations, so it depends on `kojo-runtime:tsc`. Its real inputs
-  # live in the workspace type cache rather than in this project, so it is not cached — a guard that
-  # reports a stale answer is worse than one that always runs.
+  # Check the Runtime declarations restored or emitted by its TypeScript dependency.
   check-public-types:
     command: bun src/scripts/check-public-types.ts
     deps:
       - kojo-runtime:tsc
-    options:
-      cache: false
-  # The published CLI package contains its sources and the Console assets that the Daemon serves.
-  #
-  # Not cached: its input is a directory another project writes, so a cache hit here would report a
-  # Console that is no longer there.
+    inputs:
+      - src/scripts/check-public-types.ts
+      - src/contexts/sandbox/guards/promiseFreeTypes.ts
+  # The Console build owns its output and restores it before this shell check.
   build:
     command: bun src/scripts/check-console-build.ts
     deps:
       - console:build
-    options:
-      cache: false
+    inputs:
+      - src/scripts/check-console-build.ts

@@ -7,3 +7,5 @@ dependsOn:
 tasks:
   tsc:
     command: bun tsc --build --verbose
+    outputs:
+      - /.moon/cache/types/.github

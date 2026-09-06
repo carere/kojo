@@ -14,7 +14,6 @@ login_readiness_script=.github/scripts/systemd-shipped-login-readiness.sh
 login_state_evidence_script=.github/scripts/systemd-shipped-login-state-evidence.sh
 linger_authorization_script=.github/scripts/systemd-shipped-linger-authorization.sh
 logout_readiness_script=.github/scripts/systemd-shipped-logout-readiness.sh
-playwright_cli=$workspace/apps/console/node_modules/@playwright/test/cli.js
 diagnostic=$evidence_directory/controller-diagnostic.log
 diagnostic_step=preflight
 diagnostic_line=
@@ -116,11 +115,6 @@ install -d -m 0700 -o "$evidence_user" -g "$evidence_user" "$evidence_home/.ssh"
 ssh-keygen -q -t ed25519 -N "" -f "$key"
 install -m 0600 -o "$evidence_user" -g "$evidence_user" "$key.pub" \
   "$evidence_home/.ssh/authorized_keys"
-diagnostic_step=browser-install
-test -f "$playwright_cli"
-PLAYWRIGHT_BROWSERS_PATH=/opt/kojo-playwright \
-  bun "$playwright_cli" install --with-deps chromium
-chmod -R a+rX /opt/kojo-playwright
 systemctl start ssh
 /usr/sbin/sshd -T | grep -Fx "usepam yes" >/dev/null
 loginctl disable-linger "$evidence_user"
@@ -447,15 +441,13 @@ jq -n \
       { file: (.file | split("/") | last), sha256: .sha256 }
     )),
     loadedTests: [
-      { tier: "native-host", loaded: 2, passed: 1, skipped: 1, namedSkips: ["the native macOS Daemon lifecycle"] },
-      { tier: "shipped-browser", loaded: 1, passed: 1, skipped: 0, namedSkips: [] }
+      { tier: "native-host", loaded: 2, passed: 1, skipped: 1, namedSkips: ["the native macOS Daemon lifecycle"] }
     ],
     checks: [
       { name: "printed-fresh-install", expected: "bun add -g, init, install, doctor, registration and Start succeed without conditional repair", actual: "passed", evidence: "candidate-install.log; fresh-init.log; factory-authoring.log; fresh-doctor.log; project-register.log; workflow-start.json" },
       { name: "shipped-managed-content", expected: "packed Kojo, copied global Bun and shipped Console own the service", actual: "passed", evidence: "candidate-install.log; daemon-install.log; managed-bun-sha256.log; package-sha256.log" },
       { name: "bounded-startup-readiness", expected: "managed status observes the started Daemon become responsive and Ready without repair or restart", actual: "passed", evidence: "managed-readiness-observations.jsonl; managed-readiness-final.json; managed-readiness-status.stderr.log" },
       { name: "real-daemon-records", expected: "Project, Workflow, Run, Gate, Trace, Sandbox and Artifact persist; optional wire fields are absent instead of null", actual: "passed", evidence: "run-succeeded.json; gate-applied.json; run-after-replacement.json; persisted-database.json" },
-      { name: "authenticated-browser", expected: "one authenticated browser inspects the actual encoded wire and renders persisted records and Artifact", actual: "passed", evidence: "browser-tests.log" },
       { name: "global-tool-independence", expected: "managed status and repair work after candidate global Kojo and Bun removal", actual: "passed", evidence: "global-removal.log; managed-status-after-global-removal.log; managed-repair-after-global-removal.log" },
       { name: "replacement-and-access", expected: "the Type=exec control group contains the replacement MainPID; old process and browser authority are revoked; another OS user is refused", actual: "passed", evidence: "cgroup-before-replacement.log; replacement-access.log; final-logout-with-linger.log" },
       { name: "login-lifetime", expected: "final logout reaches an exact terminal stopped manager state without linger; the next PAM login restores manager readiness without root reset; explicit linger either succeeds under Host policy or is retried after an exact policy refusal", actual: "passed", evidence: "pre-logout-login-state.json; pre-logout-login-state.stderr.log; logout-readiness-observations.jsonl; logout-readiness-final.json; logout-readiness.stderr.log; final-logout-without-linger.log; login-readiness-observations.jsonl; login-readiness-final.json; login-readiness.stderr.log; initial-linger-authorization.json; initial-keep-running-after-logout.log; initial-linger-login-state.json; initial-linger-login-state.stderr.log; linger-authorization.json; keep-running-after-logout.log; authorized-live-login-state.json; authorized-live-login-state.stderr.log; authorized-final-login-state.json; authorized-final-login-state.stderr.log; final-logout-with-linger.log" },
