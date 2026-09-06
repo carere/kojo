@@ -28,6 +28,14 @@ export default defineConfig({
       },
       {
         test: {
+          name: "repository",
+          include: ["tests/repository/**/*.test.ts"],
+          fileParallelism: false,
+          testTimeout: 60_000,
+        },
+      },
+      {
+        test: {
           name: "host",
           include: ["tests/host/**/*.test.ts"],
           fileParallelism: false,

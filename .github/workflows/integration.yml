@@ -1,4 +1,4 @@
-name: CLI integration
+name: Integration tests
 
 on:
   workflow_call:
@@ -22,7 +22,7 @@ env:
 
 jobs:
   integration:
-    name: CLI integration (${{ matrix.shard }}/8)
+    name: Integration tests (${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -59,7 +59,7 @@ jobs:
         run: moon run kojo:build
 
       # Each Host runs one file at a time. CI and release checks use identical cache keys.
-      - name: CLI integration tests
+      - name: Integration tests tests
         env:
           SHARD: ${{ matrix.shard }}
         run: |
@@ -71,7 +71,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: cli-integration-${{ matrix.shard }}
+          name: integration-${{ matrix.shard }}
           path: .release-evidence/logs/kojo-integration-${{ matrix.shard }}.log
           include-hidden-files: true
           if-no-files-found: error

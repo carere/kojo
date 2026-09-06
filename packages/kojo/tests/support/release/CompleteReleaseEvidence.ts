@@ -84,7 +84,8 @@ const check = (
     ? "contract-runtime"
     : testPath.startsWith("packages/kojo/tests/unit/")
       ? "kojo-unit"
-      : testPath.startsWith("packages/kojo/tests/integration/")
+      : testPath.startsWith("packages/kojo/tests/integration/") ||
+          testPath.startsWith("packages/kojo/tests/repository/")
         ? "kojo-integration"
         : testPath.startsWith("packages/kojo/tests/host/")
           ? "native-systemd"
@@ -148,7 +149,11 @@ const check = (
 const issueTiersForObservation = (observation: RequiredObservation): ReadonlyArray<Issue64Tier> => {
   if (observation.issueTiers !== undefined) return observation.issueTiers;
   if (observation.path.includes("/tests/unit/")) return ["U"];
-  if (observation.path.includes("/tests/integration/")) return ["I"];
+  if (
+    observation.path.includes("/tests/integration/") ||
+    observation.path.includes("/tests/repository/")
+  )
+    return ["I"];
   if (observation.path.includes("/tests/host/")) return ["H"];
   if (observation.tier === "shipped-systemd" || observation.tier === "shipped-macos") return ["R"];
   return [];
@@ -1094,45 +1099,20 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
   check(
     "RELEASE-04",
     7,
-    "old execution, storage, and spend paths are absent and guidance matches the shipped contract",
-    "packages/kojo/tests/integration/release/contractCutover.test.ts",
+    "old execution, storage, and spend paths are absent and package entry points match the shipped contract",
+    "packages/kojo/tests/repository/release/contractCutover.test.ts",
     "ships no legacy execution path or client fallback",
     ["kojo-integration", "shipped-systemd"],
     [
       {
         tier: "kojo-integration",
-        path: "packages/kojo/tests/integration/release/contractCutover.test.ts",
-        name: "keeps public guidance and package entry points on the one-Daemon release",
+        path: "packages/kojo/tests/repository/release/contractCutover.test.ts",
+        name: "keeps package entry points on the one-Daemon release",
       },
       {
         tier: "kojo-integration",
-        path: "packages/kojo/tests/integration/release/contractCutover.test.ts",
+        path: "packages/kojo/tests/repository/release/contractCutover.test.ts",
         name: "fails when test support retains a legacy agent-spend policy helper",
-      },
-      {
-        tier: "kojo-integration",
-        path: "packages/kojo/tests/integration/release/contractCutover.test.ts",
-        name: "uses the positional Project path in every shipped or generated guidance file",
-      },
-      {
-        tier: "kojo-integration",
-        path: "packages/kojo/tests/integration/release/contractCutover.test.ts",
-        name: "propagates every piped CI test failure before evidence collection",
-      },
-      {
-        tier: "kojo-integration",
-        path: "packages/kojo/tests/integration/release/contractCutover.test.ts",
-        name: "uploads the hidden core release evidence from its exact collection path",
-      },
-      {
-        tier: "kojo-integration",
-        path: "packages/kojo/tests/integration/release/contractCutover.test.ts",
-        name: "uploads the hidden complete release evidence from its exact accepted path",
-      },
-      {
-        tier: "kojo-integration",
-        path: "packages/kojo/tests/integration/release/contractCutover.test.ts",
-        name: "keeps Moon on the exact Bun version pinned for release evidence",
       },
     ],
   ),

@@ -86,6 +86,7 @@ Use moon for project tasks:
 ```bash
 moon run kojo:test
 moon run kojo:test-integration
+moon run kojo:test-repository
 moon run console:build
 ```
 
@@ -99,9 +100,12 @@ the ignored root `.env` file; Proto loads it when Moon starts. GitHub Actions us
 secret with the same name. Without a token, Moon uses its local cache. Release checks reuse valid
 Moon cache results. Changed task inputs invalidate their cached results.
 
-CI runs CLI integration tests in eight shards on separate Hosts, alongside core checks. Each shard
-runs one test file at a time. The required `Test` status accepts only a successful core job and all
-eight shards. Release checks use the same shard commands and collect all eight logs as evidence.
+CI runs process and adapter integration tests in eight parallel jobs, alongside shared core checks.
+Each integration Host runs one file at a time. Packaging, release scripts, and repository checks
+run separately with `moon run kojo:test-repository`; workflow and documentation changes do not
+invalidate the process-test cache. The required `Test` status combines both job groups and reports
+which group failed. Release checks use the same core commands and integration workflow, then collect
+logs after both groups pass. All release checks run before publication.
 
 The main paths are:
 

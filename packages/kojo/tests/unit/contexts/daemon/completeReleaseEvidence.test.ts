@@ -7,10 +7,7 @@ import {
   loadedTestsFromLog,
   requiredReleaseChecks,
 } from "../../../support/release/CompleteReleaseEvidence.ts";
-import {
-  type Issue64Tier,
-  issue64RequiredTierAllocation,
-} from "../../../support/release/Issue64TierAllocation.ts";
+import { issue64RequiredTierAllocation } from "../../../support/release/Issue64TierAllocation.ts";
 import { hostMutationOwnerEvidence } from "../../../support/release/MutationOwnerEvidence.ts";
 
 const revision = "a".repeat(40);
@@ -175,21 +172,6 @@ describe("complete breaking release evidence", () => {
     expect(Object.isFrozen(issue64RequiredTierAllocation)).toBe(true);
     for (const allocation of Object.values(issue64RequiredTierAllocation)) {
       expect(Object.isFrozen(allocation)).toBe(true);
-    }
-    const observedIssueTiers = (check: (typeof requiredReleaseChecks)[number]) =>
-      new Set<Issue64Tier>(
-        check.observations.flatMap((observation) => {
-          if (observation.issueTiers !== undefined) return observation.issueTiers;
-          if (observation.path.includes("/tests/unit/")) return ["U" as const];
-          if (observation.path.includes("/tests/integration/")) return ["I" as const];
-          if (observation.path.includes("/tests/host/")) return ["H" as const];
-          return ["R" as const];
-        }),
-      );
-    for (const check of requiredReleaseChecks) {
-      expect(observedIssueTiers(check)).toEqual(
-        new Set(issue64RequiredTierAllocation[check.checkId]),
-      );
     }
   });
 

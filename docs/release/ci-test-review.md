@@ -9,7 +9,24 @@ Core checks and seven integration shards passed. The final `Test` job reported t
 This was a stale test requirement, not a product failure or timeout.
 
 The assertion was reproduced locally and removed. Package entry-point and guidance checks remain.
-Release ordering is already checked in `tests/integration/scripts/releaseTrain.test.ts`.
+Release ordering is checked in `tests/repository/scripts/releaseTrain.test.ts`.
+
+## Implemented cleanup
+
+- Shared core commands in `.github/actions/core-checks/action.yml`; both CI and Release checks call it.
+- Core and integration jobs run concurrently during release. `core-evidence` joins their logs afterward.
+- Renamed the reusable integration workflow to `integration.yml` to reflect adapter and process coverage.
+- Moved seven repository and release-tooling files to `tests/repository`, with a separate Vitest project
+  and Moon task. Process-test inputs no longer include workflows, GitHub scripts, or documentation.
+- Removed workflow string slicing, exact command formatting, and guidance phrase assertions from
+  cutover/release tests. Retained package checks and a small parsed dependency check. The required
+  result script is executed against success, failure, cancellation, and skip results.
+- Updated full Host evidence to consume the moved repository results. Its aggregation tests pass.
+- The required `Test` job prints each upstream result before reporting failure.
+
+The findings below describe the starting state. Release stage policies and native Host coverage
+remain unchanged. No timeout increase or extra shards were added; the integration distribution
+changes naturally when repository tests leave that suite.
 
 ## Workflow responsibilities
 
@@ -17,7 +34,7 @@ Release ordering is already checked in `tests/integration/scripts/releaseTrain.t
 | --- | --- | --- |
 | `ci.yml` | Run core checks and integration shards on PRs and main | Keep |
 | `ci.yml`: `required`, displayed as `Test` | Combine core and integration results for branch protection; run no tests | Keep; its output should identify the failed upstream group |
-| `cli-integration.yml` | Run Kojo integration tests in eight parallel jobs | Keep parallel execution; its name hides that the suite includes adapters, packaging, and workflow configuration |
+| `integration.yml` | Run Kojo integration tests in eight parallel jobs | Keep parallel execution; its name hides that the suite includes adapters, packaging, and workflow configuration |
 | `release-checks.yml` | Check the prepared version, pack archives, and run full Host evidence for beta, RC, and stable | Share core commands with CI; it is not a post-publication gate |
 | `release.yml` | Prepare version, call checks, publish, create GitHub Release | Keep publication after checks, without public-registry polling afterward |
 
