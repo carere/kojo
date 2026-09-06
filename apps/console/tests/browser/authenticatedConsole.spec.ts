@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
+import { openAuthenticatedConsole } from "./support/openAuthenticatedConsole.ts";
 
 const testRoot = "/tmp/kojo-ticket-69-browser";
 const grantScript = new URL(
@@ -43,4 +44,39 @@ test("direct navigation has no domain authority", async ({ page }) => {
   await page.goto("http://127.0.0.1:47241/daemon");
   await expect(page.getByRole("heading", { name: "Console access is required" })).toBeVisible();
   await expect(page.getByText("Run kojo ui again", { exact: false })).toBeVisible();
+});
+
+test("waits for the launch grant exchange before authenticated navigation", async ({ page }) => {
+  let releaseSession: () => void = () => {};
+  const sessionAllowed = new Promise<void>((resolve) => {
+    releaseSession = resolve;
+  });
+  let sessionResponseReady: () => void = () => {};
+  const sessionResponse = new Promise<void>((resolve) => {
+    sessionResponseReady = resolve;
+  });
+  await page.route("**/_kojo/session", async (route) => {
+    const response = await route.fetch();
+    sessionResponseReady();
+    await sessionAllowed;
+    await route.fulfill({ response });
+  });
+
+  let authenticated = false;
+  const opening = openAuthenticatedConsole(page, launchUrl()).then(() => {
+    authenticated = true;
+  });
+  try {
+    await sessionResponse;
+    await page.waitForLoadState("load");
+    expect(await page.evaluate(() => window.sessionStorage.length)).toBe(0);
+    expect(authenticated).toBe(false);
+  } finally {
+    releaseSession();
+    await opening;
+  }
+
+  await page.goto("http://127.0.0.1:47241/runs");
+  await expect(page.getByRole("heading", { name: "Runs", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Console access is required" })).toHaveCount(0);
 });

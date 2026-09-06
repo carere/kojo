@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
+import { openAuthenticatedConsole } from "./support/openAuthenticatedConsole.ts";
 
 const root = "/tmp/kojo-ticket-70-browser";
 const grantScript = new URL(
@@ -16,7 +17,7 @@ const launch = (): string => {
 test("bounds reconnect attempts, preserves the snapshot, and disables all mutations", async ({
   page,
 }) => {
-  await page.goto(launch());
+  await openAuthenticatedConsole(page, launch());
   await page.goto("http://127.0.0.1:47242/");
   await expect(page.getByText("2 total", { exact: true })).toBeVisible();
 
@@ -85,7 +86,7 @@ test("bounds stalled notification connection attempts before explicit Reconnect"
 test("keeps a healthy established notification stream beyond the handshake deadline", async ({
   page,
 }) => {
-  await page.goto(launch());
+  await openAuthenticatedConsole(page, launch());
   await page.goto("http://127.0.0.1:47242/");
   await expect(page.getByText("2 total", { exact: true })).toBeVisible();
   await page.waitForTimeout(5_500);

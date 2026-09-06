@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
+import { openAuthenticatedConsole } from "./support/openAuthenticatedConsole.ts";
 
 test.describe.configure({ mode: "serial" });
 
@@ -43,7 +44,7 @@ test("paginates and filters the complete Run table with durable URL state", asyn
       body: JSON.stringify({ ...snapshot, runs }),
     });
   });
-  await page.goto(launch());
+  await openAuthenticatedConsole(page, launch());
   await page.goto(`${origin}/runs`);
   await expect(page.locator("[data-run]")).toHaveCount(50);
   await page.getByRole("button", { name: "Next" }).click();
@@ -399,7 +400,7 @@ test("shows an interrupted sibling as recovery and never as the cancelled target
       }),
     });
   });
-  await page.goto(launch());
+  await openAuthenticatedConsole(page, launch());
   await page.goto(`${origin}/runs/run-interrupted-sibling`);
   await expect(page.getByText("Interrupted sibling recovery", { exact: true })).toBeVisible();
   await expect(page.getByText(/forced Stop targeted another Run/)).toBeVisible();

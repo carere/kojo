@@ -1116,7 +1116,7 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
       {
         tier: "console-browser",
         path: "apps/console/tests/browser/workflowCatalogue.spec.ts",
-        name: "filters Workflow state and proves safe Trigger Start, Stop, force, and Run links",
+        name: "filters Workflow state and preserves current Run links",
       },
       {
         tier: "console-browser",
@@ -1156,7 +1156,17 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
       {
         tier: "console-browser",
         path: "apps/console/tests/browser/workflowCatalogue.spec.ts",
-        name: "filters Workflow state and proves safe Trigger Start, Stop, force, and Run links",
+        name: "explains that ordinary Workflow Stop keeps admitted Runs eligible",
+      },
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/workflowCatalogue.spec.ts",
+        name: "requires acknowledgement before forced Workflow Stop",
+      },
+      {
+        tier: "console-browser",
+        path: "apps/console/tests/browser/workflowCatalogue.spec.ts",
+        name: "starts a Trigger without creating an immediate Run",
       },
       {
         tier: "console-browser",

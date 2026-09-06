@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
+import { openAuthenticatedConsole } from "./support/openAuthenticatedConsole.ts";
 
 test.describe.configure({ mode: "serial" });
 
@@ -19,7 +20,7 @@ test("uses Zaidan composition for every catalogue and keeps it keyboard-operable
   page,
 }) => {
   await page.setViewportSize({ width: 360, height: 800 });
-  await page.goto(launch());
+  await openAuthenticatedConsole(page, launch());
   await page.goto("http://127.0.0.1:47242/");
 
   await expect(page.locator('[data-list-composition="zaidan-data-grid"]').first()).toBeVisible();
@@ -129,7 +130,7 @@ test("uses filtered Zaidan lists for Phases, Artifacts, and detail resources", a
   await page.route(`**/api/v1/runs/${runId}`, (route) =>
     route.fulfill({ contentType: "application/json", body: JSON.stringify(run) }),
   );
-  await page.goto(launch());
+  await openAuthenticatedConsole(page, launch());
 
   await page.goto(`http://127.0.0.1:47242/runs/${runId}?view=table`);
   await expect(page.getByText("1 of 1 Phases")).toBeVisible();
@@ -186,7 +187,7 @@ test("reads Recent changes from durable Daemon history after reload and filters 
       }),
     });
   });
-  await page.goto(launch());
+  await openAuthenticatedConsole(page, launch());
   await page.goto("http://127.0.0.1:47242/");
   await expect(page.locator('[data-recent-request="request-durable-change"]')).toBeVisible();
   await expect(page.locator("[data-recent-changes]")).not.toContainText("confirm");

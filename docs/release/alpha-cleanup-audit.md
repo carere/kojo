@@ -129,3 +129,24 @@ package copies. The final Knip and Biome checks ran after fixture cleanup.
 - Separate reviews found no further issue in provenance, static coverage, or Trigger lifecycle.
 
 Native Host release evidence and publication were not run in this follow-up.
+
+## Browser test follow-up
+
+CI exposed a stale Workflow browser fixture after the ordinary Stop fix. The browser test used a
+real Daemon action, which made its seeded queued Run eligible for execution. It then waited for
+that Run's old `runner-starting` queue reason. The failure reproduced both alone and in its file.
+
+The Workflow UI cases now use fresh, typed Project, Workflow, and Run API observations per test.
+Separate cases check ordinary Stop, acknowledged forced Stop, and Trigger Start. The release
+map requires each case. Live Runner behavior remains covered by backend integration tests.
+The unused Workflow Daemon, captured Factory, and SQLite seeds are removed.
+
+Fourteen other browser navigation sites now wait for `Access active` before leaving the launch
+page. A controlled grant-response test fails without this wait and passes with it. Browser servers
+also signal readiness after all fixture setup; an open compatibility endpoint alone was too early.
+No retries or longer timeouts were added. Other suites still share real Daemon state, so the
+full suite retains one worker.
+
+Validation: all 93 browser tests pass. The six isolated Workflow cases also pass three times with
+two workers (18 executions). The 13 release evidence unit tests and one integration test pass.
+Root TypeScript, Knip, and Biome checks pass.

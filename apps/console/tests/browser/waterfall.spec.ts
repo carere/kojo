@@ -5,6 +5,7 @@ import type {
   RunSandboxDocument,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 import { expect, type Locator, type Page, test } from "@playwright/test";
+import { openAuthenticatedConsole } from "./support/openAuthenticatedConsole.ts";
 
 const root = "/tmp/kojo-ticket-69-browser";
 const origin = "http://127.0.0.1:47241";
@@ -848,7 +849,7 @@ test("a missing Run is a settled answer and not a reconnecting outage", async ({
       body: JSON.stringify({ error: "no-such-run", message: "the Run does not exist" }),
     });
   });
-  await page.goto(launch());
+  await openAuthenticatedConsole(page, launch());
   await page.goto(`${origin}/runs/run-nope?view=timeline`);
   await expect(page.getByText("There is no run run-nope in this factory.")).toBeVisible();
   await expect(page.locator('[data-notice="retrying"]')).toHaveCount(0);
