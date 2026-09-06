@@ -115,7 +115,7 @@ jobs:
       - name: Browser tests
         run: |
           set -o pipefail
-          moon run console:test-browser -- --reporter=list --grep 'a Run catalogue row opens the Waterfall' --repeat-each=3 --max-failures=1 2>&1 | tee .release-evidence/logs/console-browser.log
+          moon run console:test-browser -- --reporter=list 2>&1 | tee .release-evidence/logs/console-browser.log
 
       - name: Browser failure traces
         if: failure()
