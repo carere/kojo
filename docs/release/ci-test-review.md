@@ -8,7 +8,7 @@ in `packages/kojo/tests/integration/release/contractCutover.test.ts`. It require
 Core checks and seven integration shards passed. The final `Test` job reported the shard failure.
 This was a stale test requirement, not a product failure or timeout.
 
-The assertion was reproduced locally and removed. Package entry-point and guidance checks remain.
+The assertion was reproduced locally and removed. Package entry-point checks remain.
 Release ordering is checked in `tests/repository/scripts/releaseTrain.test.ts`.
 
 ## Implemented cleanup
@@ -21,7 +21,8 @@ Release ordering is checked in `tests/repository/scripts/releaseTrain.test.ts`.
 - Removed workflow string slicing, exact command formatting, and guidance phrase assertions from
   cutover/release tests. Retained package checks and a small parsed dependency check. The required
   result script is executed against success, failure, cancellation, and skip results.
-- Updated full Host evidence to consume the moved repository results. Its aggregation tests pass.
+- Updated full Host evidence to consume the moved repository results. Project registration evidence
+  now uses the current real-adapter tests; removed its reference to a deleted unit test.
 - The required `Test` job prints each upstream result before reporting failure.
 
 The findings below describe the starting state. Release stage policies and native Host coverage
@@ -34,7 +35,7 @@ changes naturally when repository tests leave that suite.
 | --- | --- | --- |
 | `ci.yml` | Run core checks and integration shards on PRs and main | Keep |
 | `ci.yml`: `required`, displayed as `Test` | Combine core and integration results for branch protection; run no tests | Keep; its output should identify the failed upstream group |
-| `integration.yml` | Run Kojo integration tests in eight parallel jobs | Keep parallel execution; its name hides that the suite includes adapters, packaging, and workflow configuration |
+| `cli-integration.yml` (now `integration.yml`) | Run Kojo integration tests in eight parallel jobs | Keep parallel execution; the old name hid adapter and repository coverage |
 | `release-checks.yml` | Check the prepared version, pack archives, and run full Host evidence for beta, RC, and stable | Share core commands with CI; it is not a post-publication gate |
 | `release.yml` | Prepare version, call checks, publish, create GitHub Release | Keep publication after checks, without public-registry polling afterward |
 

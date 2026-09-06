@@ -34,7 +34,8 @@ export const issue64RequiredTierAllocation = Object.freeze({
   "SCHED-02": tiers("I"),
   "SCHED-03": tiers("U", "I"),
   "SCHED-04": tiers("U", "I"),
-  "PROJECT-01": tiers("U", "I"),
+  // Project registration now runs through real persistence and Daemon integration tests.
+  "PROJECT-01": tiers("I"),
   "LOAD-01": tiers("I"),
   "LOAD-02": tiers("U", "I", "H"),
   "LIFE-01": tiers("H"),

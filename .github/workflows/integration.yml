@@ -59,7 +59,7 @@ jobs:
         run: moon run kojo:build
 
       # Each Host runs one file at a time. CI and release checks use identical cache keys.
-      - name: Integration tests tests
+      - name: Integration tests
         env:
           SHARD: ${{ matrix.shard }}
         run: |
