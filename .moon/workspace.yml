@@ -13,7 +13,7 @@ vcs:
 
 remote:
   api: "http"
-  host: "https://remoshu.delimoov.workers.dev"
+  host: "https://remoshu.carere.workers.dev/"
   auth:
     token: "REMOSHU_TOKEN"
   cache:
