@@ -65,6 +65,10 @@ const pack = (workspace: string, packagePath: string, destination: string): Pack
   }
   const tarball = join(packageDestination, tarballs[0] ?? "");
   const manifest = packedManifest(tarball);
+  return archivePackage(tarball, manifest);
+};
+
+const archivePackage = (tarball: string, manifest = packedManifest(tarball)): PackedPackage => {
   const bytes = readFileSync(tarball);
   return {
     name: manifest.name,
@@ -158,7 +162,13 @@ export const startShippedPackageRegistry = async (options: {
     "packages/kojo-client-contracts",
     "packages/kojo-runner-contracts",
   ] as const;
-  const packed = packagePaths.map((path) => pack(options.workspace, path, options.destination));
+  const preparedArchives = process.env.KOJO_RELEASE_ARCHIVES;
+  const packed =
+    preparedArchives === undefined
+      ? packagePaths.map((path) => pack(options.workspace, path, options.destination))
+      : readdirSync(preparedArchives)
+          .filter((path) => path.endsWith(".tgz"))
+          .map((path) => archivePackage(join(preparedArchives, path)));
   const expectedNames = [
     "@carere/kojo",
     "@carere/kojo-client-contracts",

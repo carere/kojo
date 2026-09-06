@@ -317,9 +317,9 @@ export const daemonUpgradeCommand = Command.make(
   "upgrade",
   {
     version: Flag.string("version"),
-    check: Flag.boolean("check"),
+    check: Flag.boolean("check").pipe(Flag.withDefault(false)),
     approveNoRollback: Flag.string("approve-no-rollback").pipe(Flag.optional),
-    force: Flag.boolean("force"),
+    force: Flag.boolean("force").pipe(Flag.withDefault(false)),
     pending: Flag.string("pending").pipe(Flag.optional),
     timeout: Flag.string("timeout").pipe(Flag.withDefault("60s")),
   },

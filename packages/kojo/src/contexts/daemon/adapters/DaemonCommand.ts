@@ -384,8 +384,8 @@ const install = Command.make(
 const status = Command.make(
   "status",
   {
-    details: Flag.boolean("details"),
-    json: Flag.boolean("json"),
+    details: Flag.boolean("details").pipe(Flag.withDefault(false)),
+    json: Flag.boolean("json").pipe(Flag.withDefault(false)),
   },
   Effect.fn(function* ({ details, json }) {
     const daemon = yield* useLifecycleEffect((lifecycle) => lifecycle.status);
@@ -445,9 +445,9 @@ const configure = Command.make(
   "configure",
   {
     file: Flag.string("file").pipe(Flag.optional),
-    check: Flag.boolean("check"),
+    check: Flag.boolean("check").pipe(Flag.withDefault(false)),
     confirm: Flag.string("confirm").pipe(Flag.optional),
-    json: Flag.boolean("json"),
+    json: Flag.boolean("json").pipe(Flag.withDefault(false)),
   },
   Effect.fn(function* ({ file, check, confirm, json }) {
     if (Option.isSome(confirm)) {
@@ -522,7 +522,7 @@ const start = Command.make(
 const stop = Command.make(
   "stop",
   {
-    force: Flag.boolean("force"),
+    force: Flag.boolean("force").pipe(Flag.withDefault(false)),
     pending: Flag.string("pending").pipe(Flag.optional),
     timeout: Flag.string("timeout").pipe(Flag.withDefault("60s")),
   },
@@ -539,7 +539,7 @@ const stop = Command.make(
 const restart = Command.make(
   "restart",
   {
-    force: Flag.boolean("force"),
+    force: Flag.boolean("force").pipe(Flag.withDefault(false)),
     pending: Flag.string("pending").pipe(Flag.optional),
     timeout: Flag.string("timeout").pipe(Flag.withDefault("60s")),
   },
@@ -556,7 +556,7 @@ const restart = Command.make(
 const remove = Command.make(
   "remove",
   {
-    force: Flag.boolean("force"),
+    force: Flag.boolean("force").pipe(Flag.withDefault(false)),
     pending: Flag.string("pending").pipe(Flag.optional),
     timeout: Flag.string("timeout").pipe(Flag.withDefault("60s")),
   },
@@ -573,9 +573,9 @@ const remove = Command.make(
 const purge = Command.make(
   "purge",
   {
-    check: Flag.boolean("check"),
+    check: Flag.boolean("check").pipe(Flag.withDefault(false)),
     confirm: Flag.string("confirm").pipe(Flag.optional),
-    json: Flag.boolean("json"),
+    json: Flag.boolean("json").pipe(Flag.withDefault(false)),
   },
   Effect.fn(function* ({ check, confirm, json }) {
     if (check === Option.isSome(confirm)) {
@@ -640,12 +640,13 @@ const purge = Command.make(
 const repair = Command.make(
   "repair",
   {
-    check: Flag.boolean("check"),
+    check: Flag.boolean("check").pipe(Flag.withDefault(false)),
     apply: Flag.string("apply").pipe(Flag.optional),
     purgeSafety: Flag.boolean("purge-safety").pipe(
+      Flag.withDefault(false),
       Flag.withDescription("Recover sealed purge safety with the retained restricted Daemon"),
     ),
-    json: Flag.boolean("json"),
+    json: Flag.boolean("json").pipe(Flag.withDefault(false)),
   },
   Effect.fn(function* ({ check, apply, purgeSafety, json }) {
     if (check === Option.isSome(apply)) {
@@ -775,9 +776,10 @@ const disable = Command.make(
   "disable",
   {
     now: Flag.boolean("now").pipe(
+      Flag.withDefault(false),
       Flag.withDescription("Also stop the current Daemon after disabling automatic start"),
     ),
-    force: Flag.boolean("force"),
+    force: Flag.boolean("force").pipe(Flag.withDefault(false)),
     pending: Flag.string("pending").pipe(Flag.optional),
     timeout: Flag.string("timeout").pipe(Flag.withDefault("60s")),
   },

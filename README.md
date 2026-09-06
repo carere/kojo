@@ -23,8 +23,8 @@ Kojo requires Bun.
 The current release is a breaking cutover from repository-local execution to one per-user Daemon.
 See the [Daemon cutover release notes](docs/release-notes/daemon-cutover.md).
 
-Maintainers use the staged [Release process](docs/release-process.md) to move one coordinated
-package set through alpha, beta, Release Candidate, and stable validation.
+Maintainers launch the GitHub `release` workflow to create alpha, beta, Release Candidate, and stable
+versions. See the [Release process](docs/release-process.md) for inputs, evidence, and npm/JSR setup.
 
 ```bash
 bun add -g @carere/kojo
@@ -84,6 +84,11 @@ moon run kojo:test
 moon run kojo:test-integration
 moon run console:build
 ```
+
+Moon uses the Remoshu remote cache configured in `.moon/workspace.yml`. Set `REMOSHU_TOKEN` in
+the ignored root `.env` file; Proto loads it when Moon starts. GitHub Actions uses the repository
+secret with the same name. Without a token, Moon uses its local cache. Full Release evidence runs
+with `--force` and does not use cached test results.
 
 The main paths are:
 

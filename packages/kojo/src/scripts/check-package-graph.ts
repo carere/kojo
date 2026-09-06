@@ -37,7 +37,7 @@ interface ManagedReleaseMetadata {
 }
 
 const repository = resolve(import.meta.dir, "../../../..");
-const effectVersion = "4.0.0-beta.106";
+const effectVersion = "4.0.0-rc.112";
 const bootstrapVersion: BootstrapResponse["bootstrapVersion"] = 1;
 
 const readJson = <A>(path: string): A =>

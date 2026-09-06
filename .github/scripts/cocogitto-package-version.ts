@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, relative, resolve } from "node:path";
 
 interface PublicPackage {
@@ -46,10 +46,14 @@ if (!workspaceVersion.test(lock)) {
 }
 writeFileSync(lockPath, lock.replace(workspaceVersion, `$1${version}$2`));
 
-const staged = [
-  resolve(packageDirectory, "package.json"),
-  lockPath,
-];
+const staged = [resolve(packageDirectory, "package.json"), lockPath];
+const jsrPath = resolve(packageDirectory, "jsr.json");
+if (existsSync(jsrPath)) {
+  const jsr = readFileSync(jsrPath, "utf8");
+  if (typeof JSON.parse(jsr).version !== "string") throw new Error("jsr.json has no version.");
+  writeFileSync(jsrPath, jsr.replace(/("version"\s*:\s*")[^"]+(")/, `$1${version}$2`));
+  staged.push(jsrPath);
+}
 if (releasePackage.directory === "kojo-runtime") {
   const runtimeManifestPath = resolve(packageDirectory, "runtime-manifest.json");
   const runtimeManifest = readFileSync(runtimeManifestPath, "utf8");

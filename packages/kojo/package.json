@@ -32,11 +32,11 @@
   "dependencies": {
     "@carere/kojo-client-contracts": "workspace:*",
     "@carere/kojo-runner-contracts": "workspace:*",
-    "@effect/platform-bun": "4.0.0-beta.106",
-    "effect": "4.0.0-beta.106"
+    "@effect/platform-bun": "4.0.0-rc.112",
+    "effect": "4.0.0-rc.112"
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.0-beta.106",
+    "@effect/vitest": "4.0.0-rc.112",
     "@playwright/test": "1.62.1",
     "@types/bun": "^1.3.14",
     "vitest": "^4.1.0"

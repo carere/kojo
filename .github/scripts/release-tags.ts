@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { releaseTagPlan } from "../../packages/kojo/src/scripts/release/ReleaseTags.ts";
-import { assertReleaseStage } from "../../packages/kojo/src/scripts/release/ReleaseVersion.ts";
 import type { ReleaseStage } from "../../packages/kojo/src/scripts/release/ReleaseVersion.ts";
+import { assertReleaseStage } from "../../packages/kojo/src/scripts/release/ReleaseVersion.ts";
 
 interface ReleaseManifest {
   readonly packages: ReadonlyArray<{
@@ -48,6 +48,7 @@ const packageEndpoint = (name: string): string =>
 
 const metadata = async (name: string): Promise<RegistryMetadata> => {
   const response = await fetch(`${registry}/${encodeURIComponent(name)}`);
+  if (response.status === 404 && mode === "protect-latest") return {};
   if (!response.ok) throw new Error(`Registry lookup for ${name} failed with ${response.status}.`);
   return (await response.json()) as RegistryMetadata;
 };
@@ -84,7 +85,7 @@ for (const releasePackage of manifest.packages) {
     throw new Error(`${releasePackage.name} does not use ${manifest.version}.`);
   }
   const current = await metadata(releasePackage.name);
-  if (current.versions?.[manifest.version] === undefined) {
+  if (current.versions?.[manifest.version] === undefined && mode !== "protect-latest") {
     throw new Error(`${releasePackage.name}@${manifest.version} is not published.`);
   }
   snapshots.set(releasePackage.name, current["dist-tags"] ?? {});

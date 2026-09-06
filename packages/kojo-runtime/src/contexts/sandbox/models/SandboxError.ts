@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import type { YieldableError } from "effect/Cause";
 
 /**
  * Which part of the sandbox lifecycle refused. Named, because the trace groups on it.
@@ -8,8 +9,29 @@ import { Schema } from "effect";
  * own stream parser, and every one of those fails in a way `exec` cannot. A reader who sees `exec`
  * goes and looks at a command line; there is no command line here.
  */
-export const SandboxOperation = Schema.Literals(["create", "exec", "close", "agent"]);
+export const SandboxOperation: Schema.Literals<readonly ["create", "exec", "close", "agent"]> =
+  Schema.Literals(["create", "exec", "close", "agent"]);
 export type SandboxOperation = typeof SandboxOperation.Type;
+
+const SandboxErrorBase: Schema.Class<
+  SandboxError,
+  Schema.TaggedStruct<
+    "SandboxError",
+    {
+      readonly operation: Schema.Literals<readonly ["create", "exec", "close", "agent"]>;
+      readonly target: Schema.String;
+      readonly reason: Schema.String;
+      readonly cause: Schema.Defect;
+    }
+  >,
+  YieldableError
+> = Schema.TaggedError<SandboxError>()("SandboxError", {
+  operation: SandboxOperation,
+  /** The branch for a lifecycle failure, the command line for an `exec` one. */
+  target: Schema.String,
+  reason: Schema.String,
+  cause: Schema.Defect(),
+});
 
 /**
  * The sandbox itself failed — the container never started, the command never ran, the teardown
@@ -25,10 +47,4 @@ export type SandboxOperation = typeof SandboxOperation.Type;
  * Note what is **not** an error here, exactly as in `WorkspaceError`: a command that ran and exited
  * non-zero. Sandcastle's `exec` surfaces the code in its result, and so does this boundary.
  */
-export class SandboxError extends Schema.TaggedError<SandboxError>()("SandboxError", {
-  operation: SandboxOperation,
-  /** The branch for a lifecycle failure, the command line for an `exec` one. */
-  target: Schema.String,
-  reason: Schema.String,
-  cause: Schema.Defect(),
-}) {}
+export class SandboxError extends SandboxErrorBase {}

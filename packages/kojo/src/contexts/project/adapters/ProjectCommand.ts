@@ -169,6 +169,7 @@ const locationRequestId = Flag.string("request-id").pipe(
 );
 
 const confirmLocationChange = Flag.boolean("confirm").pipe(
+  Flag.withDefault(false),
   Flag.withDescription("Confirm the shown location, Workflow, Run, and history consequences"),
 );
 
@@ -289,9 +290,13 @@ const status = Command.make(
     project: projectArgument,
     revision: revisionFlag.pipe(Flag.optional),
     details: Flag.boolean("details").pipe(
+      Flag.withDefault(false),
       Flag.withDescription("Show the complete retained manifest and protections"),
     ),
-    json: Flag.boolean("json").pipe(Flag.withDescription("Emit one JSON document")),
+    json: Flag.boolean("json").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Emit one JSON document"),
+    ),
   },
   Effect.fn(function* ({ project, revision, details, json }) {
     if (!details) {
@@ -326,8 +331,8 @@ const configure = Command.make(
   {
     project: projectArgument,
     file: Flag.string("file"),
-    check: Flag.boolean("check"),
-    json: Flag.boolean("json"),
+    check: Flag.boolean("check").pipe(Flag.withDefault(false)),
+    json: Flag.boolean("json").pipe(Flag.withDefault(false)),
   },
   Effect.fn(function* ({ project, file, check, json }) {
     const patch = yield* Effect.tryPromise({

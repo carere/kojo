@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import type { YieldableError } from "effect/Cause";
 import { WorktreeState } from "./WorktreeState.ts";
 
 /**
@@ -7,7 +8,9 @@ import { WorktreeState } from "./WorktreeState.ts";
  * One literal per silent skip path that could have produced it, so the failure names the upstream
  * behaviour it caught rather than describing a symptom.
  */
-export const WorktreeFault = Schema.Literals([
+export const WorktreeFault: Schema.Literals<
+  readonly ["detached", "wrong-branch", "modified", "behind-origin"]
+> = Schema.Literals([
   /** HEAD is detached. The run's commits would land on nothing a branch can be resumed from. */
   "detached",
   /** HEAD is on some other branch. The rebuild would grade a tree from a different run. */
@@ -18,6 +21,29 @@ export const WorktreeFault = Schema.Literals([
   "behind-origin",
 ]);
 export type WorktreeFault = typeof WorktreeFault.Type;
+
+const WorktreeUnusableBase: Schema.Class<
+  WorktreeUnusable,
+  Schema.TaggedStruct<
+    "WorktreeUnusable",
+    {
+      readonly branch: Schema.String;
+      readonly worktreePath: Schema.String;
+      readonly fault: Schema.Literals<
+        readonly ["detached", "wrong-branch", "modified", "behind-origin"]
+      >;
+      readonly state: typeof WorktreeState;
+    }
+  >,
+  YieldableError
+> = Schema.TaggedError<WorktreeUnusable>()("WorktreeUnusable", {
+  /** The branch the run asked for, which is not necessarily the one it got. */
+  branch: Schema.String,
+  worktreePath: Schema.String,
+  fault: WorktreeFault,
+  /** The whole reading, so a human does not have to re-derive it from one field. */
+  state: WorktreeState,
+});
 
 /**
  * The worktree a sandbox was built on is not what the run needs it to be, and Kojo says so out loud.
@@ -31,14 +57,7 @@ export type WorktreeFault = typeof WorktreeFault.Type;
  * A `Schema.TaggedError` because it travels a workflow error channel, and the engine persists what
  * it records.
  */
-export class WorktreeUnusable extends Schema.TaggedError<WorktreeUnusable>()("WorktreeUnusable", {
-  /** The branch the run asked for, which is not necessarily the one it got. */
-  branch: Schema.String,
-  worktreePath: Schema.String,
-  fault: WorktreeFault,
-  /** The whole reading, so a human does not have to re-derive it from one field. */
-  state: WorktreeState,
-}) {
+export class WorktreeUnusable extends WorktreeUnusableBase {
   /**
    * One sentence for a human, because a report that repeats the fields adds nothing.
    *

@@ -1,5 +1,30 @@
 import { Schema } from "effect";
 
+const AgentDefinitionBase: Schema.Class<
+  AgentDefinition,
+  Schema.Struct<{
+    readonly name: Schema.NonEmptyString;
+    readonly purpose: Schema.NonEmptyString;
+    readonly model: Schema.NonEmptyString;
+    readonly tools: Schema.$Array<Schema.NonEmptyString>;
+    readonly system: Schema.NonEmptyString;
+    readonly user: Schema.String;
+  }>,
+  Record<never, never>
+> = Schema.Class<AgentDefinition>("AgentDefinition")({
+  /** The name the workflow calls this agent by — the key it sits under in the roster. */
+  name: Schema.NonEmptyString,
+  /** One purpose, in one line. It is what a human reads beside this agent's phase in the trace. */
+  purpose: Schema.NonEmptyString,
+  model: Schema.NonEmptyString,
+  /** What this agent is allowed to reach for. Empty means the provider's own default. */
+  tools: Schema.Array(Schema.NonEmptyString),
+  /** The agent's identity, from `system.md`. */
+  system: Schema.NonEmptyString,
+  /** The task template, from `user.md`. */
+  user: Schema.String,
+});
+
 /**
  * One agent, as the roster defines it: one prompt, one purpose.
  *
@@ -12,16 +37,4 @@ import { Schema } from "effect";
  * agent's identity and belongs to the provider that spawns it. `user` is the task template, and it
  * is what `renderPrompt` builds the call's prompt on, together with the envelope's contract.
  */
-export class AgentDefinition extends Schema.Class<AgentDefinition>("AgentDefinition")({
-  /** The name the workflow calls this agent by — the key it sits under in the roster. */
-  name: Schema.NonEmptyString,
-  /** One purpose, in one line. It is what a human reads beside this agent's phase in the trace. */
-  purpose: Schema.NonEmptyString,
-  model: Schema.NonEmptyString,
-  /** What this agent is allowed to reach for. Empty means the provider's own default. */
-  tools: Schema.Array(Schema.NonEmptyString),
-  /** The agent's identity, from `system.md`. */
-  system: Schema.NonEmptyString,
-  /** The task template, from `user.md`. */
-  user: Schema.String,
-}) {}
+export class AgentDefinition extends AgentDefinitionBase {}

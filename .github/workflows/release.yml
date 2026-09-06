@@ -1,24 +1,16 @@
 name: release
 
-# A stable Release is a promotion, not the first public test. This manual workflow accepts one
-# validated RC, publishes the stable package set under `candidate`, validates exact public bytes on
-# both supported Hosts, and waits at the protected `npm-production` environment before it moves
-# `latest` and creates the final GitHub Release.
+# One manual entry point. Version preparation is local to the job until all checks pass.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Exact stable version, for example 0.1.0"
-        required: true
-        type: string
-      release_candidate:
-        description: "Accepted RC version, for example 0.1.0-rc.2"
+        description: "Exact version: 0.1.0-alpha.1, 0.1.0-beta.1, 0.1.0-rc.1, or 0.1.0"
         required: true
         type: string
       dry_run:
-        description: "Build the stable candidate but do not publish it"
-        required: false
-        default: true
+        description: "Validate without pushing commits, tags, or packages"
+        default: false
         type: boolean
 
 concurrency:
@@ -26,126 +18,160 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  contents: read
   actions: read
-  contents: write
 
 jobs:
-  publish-candidate:
-    name: Publish stable candidate
+  prepare:
+    name: Prepare Release version
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 10
+    outputs:
+      revision: ${{ steps.prepare.outputs.revision }}
+      source_revision: ${{ steps.prepare.outputs.source_revision }}
+      stage: ${{ steps.prepare.outputs.stage }}
+      full_evidence: ${{ steps.prepare.outputs.full_evidence }}
     steps:
-      - name: Git checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-
-      - name: Setup toolchain
-        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
         with:
           auto-install: true
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Validate the stable version and coordinated package set
-        run: bun .github/scripts/release-train.ts validate-stable "${{ inputs.version }}" "${{ inputs.release_candidate }}"
-
-      - name: Load the accepted Release Candidate
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p .release-train/accepted-rc
-          gh release download "v${{ inputs.release_candidate }}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern release-manifest.json \
-            --dir .release-train/accepted-rc
-          bun .github/scripts/release-train.ts verify-manifest .release-train/accepted-rc/release-manifest.json rc "${{ inputs.release_candidate }}"
-
-      - name: Prove that validation accepted the Release Candidate
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash .github/scripts/verify-accepted-prerelease.sh .release-train/accepted-rc/release-manifest.json
-
-      - name: Refuse code changes after the accepted Release Candidate
-        run: bun .github/scripts/release-train.ts validate-stable-source .release-train/accepted-rc/release-manifest.json "$GITHUB_SHA"
-
-      - name: Require complete evidence for this revision
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          run_id=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=success&per_page=1" --jq '.workflow_runs[0].id // empty')
-          if [ -z "$run_id" ]; then
-            echo "::error::this revision has no successful CI run with complete supported-Host evidence."
-            exit 1
-          fi
-          mkdir -p /tmp/kojo-complete-release-evidence
-          gh run download "$run_id" --name complete-breaking-release-evidence --dir /tmp/kojo-complete-release-evidence
-          bun .github/scripts/complete-release-evidence.ts verify-complete /tmp/kojo-complete-release-evidence "$GITHUB_SHA"
-
-      - name: Git identity for test fixtures
-        run: |
-          git config --global user.name "kojo release"
-          git config --global user.email "release@kojo.invalid"
-
-      - name: TypeScript build
-        run: bun tsc --build --verbose
-
-      - name: Biome check
-        run: bun biome check --verbose --no-errors-on-unmatched .
-
-      - name: Dead-code analysis
-        run: bun knip
-
-      - name: Contract, runtime, and unit tests
-        run: moon run kojo-client-contracts:test kojo-runner-contracts:test kojo-runtime:test kojo-runtime:test-integration kojo:test kojo:check-packages
-
-      - name: Container tests
-        run: moon run kojo:test-integration
-
-      - name: Public types and package build
-        run: moon run kojo:check-public-types kojo:build
-
-      - name: Pack the stable candidate
-        run: bun .github/scripts/release-train.ts pack "${{ inputs.version }}" .release-train/packages
-
-      - name: Write the stable candidate manifest
-        run: bun .github/scripts/release-train.ts create-manifest stable "${{ inputs.version }}" "$GITHUB_SHA" .release-train/packages .release-train/release-manifest.json
-
-      - name: Upload the stable candidate
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - run: bun install --frozen-lockfile
+      - uses: cocogitto/cocogitto-action@52d0023b4396897f1815648e553db2ab8d782f3a # v4.2.0
         with:
-          name: stable-release-candidate
-          path: .release-train
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Confirm that the stable version is unused
-        if: ${{ !inputs.dry_run }}
-        run: bun .github/scripts/release-train.ts assert-unpublished "${{ inputs.version }}"
-
-      - name: Publish with the candidate tag
-        if: ${{ !inputs.dry_run }}
+          command: --version
+      - name: Git identity
+        run: |
+          git config user.name "kojo release"
+          git config user.email "release@kojo.invalid"
+      - name: Prepare version and accepted predecessor
+        id: prepare
         env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: bun .github/scripts/prepare-release.ts
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-source
+          path: .release-train/source.bundle
+          include-hidden-files: true
+          if-no-files-found: error
+
+  checks:
+    name: Validate Release
+    needs: prepare
+    uses: ./.github/workflows/release-checks.yml
+    secrets:
+      REMOSHU_TOKEN: ${{ secrets.REMOSHU_TOKEN }}
+    with:
+      revision: ${{ needs.prepare.outputs.revision }}
+      version: ${{ inputs.version }}
+      stage: ${{ needs.prepare.outputs.stage }}
+      full_evidence: ${{ needs.prepare.outputs.full_evidence == 'true' }}
+
+  jsr-checks:
+    name: Validate JSR packages
+    needs: [prepare, checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/release-checkout
+        with:
+          revision: ${{ needs.prepare.outputs.revision }}
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        with:
+          auto-install: true
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: release-candidate
+          path: .release-train
+      - name: Prepare and validate JSR source
+        run: |
+          bun .github/scripts/release-jsr.ts prepare .release-train/release-manifest.json
+          bun .github/scripts/release-jsr.ts validate .release-train/release-manifest.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: validated-release
+          path: .release-train
+          include-hidden-files: true
+          if-no-files-found: error
+
+  publish-npm:
+    name: Publish npm candidate
+    if: ${{ !inputs.dry_run }}
+    needs: [prepare, checks, jsr-checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_GITHUB_TOKEN }}
+      - uses: ./.github/actions/release-checkout
+        with:
+          revision: ${{ needs.prepare.outputs.revision }}
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        with:
+          auto-install: true
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: validated-release
+          path: .release-train
+      - name: Verify version and choose authentication
+        id: auth
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_STAGE: ${{ needs.prepare.outputs.stage }}
+          RELEASE_REVISION: ${{ needs.prepare.outputs.revision }}
+        run: |
+          bun .github/scripts/release-train.ts verify-manifest .release-train/release-manifest.json "$RELEASE_STAGE" "$RELEASE_VERSION" "$RELEASE_REVISION"
+          bun .github/scripts/release-train.ts assert-unpublished "$RELEASE_VERSION"
+          echo "mode=$(bun .github/scripts/release-train.ts auth-mode "$RELEASE_VERSION")" >> "$GITHUB_OUTPUT"
+      - name: Check tag credential before remote changes
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: test -n "$NPM_TOKEN"
+      - name: Push validated version commit and five tags
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          SOURCE_REVISION: ${{ needs.prepare.outputs.source_revision }}
+        run: |
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$SOURCE_REVISION"
+          git push --atomic origin HEAD:refs/heads/main \
+            "v$RELEASE_VERSION" \
+            "kojo-client-contracts@v$RELEASE_VERSION" \
+            "kojo-runner-contracts@v$RELEASE_VERSION" \
+            "kojo-runtime@v$RELEASE_VERSION" \
+            "kojo@v$RELEASE_VERSION"
+      - name: Bootstrap first npm package set
+        if: ${{ steps.auth.outputs.mode == 'bootstrap' }}
+        env:
+          RELEASE_NPM_AUTH: bootstrap
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: bun .github/scripts/release-train.ts publish .release-train/release-manifest.json candidate
-
-      - name: Verify the public stable candidate and protect latest
-        if: ${{ !inputs.dry_run }}
+      - name: Publish through npm Trusted Publishing
+        if: ${{ steps.auth.outputs.mode == 'oidc' }}
+        env:
+          RELEASE_NPM_AUTH: oidc
+        run: bun .github/scripts/release-train.ts publish .release-train/release-manifest.json candidate
+      - name: Verify public bytes
+        run: bun .github/scripts/release-train.ts verify-published .release-train/release-manifest.json
+      - name: Protect latest, including a partially published first package set
+        if: ${{ always() && steps.auth.outcome == 'success' }}
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          bun .github/scripts/release-train.ts verify-published .release-train/release-manifest.json
-          bun .github/scripts/release-tags.ts .release-train/release-manifest.json protect-latest
+        run: bun .github/scripts/release-tags.ts .release-train/release-manifest.json protect-latest
 
-      - name: Dry run notice
-        if: ${{ inputs.dry_run }}
-        run: echo "::notice::the stable candidate was built but was not published."
-
-  validate-candidate:
-    name: Validate stable candidate on ${{ matrix.host }}
-    if: ${{ !inputs.dry_run }}
-    needs: publish-candidate
+  validate-public:
+    name: Validate public candidate on ${{ matrix.host }}
+    needs: [prepare, publish-npm]
     strategy:
       fail-fast: false
       matrix:
@@ -157,64 +183,147 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
-      - name: Git checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup toolchain
-        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/release-checkout
+        with:
+          revision: ${{ needs.prepare.outputs.revision }}
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
         with:
           auto-install: true
-
-      - name: Download the stable candidate
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: stable-release-candidate
+          name: validated-release
           path: .release-train
-
-      - name: Verify and install the exact public package set
+      - name: Install exact public npm package set
         env:
-          BUN_INSTALL: ${{ runner.temp }}/kojo-release-validation
+          BUN_INSTALL: ${{ runner.temp }}/kojo-public-install
         run: |
-          bun .github/scripts/release-train.ts verify-manifest .release-train/release-manifest.json stable "${{ inputs.version }}" "$GITHUB_SHA"
           bun .github/scripts/release-train.ts verify-published .release-train/release-manifest.json
           bun .github/scripts/release-train.ts install .release-train/release-manifest.json "$RUNNER_TEMP/project" "$BUN_INSTALL"
 
-  promote:
-    name: Promote stable Release
-    if: ${{ !inputs.dry_run }}
-    needs: validate-candidate
+  publish-jsr:
+    name: Publish JSR packages
+    environment: ${{ needs.prepare.outputs.stage == 'stable' && 'npm-production' || 'npm-prerelease' }}
+    needs: [prepare, validate-public]
     runs-on: ubuntu-latest
-    environment: npm-production
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/release-checkout
+        with:
+          revision: ${{ needs.prepare.outputs.revision }}
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        with:
+          auto-install: true
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: validated-release
+          path: .release-train
+      - name: Publish and verify JSR packages
+        run: |
+          bun .github/scripts/release-jsr.ts publish .release-train/release-manifest.json
+          bun .github/scripts/release-jsr.ts verify .release-train/release-manifest.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: public-release-manifest
+          path: .release-train/release-manifest.json
+          include-hidden-files: true
+          if-no-files-found: error
+
+  validate-jsr:
+    name: Validate public JSR packages on ${{ matrix.os }}
+    needs: [prepare, publish-jsr]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/release-checkout
+        with:
+          revision: ${{ needs.prepare.outputs.revision }}
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        with:
+          auto-install: true
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: public-release-manifest
+          path: .release-train
+      - name: Install and import public JSR entries
+        run: bun .github/scripts/release-jsr.ts install .release-train/release-manifest.json "$RUNNER_TEMP/jsr-project"
+
+  accept:
+    name: Accept Release
+    needs: [prepare, validate-public, publish-jsr, validate-jsr]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - name: Git checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup toolchain
-        uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/release-checkout
+        with:
+          revision: ${{ needs.prepare.outputs.revision }}
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
         with:
           auto-install: true
-
-      - name: Download the validated stable candidate
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: public-release-manifest
+          path: .release-train
+      - name: Download full Host evidence
+        if: ${{ needs.prepare.outputs.full_evidence == 'true' }}
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          name: stable-release-candidate
-          path: .release-train
-
-      - name: Recheck the public bytes and promote the tags
+          name: complete-breaking-release-evidence
+          path: .release-evidence
+      - name: Verify full Host evidence
+        if: ${{ needs.prepare.outputs.full_evidence == 'true' }}
+        env:
+          RELEASE_REVISION: ${{ needs.prepare.outputs.revision }}
+        run: |
+          bun install --frozen-lockfile
+          bun .github/scripts/complete-release-evidence.ts verify-complete .release-evidence "$RELEASE_REVISION"
+          tar -czf .release-train/release-evidence.tgz -C .release-evidence .
+      - name: Recheck public bytes and promote registry tags
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           bun .github/scripts/release-train.ts verify-published .release-train/release-manifest.json
+          bun .github/scripts/release-jsr.ts verify .release-train/release-manifest.json
           bun .github/scripts/release-tags.ts .release-train/release-manifest.json
-
-      - name: Create the stable GitHub Release
+      - name: Record accepted Release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_STAGE: ${{ needs.prepare.outputs.stage }}
+          RELEASE_REVISION: ${{ needs.prepare.outputs.revision }}
         run: |
-          gh release create "v${{ inputs.version }}" .release-train/release-manifest.json \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "Kojo ${{ inputs.version }}" \
-            --generate-notes
+          args=()
+          if [ "$RELEASE_STAGE" != stable ]; then args+=(--prerelease); fi
+          assets=(.release-train/release-manifest.json)
+          if [ -f .release-train/release-evidence.tgz ]; then assets+=(.release-train/release-evidence.tgz); fi
+          gh release create "v$RELEASE_VERSION" "${assets[@]}" \
+            --verify-tag --target "$RELEASE_REVISION" --title "Kojo $RELEASE_VERSION" \
+            --generate-notes "${args[@]}"
+      - name: Release summary
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_REVISION: ${{ needs.prepare.outputs.revision }}
+        run: |
+          echo "Published Kojo $RELEASE_VERSION from $RELEASE_REVISION to npm and JSR." >> "$GITHUB_STEP_SUMMARY"
+          echo "Install: bun add -g @carere/kojo@$RELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+  dry-run:
+    name: Dry run complete
+    if: ${{ inputs.dry_run }}
+    needs: [checks, jsr-checks]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'Validation passed. No remote commits, tags, or packages were created.' >> "$GITHUB_STEP_SUMMARY"

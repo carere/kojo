@@ -1,6 +1,9 @@
 import { Context } from "effect";
 import type { SandboxHandle } from "../models/SandboxHandle.ts";
 
+const SandboxBase: Context.ServiceClass<Sandbox, "kojo/sandbox/Sandbox", SandboxHandle> =
+  Context.Service<Sandbox, SandboxHandle>()("kojo/sandbox/Sandbox");
+
 /**
  * The sandbox a phase is currently running inside.
  *
@@ -13,4 +16,4 @@ import type { SandboxHandle } from "../models/SandboxHandle.ts";
  * body, so a lane inside a lane sees the innermost one — branches of the graph, not a global
  * wrapper.
  */
-export class Sandbox extends Context.Service<Sandbox, SandboxHandle>()("kojo/sandbox/Sandbox") {}
+export class Sandbox extends SandboxBase {}

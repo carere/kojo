@@ -1,18 +1,20 @@
 import { Schema } from "effect";
 import { AgentSessionId } from "./AgentSessionId.ts";
 
-/**
- * What one agent call left behind.
- *
- * `output` is **text**, not a decoded envelope, and that is the whole point. The agent provider
- * never receives the schema — an invoker hands back what the agent said, and Kojo decodes it. Put
- * the decode behind the port and `EnvelopeParseError` belongs to the provider, which is exactly the
- * error the correction loop has to own.
- *
- * Everything else here is what the phase row needs and nothing more: which agent, on which model,
- * in which session, whether that session was re-entered or opened cold, and what the turn cost.
- */
-export class AgentAnswer extends Schema.Class<AgentAnswer>("AgentAnswer")({
+const AgentAnswerBase: Schema.Class<
+  AgentAnswer,
+  Schema.Struct<{
+    readonly agent: Schema.String;
+    readonly model: Schema.String;
+    readonly session: Schema.brand<Schema.String, "AgentSessionId">;
+    readonly resumed: Schema.Boolean;
+    readonly tokensIn: Schema.Finite;
+    readonly tokensOut: Schema.Finite;
+    readonly contextTokens: Schema.optional<Schema.Finite>;
+    readonly output: Schema.String;
+  }>,
+  Record<never, never>
+> = Schema.Class<AgentAnswer>("AgentAnswer")({
   agent: Schema.String,
   model: Schema.String,
   /** The session the call ran in — the one it resumed, or the one it opened. */
@@ -30,4 +32,17 @@ export class AgentAnswer extends Schema.Class<AgentAnswer>("AgentAnswer")({
   contextTokens: Schema.optional(Schema.Finite),
   /** The agent's tagged output, verbatim. Narrowed to the tagged block, never decoded. */
   output: Schema.String,
-}) {}
+});
+
+/**
+ * What one agent call left behind.
+ *
+ * `output` is **text**, not a decoded envelope, and that is the whole point. The agent provider
+ * never receives the schema — an invoker hands back what the agent said, and Kojo decodes it. Put
+ * the decode behind the port and `EnvelopeParseError` belongs to the provider, which is exactly the
+ * error the correction loop has to own.
+ *
+ * Everything else here is what the phase row needs and nothing more: which agent, on which model,
+ * in which session, whether that session was re-entered or opened cold, and what the turn cost.
+ */
+export class AgentAnswer extends AgentAnswerBase {}

@@ -9,7 +9,9 @@ import { Verdict } from "./Verdict.ts";
  * apply, but the run has not moved until a live runner picks it up — and a surface that shows the
  * two as one thing is lying. See adr/gate/0001.
  */
-export const AskedGateState = Schema.Literals([
+export const AskedGateState: Schema.Literals<
+  readonly ["waiting", "overdue", "recorded", "expired"]
+> = Schema.Literals([
   /** Nobody has answered, and the deadline has not passed. */
   "waiting",
   /** Nobody has answered, and the deadline has passed — but an answer may still land. */
@@ -25,6 +27,26 @@ export const AskedGateState = Schema.Literals([
 ]);
 export type AskedGateState = typeof AskedGateState.Type;
 
+const AskedGateBase: Schema.Class<
+  AskedGate,
+  Schema.Struct<{
+    readonly request: typeof GateRequest;
+    readonly verdict: Schema.optionalKey<typeof Verdict>;
+    readonly expiredAt: Schema.optionalKey<Schema.Finite>;
+  }>,
+  Record<never, never>
+> = Schema.Class<AskedGate>("AskedGate")({
+  request: GateRequest,
+  /** The verdict written against this asking, if one was. */
+  verdict: Schema.optionalKey(Verdict),
+  /**
+   * When the run settled this asking by expiry, if it did. Written by the run itself, in the same
+   * activity that records the settled `GateRecord`, so its presence proves nobody can answer any
+   * more — the run has already taken its expiry branch.
+   */
+  expiredAt: Schema.optionalKey(Schema.Finite),
+});
+
 /**
  * One asking of one gate, as a surface that never ran the workflow sees it.
  *
@@ -36,17 +58,7 @@ export type AskedGateState = typeof AskedGateState.Type;
  * a gate still waiting has no settlement to write. This one exists precisely for the interval
  * between the two, which is the interval a human lives in.
  */
-export class AskedGate extends Schema.Class<AskedGate>("AskedGate")({
-  request: GateRequest,
-  /** The verdict written against this asking, if one was. */
-  verdict: Schema.optionalKey(Verdict),
-  /**
-   * When the run settled this asking by expiry, if it did. Written by the run itself, in the same
-   * activity that records the settled `GateRecord`, so its presence proves nobody can answer any
-   * more — the run has already taken its expiry branch.
-   */
-  expiredAt: Schema.optionalKey(Schema.Finite),
-}) {
+export class AskedGate extends AskedGateBase {
   /**
    * How long the question was with a human: request to answer, request to expiry, or request to now.
    *

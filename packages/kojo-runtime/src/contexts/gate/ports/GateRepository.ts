@@ -5,6 +5,51 @@ import type { GateRequest } from "../models/GateRequest.ts";
 import type { GateStoreError } from "../models/GateStoreError.ts";
 import type { Verdict } from "../models/Verdict.ts";
 
+interface GateRepositoryService {
+  /**
+   * Writes down that a human was asked. Called from inside the request activity, once per asking.
+   */
+  readonly asked: (request: GateRequest) => Effect.Effect<void, GateStoreError>;
+  /**
+   * Writes the verdict beside the asking it answers, keyed by the token that identifies it.
+   *
+   * Answering an asking this repository never saw is not an error — the token is the authority,
+   * and a verdict may be given from a machine that never ran the workflow. The boolean says
+   * whether a row was actually updated, so a caller can tell the two apart and say so.
+   */
+  readonly recorded: (options: {
+    readonly token: DurableDeferred.Token;
+    readonly verdict: Verdict;
+  }) => Effect.Effect<boolean, GateStoreError>;
+  /**
+   * Writes down that the deadline settled the asking — nobody answered, and nobody can any more.
+   *
+   * Written by the run itself when the expiry half of the race wins, beside the `GateRecord` it
+   * already records, and it is what lets the queue tell **expired** from **overdue**: overdue
+   * means an answer may still land, expired means it cannot. Without it an expired asking sits in
+   * *waiting* forever, *overdue by* a number growing without bound.
+   *
+   * The first settlement is kept, exactly as the first verdict is: the boolean says whether this
+   * call was the one that wrote it.
+   */
+  readonly expired: (options: {
+    readonly token: DurableDeferred.Token;
+    readonly expiredAt: number;
+  }) => Effect.Effect<boolean, GateStoreError>;
+  /** One asking, by the token that identifies it. */
+  readonly byToken: (
+    token: DurableDeferred.Token,
+  ) => Effect.Effect<Option.Option<AskedGate>, GateStoreError>;
+  /** Every asking this store knows about, in no promised order. */
+  readonly all: Effect.Effect<ReadonlyArray<AskedGate>, GateStoreError>;
+}
+
+const GateRepositoryBase: Context.ServiceClass<
+  GateRepository,
+  "kojo/gate/GateRepository",
+  GateRepositoryService
+> = Context.Service<GateRepository, GateRepositoryService>()("kojo/gate/GateRepository");
+
 /**
  * Where the questions live between being asked and being answered.
  *
@@ -21,44 +66,4 @@ import type { Verdict } from "../models/Verdict.ts";
  * storage through the private Runner protocol. Nothing here can resume a Run, and a row here that says
  * `recorded` never means the run has moved.
  */
-export class GateRepository extends Context.Service<
-  GateRepository,
-  {
-    /**
-     * Writes down that a human was asked. Called from inside the request activity, once per asking.
-     */
-    readonly asked: (request: GateRequest) => Effect.Effect<void, GateStoreError>;
-    /**
-     * Writes the verdict beside the asking it answers, keyed by the token that identifies it.
-     *
-     * Answering an asking this repository never saw is not an error — the token is the authority,
-     * and a verdict may be given from a machine that never ran the workflow. The boolean says
-     * whether a row was actually updated, so a caller can tell the two apart and say so.
-     */
-    readonly recorded: (options: {
-      readonly token: DurableDeferred.Token;
-      readonly verdict: Verdict;
-    }) => Effect.Effect<boolean, GateStoreError>;
-    /**
-     * Writes down that the deadline settled the asking — nobody answered, and nobody can any more.
-     *
-     * Written by the run itself when the expiry half of the race wins, beside the `GateRecord` it
-     * already records, and it is what lets the queue tell **expired** from **overdue**: overdue
-     * means an answer may still land, expired means it cannot. Without it an expired asking sits in
-     * *waiting* forever, *overdue by* a number growing without bound.
-     *
-     * The first settlement is kept, exactly as the first verdict is: the boolean says whether this
-     * call was the one that wrote it.
-     */
-    readonly expired: (options: {
-      readonly token: DurableDeferred.Token;
-      readonly expiredAt: number;
-    }) => Effect.Effect<boolean, GateStoreError>;
-    /** One asking, by the token that identifies it. */
-    readonly byToken: (
-      token: DurableDeferred.Token,
-    ) => Effect.Effect<Option.Option<AskedGate>, GateStoreError>;
-    /** Every asking this store knows about, in no promised order. */
-    readonly all: Effect.Effect<ReadonlyArray<AskedGate>, GateStoreError>;
-  }
->()("kojo/gate/GateRepository") {}
+export class GateRepository extends GateRepositoryBase {}

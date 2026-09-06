@@ -27,6 +27,10 @@ dist
 # tests
 playwright-report
 test-results
+.release-train
+.release-evidence
+.release-evidence-input
+.release-evidence-output
 
 # Sandcastle's own working directory: the linked worktree every run is cut into, and its logs.
 # Sandcastle derives the path from the Project and branch, and `CreateSandboxOptions` has no

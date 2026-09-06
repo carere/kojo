@@ -1,5 +1,27 @@
 import { Schema } from "effect";
 
+const RepoEffectBase: Schema.Class<
+  RepoEffect,
+  Schema.Struct<{
+    readonly claimed: Schema.$Array<Schema.String>;
+    readonly changed: Schema.$Array<Schema.String>;
+    readonly commits: Schema.$Array<Schema.String>;
+  }>,
+  Record<never, never>
+> = Schema.Class<RepoEffect>("RepoEffect")({
+  /** The paths the envelope claimed. Empty when the phase's answer claims nothing. */
+  claimed: Schema.Array(Schema.String),
+  /**
+   * The paths the working tree actually changed, as `withPermissions` returns them.
+   *
+   * "Changed" means one thing in this codebase — appeared, vanished, or was rewritten relative to
+   * `HEAD` — because it comes from the same fingerprint the permission guard takes.
+   */
+  changed: Schema.Array(Schema.String),
+  /** The commits the phase produced, newest first. Empty when it committed nothing. */
+  commits: Schema.Array(Schema.String),
+});
+
 /**
  * What a phase did to the repository, in the phase's own row.
  *
@@ -12,16 +34,4 @@ import { Schema } from "effect";
  * beside this, with what became of each path — two fields because they answer two questions, and
  * because a run where they disagree is exactly the run somebody is investigating.
  */
-export class RepoEffect extends Schema.Class<RepoEffect>("RepoEffect")({
-  /** The paths the envelope claimed. Empty when the phase's answer claims nothing. */
-  claimed: Schema.Array(Schema.String),
-  /**
-   * The paths the working tree actually changed, as `withPermissions` returns them.
-   *
-   * "Changed" means one thing in this codebase — appeared, vanished, or was rewritten relative to
-   * `HEAD` — because it comes from the same fingerprint the permission guard takes.
-   */
-  changed: Schema.Array(Schema.String),
-  /** The commits the phase produced, newest first. Empty when it committed nothing. */
-  commits: Schema.Array(Schema.String),
-}) {}
+export class RepoEffect extends RepoEffectBase {}

@@ -16,6 +16,15 @@ export interface TriggerOutcome {
   readonly outcome: "admitted";
 }
 
+interface TriggerService {
+  /** One event per unit of work. A live Daemon source normally does not end. */
+  readonly stream: Stream.Stream<TriggerEvent, TriggerError>;
+  readonly ack: (event: TriggerEvent, run: TriggerOutcome) => Effect.Effect<void, TriggerError>;
+}
+
+const TriggerBase: Context.ServiceClass<Trigger, "kojo/trigger/Trigger", TriggerService> =
+  Context.Service<Trigger, TriggerService>()("kojo/trigger/Trigger");
+
 /**
  * What starts a run, and what that run is deduplicated by.
  *
@@ -35,11 +44,4 @@ export interface TriggerOutcome {
  * run settles, and it takes the event and the run outcome — nothing else, because an adapter that
  * needed the workflow's internals would be a workflow, not a source of work.
  */
-export class Trigger extends Context.Service<
-  Trigger,
-  {
-    /** One event per unit of work. A live Daemon source normally does not end. */
-    readonly stream: Stream.Stream<TriggerEvent, TriggerError>;
-    readonly ack: (event: TriggerEvent, run: TriggerOutcome) => Effect.Effect<void, TriggerError>;
-  }
->()("kojo/trigger/Trigger") {}
+export class Trigger extends TriggerBase {}

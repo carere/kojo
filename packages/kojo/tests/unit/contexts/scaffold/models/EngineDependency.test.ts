@@ -12,7 +12,7 @@ const installedEngine: ResolvedPackage = {
 };
 const installedEffect: ResolvedPackage = {
   name: "effect",
-  version: "4.0.0-beta.106",
+  version: "4.0.0-rc.112",
   directory: "/repo/node_modules/effect",
 };
 
@@ -23,7 +23,7 @@ const checkedOutEngine: ResolvedPackage = {
 };
 const checkedOutEffect: ResolvedPackage = {
   name: "effect",
-  version: "4.0.0-beta.106",
+  version: "4.0.0-rc.112",
   directory: "/home/somebody/kojo/node_modules/effect",
 };
 const checkedOutRunnerContracts: ResolvedPackage = {
@@ -42,7 +42,7 @@ describe("what a stamped repository has to declare", () => {
 
     expect(declared.reach).toBe("published");
     expect(declared.runtime.specifier).toBe("1.4.0");
-    expect(declared.effect.specifier).toBe("4.0.0-beta.106");
+    expect(declared.effect.specifier).toBe("4.0.0-rc.112");
   });
 
   it("pins `effect` to the version the engine actually loaded, never to one written twice", () => {
@@ -86,7 +86,7 @@ describe("what a stamped repository has to declare", () => {
       runnerContracts: checkedOutRunnerContracts,
     });
 
-    expect(declared.effect.version).toBe("4.0.0-beta.106");
+    expect(declared.effect.version).toBe("4.0.0-rc.112");
     expect(declared.runtime.version).toBe("0.0.0");
     expect(declarations(declared).map((entry) => entry.name)).toEqual([
       "@carere/kojo-runtime",

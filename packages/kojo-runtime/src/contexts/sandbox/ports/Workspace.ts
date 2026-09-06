@@ -11,6 +11,33 @@ export interface ExecOptions {
   readonly env?: Record<string, string> | undefined;
 }
 
+interface WorkspaceService {
+  /** The workspace root as the running phase sees it. Every path is relative to this. */
+  readonly root: string;
+  /**
+   * Where the same tree sits on the host, when it sits anywhere.
+   *
+   * `None` is not a failure to look it up: an isolated provider genuinely has no host path, and
+   * a caller that needs one — to open an editor, to hand a path to a tool that is not sandboxed
+   * — has to handle its absence rather than be handed a plausible string that resolves to
+   * nothing.
+   */
+  readonly hostPath: Option.Option<string>;
+  readonly exec: (
+    argv: ReadonlyArray<string>,
+    options?: ExecOptions,
+  ) => Effect.Effect<ExecResult, WorkspaceError>;
+  readonly git: (args: ReadonlyArray<string>) => Effect.Effect<ExecResult, WorkspaceError>;
+  readonly read: (path: string) => Effect.Effect<string, WorkspaceError>;
+  readonly write: (path: string, content: string) => Effect.Effect<void, WorkspaceError>;
+  /** `None` for a path that holds nothing. Absence is an answer, so it is not an error. */
+  readonly stat: (path: string) => Effect.Effect<Option.Option<FileStat>, WorkspaceError>;
+  readonly unlink: (path: string) => Effect.Effect<void, WorkspaceError>;
+}
+
+const WorkspaceBase: Context.ServiceClass<Workspace, "kojo/sandbox/Workspace", WorkspaceService> =
+  Context.Service<Workspace, WorkspaceService>()("kojo/sandbox/Workspace");
+
 /**
  * The filesystem and shell a phase acts on, wherever it physically is.
  *
@@ -23,29 +50,4 @@ export interface ExecOptions {
  * same place: an isolated provider runs commands in the container while the branch — the durable
  * state of a run — lives on whatever holds the repository. An adapter that must split them can.
  */
-export class Workspace extends Context.Service<
-  Workspace,
-  {
-    /** The workspace root as the running phase sees it. Every path is relative to this. */
-    readonly root: string;
-    /**
-     * Where the same tree sits on the host, when it sits anywhere.
-     *
-     * `None` is not a failure to look it up: an isolated provider genuinely has no host path, and
-     * a caller that needs one — to open an editor, to hand a path to a tool that is not sandboxed
-     * — has to handle its absence rather than be handed a plausible string that resolves to
-     * nothing.
-     */
-    readonly hostPath: Option.Option<string>;
-    readonly exec: (
-      argv: ReadonlyArray<string>,
-      options?: ExecOptions,
-    ) => Effect.Effect<ExecResult, WorkspaceError>;
-    readonly git: (args: ReadonlyArray<string>) => Effect.Effect<ExecResult, WorkspaceError>;
-    readonly read: (path: string) => Effect.Effect<string, WorkspaceError>;
-    readonly write: (path: string, content: string) => Effect.Effect<void, WorkspaceError>;
-    /** `None` for a path that holds nothing. Absence is an answer, so it is not an error. */
-    readonly stat: (path: string) => Effect.Effect<Option.Option<FileStat>, WorkspaceError>;
-    readonly unlink: (path: string) => Effect.Effect<void, WorkspaceError>;
-  }
->()("kojo/sandbox/Workspace") {}
+export class Workspace extends WorkspaceBase {}

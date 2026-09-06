@@ -1,5 +1,5 @@
 import type { Effect } from "effect";
-import { Schema, type SchemaAST, type SchemaError } from "effect";
+import { Schema, type SchemaAST } from "effect";
 
 /**
  * Every issue, never the first one.
@@ -21,5 +21,5 @@ const everyIssue: SchemaAST.ParseOptions = { errors: "all" };
  */
 export const decodeUnknown =
   <S extends Schema.Constraint>(schema: S) =>
-  (input: unknown): Effect.Effect<S["Type"], SchemaError.SchemaError, S["DecodingServices"]> =>
+  (input: unknown): Effect.Effect<S["Type"], Schema.SchemaError, S["DecodingServices"]> =>
     Schema.decodeUnknownEffect(schema, everyIssue)(input);

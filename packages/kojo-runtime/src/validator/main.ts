@@ -382,7 +382,7 @@ export const validateProject = async (root: string): Promise<ProjectValidation> 
 
 /** Stable standalone validator entry point. */
 /** @public */
-export const validatorEntryPointVersion = 1 as const;
+export const validatorEntryPointVersion: 1 = 1 as const;
 
 if (import.meta.main) {
   const root = process.argv[2] ?? process.cwd();

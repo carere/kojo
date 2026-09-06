@@ -70,7 +70,7 @@ export const EXECUTION_MUTATION_KINDS = [
   "WriteArtifactChunk",
   "FinishArtifact",
   "CancelRun",
-] as const satisfies ReadonlyArray<RunnerOperationKind>;
+] as const;
 
 export type ExecutionMutationKind = (typeof EXECUTION_MUTATION_KINDS)[number];
 

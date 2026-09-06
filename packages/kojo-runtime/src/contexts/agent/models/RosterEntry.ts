@@ -12,7 +12,11 @@ import { Effect, Schema } from "effect";
  * tools is a real and ordinary agent, and `withDecodingDefaultKey` is what v4 gives instead of
  * `Schema.optionalWith`. The default is an `Effect`, not a thunk.
  */
-export const rosterEntryFields = {
+export const rosterEntryFields: {
+  purpose: Schema.NonEmptyString;
+  model: Schema.NonEmptyString;
+  tools: Schema.withDecodingDefaultKey<Schema.$Array<Schema.NonEmptyString>, never>;
+} = {
   purpose: Schema.NonEmptyString,
   model: Schema.NonEmptyString,
   tools: Schema.Array(Schema.NonEmptyString).pipe(

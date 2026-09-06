@@ -1,5 +1,19 @@
 import { Schema } from "effect";
 
+const JudgementBase: Schema.Class<
+  Judgement,
+  Schema.Struct<{
+    readonly by: Schema.String;
+    readonly accepted: Schema.Boolean;
+    readonly reason: Schema.String;
+  }>,
+  Record<never, never>
+> = Schema.Class<Judgement>("Judgement")({
+  by: Schema.String,
+  accepted: Schema.Boolean,
+  reason: Schema.String,
+});
+
 /**
  * One half of an acceptance: who judged, what they decided, and why.
  *
@@ -8,11 +22,19 @@ import { Schema } from "effect";
  * same reason a `Verdict` carries the reviewer's: a refusal with no reason is a refusal nobody can
  * act on.
  */
-export class Judgement extends Schema.Class<Judgement>("Judgement")({
-  by: Schema.String,
-  accepted: Schema.Boolean,
-  reason: Schema.String,
-}) {}
+export class Judgement extends JudgementBase {}
+
+const AcceptanceBase: Schema.Class<
+  Acceptance,
+  Schema.Struct<{
+    readonly mechanical: typeof Judgement;
+    readonly human: typeof Judgement;
+  }>,
+  Record<never, never>
+> = Schema.Class<Acceptance>("Acceptance")({
+  mechanical: Judgement,
+  human: Judgement,
+});
 
 /**
  * Whether a finished run is **good**, which is a different question from whether its phases passed.
@@ -29,10 +51,7 @@ export class Judgement extends Schema.Class<Judgement>("Judgement")({
  * than two arguments so that it can be *handed to the merge*: the merge hangs on this and on nothing
  * else, which is what makes "phases passing is not enough" structural instead of a convention.
  */
-export class Acceptance extends Schema.Class<Acceptance>("Acceptance")({
-  mechanical: Judgement,
-  human: Judgement,
-}) {
+export class Acceptance extends AcceptanceBase {
   /** The conjunction. Both halves say yes, or the run is not accepted. */
   get accepted(): boolean {
     return this.mechanical.accepted && this.human.accepted;

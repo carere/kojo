@@ -1,5 +1,11 @@
 import { Schema } from "effect";
 
+const EnvelopeBaseBase: Schema.Class<
+  EnvelopeBase,
+  Schema.Struct<Record<never, never>>,
+  Record<never, never>
+> = Schema.Class<EnvelopeBase>("EnvelopeBase")({});
+
 /**
  * What every envelope extends.
  *
@@ -20,4 +26,4 @@ import { Schema } from "effect";
  * every agent must produce, in every factory, forever. The base fixes the shape; it does not levy a
  * tax. One place remains for a genuinely universal field to land, if one is ever earned.
  */
-export class EnvelopeBase extends Schema.Class<EnvelopeBase>("EnvelopeBase")({}) {}
+export class EnvelopeBase extends EnvelopeBaseBase {}

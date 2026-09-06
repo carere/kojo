@@ -48,7 +48,11 @@ tasks:
       - /.github/scripts/release-tags.ts
       - /.github/scripts/release-train.ts
       - /.github/scripts/verify-accepted-prerelease.sh
-      - /.github/workflows/prerelease.yml
+      - /.github/scripts/prepare-release.ts
+      - /.github/scripts/release-jsr.ts
+      - /.github/actions/release-checkout/action.yml
+      - /.github/workflows/release-checks.yml
+      - /packages/*/jsr.json
       - /.github/workflows/release.yml
       - /docs/release-process.md
       - src/**/*

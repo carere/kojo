@@ -1,4 +1,4 @@
-import { type Accessor, createEffect, createMemo, createSignal } from "solid-js";
+import { type Accessor, createEffect, createMemo, createSignal, untrack } from "solid-js";
 import { resourcePage } from "../components/data-grid/Pagination.tsx";
 
 type SearchValue = string | ReadonlyArray<string> | undefined;
@@ -37,7 +37,11 @@ export const usePaginationState = <A>(
       }
     }
     if (cursor() > 0) url.searchParams.set("cursor", String(cursor()));
-    window.history.replaceState(window.history.state, "", url);
+    // The router wraps replaceState and reads its reactive state when notified. Those reads must
+    // not become dependencies of this effect, or navigation can trigger more history writes.
+    if (url.href !== window.location.href) {
+      untrack(() => window.history.replaceState(window.history.state, "", url));
+    }
   });
 
   return { cursor, page, setCursor, reset } as const;

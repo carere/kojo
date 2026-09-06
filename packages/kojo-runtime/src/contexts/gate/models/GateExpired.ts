@@ -1,4 +1,20 @@
 import { Schema } from "effect";
+import type { YieldableError } from "effect/Cause";
+
+const GateExpiredBase: Schema.Class<
+  GateExpired,
+  Schema.TaggedStruct<
+    "GateExpired",
+    {
+      readonly gate: Schema.String;
+      readonly waited: Schema.Duration;
+    }
+  >,
+  YieldableError
+> = Schema.TaggedError<GateExpired>()("GateExpired", {
+  gate: Schema.String,
+  waited: Schema.Duration,
+});
 
 /**
  * The deadline passed and nobody answered.
@@ -7,7 +23,4 @@ import { Schema } from "effect";
  * latency the gate spent before giving up — the metric a factory lives or dies by, and the reason
  * an expiry is worth more in the trace than "failed".
  */
-export class GateExpired extends Schema.TaggedError<GateExpired>()("GateExpired", {
-  gate: Schema.String,
-  waited: Schema.Duration,
-}) {}
+export class GateExpired extends GateExpiredBase {}

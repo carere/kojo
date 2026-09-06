@@ -1,5 +1,27 @@
 import { Schema } from "effect";
+import type { YieldableError } from "effect/Cause";
 import { CheckReport } from "./CheckReport.ts";
+
+const CheckViolationBase: Schema.Class<
+  CheckViolation,
+  Schema.TaggedStruct<
+    "CheckViolation",
+    {
+      readonly agent: Schema.String;
+      readonly check: Schema.String;
+      readonly report: typeof CheckReport;
+    }
+  >,
+  YieldableError
+> = Schema.TaggedError<CheckViolation>()("CheckViolation", {
+  agent: Schema.String,
+  /**
+   * The first check that did not hold — what the trace groups on, and what the phase row names.
+   * Every other failing check is in `report`, because the correction prompt needs all of them.
+   */
+  check: Schema.String,
+  report: CheckReport,
+});
 
 /**
  * An agent answered with a well-formed envelope, and the envelope is not true.
@@ -12,15 +34,7 @@ import { CheckReport } from "./CheckReport.ts";
  * breach is a write that already happened and has already been undone. See architecture.md D8, and
  * the residual channel of `withCorrections`, which is what makes the difference structural.
  */
-export class CheckViolation extends Schema.TaggedError<CheckViolation>()("CheckViolation", {
-  agent: Schema.String,
-  /**
-   * The first check that did not hold — what the trace groups on, and what the phase row names.
-   * Every other failing check is in `report`, because the correction prompt needs all of them.
-   */
-  check: Schema.String,
-  report: CheckReport,
-}) {
+export class CheckViolation extends CheckViolationBase {
   /**
    * The violation a report describes, or nothing when the report says nothing is wrong.
    *

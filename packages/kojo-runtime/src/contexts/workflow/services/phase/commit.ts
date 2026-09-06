@@ -1,7 +1,9 @@
 import { Effect, Schema } from "effect";
+import type { Activity as ActivityType } from "effect/unstable/workflow/Activity";
 import { WorkspaceError } from "../../../sandbox/models/WorkspaceError.ts";
 import { Workspace } from "../../../sandbox/ports/Workspace.ts";
 import { runBranch } from "../../../shared/models/RunBranch.ts";
+import type { Tracer } from "../../../trace/ports/Tracer.ts";
 import { Commit } from "../../models/Commit.ts";
 import { CommitRefused } from "../../models/CommitRefused.ts";
 import { CurrentRun } from "../CurrentRun.ts";
@@ -57,7 +59,11 @@ export const commit = (options: {
    * on a developer's machine and the wrong one inside a container that has never been configured.
    */
   readonly author?: Author;
-}) =>
+}): ActivityType<
+  typeof Commit,
+  Schema.Union<readonly [typeof CommitRefused, typeof WorkspaceError]>,
+  CurrentRun | Tracer | Workspace
+> =>
   code(
     {
       name: options.name ?? "commit",

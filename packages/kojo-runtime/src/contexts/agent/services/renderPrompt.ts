@@ -1,4 +1,4 @@
-import { JsonPointer, JsonSchema, Option, Schema } from "effect";
+import { JsonPointer, type JsonSchema, Option, Schema } from "effect";
 import type { AgentDefinition } from "../models/AgentDefinition.ts";
 
 /**
@@ -50,7 +50,7 @@ const reachedDefinitions = (
     if (reference === "#") continue;
     const name = definitionName(reference);
     if (Object.hasOwn(reached, name)) continue;
-    const definition = JsonSchema.resolve$ref(reference, document.definitions);
+    const definition = document.definitions[name];
     if (definition === undefined) continue;
     reached[name] = definition;
     referencesIn(definition, pending);
@@ -67,7 +67,17 @@ const reachedDefinitions = (
  * inside the same object. What the agent reads therefore resolves against itself.
  */
 export const contractSchema = (envelope: Schema.Constraint): JsonSchema.JsonSchema => {
-  const document = JsonSchema.resolveTopLevel$ref(Schema.toJsonSchemaDocument(envelope));
+  const emitted = Schema.toJsonSchemaDocument(envelope);
+  let schema = emitted.schema;
+  const visited = new Set<string>();
+  while (typeof schema.$ref === "string" && schema.$ref.startsWith("#/$defs/")) {
+    if (visited.has(schema.$ref)) break;
+    visited.add(schema.$ref);
+    const definition = emitted.definitions[definitionName(schema.$ref)];
+    if (definition === undefined) break;
+    schema = definition;
+  }
+  const document = { ...emitted, schema };
   const reached = reachedDefinitions(document);
   return Object.keys(reached).length === 0
     ? document.schema

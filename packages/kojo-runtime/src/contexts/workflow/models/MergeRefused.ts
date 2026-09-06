@@ -1,4 +1,22 @@
 import { Schema } from "effect";
+import type { YieldableError } from "effect/Cause";
+
+const MergeRefusedBase: Schema.Class<
+  MergeRefused,
+  Schema.TaggedStruct<
+    "MergeRefused",
+    {
+      readonly branch: Schema.String;
+      readonly into: Schema.String;
+      readonly reason: Schema.String;
+    }
+  >,
+  YieldableError
+> = Schema.TaggedError<MergeRefused>()("MergeRefused", {
+  branch: Schema.String,
+  into: Schema.String,
+  reason: Schema.String,
+});
 
 /**
  * The merge ran and did not land, and the target is exactly as it was.
@@ -12,8 +30,4 @@ import { Schema } from "effect";
  * error is raised, so the inspection surface a rejected run leaves is a target nobody has to
  * unpick.
  */
-export class MergeRefused extends Schema.TaggedError<MergeRefused>()("MergeRefused", {
-  branch: Schema.String,
-  into: Schema.String,
-  reason: Schema.String,
-}) {}
+export class MergeRefused extends MergeRefusedBase {}

@@ -16,25 +16,32 @@ export interface CommittedResourceIdentity {
   readonly providerLocator?: string;
 }
 
+interface ResourceLeaseClientService {
+  readonly beginAcquisition: (
+    resource: RunnerResourceIdentity,
+  ) => Effect.Effect<CommittedResourceIdentity>;
+  readonly confirmAcquired: (
+    leaseId: string,
+    evidence: { readonly providerIdentity: string; readonly locator: string },
+  ) => Effect.Effect<void>;
+  readonly beginRelease: (leaseId: string) => Effect.Effect<void>;
+  readonly confirmReleased: (leaseId: string, evidence: string) => Effect.Effect<void>;
+  readonly preserve: (leaseId: string, reason: string) => Effect.Effect<void>;
+  readonly unresolved: (leaseId: string, reason: string) => Effect.Effect<void>;
+}
+
+const ResourceLeaseClientBase: Context.ServiceClass<
+  ResourceLeaseClient,
+  "kojo/project/ResourceLeaseClient",
+  ResourceLeaseClientService
+> = Context.Service<ResourceLeaseClient, ResourceLeaseClientService>()(
+  "kojo/project/ResourceLeaseClient",
+);
+
 /**
  * The Project Runner's private client for Daemon-owned Resource leases.
  *
  * Execution has no default. A Project Runner cannot execute authored work without the durable
  * Daemon mutation channel.
  */
-export class ResourceLeaseClient extends Context.Service<
-  ResourceLeaseClient,
-  {
-    readonly beginAcquisition: (
-      resource: RunnerResourceIdentity,
-    ) => Effect.Effect<CommittedResourceIdentity>;
-    readonly confirmAcquired: (
-      leaseId: string,
-      evidence: { readonly providerIdentity: string; readonly locator: string },
-    ) => Effect.Effect<void>;
-    readonly beginRelease: (leaseId: string) => Effect.Effect<void>;
-    readonly confirmReleased: (leaseId: string, evidence: string) => Effect.Effect<void>;
-    readonly preserve: (leaseId: string, reason: string) => Effect.Effect<void>;
-    readonly unresolved: (leaseId: string, reason: string) => Effect.Effect<void>;
-  }
->()("kojo/project/ResourceLeaseClient") {}
+export class ResourceLeaseClient extends ResourceLeaseClientBase {}

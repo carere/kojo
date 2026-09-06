@@ -32,7 +32,7 @@ describe("the Project-local runtime package contract", () => {
     const fromRuntime = Bun.resolveSync("effect", resolve(packageRoot, "src"));
     const fromAuthoredCode = Bun.resolveSync("effect", testDirectory);
 
-    expect(packageManifest.peerDependencies.effect).toBe("4.0.0-beta.106");
+    expect(packageManifest.peerDependencies.effect).toBe("4.0.0-rc.112");
     expect(runtimeManifest.effectPeer).toBe(packageManifest.peerDependencies.effect);
     expect(fromRuntime).toBe(fromAuthoredCode);
   });

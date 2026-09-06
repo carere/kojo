@@ -39,6 +39,17 @@ export interface AgentCall {
   readonly session: Option.Option<AgentSessionId>;
 }
 
+interface AgentInvokerService {
+  readonly capabilities: AgentCapabilities;
+  readonly invoke: (call: AgentCall) => Effect.Effect<AgentAnswer, AgentInvocationError>;
+}
+
+const AgentInvokerBase: Context.ServiceClass<
+  AgentInvoker,
+  "kojo/agent/AgentInvoker",
+  AgentInvokerService
+> = Context.Service<AgentInvoker, AgentInvokerService>()("kojo/agent/AgentInvoker");
+
 /**
  * One agent call, wherever the agent physically runs.
  *
@@ -47,10 +58,4 @@ export interface AgentCall {
  * planes means neither can say why a run stopped (D4). And the schema stays on Kojo's side of the
  * boundary so the decode failure lands where the correction loop can act on it (§5, claim 4).
  */
-export class AgentInvoker extends Context.Service<
-  AgentInvoker,
-  {
-    readonly capabilities: AgentCapabilities;
-    readonly invoke: (call: AgentCall) => Effect.Effect<AgentAnswer, AgentInvocationError>;
-  }
->()("kojo/agent/AgentInvoker") {}
+export class AgentInvoker extends AgentInvokerBase {}

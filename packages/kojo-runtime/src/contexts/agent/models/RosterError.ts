@@ -1,4 +1,5 @@
-import { Schema, type SchemaError } from "effect";
+import { Schema } from "effect";
+import type { YieldableError } from "effect/Cause";
 import { DecodeIssue } from "../../shared/models/DecodeIssue.ts";
 
 /**
@@ -8,7 +9,9 @@ import { DecodeIssue } from "../../shared/models/DecodeIssue.ts";
  * human's mistake in the factory rather than anything a run can recover from. The fourth is a
  * lookup fault, and it means a workflow calls an agent this roster does not define.
  */
-export const RosterFault = Schema.Literals([
+export const RosterFault: Schema.Literals<
+  readonly ["unreadable", "malformed", "no-prompt", "unknown-agent"]
+> = Schema.Literals([
   /** The roster itself could not be read — no such file, no permission. */
   "unreadable",
   /** The roster was read and is not a roster: the YAML does not parse, or an entry does not decode. */
@@ -19,6 +22,34 @@ export const RosterFault = Schema.Literals([
   "unknown-agent",
 ]);
 export type RosterFault = typeof RosterFault.Type;
+
+const RosterErrorBase: Schema.Class<
+  RosterError,
+  Schema.TaggedStruct<
+    "RosterError",
+    {
+      readonly source: Schema.String;
+      readonly fault: Schema.Literals<
+        readonly ["unreadable", "malformed", "no-prompt", "unknown-agent"]
+      >;
+      readonly agent: Schema.optional<Schema.String>;
+      readonly reason: Schema.String;
+      readonly issues: Schema.$Array<typeof DecodeIssue>;
+      readonly cause: Schema.Defect;
+    }
+  >,
+  YieldableError
+> = Schema.TaggedError<RosterError>()("RosterError", {
+  /** The roster this is about — a file path, or the name an object roster was given. */
+  source: Schema.String,
+  fault: RosterFault,
+  /** The agent this is about, when it is about one rather than the whole roster. */
+  agent: Schema.optional(Schema.String),
+  reason: Schema.String,
+  /** One entry per path that is wrong. Empty unless the fault is `malformed`. */
+  issues: Schema.Array(DecodeIssue),
+  cause: Schema.Defect(),
+});
 
 /**
  * The roster could not answer.
@@ -31,20 +62,10 @@ export type RosterFault = typeof RosterFault.Type;
  * point of decoding the roster through `Schema` instead of reading a parsed object by hand, and it
  * arrives at load, before a single sandbox is built.
  */
-export class RosterError extends Schema.TaggedError<RosterError>()("RosterError", {
-  /** The roster this is about — a file path, or the name an object roster was given. */
-  source: Schema.String,
-  fault: RosterFault,
-  /** The agent this is about, when it is about one rather than the whole roster. */
-  agent: Schema.optional(Schema.String),
-  reason: Schema.String,
-  /** One entry per path that is wrong. Empty unless the fault is `malformed`. */
-  issues: Schema.Array(DecodeIssue),
-  cause: Schema.Defect(),
-}) {
+export class RosterError extends RosterErrorBase {
   static fromSchemaError(
     options: { readonly source: string },
-    error: SchemaError.SchemaError,
+    error: Schema.SchemaError,
   ): RosterError {
     const issues = DecodeIssue.fromSchemaError(error);
     return new RosterError({

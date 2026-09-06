@@ -16,6 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { canonicalPackageName } from "../../shared/models/canonicalPackageName.ts";
 import { RevisionCaptureError } from "../models/RevisionCaptureError.ts";
 import type {
   CapturedWorkflowRevision,
@@ -250,7 +251,11 @@ const packageRootFor = (specifier: string, from: string): string => {
     const manifest = join(cursor, "package.json");
     if (existsSync(manifest)) {
       const value = JSON.parse(readFileSync(manifest, "utf8")) as { readonly name?: string };
-      if (value.name === expected) return realpathSync(cursor);
+      if (
+        value.name !== undefined &&
+        canonicalPackageName(value.name) === canonicalPackageName(expected)
+      )
+        return realpathSync(cursor);
     }
     const parent = dirname(cursor);
     if (parent === cursor) break;
@@ -344,7 +349,11 @@ const packageGraph = (
     const dependencies = [...new Set([...required, ...optional])]
       .sort()
       .map((name) => ({ name, optional: optional.has(name) && !required.has(name) }));
-    roots.set(root, { name: manifest.name, version: manifest.version, dependencies });
+    roots.set(root, {
+      name: canonicalPackageName(manifest.name),
+      version: manifest.version,
+      dependencies,
+    });
     queue.push(root);
     return root;
   };

@@ -3,12 +3,42 @@ import { PhaseId } from "../../shared/models/PhaseId.ts";
 import { RunId } from "../../shared/models/RunId.ts";
 
 /** What repeated. Three kinds, because three are what a phase genuinely does many of. */
-export const OccurrenceKind = Schema.Literals(["exec", "tool", "iteration"]);
+export const OccurrenceKind: Schema.Literals<readonly ["exec", "tool", "iteration"]> =
+  Schema.Literals(["exec", "tool", "iteration"]);
 export type OccurrenceKind = typeof OccurrenceKind.Type;
 
 /** How one repetition ended. There is no `interrupted`: an interrupted phase records the phase. */
-export const OccurrenceOutcome = Schema.Literals(["succeeded", "failed"]);
+export const OccurrenceOutcome: Schema.Literals<readonly ["succeeded", "failed"]> = Schema.Literals(
+  ["succeeded", "failed"],
+);
 export type OccurrenceOutcome = typeof OccurrenceOutcome.Type;
+
+const OccurrenceBase: Schema.Class<
+  Occurrence,
+  Schema.Struct<{
+    readonly runId: Schema.brand<Schema.String, "RunId">;
+    readonly phaseId: Schema.brand<Schema.String, "PhaseId">;
+    readonly kind: Schema.Literals<readonly ["exec", "tool", "iteration"]>;
+    readonly name: Schema.String;
+    readonly startedAt: Schema.Finite;
+    readonly endedAt: Schema.Finite;
+    readonly outcome: Schema.Literals<readonly ["succeeded", "failed"]>;
+    readonly detail: Schema.optionalKey<Schema.String>;
+  }>,
+  Record<never, never>
+> = Schema.Class<Occurrence>("Occurrence")({
+  runId: RunId,
+  /** The phase this repeated inside. An occurrence outside a phase has no home and no meaning. */
+  phaseId: PhaseId,
+  kind: OccurrenceKind,
+  /** What ran — the command line, the tool's name, the iteration's label. */
+  name: Schema.String,
+  startedAt: Schema.Finite,
+  endedAt: Schema.Finite,
+  outcome: OccurrenceOutcome,
+  /** One line about how it ended — an exit code, a tool's own error. Absent when there is none. */
+  detail: Schema.optionalKey(Schema.String),
+});
 
 /**
  * One repetition **inside** a phase — a tool call, an `exec`, an iteration.
@@ -29,19 +59,7 @@ export type OccurrenceOutcome = typeof OccurrenceOutcome.Type;
  * `INTEGER PRIMARY KEY` in the schema: `select *` never expands SQLite's implicit rowid, so a
  * reader polling for new occurrences would get no cursor to advance and re-read row one forever.
  */
-export class Occurrence extends Schema.Class<Occurrence>("Occurrence")({
-  runId: RunId,
-  /** The phase this repeated inside. An occurrence outside a phase has no home and no meaning. */
-  phaseId: PhaseId,
-  kind: OccurrenceKind,
-  /** What ran — the command line, the tool's name, the iteration's label. */
-  name: Schema.String,
-  startedAt: Schema.Finite,
-  endedAt: Schema.Finite,
-  outcome: OccurrenceOutcome,
-  /** One line about how it ended — an exit code, a tool's own error. Absent when there is none. */
-  detail: Schema.optionalKey(Schema.String),
-}) {
+export class Occurrence extends OccurrenceBase {
   get durationMillis(): number {
     return this.endedAt - this.startedAt;
   }

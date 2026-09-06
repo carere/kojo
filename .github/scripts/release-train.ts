@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
+import { requiresFullEvidence } from "../../packages/kojo/src/scripts/release/ReleasePolicy.ts";
+import type { ReleaseStage } from "../../packages/kojo/src/scripts/release/ReleaseVersion.ts";
 import {
   assertPrereleaseFollowsCandidate,
   assertReleaseStage,
   assertStableFollowsCandidate,
   parseReleaseVersion,
 } from "../../packages/kojo/src/scripts/release/ReleaseVersion.ts";
-import type { ReleaseStage } from "../../packages/kojo/src/scripts/release/ReleaseVersion.ts";
 
 const repositoryRoot = resolve(import.meta.dir, "../..");
 const registry = (process.env.KOJO_NPM_REGISTRY ?? "https://registry.npmjs.org").replace(/\/$/, "");
@@ -43,6 +44,11 @@ interface ReleaseManifest {
   readonly stage: ReleaseStage;
   readonly testedRevision: string;
   readonly version: string;
+  readonly evidence: {
+    readonly policy: "core" | "full";
+    readonly fullHostEvidence: "required" | "not-required";
+  };
+  readonly jsr?: ReadonlyArray<unknown>;
 }
 
 interface RegistryVersion {
@@ -54,8 +60,7 @@ interface RegistryMetadata {
   readonly versions?: Readonly<Record<string, RegistryVersion>>;
 }
 
-const readJson = <Value>(path: string): Value =>
-  JSON.parse(readFileSync(path, "utf8")) as Value;
+const readJson = <Value>(path: string): Value => JSON.parse(readFileSync(path, "utf8")) as Value;
 
 const packageVersion = (directory: string): string =>
   readJson<PackageJson>(resolve(repositoryRoot, "packages", directory, "package.json")).version;
@@ -67,6 +72,10 @@ const assertCoordinatedVersion = (version: string): void => {
       throw new Error(
         `${releasePackage.name} declares '${declared}', but the Release train requires '${version}'.`,
       );
+    }
+    const jsrPath = resolve(repositoryRoot, "packages", releasePackage.directory, "jsr.json");
+    if (existsSync(jsrPath) && readJson<PackageJson>(jsrPath).version !== version) {
+      throw new Error(`${releasePackage.name} JSR version differs from ${version}.`);
     }
   }
 
@@ -133,12 +142,15 @@ const assertStableSource = (manifestPath: string, currentRevision: string): void
     "packages/kojo-runtime/runtime-manifest.json",
     ...publicPackages.map(({ directory }) => `packages/${directory}/package.json`),
     ...publicPackages.map(({ directory }) => `packages/${directory}/CHANGELOG.md`),
+    ...publicPackages.map(({ directory }) => `packages/${directory}/jsr.json`),
   ]);
   const unexpected = changedPaths.filter(
     (path) => !allowedFiles.has(path) && !/^docs\/release-notes\/[^/]+\.md$/.test(path),
   );
   if (unexpected.length > 0) {
-    throw new Error(`Stable has changes outside version files and Release notes: ${unexpected.join(", ")}`);
+    throw new Error(
+      `Stable has changes outside version files and Release notes: ${unexpected.join(", ")}`,
+    );
   }
 
   for (const releasePackage of publicPackages) {
@@ -152,6 +164,20 @@ const assertStableSource = (manifestPath: string, currentRevision: string): void
     after.version = "<release-version>";
     if (JSON.stringify(before) !== JSON.stringify(after)) {
       throw new Error(`${path} changes more than its version.`);
+    }
+    const jsrPath = `packages/${releasePackage.directory}/jsr.json`;
+    if (existsSync(resolve(repositoryRoot, jsrPath))) {
+      const jsrBefore = repositoryJsonAt<Record<string, unknown>>(
+        candidate.testedRevision,
+        jsrPath,
+      );
+      const jsrAfter = readJson<Record<string, unknown>>(resolve(repositoryRoot, jsrPath));
+      if (jsrBefore.version !== candidate.version || jsrAfter.version !== stable.version)
+        throw new Error(`${jsrPath} has incorrect versions.`);
+      jsrBefore.version = "<release-version>";
+      jsrAfter.version = "<release-version>";
+      if (JSON.stringify(jsrBefore) !== JSON.stringify(jsrAfter))
+        throw new Error(`${jsrPath} changes more than its version.`);
     }
   }
 
@@ -173,7 +199,9 @@ const assertStableSource = (manifestPath: string, currentRevision: string): void
     throw new Error("The runtime manifest changes more than its package version.");
   }
 
-  const lockBefore = Bun.JSONC.parse(gitOutput(["show", `${candidate.testedRevision}:bun.lock`])) as {
+  const lockBefore = Bun.JSONC.parse(
+    gitOutput(["show", `${candidate.testedRevision}:bun.lock`]),
+  ) as {
     workspaces: Record<string, { version?: string }>;
   };
   const lockAfter = Bun.JSONC.parse(readFileSync(resolve(repositoryRoot, "bun.lock"), "utf8")) as {
@@ -198,7 +226,9 @@ const assertStableSource = (manifestPath: string, currentRevision: string): void
 const packageJsonFromArchive = (archive: string): PackageJson => {
   const result = Bun.spawnSync(["tar", "-xOf", archive, "package/package.json"]);
   if (result.exitCode !== 0) {
-    throw new Error(`Cannot read package/package.json from ${archive}: ${result.stderr.toString()}`);
+    throw new Error(
+      `Cannot read package/package.json from ${archive}: ${result.stderr.toString()}`,
+    );
   }
   return JSON.parse(result.stdout.toString()) as PackageJson;
 };
@@ -213,9 +243,12 @@ const archiveEntries = (archive: string): ReadonlyArray<string> => {
 
 const run = (
   command: ReadonlyArray<string>,
-  options: { readonly cwd?: string; readonly env?: Readonly<Record<string, string | undefined>> } = {},
+  options: {
+    readonly cwd?: string;
+    readonly env?: Readonly<Record<string, string | undefined>>;
+  } = {},
 ): string => {
-  const result = Bun.spawnSync(command, options);
+  const result = Bun.spawnSync([...command], options);
   if (result.exitCode !== 0) {
     throw new Error(`${command.join(" ")} failed: ${result.stderr.toString()}`);
   }
@@ -232,10 +265,9 @@ const packRelease = (version: string, archiveDirectory: string): void => {
   }
 
   for (const releasePackage of publicPackages) {
-    run(
-      ["bun", "pm", "pack", "--destination", resolve(archiveDirectory), "--quiet"],
-      { cwd: resolve(repositoryRoot, "packages", releasePackage.directory) },
-    );
+    run(["bun", "pm", "pack", "--destination", resolve(archiveDirectory), "--quiet"], {
+      cwd: resolve(repositoryRoot, "packages", releasePackage.directory),
+    });
   }
 
   const archives = readdirSync(archiveDirectory)
@@ -249,7 +281,9 @@ const packRelease = (version: string, archiveDirectory: string): void => {
     if (!entries.includes("package/LICENSE")) throw new Error(`${archive} has no LICENSE.`);
   }
 
-  const byName = new Map(archives.map((archive) => [packageJsonFromArchive(archive).name, archive]));
+  const byName = new Map(
+    archives.map((archive) => [packageJsonFromArchive(archive).name, archive]),
+  );
   const kojoEntries = archiveEntries(byName.get("@carere/kojo") ?? "");
   if (!kojoEntries.includes("package/console/index.html")) {
     throw new Error("The Kojo archive has no Console shell.");
@@ -284,7 +318,9 @@ const createManifest = (
   if (archives.length !== publicPackages.length) {
     throw new Error("The package directory does not contain exactly four package archives.");
   }
-  const byName = new Map(archives.map((archive) => [packageJsonFromArchive(archive).name, archive]));
+  const byName = new Map(
+    archives.map((archive) => [packageJsonFromArchive(archive).name, archive]),
+  );
 
   const packages = publicPackages.map(({ name }) => {
     const archive = byName.get(name);
@@ -304,7 +340,9 @@ const createManifest = (
   });
 
   if (byName.size !== publicPackages.length) {
-    throw new Error("The package directory contains an archive outside the coordinated package set.");
+    throw new Error(
+      "The package directory contains an archive outside the coordinated package set.",
+    );
   }
 
   return {
@@ -315,6 +353,10 @@ const createManifest = (
     stage,
     testedRevision,
     version,
+    evidence: {
+      policy: requiresFullEvidence(version) ? "full" : "core",
+      fullHostEvidence: requiresFullEvidence(version) ? "required" : "not-required",
+    },
   };
 };
 
@@ -327,12 +369,20 @@ const assertManifest = (
   testedRevision?: string,
 ): void => {
   const release = assertReleaseStage(version, stage);
-  if (manifest.formatVersion !== 1) throw new Error("The Release manifest format is not supported.");
+  if (manifest.formatVersion !== 1)
+    throw new Error("The Release manifest format is not supported.");
   if (manifest.version !== version || manifest.stage !== stage) {
     throw new Error(`The Release manifest does not describe ${stage} ${version}.`);
   }
   if (manifest.baseVersion !== release.baseVersion) {
     throw new Error("The Release manifest has an incorrect base version.");
+  }
+  if (
+    manifest.evidence?.policy !== (requiresFullEvidence(version) ? "full" : "core") ||
+    manifest.evidence.fullHostEvidence !==
+      (requiresFullEvidence(version) ? "required" : "not-required")
+  ) {
+    throw new Error("The Release manifest has an incorrect evidence policy.");
   }
   if (testedRevision !== undefined && manifest.testedRevision !== testedRevision) {
     throw new Error(
@@ -385,25 +435,55 @@ const waitForPublishedVersion = async (
   return undefined;
 };
 
-const publishRelease = (manifestPath: string, tag: string): void => {
+const publishRelease = async (manifestPath: string, tag: string): Promise<void> => {
   const manifest = readManifest(manifestPath);
   assertManifest(manifest, manifest.version, manifest.stage);
-  const token = process.env.NPM_TOKEN;
-  if (token === undefined || token.length === 0) throw new Error("NPM_TOKEN is not set.");
-
   for (const releasePackage of manifest.packages) {
-    run(
-      [
-        "bun",
-        "publish",
-        "--access",
-        "public",
-        "--tag",
-        tag,
-        resolve(dirname(manifestPath), "packages", releasePackage.archive),
-      ],
-      { env: { ...process.env, NPM_CONFIG_TOKEN: token } },
-    );
+    const archive = resolve(dirname(manifestPath), "packages", releasePackage.archive);
+    if (
+      digest("sha256", archive, "hex") !== releasePackage.sha256 ||
+      `sha512-${digest("sha512", archive, "base64")}` !== releasePackage.integrity ||
+      statSync(archive).size !== releasePackage.size
+    )
+      throw new Error(`${releasePackage.name} archive changed after validation.`);
+    let token: string | undefined;
+    if (process.env.RELEASE_NPM_AUTH === "bootstrap") {
+      if (manifest.stage !== "alpha")
+        throw new Error("Bootstrap authentication is limited to alpha.");
+      token = process.env.NPM_TOKEN;
+    } else {
+      if (process.env.RELEASE_NPM_AUTH !== "oidc")
+        throw new Error("Select bootstrap or oidc authentication.");
+      const requestUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+      const requestToken = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+      if (!requestUrl || !requestToken)
+        throw new Error("GitHub OIDC permission id-token: write is required.");
+      const url = new URL(requestUrl);
+      url.searchParams.set("audience", "npm:registry.npmjs.org");
+      const identityResponse = await fetch(url, {
+        headers: { authorization: `Bearer ${requestToken}` },
+      });
+      if (!identityResponse.ok)
+        throw new Error(`GitHub OIDC request failed (${identityResponse.status}).`);
+      const identity = (await identityResponse.json()) as { value: string };
+      const exchange = await fetch(
+        `${registry}/-/npm/v1/oidc/token/exchange/package/${encodeURIComponent(releasePackage.name)}`,
+        {
+          method: "POST",
+          headers: { authorization: `Bearer ${identity.value}` },
+        },
+      );
+      if (!exchange.ok)
+        throw new Error(
+          `npm OIDC exchange failed for ${releasePackage.name} (${exchange.status}). Check its Trusted Publisher settings.`,
+        );
+      token = ((await exchange.json()) as { token: string }).token;
+    }
+    if (!token) throw new Error("npm publication credential is missing.");
+    if (process.env.GITHUB_ACTIONS === "true") process.stdout.write(`::add-mask::${token}\n`);
+    run(["bun", "publish", "--access", "public", "--tag", tag, archive], {
+      env: { ...process.env, NPM_CONFIG_TOKEN: token },
+    });
   }
 };
 
@@ -432,17 +512,16 @@ const installRelease = (manifestPath: string, project: string, globalRoot: strin
     env: environment,
   }).trim();
   if (actualVersion !== `kojo v${manifest.version}`) {
-    throw new Error(`The installed CLI reports '${actualVersion}', not 'kojo v${manifest.version}'.`);
+    throw new Error(
+      `The installed CLI reports '${actualVersion}', not 'kojo v${manifest.version}'.`,
+    );
   }
 };
 
 const verifyPublished = async (manifest: ReleaseManifest): Promise<void> => {
   assertManifest(manifest, manifest.version, manifest.stage);
   for (const releasePackage of manifest.packages) {
-    const published = await waitForPublishedVersion(
-      releasePackage.name,
-      releasePackage.version,
-    );
+    const published = await waitForPublishedVersion(releasePackage.name, releasePackage.version);
     if (published === undefined) {
       throw new Error(`${releasePackage.name}@${releasePackage.version} is not in the registry.`);
     }
@@ -456,7 +535,8 @@ const verifyPublished = async (manifest: ReleaseManifest): Promise<void> => {
 
 const verifyActiveTags = async (manifest: ReleaseManifest): Promise<void> => {
   assertManifest(manifest, manifest.version, manifest.stage);
-  if (manifest.stage === "stable") throw new Error("A stable Release is not a prerelease candidate.");
+  if (manifest.stage === "stable")
+    throw new Error("A stable Release is not a prerelease candidate.");
   for (const releasePackage of manifest.packages) {
     const tags = (await registryMetadata(releasePackage.name))?.["dist-tags"];
     if (tags?.[manifest.stage] !== manifest.version || tags.next !== manifest.version) {
@@ -474,6 +554,16 @@ const usage = (): never => {
 const [command, ...arguments_] = Bun.argv.slice(2);
 
 switch (command) {
+  case "auth-mode": {
+    const missing = [];
+    for (const { name } of publicPackages)
+      if ((await registryMetadata(name)) === undefined) missing.push(name);
+    const mode = missing.length > 0 ? "bootstrap" : "oidc";
+    if (mode === "bootstrap" && parseReleaseVersion(arguments_[0] ?? "").stage !== "alpha")
+      throw new Error("Only alpha may create the initial npm packages.");
+    process.stdout.write(`${mode}\n`);
+    break;
+  }
   case "validate-prerelease": {
     const [stage, version, previous] = arguments_;
     if (stage === undefined || version === undefined) usage();
@@ -540,7 +630,7 @@ switch (command) {
   case "publish": {
     const [path, tag] = arguments_;
     if (path === undefined || tag === undefined) usage();
-    publishRelease(path, tag);
+    await publishRelease(path, tag);
     break;
   }
   case "verify-published": {

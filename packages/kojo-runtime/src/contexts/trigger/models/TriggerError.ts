@@ -1,4 +1,5 @@
-import { Schema, type SchemaError } from "effect";
+import { Schema } from "effect";
+import type { YieldableError } from "effect/Cause";
 import { DecodeIssue } from "../../shared/models/DecodeIssue.ts";
 
 /**
@@ -10,7 +11,9 @@ import { DecodeIssue } from "../../shared/models/DecodeIssue.ts";
  * the run genuinely happened, and only the telling failed, so nothing may re-start the run on the
  * strength of it.
  */
-export const TriggerFault = Schema.Literals([
+export const TriggerFault: Schema.Literals<
+  readonly ["unreachable", "malformed", "key-mismatch", "ack-refused"]
+> = Schema.Literals([
   /** The source could not be read — the API refused, the socket died, the file is gone. */
   "unreachable",
   /** An event arrived whose payload is not one this workflow takes. */
@@ -21,6 +24,34 @@ export const TriggerFault = Schema.Literals([
   "ack-refused",
 ]);
 export type TriggerFault = typeof TriggerFault.Type;
+
+const TriggerErrorBase: Schema.Class<
+  TriggerError,
+  Schema.TaggedStruct<
+    "TriggerError",
+    {
+      readonly source: Schema.String;
+      readonly fault: Schema.Literals<
+        readonly ["unreachable", "malformed", "key-mismatch", "ack-refused"]
+      >;
+      readonly key: Schema.optional<Schema.String>;
+      readonly reason: Schema.String;
+      readonly issues: Schema.$Array<typeof DecodeIssue>;
+      readonly cause: Schema.Defect;
+    }
+  >,
+  YieldableError
+> = Schema.TaggedError<TriggerError>()("TriggerError", {
+  /** The trigger this is about, as the event named it. */
+  source: Schema.String,
+  fault: TriggerFault,
+  /** The dedup value this is about, when it is about one event rather than the whole source. */
+  key: Schema.optional(Schema.String),
+  reason: Schema.String,
+  /** One entry per path that is wrong. Empty unless the fault is `malformed`. */
+  issues: Schema.Array(DecodeIssue),
+  cause: Schema.Defect(),
+});
 
 /**
  * The trigger could not do what it was asked.
@@ -33,20 +64,10 @@ export type TriggerFault = typeof TriggerFault.Type;
  * a missing field reports **which key** — `ticket.revision` — rather than "invalid payload", and it
  * reports it before a single sandbox is built.
  */
-export class TriggerError extends Schema.TaggedError<TriggerError>()("TriggerError", {
-  /** The trigger this is about, as the event named it. */
-  source: Schema.String,
-  fault: TriggerFault,
-  /** The dedup value this is about, when it is about one event rather than the whole source. */
-  key: Schema.optional(Schema.String),
-  reason: Schema.String,
-  /** One entry per path that is wrong. Empty unless the fault is `malformed`. */
-  issues: Schema.Array(DecodeIssue),
-  cause: Schema.Defect(),
-}) {
+export class TriggerError extends TriggerErrorBase {
   static fromSchemaError(
     options: { readonly source: string; readonly key: string },
-    error: SchemaError.SchemaError,
+    error: Schema.SchemaError,
   ): TriggerError {
     const issues = DecodeIssue.fromSchemaError(error);
     return new TriggerError({

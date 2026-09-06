@@ -14,8 +14,25 @@ import { Schema } from "effect";
  * provider value therefore carries no capability a type can read, so Kojo attaches the tag at the
  * point the provider is constructed and never tries to recover it afterwards.
  */
-export const SandboxKind = Schema.Literals(["bind-mount", "isolated", "none"]);
+export const SandboxKind: Schema.Literals<readonly ["bind-mount", "isolated", "none"]> =
+  Schema.Literals(["bind-mount", "isolated", "none"]);
 export type SandboxKind = typeof SandboxKind.Type;
+
+const SandboxCapabilitiesBase: Schema.Class<
+  SandboxCapabilities,
+  Schema.Struct<{
+    readonly kind: Schema.Literals<readonly ["bind-mount", "isolated", "none"]>;
+    readonly capturesSessions: Schema.Boolean;
+    readonly resumesSessions: Schema.Boolean;
+  }>,
+  Record<never, never>
+> = Schema.Class<SandboxCapabilities>("SandboxCapabilities")({
+  kind: SandboxKind,
+  /** Whether the agent's session file is pulled back to the host after an iteration. */
+  capturesSessions: Schema.Boolean,
+  /** Whether a later iteration can continue that session instead of starting cold. */
+  resumesSessions: Schema.Boolean,
+});
 
 /**
  * What a provider can do for an agent's session — two capabilities, not one.
@@ -23,13 +40,7 @@ export type SandboxKind = typeof SandboxKind.Type;
  * Capture and resume come apart, and the matrix below is why the `AgentInvoker` port must ask
  * rather than assume.
  */
-export class SandboxCapabilities extends Schema.Class<SandboxCapabilities>("SandboxCapabilities")({
-  kind: SandboxKind,
-  /** Whether the agent's session file is pulled back to the host after an iteration. */
-  capturesSessions: Schema.Boolean,
-  /** Whether a later iteration can continue that session instead of starting cold. */
-  resumesSessions: Schema.Boolean,
-}) {}
+export class SandboxCapabilities extends SandboxCapabilitiesBase {}
 
 /**
  * Three rows, not two.

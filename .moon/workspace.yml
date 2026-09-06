@@ -10,3 +10,12 @@ projects:
 vcs:
   defaultBranch: "main"
   provider: "github"
+
+remote:
+  api: "http"
+  host: "https://remoshu.delimoov.workers.dev"
+  auth:
+    token: "REMOSHU_TOKEN"
+  cache:
+    instanceName: "carere/kojo"
+    verifyIntegrity: true

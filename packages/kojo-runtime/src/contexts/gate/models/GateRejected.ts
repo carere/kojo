@@ -1,4 +1,23 @@
 import { Schema } from "effect";
+import type { YieldableError } from "effect/Cause";
+
+const GateRejectedBase: Schema.Class<
+  GateRejected,
+  Schema.TaggedStruct<
+    "GateRejected",
+    {
+      readonly gate: Schema.String;
+      readonly actor: Schema.String;
+      readonly reason: Schema.String;
+    }
+  >,
+  YieldableError
+> = Schema.TaggedError<GateRejected>()("GateRejected", {
+  gate: Schema.String,
+  /** Who was asked to decide. */
+  actor: Schema.String,
+  reason: Schema.String,
+});
 
 /**
  * A human was asked and said no.
@@ -9,9 +28,4 @@ import { Schema } from "effect";
  * `reason` is the reviewer's own words. A rejected fix is re-prompted from it, so an empty reason
  * costs the next attempt its only clue.
  */
-export class GateRejected extends Schema.TaggedError<GateRejected>()("GateRejected", {
-  gate: Schema.String,
-  /** Who was asked to decide. */
-  actor: Schema.String,
-  reason: Schema.String,
-}) {}
+export class GateRejected extends GateRejectedBase {}

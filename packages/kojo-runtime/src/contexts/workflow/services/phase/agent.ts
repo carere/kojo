@@ -1,5 +1,7 @@
 import { Cause, Clock, Effect, Option, Schema, SchemaAST } from "effect";
+import type { Scope } from "effect/Scope";
 import { Activity } from "effect/unstable/workflow";
+import type { WorkflowEngine, WorkflowInstance } from "effect/unstable/workflow/WorkflowEngine";
 import type { AgentAnswer } from "../../../agent/models/AgentAnswer.ts";
 import { AgentInvocationError } from "../../../agent/models/AgentInvocationError.ts";
 import type { AgentSessionId } from "../../../agent/models/AgentSessionId.ts";
@@ -68,7 +70,22 @@ export const agent = <Envelope extends Schema.Top, R = never>(options: {
   readonly checks?: ReadonlyArray<Check<Envelope["Type"], R>> | undefined;
   /** How many correction turns this phase may spend. Defaults to `defaultCorrections`. */
   readonly corrections?: number | undefined;
-}) =>
+}): Activity.Activity<
+  Envelope,
+  Schema.Union<
+    readonly [
+      typeof EnvelopeParseError,
+      typeof AgentInvocationError,
+      typeof CheckViolation,
+      typeof WorkspaceError,
+    ]
+  >,
+  | AgentInvoker
+  | CurrentRun
+  | Tracer
+  | Exclude<R, Scope | WorkflowEngine | WorkflowInstance>
+  | Exclude<Envelope["DecodingServices"], Scope | WorkflowEngine | WorkflowInstance>
+> =>
   Activity.make({
     name: options.name,
     success: options.envelope,

@@ -10,6 +10,7 @@ export const ui = Command.make(
   "ui",
   {
     noOpen: Flag.boolean("no-open").pipe(
+      Flag.withDefault(false),
       Flag.withDescription("Print the sensitive short-lived launch URL instead of opening it"),
     ),
   },

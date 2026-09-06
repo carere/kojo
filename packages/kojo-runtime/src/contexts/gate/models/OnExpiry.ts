@@ -1,7 +1,8 @@
 import { type Duration, Schema } from "effect";
 
 /** The three branches a run can take when a deadline passes. Named on the record and the CLI. */
-export const ExpiryBranch = Schema.Literals(["fail", "reject", "escalate"]);
+export const ExpiryBranch: Schema.Literals<readonly ["fail", "reject", "escalate"]> =
+  Schema.Literals(["fail", "reject", "escalate"]);
 export type ExpiryBranch = typeof ExpiryBranch.Type;
 
 /**

@@ -8,72 +8,41 @@ const repositoryFile = (path: string): string =>
   readFileSync(new URL(`../../../../../${path}`, import.meta.url), "utf8");
 
 describe("the Release train", () => {
-  it("publishes a prerelease as a hidden candidate before Host validation", () => {
-    const workflow = repositoryFile(".github/workflows/prerelease.yml");
-    const publish = workflow.indexOf(
-      "release-train.ts publish .release-train/release-manifest.json candidate",
-    );
-    const validate = workflow.indexOf("  validate:\n");
-    const accept = workflow.indexOf("  accept:\n");
-
-    expect(workflow).toContain("workflow_dispatch:");
-    expect(workflow).not.toMatch(/^ {2}(push|schedule):/m);
-    expect(workflow).toContain("ubuntu-24.04");
-    expect(workflow).toContain("macos-15");
-    expect(workflow).toContain("complete-breaking-release-evidence");
-    expect(workflow).toContain("verify-published .release-train/release-manifest.json");
-    expect(workflow).toContain("needs: validate");
-    expect(publish).toBeGreaterThan(0);
-    expect(validate).toBeGreaterThan(publish);
-    expect(accept).toBeGreaterThan(validate);
-    expect(workflow.slice(accept)).toContain(
-      "bun .github/scripts/release-tags.ts .release-train/release-manifest.json",
-    );
-    expect(workflow.indexOf("Record the accepted prerelease")).toBeLessThan(
-      workflow.indexOf("Activate the accepted prerelease tags"),
-    );
+  it("runs one manual Release pipeline with candidate validation before promotion", () => {
+    const workflow = Bun.YAML.parse(repositoryFile(".github/workflows/release.yml")) as {
+      on: Record<string, unknown>;
+      jobs: Record<string, { needs?: string[]; environment?: string }>;
+    };
+    expect(Object.keys(workflow.on)).toEqual(["workflow_dispatch"]);
+    expect(workflow.jobs["publish-npm"]?.needs).toEqual(["prepare", "checks", "jsr-checks"]);
+    expect(workflow.jobs["validate-public"]?.needs).toContain("publish-npm");
+    expect(workflow.jobs["publish-jsr"]?.needs).toContain("validate-public");
+    expect(workflow.jobs.accept?.needs).toContain("validate-jsr");
+    expect(workflow.jobs["publish-jsr"]?.environment).toContain("npm-production");
   });
 
-  it("promotes a validated stable candidate without republishing it", () => {
-    const workflow = repositoryFile(".github/workflows/release.yml");
-    const candidatePublish = workflow.indexOf(
-      "release-train.ts publish .release-train/release-manifest.json candidate",
-    );
-    const validation = workflow.indexOf("  validate-candidate:\n");
-    const promotion = workflow.indexOf("  promote:\n");
-
-    expect(workflow).toContain("release_candidate:");
-    expect(workflow).toContain(
-      "verify-manifest .release-train/accepted-rc/release-manifest.json rc",
-    );
-    expect(workflow).toContain("Prove that validation accepted the Release Candidate");
-    expect(workflow).toContain(
-      "verify-accepted-prerelease.sh .release-train/accepted-rc/release-manifest.json",
-    );
-    expect(workflow).toContain("Refuse code changes after the accepted Release Candidate");
-    expect(workflow).toContain("release-train.ts validate-stable-source");
-    expect(workflow).toContain("environment: npm-production");
-    expect(workflow).toContain("complete-breaking-release-evidence");
-    expect(candidatePublish).toBeGreaterThan(0);
-    expect(validation).toBeGreaterThan(candidatePublish);
-    expect(promotion).toBeGreaterThan(validation);
-    expect(workflow.slice(promotion)).not.toContain("bun publish");
-    expect(workflow.slice(promotion)).toContain(
-      "bun .github/scripts/release-tags.ts .release-train/release-manifest.json",
-    );
+  it("limits full Host evidence to Release checks", () => {
+    const ci = repositoryFile(".github/workflows/ci.yml");
+    const checks = Bun.YAML.parse(repositoryFile(".github/workflows/release-checks.yml")) as {
+      jobs: Record<string, { if?: string }>;
+    };
+    for (const job of [
+      "native-systemd-host",
+      "shipped-systemd-release",
+      "shipped-macos-release",
+      "complete-release-evidence",
+    ]) {
+      expect(ci).not.toContain(`  ${job}:`);
+      expect(checks.jobs[job]?.if).toBe(`\${{ inputs.full_evidence }}`);
+    }
   });
 
-  it("documents the complete stage order and immutable candidate rule", () => {
+  it("documents workflow operation and immutable candidates", () => {
     const guide = repositoryFile("docs/release-process.md");
-
-    expect(guide.indexOf("| Alpha |")).toBeLessThan(guide.indexOf("| Beta |"));
-    expect(guide.indexOf("| Beta |")).toBeLessThan(guide.indexOf("| Release Candidate |"));
-    expect(guide.indexOf("| Release Candidate |")).toBeLessThan(guide.indexOf("| Stable |"));
+    expect(guide).toContain("Run workflow");
     expect(guide).toContain("Do not reuse a published version.");
-    expect(guide).toContain("Promotion moves `latest` and `next`");
-    expect(guide).toContain("cog bump --version 0.1.0-alpha.1 --include-packages");
-    expect(guide).toContain("git push --atomic origin main");
-    expect(guide).toContain("Select `v0.1.0-alpha.1` in the workflow ref selector.");
+    expect(guide).toContain("RELEASE_GITHUB_TOKEN");
+    expect(guide).not.toContain("git push --atomic origin main");
   });
 
   it("uses Cocogitto for the coordinated version commit and tags", () => {
@@ -122,6 +91,10 @@ describe("the Release train", () => {
         resolve(fixture, "bun.lock"),
         '{\n  "lockfileVersion": 1,\n  "workspaces": {\n    "packages/kojo-runtime": {\n      "name": "@carere/kojo-runtime",\n      "version": "0.0.0"\n    }\n  }\n}\n',
       );
+      writeFileSync(
+        resolve(runtime, "jsr.json"),
+        JSON.stringify({ name: "@carere/kojo-runtime", version: "0.0.0", exports: {} }),
+      );
       expect(spawnSync("git", ["init", "--initial-branch=main"], { cwd: fixture }).status).toBe(0);
       expect(spawnSync("git", ["add", "."], { cwd: fixture }).status).toBe(0);
 
@@ -137,9 +110,22 @@ describe("the Release train", () => {
         JSON.parse(readFileSync(resolve(runtime, "runtime-manifest.json"), "utf8")).packageVersion,
       ).toBe(targetVersion);
       expect(readFileSync(resolve(fixture, "bun.lock"), "utf8")).toContain(targetVersion);
+      expect(JSON.parse(readFileSync(resolve(runtime, "jsr.json"), "utf8")).version).toBe(
+        targetVersion,
+      );
       expect(spawnSync("git", ["diff", "--cached", "--quiet"], { cwd: fixture }).status).toBe(1);
     } finally {
       rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the same deep library exports on npm and JSR", () => {
+    for (const directory of ["kojo-client-contracts", "kojo-runner-contracts", "kojo-runtime"]) {
+      const npm = JSON.parse(repositoryFile(`packages/${directory}/package.json`));
+      const jsr = JSON.parse(repositoryFile(`packages/${directory}/jsr.json`));
+      expect(jsr.name).toBe(npm.name);
+      expect(jsr.version).toBe(npm.version);
+      expect(jsr.exports).toEqual(npm.exports);
     }
   });
 
@@ -157,8 +143,8 @@ describe("the Release train", () => {
 
     expect(verification).toContain("--json isPrerelease");
     expect(verification).toContain('git rev-list -n 1 "$release_tag"');
-    expect(verification).toContain('.name == "Accept the prerelease"');
+    expect(verification).toContain('.name == "Accept Release"');
     expect(verification).toContain('release-train.ts verify-published "$manifest"');
-    expect(verification).toContain('release-train.ts verify-active-tags "$manifest"');
+    expect(verification).toContain('release-jsr.ts verify "$manifest"');
   });
 });
