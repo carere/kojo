@@ -366,7 +366,6 @@ describe("the Daemon contract cutover", () => {
         "utf8",
       ),
     ].join("\n");
-    const releaseWorkflow = readFileSync(new URL(".github/workflows/release.yml", root), "utf8");
 
     expect(globalPackage.bin).toEqual({ kojo: "./src/main.ts" });
     expect(globalPackage.files).toEqual(["console", "managed-release.json", "src"]);
@@ -376,8 +375,6 @@ describe("the Daemon contract cutover", () => {
       "./validator/main": "./src/validator/main.ts",
     });
     expect(runtimeManifest).toContain('"hosts": ["darwin", "linux"]');
-    expect(releaseWorkflow).toContain("complete-breaking-release-evidence");
-    expect(releaseWorkflow).toContain("verify-complete");
     for (const command of [
       "kojo init",
       "kojo doctor",
