@@ -44,12 +44,16 @@ export const agents = SandcastleAgentInvoker.fromConfig({ config: ".kojo/kojo.co
  * factory the mechanical half of every acceptance is `commands.ts`, so an unguarded agent can make
  * its own suite pass.
  *
- * The skill directory is added because this repository has one and a stamped repository has one:
- * `.claude/skills/kojo/` is what tells the *next* agent how to drive the factory. An agent that
+ * The repository skill is in `.agents/skills/kojo/`; stamped Claude Code skills use
+ * `.claude/skills/kojo/`. Both tell the next agent how to drive the Factory. An agent that
  * rewrites those instructions has changed the behaviour of every run after it, and no diff review of
  * a feature branch would think to look there.
  */
-const barred: ReadonlyArray<string> = [...factoryOwnPaths, ".claude/skills/kojo/"];
+const barred: ReadonlyArray<string> = [
+  ...factoryOwnPaths,
+  ".agents/skills/kojo/",
+  ".claude/skills/kojo/",
+];
 
 /**
  * **This factory keeps its own files in the worktree, and that is a decision rather than an oversight.**

@@ -1,6 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Layer, Option, Path } from "effect";
-import * as InMemoryImageBuilder from "../../../../../src/contexts/scaffold/adapters/InMemoryImageBuilder.ts";
+import { Effect, Layer, Path } from "effect";
 import {
   type InitialiseRequest,
   initialise,
@@ -20,22 +19,14 @@ const request = (overrides?: Partial<InitialiseRequest>): InitialiseRequest => (
   ...overrides,
 });
 
-/** One initialisation over a filesystem that lives in a `Map`, and a builder that only records. */
+/** One initialisation over an in-memory filesystem. */
 const run = (options: InitialiseRequest, seed?: Readonly<Record<string, string>>) =>
   Effect.gen(function* () {
     const memory = memoryFileSystem(seed);
-    const environment = Layer.mergeAll(memory.layer, Path.layer, InMemoryImageBuilder.layer);
-
-    const outcome = yield* Effect.gen(function* () {
-      const initialised = yield* initialise(options);
-      const built = yield* Effect.flatMap(
-        InMemoryImageBuilder.BuiltImages,
-        (images) => images.built,
-      );
-      return { initialised, built };
-    }).pipe(Effect.provide(environment));
-
-    return { ...outcome, files: memory.files, directories: memory.directories };
+    const initialised = yield* initialise(options).pipe(
+      Effect.provide(Layer.merge(memory.layer, Path.layer)),
+    );
+    return { initialised, files: memory.files, directories: memory.directories };
   });
 
 describe("stamping a factory into a repository", () => {
@@ -146,10 +137,8 @@ describe("the install the instructions create being ignored", () => {
 describe("safe initialisation", () => {
   it.effect("records the image contract without building an image", () =>
     Effect.gen(function* () {
-      const { initialised, built, files } = yield* run(request({ imageName: "acme:latest" }));
+      const { files } = yield* run(request({ imageName: "acme:latest" }));
 
-      expect(built).toEqual([]);
-      expect(Option.isNone(initialised.image)).toBe(true);
       expect(files.get("/repo/.kojo/workflows/review.ts")).toContain('imageName: "acme:latest"');
       expect(files.has("/repo/.kojo/sandbox/Dockerfile")).toBe(true);
     }),

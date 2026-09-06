@@ -1,15 +1,7 @@
 import type { UseQueryResult } from "@tanstack/solid-query";
 import { type ApiError, refused } from "../services/api.ts";
 
-/**
- * A query's data, read without ever suspending.
- *
- * `solid-query` backs `data` with a resource: reading it before the first success throws to the
- * nearest `<Suspense>`. That is the wrong shape for this Console. The Console retries forever, so a
- * resource that never resolves would hold a suspense fallback on screen for the whole outage — and
- * the fallback is exactly the blank view console.md §10 forbids. Asking `isPending` first, which is
- * plain store state, keeps the read out of the resource until there is something in it.
- */
+/** Read data after the query leaves its pending state. This avoids a Suspense fallback that would replace the view during an unavailable initial snapshot. */
 export const settled = <A>(query: UseQueryResult<A, Error>): A | undefined =>
   query.isPending ? undefined : query.data;
 

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 import { InMemoryProjectRecoveryRepository } from "../../../../src/contexts/project/adapters/InMemoryProjectRecoveryRepository.ts";
-import { runnerFaultLocality } from "../../../../src/contexts/project/models/ProjectRecovery.ts";
 import { ProjectRecoveryRepository } from "../../../../src/contexts/project/ports/ProjectRecoveryRepository.ts";
 
 describe("Project Runner recovery", () => {
@@ -85,13 +84,6 @@ describe("Project Runner recovery", () => {
         failedOperationPending: false,
       });
     }).pipe(Effect.provide(adapter.layer));
-  });
-
-  it("retires unsafe connections but keeps stale authority local to its request", () => {
-    expect(runnerFaultLocality("malformed-frame")).toBe("connection");
-    expect(runnerFaultLocality("oversized-frame")).toBe("connection");
-    expect(runnerFaultLocality("wrong-scope")).toBe("connection");
-    expect(runnerFaultLocality("stale-authority")).toBe("request");
   });
 
   it.effect("does not let repair convert uncertain termination into safe evidence", () => {

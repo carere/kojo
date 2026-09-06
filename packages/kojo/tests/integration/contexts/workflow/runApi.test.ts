@@ -1048,6 +1048,220 @@ describe("Daemon no-Trigger Run API", () => {
     }),
   );
 
+  it.each([
+    ["recovers acknowledgement and resets for the next event", 1, 2],
+    ["exhausts acknowledgement retries without repeating execution", 6, 1],
+    ["stops acknowledgement retries when the Workflow stops", 6, 1],
+  ] as const)("real Trigger retry: %s", async (_name, failures, expectedRuns) => {
+    const hostPaths = paths();
+    const acknowledgement = join(roots[0] ?? "", "retry-acknowledgements.jsonl");
+    const attemptsPath = join(roots[0] ?? "", "retry-attempts.jsonl");
+    const executionsPath = join(roots[0] ?? "", "retry-executions.jsonl");
+    const location = triggerProject(roots[0] ?? "", acknowledgement);
+    const sourcePath = join(location, ".kojo", "workflows", "tickets.ts");
+    const source = readFileSync(sourcePath, "utf8")
+      .replace("import { appendFileSync }", "import { appendFileSync, existsSync, readFileSync }")
+      .replace(
+        "stream: Stream.make(first).pipe(",
+        `stream: Stream.make(first).pipe(
+        Stream.filter((event) => !existsSync(${JSON.stringify(acknowledgement)}) || !readFileSync(${JSON.stringify(acknowledgement)}, "utf8").includes(event.key)),`,
+      )
+      .replace(
+        "import { TriggerEvent }",
+        'import { TriggerError } from "@carere/kojo-runtime/contexts/trigger/models/TriggerError";\nimport { TriggerEvent }',
+      )
+      .replace(
+        "const trigger = Layer.succeed",
+        "const attempts = new Map();\nconst trigger = Layer.succeed",
+      )
+      .replace(
+        "ack: (event, run) => Effect.sync(() =>",
+        `ack: (event, run) => Effect.suspend(() => {
+        const count = (attempts.get(event.key) ?? 0) + 1;
+        attempts.set(event.key, count);
+        appendFileSync(${JSON.stringify(attemptsPath)}, JSON.stringify({ key: event.key, run, count, at: Date.now() }) + "\\n");
+        if (count <= ${failures}) return Effect.fail(new TriggerError({ source: "fixture", fault: "ack-refused", key: event.key, reason: "controlled acknowledgement failure", issues: [], cause: null }));
+        return Effect.void;
+      }).pipe(Effect.andThen(Effect.sync(() =>`,
+      )
+      .replace("\n  ),\n});", "\n  ))),\n});")
+      .replace(
+        "Effect.succeed(payload.ticket)",
+        `Effect.sync(() => {
+        appendFileSync(${JSON.stringify(executionsPath)}, payload.ticket + "\\n");
+        return payload.ticket;
+      })`,
+      );
+    writeFileSync(sourcePath, source);
+    mkdirSync(hostPaths.dataRoot, { recursive: true, mode: 0o700 });
+    const captured = captureWorkflowRevision({
+      project: location,
+      dataRoot: hostPaths.dataRoot,
+      workflowName: "tickets",
+    });
+    const databasePath = join(hostPaths.dataRoot, "kojo.db");
+    const database = new Database(databasePath, { create: true, strict: true });
+    database.run(
+      "CREATE TABLE daemon_metadata (name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT",
+    );
+    const projects = new SqliteProjectRepository(database);
+    const registered = await Effect.runPromise(
+      projects.register({
+        requestId: "seed-trigger-project",
+        requestBody: "seed-trigger-project",
+        dataIdentity: "seed-data",
+        location,
+        observedAt: "2026-09-01T00:00:00.000Z",
+        factory: {
+          state: "available",
+          refreshState: "current",
+          workflows: [
+            {
+              workflowName: "tickets",
+              availability: "available",
+              source: join(location, ".kojo", "workflows", "tickets.ts"),
+              triggerDeclared: true,
+              revision: captured,
+            },
+          ],
+        },
+      }),
+    );
+    database.close(false);
+    chmodSync(databasePath, 0o600);
+
+    const daemon = startDaemon(hostPaths, { automaticRefresh: false, runnerIdleMillis: 100 });
+    daemons.push(daemon);
+    const startPath = `/api/v1/projects/${registered.project.projectId}/workflows/tickets/actions/start`;
+    const start = await mutate(daemon, startPath, {
+      mutationVersion: 1,
+      requestId: "start-trigger",
+      dataIdentity: daemon.endpoint.dataIdentity,
+      operation: "startWorkflow",
+      target: {
+        identityVersion: 1,
+        kind: "workflow",
+        parts: [registered.project.projectId, "tickets"],
+      },
+      arguments: {},
+      preconditions: { mode: "trigger", revisionId: captured.revisionId },
+    });
+    expect(start.status, await start.clone().text()).toBe(202);
+    expect(await start.json()).toMatchObject({
+      kind: "trigger",
+      activity: "active",
+      pollerStarted: true,
+    });
+
+    const stopRetryWorkflow = async () => {
+      const response = await mutate(daemon, startPath.replace("/start", "/stop"), {
+        mutationVersion: 1,
+        requestId: "stop-retry-workflow",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation: "stopWorkflow",
+        target: {
+          identityVersion: 1,
+          kind: "workflow",
+          parts: [registered.project.projectId, "tickets"],
+        },
+        arguments: {},
+        preconditions: {},
+      });
+      expect(response.status, await response.clone().text()).toBe(202);
+    };
+    const deadline = Date.now() + 45_000;
+    const attempts = (): { key: string; count: number; run: { runId: string }; at: number }[] =>
+      existsSync(attemptsPath)
+        ? readFileSync(attemptsPath, "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line))
+        : [];
+    if (_name === "stops acknowledgement retries when the Workflow stops") {
+      while (attempts().length === 0 && Date.now() < deadline) await Bun.sleep(10);
+      expect(attempts()).toHaveLength(1);
+      await stopRetryWorkflow();
+      await Bun.sleep(1_100);
+      expect(attempts()).toHaveLength(1);
+      const workflows = await (
+        await call(daemon, `/api/v1/projects/${registered.project.projectId}/workflows`)
+      ).json();
+      expect(workflows).toMatchObject({
+        workflows: [
+          expect.objectContaining({
+            activity: "inactive",
+            trigger: expect.objectContaining({ state: "not-observed", detail: "stopped" }),
+          }),
+        ],
+      });
+      const runs = (await (await call(daemon, "/api/v1/runs")).json()) as RunSnapshot;
+      expect(runs.runs).toHaveLength(1);
+      for (const run of runs.runs)
+        expect((await waitForRun(daemon, run.runId)).state).toBe("succeeded");
+      expect(readFileSync(executionsPath, "utf8").trim().split("\n")).toEqual(["ticket-one"]);
+      return;
+    }
+    while (Date.now() < deadline) {
+      const observed = attempts();
+      if (
+        failures === 1
+          ? observed.filter(({ count }) => count === 2).length === 2
+          : observed.length === 6
+      )
+        break;
+      await Bun.sleep(20);
+    }
+    const observed = attempts();
+    expect(observed.map(({ key, count }) => ({ key, count }))).toEqual(
+      failures === 1
+        ? [
+            { key: "ticket-one", count: 1 },
+            { key: "ticket-one", count: 2 },
+            { key: "ticket-two", count: 1 },
+            { key: "ticket-two", count: 2 },
+          ]
+        : Array.from({ length: 6 }, (_, index) => ({ key: "ticket-one", count: index + 1 })),
+    );
+    for (const key of new Set(observed.map(({ key }) => key))) {
+      expect(
+        new Set(observed.filter((attempt) => attempt.key === key).map(({ run }) => run.runId)).size,
+      ).toBe(1);
+    }
+    const runs = (await (await call(daemon, "/api/v1/runs")).json()) as RunSnapshot;
+    expect(runs.runs).toHaveLength(expectedRuns);
+    if (failures === 1) {
+      for (const run of runs.runs)
+        expect((await waitForRun(daemon, run.runId)).state).toBe("succeeded");
+      expect(readFileSync(executionsPath, "utf8").trim().split("\n").sort()).toEqual([
+        "ticket-one",
+        "ticket-two",
+      ]);
+    }
+    if (failures === 6) {
+      const workflowPath = `/api/v1/projects/${registered.project.projectId}/workflows`;
+      let document: unknown;
+      while (Date.now() < deadline) {
+        document = await (await call(daemon, workflowPath)).json();
+        if (JSON.stringify(document).includes('"state":"failed"')) break;
+        await Bun.sleep(20);
+      }
+      expect(document).toMatchObject({
+        workflows: [
+          expect.objectContaining({ trigger: expect.objectContaining({ state: "failed" }) }),
+        ],
+      });
+      expect(JSON.stringify(document)).toContain("acknowledgement retry cycle was exhausted");
+      expect(JSON.stringify(document)).toContain("controlled acknowledgement failure");
+      for (const run of runs.runs)
+        expect((await waitForRun(daemon, run.runId)).state).toBe("succeeded");
+      await stopRetryWorkflow();
+      expect(readFileSync(executionsPath, "utf8").trim().split("\n")).toEqual(["ticket-one"]);
+      expect(existsSync(acknowledgement)).toBe(false);
+    } else {
+      expect(readFileSync(acknowledgement, "utf8").trim().split("\n")).toHaveLength(2);
+    }
+  });
+
   it("runs one authored Trigger poller, acknowledges after durable admission, and stops its boundary", async () => {
     const hostPaths = paths();
     const acknowledgement = join(roots[0] ?? "", "trigger-acknowledgements.jsonl");

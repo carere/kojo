@@ -1,16 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { decodeBootstrapResponse } from "../../../../../src/contexts/client/contracts/bootstrap.ts";
 import { decodeMutationEnvelope } from "../../../../../src/contexts/client/contracts/mutation.ts";
-import { decodeObservationSnapshot } from "../../../../../src/contexts/client/contracts/observation.ts";
 import {
   decodeOperationReceipt,
   decodeOperationRefusal,
   decodeRecordedOperationOutcome,
 } from "../../../../../src/contexts/client/contracts/operation.ts";
-import {
-  decodePageMetadata,
-  decodePaginationRequest,
-} from "../../../../../src/contexts/client/contracts/pagination.ts";
 
 const target = { identityVersion: 1, kind: "project", parts: ["project_1"] } as const;
 
@@ -65,21 +60,6 @@ describe("client contract golden fixtures", () => {
           retry: "safe",
           remedy: "Repair the Project.",
         },
-      }),
-      decodePaginationRequest({ paginationVersion: 1, limit: 50 }),
-      decodePageMetadata({
-        paginationVersion: 1,
-        totalMatching: 1,
-        snapshotVersion: 3,
-        nextCursor: { cursorVersion: 1, value: "next_1" },
-      }),
-      decodeObservationSnapshot({
-        observationVersion: 1,
-        instanceId: "daemon_1",
-        dataIdentity: "data_1",
-        snapshotVersion: 3,
-        observedAt: "2026-09-01T10:00:00Z",
-        data: { projects: [] },
       }),
     ];
 

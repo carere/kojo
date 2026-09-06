@@ -199,12 +199,28 @@ export class SqliteTraceRepository {
   readonly projection = (runId: string): Effect.Effect<TraceProjection, RunStoreError> =>
     Effect.try({
       try: () => ({
+        ...this.#runDocument(runId),
         phases: this.#documents("kojo_phases", runId),
         gates: this.#documents("kojo_gates", runId),
         sandboxes: this.#documents("kojo_sandboxes", runId),
       }),
       catch: failure,
     });
+
+  #runDocument(runId: string): Pick<TraceProjection, "run"> {
+    const row = this.#database
+      .query<DocumentRow, [string]>("SELECT document FROM kojo_runs WHERE run_id = ?")
+      .get(runId);
+    if (row === null) return {};
+    const decoded = decodeTraceMutation({ kind: "run-started", record: JSON.parse(row.document) });
+    if (!decoded.ok || decoded.value.kind !== "run-started") {
+      throw new RunStoreError({
+        code: "STORE_FAILED",
+        message: "the kojo_runs row is not an exact Trace record",
+      });
+    }
+    return { run: decoded.value.record };
+  }
 
   #documents(
     table: "kojo_phases" | "kojo_gates" | "kojo_sandboxes",

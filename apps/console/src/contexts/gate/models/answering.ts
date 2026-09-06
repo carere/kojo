@@ -1,13 +1,6 @@
 import type { Asking } from "./Asking.ts";
 
-/**
- * Where one asking stands — console.md §9, and the rule the whole surface turns on.
- *
- * **A recorded answer is never rendered as an applied one.** The Console writes a Verdict; the
- * Daemon Runner applies it. Those are two events, they can be days apart, and an *approved ✓* that means
- * nothing is the single failure that destroys trust in a control surface (adr/gate/0001). So the
- * six states below are six different words, and nothing collapses them.
- */
+/** Keep Recorded and Applied Gate states distinct. The Daemon owns application; the Console displays the available state. */
 export type AnsweringState =
   /** Nobody has answered, and the deadline has not passed. */
   | "waiting"

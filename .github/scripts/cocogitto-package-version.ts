@@ -7,7 +7,7 @@ interface PublicPackage {
 }
 
 const run = (command: ReadonlyArray<string>, cwd: string): string => {
-  const result = Bun.spawnSync(command, { cwd });
+  const result = Bun.spawnSync([...command], { cwd });
   if (result.exitCode !== 0) {
     throw new Error(`${command.join(" ")} failed: ${result.stderr.toString()}`);
   }

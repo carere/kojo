@@ -16,25 +16,9 @@ import { type Asking, askingOf, waitedMillis } from "../models/Asking.ts";
 import { GateAnswering } from "./GateAnswering.tsx";
 
 /**
- * One asking of one gate — **the panel's third subject**.
- *
- * console.md §3 used to say a gate was a phase of kind `actor`, so its detail was the phase panel
- * plus a form. The engine never backed that: nothing writes an actor phase record, and a gate record
- * carries no phase id, so there was no recorded link between the two to follow. The record was
- * always the better subject anyway — it is richer than a phase row could be, carrying the token, the
- * choices, the deadline and its expiry branch, the answerer and the latency — and the identity is
- * already there, because an **asking** is what a gate is keyed by.
- *
- * The panel reads two sources and needs both, which is the whole shape of adr/gate/0001:
- *
- * | Source | What only it can say |
- * |---|---|
- * | `GET /api/v1/askings` | the request, and whether a Verdict has been **Recorded** |
- * | the run document | whether the run **settled** this asking, which is the only proof it applied |
- *
- * A gate that settled long ago has a record and no asking — the askings table is the reference
- * adapter's, and a factory answered from somewhere else may never have had a row. So the panel
- * renders from whichever half it has, and says which facts the other half was carrying.
+ * Show one Asking and its Trace record. The Daemon Asking supplies the Request and durable Gate
+ * state. The Run document supplies the recorded human latency and sandbox acquisitions.
+ * Render the available facts if one source is absent.
  */
 export const GatePanel = (props: {
   readonly runId: string;

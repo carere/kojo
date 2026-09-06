@@ -1,9 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-  contractCodecSource,
-  generatedContractCodecs,
-} from "./generate-contract-codecs.ts";
+import { contractCodecSource, generatedContractCodecs } from "./generate-contract-codecs.ts";
 
 const root = process.cwd();
 const source = readFileSync(join(root, contractCodecSource));

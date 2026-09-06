@@ -23,23 +23,7 @@ import { PublishedArtifacts } from "./PublishedArtifacts.tsx";
 import { RunOutcome } from "./RunOutcome.tsx";
 import { Waterfall } from "./Waterfall.tsx";
 
-/**
- * One run, in full depth — console.md §4.
- *
- * Three parts in descending order of how fast they answer a question: the header says *what now*, the
- * waterfall says *what happened*, and the detail panel says everything else. If you deleted the
- * waterfall the page would still be useful; if you deleted the header it would not.
- *
- * **The panel is a nested route rendered below the waterfall, never over it.** `<Outlet />` is the
- * dock: a phase or an acquisition is a URL, so it survives being pasted, and the position somebody
- * clicked from stays on screen while they read it.
- *
- * **The timeline-or-table choice is in the URL**, per console.md §8: the URL is what a person pastes
- * to a colleague, and *"look at it as a table"* has to survive being pasted. Everything else the
- * waterfall knows about itself — zoom, hover, what the panel is open on — is Solux state, created
- * here and scoped to this view. The store is provided above the outlet as well as above the
- * waterfall, because synchronising those two is the whole of what console.md §8 gives it to do.
- */
+/** Show the Run header, Waterfall or table, and nested detail panel. Provide one interaction store to the Waterfall and panel; keep the view choice in the URL. */
 
 const statusTones: Record<string, BadgeTone> = {
   executing: "running",
@@ -309,7 +293,7 @@ export const RunView = (props: {
                 <Stamp name="host" label="host">
                   {document().run.run.host}
                 </Stamp>
-                <Stamp name="config" label="config">
+                <Stamp name="config" label="Factory revision">
                   {document().run.run.configDigest}
                 </Stamp>
                 <Stamp name="idempotency-key" label="idempotency key">
@@ -480,17 +464,7 @@ export const RunView = (props: {
               </section>
             </Show>
 
-            {/*
-             * The gate card, directly beneath the header — console.md §4 — because it is the one
-             * thing on this page a person can act on.
-             *
-             * **It outlives the suspension it belongs to, on purpose.** A card that showed only
-             * while `outcome === "suspended"` would disappear the instant a runner applied the
-             * answer, which is the instant *applied — the run resumed* becomes the only sentence
-             * worth reading. And a run that reached a terminal outcome with a verdict nobody applied
-             * keeps its card too: an answer nobody applied is still an answer nobody applied, and
-             * hiding it is the exact failure adr/gate/0001 was written against.
-             */}
+            {/* Show the Gates below the Run header. */}
             {/*
              * Why the run died, above the gate card and directly under the header. It renders on a
              * failed or breached run and on nothing else, so a healthy run's page is unchanged.
@@ -542,19 +516,7 @@ export const RunView = (props: {
 
             <SoluxProvider store={store}>
               <div class="flex flex-col gap-4">
-                {/*
-                 * The timeline stays on screen while the panel is read, and that is what the side
-                 * dock was really buying — adjacency was the means, not the requirement. console.md
-                 * §4 lists header, then waterfall, then panel, in vertical order; nothing in the
-                 * record asks for a column beside.
-                 *
-                 * `bg-background` and `z-10` are load-bearing: a sticky block with no ground of its
-                 * own shows the page sliding through it. `max-h-[60vh]` is a cap the fixtures cannot
-                 * show the need for — every one of them tops out at three scope rows — but a run
-                 * holding ten acquisitions builds a 520-pixel block that would then own most of the
-                 * window for ever. It also finally gives `GanttHeader`'s own `sticky top-0` a
-                 * scrolling ancestor to stick to, which it has never had.
-                 */}
+                {/* Keep the Waterfall visible above the detail panel in one page flow. */}
                 <div class="bg-background flex w-full min-w-0 flex-col gap-2 lg:sticky lg:top-0 lg:z-10 lg:max-h-[60vh] lg:overflow-x-hidden lg:overflow-y-auto lg:pt-2">
                   <Show
                     when={spansOf(document(), now()).length > 0}

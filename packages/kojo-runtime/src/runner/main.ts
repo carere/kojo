@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
+import { hostname } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { RUNNER_PROTOCOL_VERSION } from "@carere/kojo-runner-contracts/contexts/project/contracts/frame";
@@ -12,7 +13,6 @@ import { Data, Effect, Layer, Option, Schema, Stream } from "effect";
 import { WorkflowEngine } from "effect/unstable/workflow";
 import type { GateRequest } from "../contexts/gate/models/GateRequest.ts";
 import { Gate } from "../contexts/gate/ports/Gate.ts";
-import { GateRepository } from "../contexts/gate/ports/GateRepository.ts";
 import {
   layer as daemonResources,
   type SendResourceMutation,
@@ -24,12 +24,17 @@ import {
 } from "../contexts/project/services/runnerChannel.ts";
 import * as BindMountWorkspace from "../contexts/sandbox/adapters/BindMountWorkspace.ts";
 import * as SandcastleSandboxSource from "../contexts/sandbox/adapters/SandcastleSandboxSource.ts";
+import { BuildInfo } from "../contexts/shared/models/BuildInfo.ts";
 import {
   layer as daemonArtifacts,
   type SendArtifactMutation,
 } from "../contexts/trace/adapters/DaemonArtifactPublisher.ts";
 import { Tracer } from "../contexts/trace/ports/Tracer.ts";
 import { Trigger } from "../contexts/trigger/ports/Trigger.ts";
+import {
+  acknowledgeTriggerEvent,
+  triggerRetryDelays,
+} from "../contexts/trigger/services/acknowledgeTriggerEvent.ts";
 import { layer as daemonEngine } from "../contexts/workflow/adapters/DaemonWorkflowEngine.ts";
 import { withRetainedFactoryRoot } from "../contexts/workflow/adapters/RetainedFactoryAssetRepository.ts";
 import { DaemonExecutionRepository } from "../contexts/workflow/ports/DaemonExecutionRepository.ts";
@@ -219,6 +224,22 @@ export const executeRegisteredRevision = async (
   sendTraceMutation: SendTraceMutation,
 ): Promise<ExecuteRegisteredResult> => {
   const { bundle, payload } = await loadRegisteredRevision(request);
+  const runtimeManifest: unknown = JSON.parse(
+    await readFile(new URL("../../runtime-manifest.json", import.meta.url), "utf8"),
+  );
+  if (
+    !hasProperties(runtimeManifest) ||
+    typeof runtimeManifest.packageVersion !== "string" ||
+    runtimeManifest.packageVersion.length === 0
+  ) {
+    throw new Error("the retained Runtime manifest has no package version");
+  }
+  const buildInfoLayer = Layer.succeed(BuildInfo, {
+    version: runtimeManifest.packageVersion,
+    commit: "unknown",
+    configDigest: request.revisionId,
+    host: hostname(),
+  });
   const results = new Map(Object.entries(request.recordedResults));
   const deferredResults = new Map(Object.entries(request.deferredResults));
   const scheduledWakeups = new Map(Object.entries(request.scheduledWakeups));
@@ -315,13 +336,6 @@ export const executeRegisteredRevision = async (
       }),
     describe: (asking) => asking.description,
   });
-  const gateRepositoryLayer = Layer.succeed(GateRepository, {
-    asked: () => Effect.void,
-    recorded: () => Effect.succeed(false),
-    expired: () => Effect.succeed(false),
-    byToken: () => Effect.succeed(Option.none()),
-    all: Effect.succeed([]),
-  });
   const tracerLayer = Layer.succeed(Tracer, {
     runStarted: (record) =>
       Effect.promise(() =>
@@ -392,8 +406,8 @@ export const executeRegisteredRevision = async (
     engineLayer,
     tracerLayer,
     gateLayer,
-    gateRepositoryLayer,
     executionServices,
+    buildInfoLayer,
   );
   const registration = authoredLayer.pipe(Layer.provideMerge(runnerServices));
   const execution = Effect.gen(function* () {
@@ -446,8 +460,6 @@ export const executeRegisteredRevision = async (
   };
 };
 
-const triggerRetryDelays = [1_000, 2_000, 4_000, 8_000, 16_000] as const;
-
 class TriggerProcessError extends Data.TaggedError("TriggerProcessError")<{
   readonly message: string;
   readonly cause: unknown;
@@ -476,8 +488,10 @@ const runRegisteredTrigger = async (options: {
   const sendMutation = (
     kind: "AdmitTriggerRequest" | "RecordRejectedTriggerEvent" | "RecordTriggerProgress",
     body: JsonValue,
-  ): Promise<Record<string, JsonValue>> =>
-    options.sendMutation(kind, options.registration, options.pollerId, body);
+  ): Promise<Record<string, JsonValue>> => {
+    options.signal.throwIfAborted();
+    return options.sendMutation(kind, options.registration, options.pollerId, body);
+  };
   const processEvent = async (
     trigger: Trigger["Service"],
     event: Parameters<Trigger["Service"]["ack"]>[0],
@@ -533,37 +547,43 @@ const runRegisteredTrigger = async (options: {
       if (admission.retry !== true || attempt === triggerRetryDelays.length) {
         throw new Error(String(admission.reason ?? "the Trigger event was refused"));
       }
-      await Bun.sleep(triggerRetryDelays[attempt] ?? 16_000);
+      await Effect.runPromise(Effect.sleep(triggerRetryDelays[attempt] ?? 16_000), {
+        signal: options.signal,
+      });
     }
     const runId = admission?.runId;
     if (typeof runId !== "string")
       throw new Error("durable Trigger admission did not return a Run ID");
     let acknowledged = false;
     let acknowledgementCause: unknown;
-    for (let attempt = 0; attempt <= triggerRetryDelays.length; attempt += 1) {
-      try {
-        await Effect.runPromise(trigger.ack(event, { runId: runId as never, outcome: "admitted" }));
-        acknowledged = true;
-        break;
-      } catch (cause) {
-        acknowledgementCause = cause;
-        if (attempt < triggerRetryDelays.length)
-          await Bun.sleep(triggerRetryDelays[attempt] ?? 16_000);
-      }
+    try {
+      await Effect.runPromise(
+        acknowledgeTriggerEvent(trigger, event, { runId: runId as never, outcome: "admitted" }),
+        { signal: options.signal },
+      );
+      acknowledged = true;
+    } catch (cause) {
+      options.signal.throwIfAborted();
+      acknowledgementCause = cause;
     }
     if (!acknowledged) {
       const reason =
-        acknowledgementCause instanceof Error
+        acknowledgementCause instanceof Error && acknowledgementCause.message.trim() !== ""
           ? acknowledgementCause.message
-          : String(acknowledgementCause);
+          : hasProperties(acknowledgementCause) &&
+              typeof acknowledgementCause.reason === "string" &&
+              acknowledgementCause.reason.trim() !== ""
+            ? acknowledgementCause.reason
+            : "the Trigger source could not acknowledge the admitted Run";
+      const detail = `Trigger acknowledgement retry cycle was exhausted: ${reason}`;
       await sendMutation("RecordTriggerProgress", {
         projectId: options.registration.projectId,
         workflowName: options.registration.workflowName,
         state: "failed",
-        detail: `Trigger acknowledgement retry cycle was exhausted: ${reason}`,
+        detail,
         observedAt: new Date().toISOString(),
       });
-      throw new Error(reason);
+      throw new Error(detail);
     }
     await sendMutation("RecordTriggerProgress", {
       projectId: options.registration.projectId,

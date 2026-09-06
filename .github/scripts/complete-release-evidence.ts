@@ -1,26 +1,18 @@
 #!/usr/bin/env bun
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import {
   completeReleaseEvidence,
-  loadedTestsFromLog,
-  requiredReleaseChecks,
   type EvidenceTier,
   type LoadedTestEvidence,
+  loadedTestsFromLog,
+  requiredReleaseChecks,
 } from "../../packages/kojo/tests/support/release/CompleteReleaseEvidence.ts";
 
-const fail = (message: string): never => {
+function fail(message: string): never {
   throw new Error(`complete release evidence: ${message}`);
-};
+}
 
 const readJson = <A>(path: string): A => JSON.parse(readFileSync(path, "utf8")) as A;
 
@@ -171,7 +163,7 @@ const facts = (path: string): Readonly<Record<string, string>> =>
 
 interface CoreEvidence {
   readonly testedRevision: string;
-  readonly tiers: Readonly<Record<string, LoadedTestEvidence>>;
+  readonly tiers: Readonly<Record<Exclude<EvidenceTier, HostTier>, LoadedTestEvidence>>;
   readonly cache: string;
   readonly safetyRegression: {
     readonly expected: "protected check fails for injected regression";
@@ -202,11 +194,7 @@ interface HostManifest {
   }>;
 }
 
-const hostTier = (
-  tier: EvidenceTier,
-  manifest: HostManifest,
-  log: string,
-): LoadedTestEvidence => {
+const hostTier = (tier: EvidenceTier, manifest: HostManifest, log: string): LoadedTestEvidence => {
   const loaded = manifest.loadedTests.reduce((total, item) => total + item.loaded, 0);
   const passed = manifest.loadedTests.reduce((total, item) => total + item.passed, 0);
   const skipped = manifest.loadedTests.reduce((total, item) => total + item.skipped, 0);
@@ -221,12 +209,16 @@ const hostTier = (
     cacheHit: false,
     log,
     tests: (manifest.checks ?? []).map((check) => ({
-      path: manifest.checkId === undefined ? "evidence.json" : `${manifest.checkId}/evidence-manifest.json`,
+      path:
+        manifest.checkId === undefined
+          ? "evidence.json"
+          : `${manifest.checkId}/evidence-manifest.json`,
       name: check.name,
-      status: ["passed", "installed", "recorded", "usable"].includes(check.actual) ||
-          check.actual.startsWith("rendered")
-        ? "passed"
-        : "failed",
+      status:
+        ["passed", "installed", "recorded", "usable"].includes(check.actual) ||
+        check.actual.startsWith("rendered")
+          ? "passed"
+          : "failed",
       log,
     })),
   };
@@ -245,14 +237,15 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
   const nativeFactsPath = join(inputRoot, "native-systemd", "host-facts.log");
   const native = facts(nativeFactsPath);
   const nativeCounts = native.HostTests?.match(/(\d+) passed, (\d+) skipped, (\d+) loaded/);
-  if (nativeCounts === undefined) fail("native systemd Host counts are absent");
+  if (nativeCounts === undefined || nativeCounts === null)
+    fail("native systemd Host counts are absent");
   const nativeEnvironment = {
-      os: native.OS ?? "unknown",
-      architecture: native.Architecture ?? "unknown",
-      kernel: native.Kernel ?? "unknown",
-      bun: native.Bun ?? "unknown",
-      moon: native.Moon ?? "unknown",
-    };
+    os: native.OS ?? "unknown",
+    architecture: native.Architecture ?? "unknown",
+    kernel: native.Kernel ?? "unknown",
+    bun: native.Bun ?? "unknown",
+    moon: native.Moon ?? "unknown",
+  };
   const nativeTier = loadedTestsFromLog(
     "native-systemd",
     native.TestedRevision ?? "",
@@ -264,13 +257,15 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
     nativeTier.passed !== Number(nativeCounts[1]) ||
     nativeTier.skipped !== Number(nativeCounts[2]) ||
     nativeTier.loaded !== Number(nativeCounts[3])
-  ) fail("native systemd Host log differs from its recorded counts");
+  )
+    fail("native systemd Host log differs from its recorded counts");
   requirePinnedHostTool("native-systemd", "bun", nativeEnvironment.bun, pinnedBun);
   requirePinnedHostTool("native-systemd", "moon", nativeEnvironment.moon, pinnedMoon);
 
   const systemdManifestPath = join(inputRoot, "shipped-systemd", "evidence.json");
   const systemd = readJson<HostManifest>(systemdManifestPath);
-  if (systemd.noHiddenRepairs === undefined) fail("shipped systemd hidden-repair evidence is absent");
+  if (systemd.noHiddenRepairs === undefined)
+    fail("shipped systemd hidden-repair evidence is absent");
   requirePinnedHostTool("shipped-systemd", "bun", systemd.environment.bun, pinnedBun);
   requirePinnedHostTool("shipped-systemd", "moon", systemd.environment.moon, pinnedMoon);
   const macManifests = filesUnder(join(inputRoot, "shipped-macos"))
@@ -290,8 +285,6 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
     requirePinnedHostTool("shipped-macos", "bun", manifest.environment.bun, pinnedBun);
     requirePinnedHostTool("shipped-macos", "moon", manifest.environment.moon, pinnedMoon);
   }
-  const mac = macManifests[0];
-  if (mac === undefined) fail("shipped macOS evidence is absent");
   const macTiers = macManifests.map((manifest) =>
     hostTier(
       "shipped-macos",
@@ -300,12 +293,14 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
     ),
   );
 
-  const tiers = {
+  const firstMacTier = macTiers[0];
+  if (firstMacTier === undefined) fail("shipped macOS evidence is absent");
+  const tiers: Readonly<Record<EvidenceTier, LoadedTestEvidence>> = {
     ...core.tiers,
     "native-systemd": nativeTier,
     "shipped-systemd": hostTier("shipped-systemd", systemd, "shipped-systemd/evidence.json"),
     "shipped-macos": {
-      ...macTiers[0],
+      ...firstMacTier,
       log: `shipped-macos/${testedRevision}/*/evidence-manifest.json`,
       loaded: macTiers.reduce((sum, tier) => sum + tier.loaded, 0),
       passed: macTiers.reduce((sum, tier) => sum + tier.passed, 0),
@@ -313,7 +308,7 @@ const complete = (arguments_: ReadonlyArray<string>): void => {
       namedSkips: macTiers.flatMap((tier) => tier.namedSkips),
       tests: macTiers.flatMap((tier) => tier.tests),
     },
-  } as Readonly<Record<EvidenceTier, LoadedTestEvidence>>;
+  };
   const result = completeReleaseEvidence({
     testedRevision,
     tiers,

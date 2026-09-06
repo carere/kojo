@@ -17,7 +17,7 @@ import solid from "vite-plugin-solid";
  *
  * **The client output lands inside `packages/kojo`.** The Daemon Console has to work for somebody who
  * installed Kojo rather than only for somebody who cloned this repository, so the published package
- * carries the build (console.md §12). The path is the managed release's Console asset directory, and
+ * carries the build. The path is the managed release's Console asset directory, and
  * it is set on the `client` environment rather than on `build.outDir` because the plugin derives the
  * client directory as `join(build.outDir, "client")` — setting the root would bury the shell one
  * level too deep.

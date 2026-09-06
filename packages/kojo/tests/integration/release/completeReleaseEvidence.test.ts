@@ -266,6 +266,14 @@ describe("the complete breaking release evidence executable", () => {
       );
     const nativeFactsPath = join(input, "native-systemd", "host-facts.log");
     const nativeFacts = readFileSync(nativeFactsPath, "utf8");
+    writeFileSync(
+      nativeFactsPath,
+      nativeFacts.replace("HostTests=1 passed, 1 skipped, 2 loaded", "HostTests=invalid"),
+    );
+    const invalidCounts = completeWith("invalid-native-counts");
+    expect(invalidCounts.exitCode).not.toBe(0);
+    expect(invalidCounts.stderr.toString()).toContain("native systemd Host counts are absent");
+    writeFileSync(nativeFactsPath, nativeFacts);
     writeFileSync(nativeFactsPath, nativeFacts.replace(`Bun=${repositoryBun}`, "Bun=9.9.9"));
     const nativeDrift = completeWith("native-drift");
     expect(nativeDrift.exitCode).not.toBe(0);

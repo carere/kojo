@@ -3,28 +3,7 @@ import { Effect, FileSystem, Path } from "effect";
 import { defaultTrunk } from "../../src/contexts/shared/models/FactoryLayout.ts";
 import { linkRuntime } from "./linkRuntime.ts";
 
-/**
- * A repository nobody minds losing, with a finished factory in it.
- *
- * **This is the blast radius of ticket 15.** A real agent, invoked for real, with
- * `--dangerously-skip-permissions`, writes to whatever directory it is standing in — so it stands
- * in a temporary git repository seeded here and never in the Kojo working tree. Everything the agent
- * can reach is created by this module and deleted with the scope.
- *
- * Three things it does that a plain temp directory does not:
- *
- * - **`kojo init` stamps the factory**, as a subprocess, exactly as a person runs it. Not
- *   `initialise()` with an in-memory image builder: the claim under test is that *the factory
- *   `kojo init` stamps* can drive a real agent, and a fixture assembled by hand would be a claim
- *   about the fixture.
- * - **`.kojo/commands.ts` is finished**, before the first commit. A freshly stamped factory ships
- *   three placeholders that print `KOJO-PLACEHOLDER` and exit 78, so `verify` records
- *   `accepted: false` and `requireAcceptance` refuses however a human answers. Editing it is the
- *   first thing a person does with a new factory, and it is the first thing done here.
- * - **`node_modules/@carere/kojo` links to the package under test** — see `linkEngine.ts`. That is
- *   what `bun install` leaves a target repository holding, and is how the stamped file's
- *   `@carere/kojo/…` imports resolve to the engine being graded rather than to a published copy.
- */
+/** Stamp and finish a temporary Factory for the controlled Agent Provider process tests. */
 
 const packageRoot = new URL("../../", import.meta.url).pathname.replace(/\/$/, "");
 const cli = new URL("../../../kojo/src/main.ts", import.meta.url).pathname;
@@ -35,63 +14,29 @@ const cli = new URL("../../../kojo/src/main.ts", import.meta.url).pathname;
  * The CLI reaches `bun:sqlite`, and a child on Node dies at import — which Vitest reports as a
  * *failed suite* contributing zero tests rather than as failing tests.
  */
-export const bun = (): string => {
+const bun = (): string => {
   if (process.versions.bun === undefined) {
     throw new Error(
       `this suite must run under Bun, but is running under Node ${process.version}. ` +
-        "Run it through the `packages/kojo:test-integration` moon task.",
+        "Run it through the `kojo-runtime:test-integration` moon task.",
     );
   }
   return process.execPath;
 };
 
-export interface Ran {
+interface Ran {
   readonly status: number | null;
   readonly stdout: string;
   readonly stderr: string;
 }
 
 /** One whole `kojo` process, launched from inside the target repository, the way a person does. */
-export const kojo = (
-  root: string,
-  args: ReadonlyArray<string>,
-  options?: {
-    readonly timeoutMillis?: number;
-    /**
-     * The child's `PATH`, when the caller needs to decide which `claude` the run reaches.
-     *
-     * A stamped `review` wires the stock Claude Code provider, so the binary it spawns is whatever
-     * `claude` is on this variable. A test puts its controlled process in this path.
-     */
-    readonly path?: string | undefined;
-    /**
-     * The child's `HOME`, when the caller needs the agent's session transcripts somewhere else.
-     *
-     * Sandcastle looks a `resumeSession` up under `$HOME/.claude/projects` **of the process that
-     * asks** — `findClaudeSessionOnHost` reads `process.env.HOME` — and refuses to spawn a resumed
-     * turn when no transcript is there. So a rehearsal that wants its scripted agent to be handed a
-     * correction gives the child a home of its own and lets the script write the transcript into it.
-     * Pointing that at the operator's real `~/.claude/projects` instead would put fabricated
-     * transcripts in real session storage, so it is a temporary directory or nothing.
-     */
-    readonly home?: string | undefined;
-  },
-): Effect.Effect<Ran> =>
+const kojo = (root: string, args: ReadonlyArray<string>): Effect.Effect<Ran> =>
   Effect.sync(() => {
-    const environment =
-      options?.path === undefined && options?.home === undefined
-        ? undefined
-        : ({
-            ...process.env,
-            ...(options?.path === undefined ? {} : { PATH: options.path }),
-            ...(options?.home === undefined ? {} : { HOME: options.home }),
-          } as NodeJS.ProcessEnv);
     const finished = spawnSync(bun(), [cli, ...args], {
       cwd: root,
       encoding: "utf8",
-      ...(environment === undefined ? {} : { env: environment }),
-      // An agent turn is minutes, not seconds, and a `kojo run` that carries one inherits that.
-      timeout: options?.timeoutMillis ?? 15 * 60 * 1000,
+      timeout: 15 * 60 * 1000,
       maxBuffer: 64 * 1024 * 1024,
     });
     return {
@@ -101,7 +46,7 @@ export const kojo = (
     };
   });
 
-export const git = (root: string, args: ReadonlyArray<string>): string =>
+const git = (root: string, args: ReadonlyArray<string>): string =>
   execFileSync("git", [...args], { cwd: root, encoding: "utf8" });
 
 /**
@@ -182,7 +127,7 @@ const buildScript = [
   "",
 ].join("\n");
 
-export interface Throwaway {
+interface Throwaway {
   /** The repository root. Everything the agent can reach is under here. */
   readonly root: string;
 }
@@ -195,25 +140,6 @@ export interface Throwaway {
  */
 export const throwawayRepo = (options: {
   readonly model: string;
-  /**
-   * Extra text appended to the drafter's own `prompts/drafter/user.md`, before the commit.
-   *
-   * The task template is where a factory tells its agent how to work, so a standing instruction —
-   * one that is about *how to answer* rather than about this change — belongs here rather than in the
-   * subject, which is also the gate's question. (A run's branch cannot be reached from either: it is
-   * `runBranch(runId)` and nothing else.)
-   */
-  readonly insist?: string | undefined;
-  /**
-   * Extra field declarations inserted into the stamped `Drafted`, before the commit.
-   *
-   * The envelope is the target repository's own file — `kojo init` stamps it and the author owns it
-   * from then on — so widening it here is what a factory author does, not a hole poked in a fixture.
-   * Ticket 48 needs one field with a **narrow** type to make a real model's first answer fail to
-   * decode; see `tests/support/riskNote.ts` for the design and why it is a field rather than an
-   * instruction to answer badly.
-   */
-  readonly alsoInEnvelope?: string | undefined;
 }): Effect.Effect<
   Throwaway,
   never,
@@ -248,14 +174,13 @@ export const throwawayRepo = (options: {
     // `.sandcastle/` is where Sandcastle puts the worktree it cuts and the log it writes. Neither
     // belongs to the repository, and an untracked one at the root would make every `git status`
     // here read dirty.
-    yield* write(".gitignore", "node_modules\n.sandcastle\n.kojo/kojo.db*\n");
+    yield* write(".gitignore", "node_modules\n.sandcastle\n");
     yield* write("notes/hello.txt", "hello\n");
     yield* write("scripts/test.sh", testScript);
     yield* write("scripts/lint.sh", lintScript);
     yield* write("scripts/build.sh", buildScript);
 
-    // The real command, as a person runs it. `--skip-image` because the sandbox is `none`: there is
-    // no image to build, and building one would need a daemon this suite does not require.
+    // The Host provider needs no container image.
     const stamped = yield* kojo(root, [
       "init",
       "--agent",
@@ -275,34 +200,6 @@ export const throwawayRepo = (options: {
 
     // **The mandatory first step**, before the factory is committed — see the header.
     yield* write(".kojo/commands.ts", realCommands);
-
-    if (options.alsoInEnvelope !== undefined) {
-      const envelopes = path.join(root, ".kojo", "envelopes.ts");
-      const stampedEnvelopes = yield* fileSystem.readFileString(envelopes).pipe(Effect.orDie);
-      // The end of the only class the stamped file declares. Asserted rather than assumed: a
-      // template that stops closing its envelope this way must fail here, loudly, rather than
-      // silently drop the field this fixture's whole point is to add.
-      const closes = stampedEnvelopes.lastIndexOf("}) {}");
-      if (closes < 0) {
-        return yield* Effect.die(
-          new Error(`the stamped ${envelopes} does not close a class with "}) {}"`),
-        );
-      }
-      yield* fileSystem
-        .writeFileString(
-          envelopes,
-          `${stampedEnvelopes.slice(0, closes)}${options.alsoInEnvelope}\n${stampedEnvelopes.slice(closes)}`,
-        )
-        .pipe(Effect.orDie);
-    }
-
-    if (options.insist !== undefined) {
-      const userPrompt = path.join(root, ".kojo", "prompts", "drafter", "user.md");
-      const stampedPrompt = yield* fileSystem.readFileString(userPrompt).pipe(Effect.orDie);
-      yield* fileSystem
-        .writeFileString(userPrompt, `${stampedPrompt.trimEnd()}\n\n${options.insist}\n`)
-        .pipe(Effect.orDie);
-    }
 
     yield* Effect.sync(() => {
       git(root, ["add", "--all"]);

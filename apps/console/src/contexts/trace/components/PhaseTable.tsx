@@ -15,18 +15,7 @@ import type { PhaseState } from "../models/RunDoc.ts";
 import type { PhaseSpan } from "../models/waterfall.ts";
 import { hostRow } from "../models/waterfall.ts";
 
-/**
- * The same phase records, as rows.
- *
- * console.md §4 keeps this available behind a toggle and adr/trace/0001 says why it is not the
- * centrepiece: the two costs this whole design exists to manage — how long a human held a gate, and
- * what a sandbox rebuild took — are durations, and a table gives a two-second phase and a
- * forty-one-hour wait the same row height. It costs nothing to offer because it is the same data.
- *
- * **The same spans, not a second read.** It renders what the waterfall renders, so a phase cannot be
- * on one and missing from the other — including the in-flight one, which appears here with its
- * duration still growing.
- */
+/** Show the Phase records as table rows. The Run view keeps this as an alternative to the Waterfall. */
 
 const features = tableFeatures({});
 const helper = createColumnHelper<typeof features, PhaseSpan>();

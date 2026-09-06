@@ -15,16 +15,7 @@ import {
   type SettledAsking,
 } from "../models/answering.ts";
 
-/**
- * One click, and then the truth about what that click did — console.md §9.
- *
- * **This is the component adr/gate/0001 exists to constrain.** The `POST` records a verdict; it does
- * not apply one. So nothing here ever draws a tick on the strength of a 200: the answer resolves
- * into one of three states, each with its own word, and *applied* is drawn from the run's own
- * settled record and from nothing else.
- *
- * The Daemon Asking state and the Run record are the only sources for Recorded and Applied.
- */
+/** Record a Verdict and show its durable state. A Recorded Verdict is not proof that the Run applied it; see docs/adr/gate/0001-the-console-answers-by-record-and-apply.md. */
 
 const tones: Record<AnsweringState, BadgeTone> = {
   waiting: "waiting",

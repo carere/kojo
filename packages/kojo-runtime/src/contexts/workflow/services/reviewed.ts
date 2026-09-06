@@ -7,7 +7,6 @@ import type { GateUnreachable } from "../../gate/models/GateUnreachable.ts";
 import type { OnExpiry } from "../../gate/models/OnExpiry.ts";
 import type { Verdict } from "../../gate/models/Verdict.ts";
 import type { Gate } from "../../gate/ports/Gate.ts";
-import type { GateRepository } from "../../gate/ports/GateRepository.ts";
 import type { Tracer } from "../../trace/ports/Tracer.ts";
 import type { CurrentRun } from "./CurrentRun.ts";
 import { gate } from "./phase/gate.ts";
@@ -113,13 +112,7 @@ export const reviewed = <Subject, E = never, R = never>(
 ): Effect.Effect<
   Subject,
   E | GateRejected | GateExpired | GateUnreachable,
-  | R
-  | Gate
-  | GateRepository
-  | Tracer
-  | CurrentRun
-  | WorkflowEngine.WorkflowEngine
-  | WorkflowEngine.WorkflowInstance
+  R | Gate | Tracer | CurrentRun | WorkflowEngine.WorkflowEngine | WorkflowEngine.WorkflowInstance
 > =>
   // The subject changes from round to round, so it is state — and state that outlives one evaluation
   // is state a second `yield*` of the same value would inherit. Suspending gives each evaluation its

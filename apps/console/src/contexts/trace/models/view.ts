@@ -1,11 +1,4 @@
-/**
- * How a run is being looked at — the one piece of view state that lives in the URL.
- *
- * console.md §8 puts the timeline-or-table toggle there rather than in a store, because the URL is
- * what a person pastes to a colleague and *"look at it as a table"* has to survive being pasted. It
- * is stated here rather than beside the run view so that the detail panel's links can carry it
- * without importing a component.
- */
+/** Keep the timeline-or-table choice in the URL. Detail-panel links preserve it. */
 export type RunViewMode = "timeline" | "table";
 
 /**

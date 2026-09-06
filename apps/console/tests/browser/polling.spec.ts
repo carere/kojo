@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
+import { openAuthenticatedConsole } from "./support/openAuthenticatedConsole.ts";
 
 const root = "/tmp/kojo-ticket-69-browser";
 const origin = "http://127.0.0.1:47241";
@@ -68,7 +69,7 @@ test("asks the authenticated Daemon again every second while a Run can still mov
     });
   });
 
-  await page.goto(launch());
+  await openAuthenticatedConsole(page, launch());
   const notificationsEstablished = page.waitForResponse(
     (response) =>
       new URL(response.url()).pathname === "/api/v1/notifications" &&
@@ -107,7 +108,7 @@ test("stops authenticated Daemon polling after every Run reaches a terminal stat
     await route.continue();
   });
 
-  await page.goto(launch());
+  await openAuthenticatedConsole(page, launch());
   await page.goto(`${origin}/runs`);
   await expect(page.locator('[data-run="run-succeeded"]')).toBeVisible();
   await page.waitForTimeout(3_400);

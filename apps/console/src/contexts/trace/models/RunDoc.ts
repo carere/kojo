@@ -1,24 +1,4 @@
-/**
- * `GET /api/v1/runs/:runId` — one whole Run, as the Daemon wire carries it.
- *
- * Read structurally, never decoded. console.md §10 asks the Console to ignore what a newer factory
- * grew that this build does not know about, which is the whole value of the additive-migration
- * promise; a schema that refused an unknown field would spend it on nothing. So these are the fields
- * the run view reads and no others, and everything else on the record travels past unread.
- *
- * **`?` here means the key is absent, and it never means `null`** — adr/trace/0003. That is a promise
- * the *server* keeps and the type system enforces there: every optional field of every record on this
- * wire is `Schema.optionalKey`, which with `exactOptionalPropertyTypes` makes a producer that passes
- * `undefined` fail to compile, and a key that is never present holding `undefined` is a key the JSON
- * serializer never writes as `null`.
- *
- * It is written down here because this file is where a reader decides what `x === undefined` means.
- * It once meant nothing at all: the server sent `"inFlight": null`, `null === undefined` is false,
- * and the run view threw on every real run while eighty-five browser specs — fed by fixtures that
- * omitted the same keys — stayed green. Every `=== undefined` guard in this application was audited
- * against that record; none of them needed changing, because absent is now the only thing the server
- * can send.
- */
+/** Model the fields consumed from GET /api/v1/runs/:runId. Unknown additive fields do not affect the view. */
 
 /** The three kinds of phase a workflow is made of. A sandbox is a scope, so it is not one. */
 export type PhaseKind = "actor" | "code" | "agent";

@@ -29,15 +29,3 @@ export interface RunnerFailure {
   /** True only when work, and not a heartbeat, failed. */
   readonly operationFailed: boolean;
 }
-
-export type UnsafeRunnerTraffic =
-  | "malformed-frame"
-  | "oversized-frame"
-  | "stale-authority"
-  | "wrong-scope";
-
-export type RunnerFaultLocality = "connection" | "request";
-
-/** Malformed and scope-expanding traffic retires the connection. Stale authority rejects one request. */
-export const runnerFaultLocality = (fault: UnsafeRunnerTraffic): RunnerFaultLocality =>
-  fault === "stale-authority" ? "request" : "connection";

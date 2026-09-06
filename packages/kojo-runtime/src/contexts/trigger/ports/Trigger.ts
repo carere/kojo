@@ -3,13 +3,7 @@ import type { RunId } from "../../shared/models/RunId.ts";
 import type { TriggerError } from "../models/TriggerError.ts";
 import type { TriggerEvent } from "../models/TriggerEvent.ts";
 
-/**
- * What one event produced: the run, and where that run stopped.
- *
- * `suspended` is a perfectly good thing to acknowledge — it says a human was asked and the factory
- * let go of everything it held. A tracker comment that says "waiting on review, run `<id>`" is more
- * use than silence until Tuesday, so the run id travels with the outcome rather than only the word.
- */
+/** The Run that the Daemon admitted for one Trigger event. */
 export interface TriggerOutcome {
   readonly runId: RunId;
   /** The Daemon committed the Run before it asked the source to acknowledge. */
@@ -39,9 +33,7 @@ const TriggerBase: Context.ServiceClass<Trigger, "kojo/trigger/Trigger", Trigger
  * one would be a second answer to "is this the same unit of work", and two answers means neither is
  * trustworthy.
  *
- * `ack` is the other half of a trigger, and the reason a trigger is a port at all: it is where a
- * ticket gets closed, a webhook gets its response, a queue message gets deleted. It runs after the
- * run settles, and it takes the event and the run outcome — nothing else, because an adapter that
- * needed the workflow's internals would be a workflow, not a source of work.
+ * `ack` confirms admission after the Daemon commits the Run. It does not report Run completion
+ * or a Gate suspension. The source can use the Run id to link to later Run status.
  */
 export class Trigger extends TriggerBase {}

@@ -2,26 +2,7 @@ import { axisDuration, tickLabel } from "../../shared/lib/duration.ts";
 import { acquiredAtOf, nameOf } from "./ids.ts";
 import type { PhaseKind, PhaseState, RunDoc } from "./RunDoc.ts";
 
-/**
- * The run waterfall, as pure geometry over one run document and one instant.
- *
- * Everything the run view draws is decided here and nothing is decided in a component, for the same
- * reason the run list's rows are: a component that computed a width from a clock could not be graded
- * without a browser, and a screenshot of it could not be stable. `now` is an argument.
- *
- * Two decisions carry the shape, and both are settled records rather than choices made here —
- * adr/trace/0001 and console.md §5:
- *
- * - **Rows are the scope tree, not concurrency lanes.** The host is the root row and each sandbox
- *   *acquisition* is a child row, so the vertical axis means *where this ran* — which nothing else
- *   answers — and the rebuild a mid-run gate forces appears as a second row without anybody building
- *   a rebuild indicator. A run is mostly sequential, so a conventional gantt would spend the whole
- *   vertical plane drawing a staircase.
- * - **The time axis breaks.** A realistic hotfix run is `route` 8 s and a gate 41 h. On a linear axis
- *   sized to 41 hours everything worth reading is a hairline, so any stretch that would flatten the
- *   rest of the run collapses to a fixed width labelled with its real duration. A 41-hour bar reads
- *   as *long* and cannot be measured; a break states the number.
- */
+/** Build Waterfall rows from the scope tree. Each Sandbox acquisition has a separate row. Break long spans and gaps while preserving their real durations; see docs/adr/trace/0001-run-view-is-a-waterfall-not-the-authored-graph.md. */
 
 /** How wide a break is drawn, whatever it elides. Fixed, because that is what makes it a break. */
 export const breakWidth = 88;
@@ -301,18 +282,7 @@ interface Occupied {
   readonly to: number;
 }
 
-/**
- * The axis cut at every phase and acquisition edge, each piece marked as covered or dead.
- *
- * Cutting at *every* edge is what makes the rest of this module simple: no phase can start or end in
- * the middle of a stretch, so no span ever begins inside a break, and a span that crosses one is
- * drawn as one bar passing under it rather than as two pieces somebody has to read as one.
- *
- * **The acquisitions count as occupancy, and that is not a detail.** The ninety seconds a container
- * takes to build after a gate is a stretch with no phase in it, so a rule that only knew about phases
- * would swallow the rebuild into the gate's break — and *what the rebuild cost* is one of the two
- * things console.md §5 says the row model exists to make visible.
- */
+/** Keep both Phase activity and Sandbox acquisition boundaries visible when finding stretches. A rebuild must remain separate from the preceding Gate wait. */
 export const stretchesOf = (
   occupied: ReadonlyArray<Occupied>,
   from: number,

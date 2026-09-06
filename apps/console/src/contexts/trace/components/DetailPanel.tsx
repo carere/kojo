@@ -3,22 +3,11 @@ import type { JSX } from "solid-js";
 import { keepView } from "../models/view.ts";
 
 /**
- * The dock everything known about one thing is drawn in — console.md §6.
- *
- * **It is a panel and not a page**, and that is the decision the whole ticket turns on. A phase
- * detail has to be deep-linkable, because it is the thing a person pastes into a chat when they ask a
- * colleague why a run died; but replacing the waterfall with a full page would throw away the
- * position they clicked from, and the whole job is investigation *in context*. So the route is
- * nested, the waterfall stays on screen above it — pinned there, rather than beside it — and
- * closing the panel is a link back to the run
- * rather than a piece of component state.
- *
- * Two subjects share this shell: a phase, and a **sandbox acquisition**. The band on the waterfall is
- * not scenery — it is a whole record — so the panel says which of the two it is holding, both as a
- * heading and as the attribute the browser tier reads.
+ * Show a Phase, Sandbox acquisition, or Gate below the Waterfall. Nested routes keep the Run in
+ * view and give each subject a link. Closing the panel returns to the Run URL.
  */
 export const DetailPanel = (props: {
-  /** `phase` or `sandbox`. The panel has two subjects, not one. */
+  /** `phase`, `sandbox`, or `gate`. */
   readonly subject: string;
   readonly title: string;
   readonly subtitle: string;

@@ -52,7 +52,7 @@ Daemon setting paths are:
 
 Project setting paths are `limits.executingRuns` and `limits.newStartQueue`.
 
-Limits and durations are positive integer milliseconds. Restart delays are a nonempty list of at
+Limits are positive integer counts. Durations are positive integer milliseconds. Restart delays are a nonempty list of at
 most 16 positive integer milliseconds. Each retention value is a positive integer duration or
 `"indefinite"`.
 

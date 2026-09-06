@@ -12,7 +12,6 @@ import { GateUnreachable } from "../../../gate/models/GateUnreachable.ts";
 import type { OnExpiry } from "../../../gate/models/OnExpiry.ts";
 import { Settlement, Verdict } from "../../../gate/models/Verdict.ts";
 import { Gate } from "../../../gate/ports/Gate.ts";
-import { GateRepository } from "../../../gate/ports/GateRepository.ts";
 import { Tracer } from "../../../trace/ports/Tracer.ts";
 import { CurrentRun } from "../CurrentRun.ts";
 import { currentLane } from "./whereItRan.ts";
@@ -64,17 +63,11 @@ const ask = (
 ): Effect.Effect<
   Answered,
   GateUnreachable,
-  | Gate
-  | GateRepository
-  | Tracer
-  | CurrentRun
-  | WorkflowEngine.WorkflowEngine
-  | WorkflowEngine.WorkflowInstance
+  Gate | Tracer | CurrentRun | WorkflowEngine.WorkflowEngine | WorkflowEngine.WorkflowInstance
 > =>
   Effect.gen(function* () {
     const run = yield* CurrentRun;
     const port = yield* Gate;
-    const repository = yield* GateRepository;
     const tracer = yield* Tracer;
 
     // `make` returns a plain object. `yield*` on it is a defect at runtime, not a type error.
@@ -126,23 +119,7 @@ const ask = (
       name: `${asking.deferredName}/record`,
       success: Schema.Void,
       error: Schema.Never,
-      execute: Effect.gen(function* () {
-        yield* tracer.gate(settled(request, settlement));
-        // The queue's read model has to hear the same settlement the trace just did, or an expired
-        // asking sits in *waiting* forever, *overdue by* a number growing without bound. The
-        // deadline is used as the settlement time rather than the clock because it is when the
-        // asking stopped being answerable — and it replays stable, like the reject verdict below.
-        // Logged and swallowed rather than failing the activity: the row is observability, and a
-        // run must not be traded for the record of it — the same rule every trace write follows.
-        if (settlement === "expired") {
-          yield* repository.expired({ token, expiredAt: request.deadlineAt }).pipe(
-            Effect.ignoreCause({
-              log: "Error",
-              message: `the asking ${asking.deferredName} could not be marked expired`,
-            }),
-          );
-        }
-      }),
+      execute: tracer.gate(settled(request, settlement)),
     });
 
     return {
@@ -184,12 +161,7 @@ export const gate = (
 ): Effect.Effect<
   Verdict,
   GateUnreachable | GateExpired,
-  | Gate
-  | GateRepository
-  | Tracer
-  | CurrentRun
-  | WorkflowEngine.WorkflowEngine
-  | WorkflowEngine.WorkflowInstance
+  Gate | Tracer | CurrentRun | WorkflowEngine.WorkflowEngine | WorkflowEngine.WorkflowInstance
 > =>
   Effect.gen(function* () {
     const asking = params.asking ?? (yield* Activity.CurrentAttempt);

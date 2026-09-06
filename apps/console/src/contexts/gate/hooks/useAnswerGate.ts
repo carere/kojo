@@ -4,8 +4,6 @@ import { readDaemon, recordGateVerdict } from "../../daemon/services/browserAcce
 /**
  * What the Daemon Gate-answer endpoint gives back.
  *
- * **There is no `applied` field, and there cannot be one.** Applying is a runner picking the answer
- * up on its own poll, which by definition has not happened when this response is written. What the
  * The receipt reports the durable Verdict. Application remains a separate Daemon-owned state.
  */
 export interface GateReceipt {
@@ -17,14 +15,14 @@ export interface GateReceipt {
   };
 }
 
-/** What a browser sends. The answerer is not in it: the server records the OS user (console.md §9). */
+/** What a browser sends. The Daemon records the Answerer from the authenticated OS user. */
 export interface GateAnswer {
   readonly choice: string;
   readonly reason: string;
 }
 
 /**
- * Answering, as the one mutation this Console has.
+ * Record a Gate Verdict through the Daemon.
  *
  * Three things it deliberately does not do:
  *

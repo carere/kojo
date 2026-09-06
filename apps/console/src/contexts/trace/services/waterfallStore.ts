@@ -1,22 +1,6 @@
 import { configureStore, createEvent, createSlice, type Store } from "@carere/solux";
 
-/**
- * The waterfall's own interaction state — Solux, scoped to one component.
- *
- * console.md §8 draws the line this file sits on, and it has two sides:
- *
- * - **TanStack Query loads data. Solux does not.** Nothing here fetches, nothing here holds a run,
- *   and no handler below is asynchronous. The run document arrives through `useRun`, and this store
- *   only ever answers *how is it being looked at*.
- * - **It is not a global store.** It is created inside the waterfall, provided to its own subtree,
- *   and discarded when the run view unmounts. Two run views would have two of them, which is right:
- *   a zoom is a property of a thing somebody is looking at, not of the application.
- *
- * What lives here is what §8 names — zoom, hover, selection, and the **break thresholds**. What does
- * not is the timeline-or-table toggle: §8 puts that in the URL, because the URL is what a person
- * pastes to a colleague, and "look at the table" has to survive being pasted. Wall-clock is a break
- * threshold rather than a view — it is the axis with every break given up — so it stays here.
- */
+/** Keep zoom, hover, selection, and break thresholds in a store scoped to one Run view. TanStack Query owns data; the URL owns the timeline-or-table choice. */
 
 /**
  * The state, and it is deliberately not `readonly`.
@@ -26,13 +10,7 @@ import { configureStore, createEvent, createSlice, type Store } from "@carere/so
  * elsewhere: nothing outside a handler ever writes it, because the only way in is `dispatch`.
  */
 export interface WaterfallState {
-  /**
-   * Whether the axis breaks at all.
-   *
-   * `false` is wall-clock: one linear scale end to end, which console.md keeps available on purpose.
-   * It is the honest control case — a person who does not believe a break can turn it off and watch
-   * the run become a hairline beside a 41-hour bar.
-   */
+  /** Use a linear wall-clock axis when false. */
   breaks: boolean;
   /**
    * How much of the axis one stretch may take before it collapses. See `BreakRule.share`.

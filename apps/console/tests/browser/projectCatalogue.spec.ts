@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { expect, test } from "@playwright/test";
+import { openAuthenticatedConsole } from "./support/openAuthenticatedConsole.ts";
 
 test.describe.configure({ mode: "serial" });
 
@@ -16,7 +17,7 @@ const launch = (): string => {
 };
 
 test("filters an authoritative Project grid and keeps stable URL selection", async ({ page }) => {
-  await page.goto(launch());
+  await openAuthenticatedConsole(page, launch());
   await page.goto("http://127.0.0.1:47242/");
   await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
   await expect(page.getByText("2 total", { exact: true })).toBeVisible();
@@ -44,7 +45,7 @@ test("filters an authoritative Project grid and keeps stable URL selection", asy
 test("keeps flat resource navigation and durable links out of every Project row", async ({
   page,
 }) => {
-  await page.goto(launch());
+  await openAuthenticatedConsole(page, launch());
   await page.goto("http://127.0.0.1:47242/");
   const navigation = page.getByRole("navigation", { name: "Console" });
   await expect(navigation.getByRole("link")).toHaveText(["Projects", "Runs", "Gate", "Daemon"]);
@@ -83,7 +84,7 @@ test("paginates fifty filtered Projects and keeps the cursor in the URL", async 
       }),
     });
   });
-  await page.goto(launch());
+  await openAuthenticatedConsole(page, launch());
   await page.goto("http://127.0.0.1:47242/");
   await expect(page.locator("[data-project-id]")).toHaveCount(50);
   await expect(page.getByText("1–50 of 51", { exact: true })).toBeVisible();
@@ -99,7 +100,7 @@ test("paginates fifty filtered Projects and keeps the cursor in the URL", async 
 test("shows Project location history, drain consequences, and explicit confirmation", async ({
   page,
 }) => {
-  await page.goto(launch());
+  await openAuthenticatedConsole(page, launch());
   await page.goto("http://127.0.0.1:47242/");
   await expect(page.getByText("2 total", { exact: true })).toBeVisible();
   const project = page.getByRole("link", { name: "project-missing", exact: true });

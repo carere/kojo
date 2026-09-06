@@ -164,14 +164,26 @@ for (const entry of [runtime.runner, runtime.validator]) {
   }
 }
 
-const rootTypeScript = readFileSync(resolve(repository, "tsconfig.json"), "utf8");
+const rootTypeScript = readJson<{ readonly references: ReadonlyArray<{ readonly path: string }> }>(
+  "tsconfig.json",
+);
 const rootMoon = readFileSync(resolve(repository, "moon.yml"), "utf8");
-for (const packagePath of Object.values(packages)) {
-  if (!rootTypeScript.includes(`./${packagePath}`)) {
+for (const packagePath of [".github", "apps/console", ...Object.values(packages)]) {
+  if (
+    !rootTypeScript.references.some(
+      ({ path }) => resolve(repository, path) === resolve(repository, packagePath),
+    )
+  ) {
     fail(`${packagePath} is absent from TypeScript references`);
   }
 }
-for (const project of ["kojo", "kojo-client-contracts", "kojo-runner-contracts", "kojo-runtime"]) {
+for (const project of [
+  "release-tooling",
+  "kojo",
+  "kojo-client-contracts",
+  "kojo-runner-contracts",
+  "kojo-runtime",
+]) {
   if (!rootMoon.includes(`  - ${project}`)) {
     fail(`${project} is absent from the Moon root graph`);
   }

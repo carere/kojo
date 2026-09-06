@@ -12,7 +12,7 @@ tasks:
 
   # A prerendered shell plus the client bundle, written straight into `packages/kojo/console` so the
   # published package carries the Console. The output is declared workspace-relative because it is
-  # outside this project, which is exactly the edge this ticket exists to build.
+  # outside this project.
   build:
     command: vite build
     inputs:

@@ -16,7 +16,6 @@ import {
   layer as inMemoryExecutionServices,
 } from "../../../../support/InMemoryExecutionServices.ts";
 import * as InMemoryGate from "../../../../support/InMemoryGate.ts";
-import * as InMemoryGateRepository from "../../../../support/InMemoryGateRepository.ts";
 import {
   inMemoryWorkflowEngine,
   selfContainedTestLayer,
@@ -155,7 +154,6 @@ const layerFor = (answers: Record<string, ReadonlyArray<InMemoryGate.ProgrammedA
           InMemoryGate.layer(answers).pipe(Layer.provideMerge(inMemoryWorkflowEngine)),
           // The gate phase now writes an expiry settlement where the queue reads, so every workflow
           // body consumes the repository beside the gate.
-          InMemoryGateRepository.layer,
           inMemoryExecutionServices,
         ),
       ),

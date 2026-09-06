@@ -85,6 +85,27 @@ const verificationOf = (
   };
 };
 
+const provenanceOf = (trace: TraceProjection): Pick<RunDocument, "provenance"> => {
+  const record = trace.run;
+  if (
+    record === undefined ||
+    typeof record.engineVersion !== "string" ||
+    typeof record.engineCommit !== "string" ||
+    typeof record.configDigest !== "string" ||
+    typeof record.host !== "string"
+  )
+    return {};
+  return {
+    provenance: {
+      engineVersion: record.engineVersion,
+      engineCommit: record.engineCommit,
+      configDigest: record.configDigest,
+      host: record.host,
+      ...(typeof record.imageDigest === "string" ? { imageDigest: record.imageDigest } : {}),
+    },
+  };
+};
+
 /** Build the public Run document from durable execution, Trace, Artifact, and uncertainty state. */
 export const runDocumentOf = (
   run: DaemonRun,
@@ -98,6 +119,7 @@ export const runDocumentOf = (
   workflowName: run.workflowName,
   revisionId: run.revisionId,
   packageGraphId: run.packageGraphId,
+  ...provenanceOf(trace),
   state: run.state,
   ...(!terminal(run) && run.state === "queued"
     ? { queueReason: run.queueReason ?? ("runner-starting" as const) }
