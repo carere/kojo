@@ -33,13 +33,7 @@ const RunRecordBase: Schema.Class<
   startedAt: Schema.Finite,
   engineVersion: Schema.String,
   engineCommit: Schema.String,
-  /**
-   * The factory's own configuration, as a digest.
-   *
-   * The engine version says what Kojo was; this says what the factory told it to be. A run that
-   * behaved differently from yesterday's differs in one of the two, and neither can be
-   * reconstructed after the fact.
-   */
+  /** Full captured Workflow Revision digest, including Factory configuration and packages. */
   configDigest: Schema.String,
   /** Which machine ran it. Two hosts of one factory answer "why is it slow here" and not there. */
   host: Schema.String,

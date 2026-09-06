@@ -1,6 +1,14 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer, type Socket } from "node:net";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { OperationReplyBody } from "@carere/kojo-runner-contracts/contexts/project/contracts/execution";
@@ -23,6 +31,7 @@ const execute = async (
   counter: string,
   registrations: ReadonlyArray<ExecuteRegisteredRequest> = [request],
   dispose?: { readonly revisionId: string; readonly workflowName: string },
+  options?: { readonly runner?: string; readonly version?: string },
 ): Promise<ExecuteRegisteredResult> => {
   const channel = join(dirname(counter), `runner-${crypto.randomUUID()}.sock`);
   let accepted: (socket: Socket) => void = () => undefined;
@@ -35,11 +44,12 @@ const execute = async (
     server.once("listening", resolve);
     server.once("error", reject);
   });
-  const child = Bun.spawn([process.execPath, runner], {
+  const child = Bun.spawn([process.execPath, options?.runner ?? runner], {
     cwd: executionRoot,
     env: {
       ...process.env,
       KOJO_EFFECT_COUNTER: counter,
+      KOJO_BUILD_COMMIT: "unverified-environment-commit",
       KOJO_RUNNER_CHANNEL: channel,
       KOJO_RUNNER_BINDING: JSON.stringify({
         daemonInstanceId: request.daemonInstanceId,
@@ -153,6 +163,7 @@ const execute = async (
       },
     }),
   );
+  let startedRecords = 0;
   let executed = await readFrame();
   while (executed.kind !== "Ready") {
     expect(executed).toMatchObject({
@@ -161,6 +172,21 @@ const execute = async (
       claimGeneration: 1,
     });
     const mutation = executed.body as unknown as Record<string, unknown>;
+    if (executed.kind === "WriteTrace" && mutation.kind === "run-started") {
+      startedRecords += 1;
+      expect(mutation.record).toMatchObject({
+        runId: request.runId,
+        engineVersion:
+          options?.version ??
+          JSON.parse(
+            readFileSync(new URL("../../../../runtime-manifest.json", import.meta.url), "utf8"),
+          ).packageVersion,
+        engineCommit: "unknown",
+        configDigest: request.revisionId,
+        host: hostname(),
+      });
+      expect(mutation.record).not.toHaveProperty("imageDigest");
+    }
     const result =
       executed.kind === "WriteTrace"
         ? { state: "committed" }
@@ -188,6 +214,7 @@ const execute = async (
     );
     executed = await readFrame();
   }
+  if (options?.version !== undefined) expect(startedRecords).toBe(1);
   const executedBody = executed.body as unknown as OperationReplyBody;
   expect(executed).toMatchObject({
     kind: "Ready",
@@ -251,6 +278,52 @@ describe("fresh Project Runner replay", () => {
       expect(result.runId).toBe(selected.runId);
       expect(result.idempotencyKey).toBe("second-revision");
       expect(readFileSync(counter, "utf8")).toBe("second\n");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("records the retained Runtime version and full Revision digest in Run provenance", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "kojo-runner-provenance-"));
+    const counter = join(directory, "effects.txt");
+    const retained = join(directory, "runtime");
+    const runtimeRoot = fileURLToPath(new URL("../../../../", import.meta.url));
+    writeFileSync(counter, "");
+    try {
+      mkdirSync(retained);
+      cpSync(join(runtimeRoot, "src"), join(retained, "src"), { recursive: true });
+      cpSync(executionRoot, join(retained, "tests/fixtures/runner"), { recursive: true });
+      symlinkSync(join(runtimeRoot, "node_modules"), join(retained, "node_modules"), "dir");
+      writeFileSync(
+        join(retained, "runtime-manifest.json"),
+        JSON.stringify({ packageVersion: "9.8.7-alpha.2" }),
+      );
+      const request: ExecuteRegisteredRequest = {
+        registrationVersion: 1,
+        selectedProtocol: 1,
+        daemonInstanceId: "daemon-provenance",
+        runnerInstanceId: "runner-provenance",
+        projectId: "project-provenance",
+        boundProjectId: "project-provenance",
+        revisionId: "1".repeat(64),
+        packageGraphId: "2".repeat(64),
+        boundPackageGraphId: "2".repeat(64),
+        executionRoot: join(retained, "tests/fixtures/runner"),
+        workflowName: "example",
+        entrySource: "example.ts",
+        payload: null,
+        connectionSecret: "ab".repeat(32),
+        runId: "run-provenance",
+        recordedResults: {},
+        deferredResults: {},
+        scheduledWakeups: {},
+      };
+      const result = await execute(request, counter, [request], undefined, {
+        runner: join(retained, "src/runner/main.ts"),
+        version: "9.8.7-alpha.2",
+      });
+      expect(result.outcome).toBe("succeeded");
+      expect(readFileSync(counter, "utf8")).toBe("effect\n");
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

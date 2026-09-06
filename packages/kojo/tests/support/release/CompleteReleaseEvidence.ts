@@ -278,12 +278,32 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     "Trigger acknowledgement follows durable admission and retry does not repeat execution",
     "packages/kojo/tests/integration/contexts/trigger/admission.test.ts",
     "records acknowledgement only with durable admission or duplicate detection",
-    ["kojo-unit", "kojo-integration"],
+    ["contract-runtime", "kojo-integration"],
     [
       {
-        tier: "kojo-unit",
-        path: "packages/kojo/tests/unit/contexts/trigger/retryCycle.test.ts",
-        name: "uses one bounded five-delay cycle and resets after source progress",
+        tier: "contract-runtime",
+        path: "packages/kojo-runtime/tests/unit/contexts/trigger/services/acknowledgeTriggerEvent.test.ts",
+        name: "bounds the live retry cycle to five delays and preserves the admitted Run",
+      },
+      {
+        tier: "contract-runtime",
+        path: "packages/kojo-runtime/tests/unit/contexts/trigger/services/acknowledgeTriggerEvent.test.ts",
+        name: "starts a fresh retry cycle after each acknowledged event",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/workflow/runApi.test.ts",
+        name: "real Trigger retry: recovers acknowledgement and resets for the next event",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/workflow/runApi.test.ts",
+        name: "real Trigger retry: exhausts acknowledgement retries without repeating execution",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/workflow/runApi.test.ts",
+        name: "real Trigger retry: stops acknowledgement retries when the Workflow stops",
       },
     ],
   ),
@@ -646,8 +666,13 @@ export const requiredReleaseChecks: ReadonlyArray<RequiredReleaseCheck> = [
     [
       {
         tier: "kojo-unit",
-        path: "packages/kojo/tests/unit/contexts/project/services/runnerIdle.test.ts",
-        name: "keeps execution, refresh, recovery, wake-up, and current Trigger polling busy",
+        path: "packages/kojo/tests/unit/contexts/workflow/scheduling.test.ts",
+        name: "releases the Project slot when a Run suspends",
+      },
+      {
+        tier: "kojo-integration",
+        path: "packages/kojo/tests/integration/contexts/workflow/runApi.test.ts",
+        name: "admits an exact retained revision and seals its stopped Runner cache for removal",
       },
       {
         tier: "kojo-integration",

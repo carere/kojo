@@ -293,7 +293,7 @@ export const RunView = (props: {
                 <Stamp name="host" label="host">
                   {document().run.run.host}
                 </Stamp>
-                <Stamp name="config" label="config">
+                <Stamp name="config" label="Factory revision">
                   {document().run.run.configDigest}
                 </Stamp>
                 <Stamp name="idempotency-key" label="idempotency key">

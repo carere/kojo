@@ -71,24 +71,33 @@ The two generated JSON codec copies also remain. Their contract packages must st
 Historical ADR, research, build, and test-audit records remain as decision history. They must not
 be read as current operator instructions.
 
-## Follow-up work
+## Follow-up resolution
 
-1. **Replace helper-only release evidence.** `runnerIdle.ts` and `retryCycle.ts` have no production
-   callers. Their tests are still cited by `CompleteReleaseEvidence.ts` for `SCHED-03` and
-   `STATE-04`. Actual idle termination is in `ProjectRunnerTransport.ts`; actual Trigger retry is
-   in Runtime `runner/main.ts`. Add tests through those live paths, then remove the two helpers
-   and update the evidence map. Existing helper tests do not prove the live behavior.
-2. **Check Run provenance.** Runtime `BuildInfo` remains active in Run tracing, but defaults its
-   configuration digest to `unconfigured`. The Runner does not supply that reference. Check the
-   intended relationship with the captured Workflow Revision before changing or removing it.
-3. **Add static TypeScript coverage for GitHub scripts.** Biome now checks them, but the root
-   TypeScript build still has no project reference for `.github/scripts`. Script integration
-   tests do not replace a type check.
+The three follow-ups from the initial cleanup are addressed in a separate change:
 
-This audit proves the listed removals and records known gaps. It is not release acceptance.
+1. **Release evidence uses live behavior.** The old `runnerIdle.ts` and `retryCycle.ts` helpers
+   are removed. Runner idle evidence checks process exit and retained Revision reader release.
+   Trigger acknowledgement retries use a service called by the actual Runner, with controlled-clock
+   tests and fresh Runner-process tests. The release evidence map names these tests.
+   These tests also exposed missing dispatch wake-ups after acknowledgement failure and ordinary
+   Workflow Stop, plus acknowledgement work that did not receive Stop cancellation. The follow-up
+   corrects these paths and requires admitted Runs to complete exactly once. Forced Stop keeps
+   its cancellation behavior. Trigger fault details retain the source failure reason.
+2. **Run provenance uses recorded facts.** The Runner supplies its retained Runtime version,
+   the full captured Workflow Revision digest, and its Host. The trace field `configDigest`
+   identifies that full Revision, including configuration and packages. No verified source commit
+   is supplied by publication, so the commit is `unknown`. The Daemon exposes recorded provenance
+   in the Run document. The Console no longer presents a Revision as an engine commit or a package
+   graph as configuration; missing trace facts are shown as `not recorded`.
+3. **GitHub scripts have static TypeScript coverage.** The `release-tooling` Moon project is part
+   of the root TypeScript build. Compiler errors were fixed without suppressions. A deliberate
+   temporary type error confirmed that the root build checks the scripts. The new check also found
+   a missing `null` check for malformed native Host counts; a regression test covers that case.
+
+This audit records the listed cleanup and fixes. It is not release acceptance.
 Native Host evidence and registry publication still belong to the release process.
 
-## Validation
+## Initial cleanup validation
 
 - CLI unit suite: 365 tests passed.
 - Runtime: 256 unit tests and 96 integration tests passed, including the moved shared tests.
@@ -103,3 +112,20 @@ Native Host evidence and registry publication still belong to the release proces
 
 One intermediate repository scan overlapped integration fixtures and reported their temporary
 package copies. The final Knip and Biome checks ran after fixture cleanup.
+
+
+## Follow-up validation
+
+- Full CLI suites: 362 unit tests and 235 integration tests passed.
+- Runtime: 258 unit tests and 97 integration tests passed.
+- Client contracts: 11 tests passed.
+- Console: three provenance browser tests passed against the built Console.
+- Live Trigger tests first reproduced blocked admitted Runs and post-Stop retries. After the
+  fixes, retry recovery, retry exhaustion, and ordinary Stop all pass. Each admitted Run completes
+  once. Stop permits no later acknowledgement attempts.
+- Root TypeScript build, standalone Factory type check, Knip, Biome, package graph, and
+  public-type guard pass.
+- The deliberate GitHub script type-error probe was rejected by the root build and then removed.
+- Separate reviews found no further issue in provenance, static coverage, or Trigger lifecycle.
+
+Native Host release evidence and publication were not run in this follow-up.

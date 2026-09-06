@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 import { SqliteTraceRepository } from "../../../../src/contexts/trace/adapters/SqliteTraceRepository.ts";
+import { runDocumentOf } from "../../../../src/contexts/workflow/services/RunDocumentProjection.ts";
 
 const authority = {
   runId: "run-trace",
@@ -41,10 +42,32 @@ const fixture = (): { readonly database: Database; readonly trace: SqliteTraceRe
   return { database, trace: new SqliteTraceRepository(database) };
 };
 
+const publicRun = (projection: Parameters<typeof runDocumentOf>[2]) =>
+  runDocumentOf(
+    {
+      runId: authority.runId,
+      projectId: "project-trace",
+      workflowName: "release",
+      idempotencyKey: "release-one",
+      payload: null,
+      revisionId: authority.revisionId,
+      packageGraphId: "package-graph-trace",
+      state: "executing",
+      admissionSequence: 1,
+      admittedAt: "2026-09-01T00:00:00.000Z",
+    },
+    [],
+    projection,
+    [],
+  );
+
 describe("SQLite Trace repository", () => {
   it("persists exact Phase, Gate, and Sandbox records without null optional fields", async () => {
     const { database, trace } = fixture();
     try {
+      expect(
+        publicRun(await Effect.runPromise(trace.projection(authority.runId))),
+      ).not.toHaveProperty("provenance");
       await Effect.runPromise(
         trace.write(authority, {
           kind: "run-started",
@@ -114,6 +137,12 @@ describe("SQLite Trace repository", () => {
       );
 
       const projection = await Effect.runPromise(trace.projection(authority.runId));
+      expect(publicRun(projection).provenance).toEqual({
+        engineVersion: "test",
+        engineCommit: "commit",
+        configDigest: "config",
+        host: "linux",
+      });
       expect(projection.phases).toHaveLength(1);
       expect(projection.gates).toHaveLength(1);
       expect(projection.sandboxes).toHaveLength(1);

@@ -349,6 +349,8 @@ export class RunCoordinator {
           }),
         );
         await this.#triggerSupervisor.stopPoller(options.projectId, options.workflowName);
+        // Ordinary Stop preserves admitted Runs, including those awaiting source acknowledgement.
+        void this.#pump();
         return {
           kind: "stop",
           projectId: receipt.projectId,

@@ -535,7 +535,8 @@ export class TriggerSupervisor {
           }),
         );
         await reply(frame, { recorded: true });
-        if (state === "polling") void this.#pumpRuns();
+        // Admission remains executable when source acknowledgement fails.
+        if (state === "polling" || state === "failed") void this.#pumpRuns();
         return;
       }
       throw new Error(`the Trigger Runner sent unexpected ${frame.kind}`);

@@ -6,6 +6,7 @@ projects:
     - "packages/*"
   sources:
     root: "."
+    release-tooling: ".github"
 
 vcs:
   defaultBranch: "main"

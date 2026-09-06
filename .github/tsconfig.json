@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.options.json",
+  "include": ["scripts/**/*.ts"],
+  "compilerOptions": {
+    "types": ["bun"],
+    "outDir": "../.moon/cache/types/.github"
+  },
+  "references": [
+    {
+      "path": "../packages/kojo"
+    }
+  ]
+}

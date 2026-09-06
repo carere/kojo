@@ -280,13 +280,14 @@ const openRun = async (
     readonly view?: "timeline" | "table";
     readonly now?: number;
     readonly settled?: boolean;
+    readonly document?: RunDocument;
   } = {},
 ): Promise<void> => {
   await page.addInitScript(`window.__KOJO_NOW__ = ${options.now ?? base + 10_000}`);
   await page.route(`**/api/v1/runs/${runId}`, (route) =>
     route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify(fixture(runId, options.settled)),
+      body: JSON.stringify(options.document ?? fixture(runId, options.settled)),
     }),
   );
   await authenticate(page);
@@ -908,4 +909,33 @@ test("a successful Run has no failure outcome and a Host-only Run states no bran
   await openRun(page, "run-stale");
   await expect(page.locator("[data-run-outcome]")).toHaveCount(0);
   await expect(page.locator('[data-stamp="branch"]')).toContainText("no sandbox was acquired");
+});
+
+test("Run provenance shows recorded facts without using package graph or Revision as a commit", async ({
+  page,
+}) => {
+  const document = runDocument("run-provenance", "succeeded", [], {
+    provenance: {
+      engineVersion: "0.1.0-alpha.7",
+      engineCommit: "unknown",
+      configDigest: "c".repeat(64),
+      host: "recorded-runner-host",
+    },
+  });
+  await openRun(page, document.runId, { document });
+  await expect(page.locator('[data-stamp="engine"]')).toContainText("0.1.0-alpha.7");
+  await expect(page.locator('[data-stamp="commit"]')).toContainText("unknown");
+  await expect(page.locator('[data-stamp="host"]')).toContainText("recorded-runner-host");
+  await expect(page.locator('[data-stamp="config"]')).toContainText("c".repeat(64));
+  await expect(page.locator('[data-stamp="revision"]')).toContainText(document.revisionId);
+  await expect(page.locator('[data-stamp="graph"]')).toContainText(document.packageGraphId);
+});
+
+test("a Run with no provenance states that its execution facts were not recorded", async ({
+  page,
+}) => {
+  await openRun(page, "run-stale");
+  for (const name of ["engine", "commit", "host", "config"]) {
+    await expect(page.locator(`[data-stamp="${name}"]`)).toContainText("not recorded");
+  }
 });

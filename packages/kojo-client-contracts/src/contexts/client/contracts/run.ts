@@ -83,6 +83,16 @@ export interface RunDocument {
   readonly workflowName: string;
   readonly revisionId: string;
   readonly packageGraphId: string;
+  /** Recorded by the Runner. Absent until the Run's start Trace is available. */
+  readonly provenance?: {
+    readonly engineVersion: string;
+    /** `unknown` when the Runtime has no verified source commit. */
+    readonly engineCommit: string;
+    /** Full captured Workflow Revision digest, including Factory configuration and packages. */
+    readonly configDigest: string;
+    readonly host: string;
+    readonly imageDigest?: string;
+  };
   readonly state: RunExecutionState;
   readonly queueReason?:
     | "execution-capacity"

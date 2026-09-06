@@ -532,11 +532,11 @@ const verifyPublished = async (manifest: ReleaseManifest): Promise<void> => {
   }
 };
 
-const usage = (): never => {
+function usage(): never {
   throw new Error(
     "Usage: release-train.ts validate-prerelease <stage> <version> [previous] | validate-stable <version> <rc-version> | validate-stable-source <manifest> <revision> | pack <version> <archive-directory> | create-manifest <stage> <version> <revision> <archive-directory> <output> | verify-manifest <manifest> <stage> <version> [revision] | auth-mode <version> | assert-unpublished <version> | publish <manifest> <tag> | verify-published <manifest> | install <manifest> <project-directory> <global-directory>",
   );
-};
+}
 
 const [command, ...arguments_] = Bun.argv.slice(2);
 

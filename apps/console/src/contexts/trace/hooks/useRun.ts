@@ -29,10 +29,10 @@ export const useRun = (runId: () => string): UseQueryResult<RunDoc, Error> =>
             workflow: run.workflowName,
             idempotencyKey: "retained by the Daemon",
             startedAt: Date.parse(run.startedAt ?? run.admittedAt),
-            engineVersion: "Project runtime",
-            engineCommit: run.revisionId.slice(0, 12),
-            configDigest: run.packageGraphId.slice(0, 12),
-            host: "local Host",
+            engineVersion: run.provenance?.engineVersion ?? "not recorded",
+            engineCommit: run.provenance?.engineCommit ?? "not recorded",
+            configDigest: run.provenance?.configDigest ?? "not recorded",
+            host: run.provenance?.host ?? "not recorded",
           },
           ...(run.state === "succeeded" || run.state === "failed" || run.state === "cancelled"
             ? { outcome: run.state }

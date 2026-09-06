@@ -7,6 +7,7 @@ language: typescript
 # `"references": []`. A later `bun tsc --build` then compiles nothing and exits 0 — a check that
 # reports green while doing no work, which is the failure mode this repo has now hit twice.
 dependsOn:
+  - release-tooling
   - kojo-client-contracts
   - kojo
   - kojo-runner-contracts

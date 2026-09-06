@@ -77,6 +77,8 @@ bun biome check .
 bun knip
 ```
 
+The root TypeScript build includes the GitHub scripts in `.github/`.
+
 Use moon for project tasks:
 
 ```bash

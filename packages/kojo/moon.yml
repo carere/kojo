@@ -9,6 +9,7 @@ tasks:
   check-packages:
     command: bun src/scripts/check-package-graph.ts
     inputs:
+      - /.github/tsconfig.json
       - /apps/console/package.json
       - /moon.yml
       - /packages/*/package.json

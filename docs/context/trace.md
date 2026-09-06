@@ -13,8 +13,9 @@ describe one completed unit of work.
 _Avoid_: log, event log, history
 
 **Run record**:
-The row that ties a run's phases together. It carries what produced the run — engine version,
-config digest, host, image digest — and it is updated in place as the run's status changes.
+The record that ties a Run's Phases together and carries the Runtime version, the full captured
+Workflow Revision digest (including configuration and packages), the Host, and the image digest
+when known. Its status changes as the Run progresses.
 _Avoid_: session, adw
 
 **Phase record**:
