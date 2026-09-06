@@ -15,9 +15,15 @@ on:
       full_evidence:
         type: boolean
         required: true
+    secrets:
+      REMOSHU_TOKEN:
+        required: false
 
 permissions:
   contents: read
+
+env:
+  REMOSHU_TOKEN: ${{ secrets.REMOSHU_TOKEN }}
 
 jobs:
   ci:

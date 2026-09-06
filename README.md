@@ -85,6 +85,11 @@ moon run kojo:test-integration
 moon run console:build
 ```
 
+Moon uses the Remoshu remote cache configured in `.moon/workspace.yml`. Set `REMOSHU_TOKEN` in
+the ignored root `.env` file; Proto loads it when Moon starts. GitHub Actions uses the repository
+secret with the same name. Without a token, Moon uses its local cache. Full Release evidence runs
+with `--force` and does not use cached test results.
+
 The main paths are:
 
 - `apps/console/`: the Console.

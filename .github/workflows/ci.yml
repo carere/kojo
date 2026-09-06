@@ -18,6 +18,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  REMOSHU_TOKEN: ${{ secrets.REMOSHU_TOKEN }}
+
 jobs:
   ci:
     # The name branch protection matches on. Changing it silently un-gates `main`.
@@ -112,7 +115,15 @@ jobs:
       - name: Browser tests
         run: |
           set -o pipefail
-          moon run console:test-browser -- --reporter=list 2>&1 | tee .release-evidence/logs/console-browser.log
+          moon run console:test-browser -- --reporter=list --grep 'a Run catalogue row opens the Waterfall' --repeat-each=10 2>&1 | tee .release-evidence/logs/console-browser.log
+
+      - name: Browser failure traces
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: browser-failure-traces
+          path: apps/console/test-results
+          retention-days: 7
 
       # Last because it is the slowest and the only one that needs a container daemon. `ubuntu-latest`
       # ships Docker; the suites build the one image they need and skip with a stated reason if the
