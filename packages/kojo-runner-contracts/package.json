@@ -1,6 +1,6 @@
 {
   "name": "@carere/kojo-runner-contracts",
-  "version": "0.0.0",
+  "version": "0.1.0-alpha.1",
   "description": "Versioned plain-data contracts for Kojo Project Runners",
   "keywords": [
     "contract",

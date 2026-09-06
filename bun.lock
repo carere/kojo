@@ -45,7 +45,7 @@
     },
     "packages/kojo": {
       "name": "@carere/kojo",
-      "version": "0.0.0",
+      "version": "0.1.0-alpha.1",
       "bin": {
         "kojo": "./src/main.ts",
       },
@@ -64,21 +64,21 @@
     },
     "packages/kojo-client-contracts": {
       "name": "@carere/kojo-client-contracts",
-      "version": "0.0.0",
+      "version": "0.1.0-alpha.1",
       "devDependencies": {
         "vitest": "^4.1.0",
       },
     },
     "packages/kojo-runner-contracts": {
       "name": "@carere/kojo-runner-contracts",
-      "version": "0.0.0",
+      "version": "0.1.0-alpha.1",
       "devDependencies": {
         "vitest": "^4.1.0",
       },
     },
     "packages/kojo-runtime": {
       "name": "@carere/kojo-runtime",
-      "version": "0.0.0",
+      "version": "0.1.0-alpha.1",
       "dependencies": {
         "@ai-hero/sandcastle": "0.12.0",
         "@carere/kojo-runner-contracts": "workspace:*",

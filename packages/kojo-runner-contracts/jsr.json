@@ -1,6 +1,6 @@
 {
   "name": "@carere/kojo-runner-contracts",
-  "version": "0.0.0",
+  "version": "0.1.0-alpha.1",
   "exports": {
     "./contexts/project/codecs/frame": "./src/contexts/project/codecs/frame.ts",
     "./contexts/project/codecs/framing": "./src/contexts/project/codecs/framing.ts",

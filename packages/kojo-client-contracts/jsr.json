@@ -1,6 +1,6 @@
 {
   "name": "@carere/kojo-client-contracts",
-  "version": "0.0.0",
+  "version": "0.1.0-alpha.1",
   "exports": {
     "./contexts/client/contracts/bootstrap": "./src/contexts/client/contracts/bootstrap.ts",
     "./contexts/client/contracts/browser": "./src/contexts/client/contracts/browser.ts",
