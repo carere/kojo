@@ -11,8 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
-import { type Browser, chromium } from "@playwright/test";
+import { dirname, join, resolve, sep } from "node:path";
 import { DAEMON_CLEANUP_MILLIS } from "../../../src/contexts/daemon/services/LifecycleController.ts";
 import { startShippedPackageRegistry } from "./ShippedPackageRegistry.ts";
 
@@ -557,175 +556,6 @@ const waitFor = async <A>(
   throw new Error(message);
 };
 
-const shippedMacosArtifactContent = "actual Daemon artifact: shipped macOS\n";
-
-const renderRun = async (options: {
-  readonly browser: Browser;
-  readonly launchUrl: string;
-  readonly runId: string;
-  readonly screenshot: string;
-  readonly expectedState: string;
-  readonly expectedText?: ReadonlyArray<string>;
-}): Promise<{ readonly text: string; readonly origin: string }> => {
-  const context = await options.browser.newContext();
-  const page = await context.newPage();
-  const origin = new URL(options.launchUrl).origin;
-  const diagnosticName = basename(options.screenshot, ".png");
-  const diagnosticPath = join(
-    dirname(options.screenshot),
-    "records",
-    `${diagnosticName}-render.json`,
-  );
-  const failureScreenshot = join(dirname(options.screenshot), `${diagnosticName}-failure.png`);
-  const observations: Array<Record<string, unknown>> = [];
-  let stage = "open authenticated Console";
-  let artifactResponse: Record<string, unknown> | undefined;
-  page.on("requestfailed", (request) => {
-    const path = new URL(request.url()).pathname;
-    if (path.startsWith("/api/") || path.startsWith("/_kojo/")) {
-      observations.push({
-        kind: "request-failed",
-        method: request.method(),
-        path,
-        error: request.failure()?.errorText ?? "unknown",
-      });
-    }
-  });
-  page.on("response", (response) => {
-    const path = new URL(response.url()).pathname;
-    if (path.startsWith("/api/") || path.startsWith("/_kojo/")) {
-      observations.push({ kind: "response", path, status: response.status() });
-    }
-  });
-  page.on("pageerror", (error) => {
-    observations.push({ kind: "page-error", message: error.message });
-  });
-  try {
-    await page.goto(options.launchUrl);
-    await page.getByText("Access active", { exact: true }).waitFor();
-    const notificationEstablished = page.waitForResponse(
-      (response) =>
-        new URL(response.url()).pathname === "/api/v1/notifications" &&
-        response.status() === 200 &&
-        new URL(response.request().headers().referer ?? origin).pathname ===
-          `/runs/${options.runId}`,
-      { timeout: 10_000 },
-    );
-    stage = "render retained Run after authenticated notification handshake";
-    await page.goto(`${origin}/runs/${options.runId}`);
-    await notificationEstablished;
-    await page.locator(`[data-run-header="${options.runId}"]`).waitFor();
-    await page.getByText(options.expectedState, { exact: true }).first().waitFor();
-    await page.getByText("Captured Artifacts", { exact: true }).waitFor();
-    await page.getByText("release-evidence.txt", { exact: true }).waitFor();
-
-    const display = page.locator("[data-published-artifact-display]");
-    const artifactId = await display.getAttribute("data-published-artifact-display");
-    if (artifactId === null || artifactId.length === 0) {
-      throw new Error("the retained Artifact display action has no Artifact identity");
-    }
-    const artifactPath = `/api/v1/runs/${encodeURIComponent(options.runId)}/artifacts/${encodeURIComponent(artifactId)}`;
-    const responsePromise = page.waitForResponse(
-      (response) =>
-        response.request().method() === "GET" &&
-        new URL(response.url()).pathname === artifactPath &&
-        new URL(response.url()).search === "",
-      { timeout: 10_000 },
-    );
-    stage = "read retained Artifact through the authenticated Console API";
-    const [, response] = await Promise.all([display.click(), responsePromise]);
-    artifactResponse = {
-      path: artifactPath,
-      status: response.status(),
-      contentType: response.headers()["content-type"] ?? null,
-    };
-    if (response.status() !== 200) {
-      throw new Error(`the authenticated Artifact response returned ${response.status()}`);
-    }
-    const wire = (await response.json()) as {
-      readonly artifactId?: unknown;
-      readonly content?: unknown;
-    };
-    if (wire.artifactId !== artifactId || wire.content !== shippedMacosArtifactContent) {
-      throw new Error("the authenticated Artifact response changed the retained bytes");
-    }
-
-    stage = "render retained Artifact content in the Console";
-    const visibleArtifact = page.locator(`[data-published-artifact-content="${artifactId}"]`);
-    await visibleArtifact.waitFor({ state: "visible", timeout: 5_000 });
-    const visibleContent = await visibleArtifact.textContent();
-    if (visibleContent !== shippedMacosArtifactContent) {
-      throw new Error("the authenticated Console changed the retained Artifact bytes");
-    }
-    const text = (await page.locator("body").innerText()).trim();
-    for (const expected of [
-      "release-evidence",
-      "publish-evidence",
-      "shipped-macos",
-      ...(options.expectedText ?? []),
-    ]) {
-      if (!text.includes(expected))
-        throw new Error(`the authenticated Console did not render ${expected}`);
-    }
-    await page.screenshot({ path: options.screenshot, fullPage: true });
-    writeFileSync(
-      diagnosticPath,
-      `${JSON.stringify(
-        {
-          outcome: "rendered",
-          stage,
-          artifactResponse,
-          visibleContent: true,
-          observations,
-        },
-        null,
-        2,
-      )}\n`,
-    );
-    return { text, origin };
-  } catch (cause) {
-    const message = cause instanceof Error ? cause.message : String(cause);
-    const visibleState = {
-      runHeader: await page
-        .locator(`[data-run-header="${options.runId}"]`)
-        .isVisible()
-        .catch(() => false),
-      artifactAction: await page
-        .locator("[data-published-artifact-display]")
-        .isVisible()
-        .catch(() => false),
-      artifactContent: await page
-        .locator("[data-published-artifact-content]")
-        .isVisible()
-        .catch(() => false),
-      reconnect: await page
-        .getByText("Reconnect", { exact: true })
-        .isVisible()
-        .catch(() => false),
-    };
-    await page.screenshot({ path: failureScreenshot, fullPage: true }).catch(() => undefined);
-    writeFileSync(
-      diagnosticPath,
-      `${JSON.stringify(
-        {
-          outcome: "failed",
-          stage,
-          message,
-          artifactResponse,
-          location: new URL(page.url()).pathname,
-          visibleState,
-          observations,
-        },
-        null,
-        2,
-      )}\n`,
-    );
-    throw new Error(`${stage}: ${message}; see ${diagnosticPath}`, { cause });
-  } finally {
-    await context.close();
-  }
-};
-
 const sanitizeGateSnapshot = (snapshot: GateSnapshot): object => ({
   ...snapshot,
   askings: snapshot.askings.map(({ token: _token, ...asking }) => ({
@@ -973,7 +803,6 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
   const managedKojo = join(defaultInstallation, "bin", "kojo");
   let ownsInstallation = false;
   let registry: Awaited<ReturnType<typeof startShippedPackageRegistry>> | undefined;
-  let browser: Browser | undefined;
   let evidenceReports:
     | ReadonlyArray<{ readonly checkId: string; readonly manifest: object }>
     | undefined;
@@ -1087,27 +916,6 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
     assertShippedWaitingGateEvidence(waitingDocument, asking.snapshot);
     recorder.write("run-waiting.json", waitingDocument);
 
-    const launch = await recorder.run(
-      "authenticated-console-grant",
-      [globalKojo, "ui", "--no-open"],
-      {
-        cwd: project,
-        env: environment,
-        redactOutput: true,
-      },
-    );
-    const launchUrl = launch.stdout.trim();
-    browser = await chromium.launch({ headless: true });
-    const waitingRender = await renderRun({
-      browser,
-      launchUrl,
-      runId,
-      screenshot: join(evidenceRoot, "console-waiting.png"),
-      expectedState: "suspended",
-      expectedText: ["Approve the controlled shipped macOS Run", "release-verifier"],
-    });
-    recorder.write("console-waiting.txt", waitingRender.text);
-
     const currentEndpoint = endpoint();
     const unauthenticated = await fetch(`${currentEndpoint.consoleOrigin}/api/v1/daemon`);
     if (unauthenticated.status !== 401) {
@@ -1115,10 +923,9 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
         `the actual Console accepted an unauthenticated read with ${unauthenticated.status}`,
       );
     }
-    recorder.write("browser-access.json", {
+    recorder.write("console-access.json", {
       origin: currentEndpoint.consoleOrigin,
       unauthenticatedDaemonRead: unauthenticated.status,
-      authenticatedRunRendered: true,
     });
     recorder.write(
       "private-paths.json",
@@ -1210,20 +1017,6 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
     }, "the managed Daemon did not apply the Verdict and finish the Run");
     assertShippedCompletedRunEvidence(completed);
     recorder.write("run-complete.json", completed);
-    const completedLaunch = await recorder.run(
-      "managed-authenticated-console-grant",
-      [managedKojo, "ui", "--no-open"],
-      { cwd: project, env: managedEnvironment, redactOutput: true },
-    );
-    const completeRender = await renderRun({
-      browser,
-      launchUrl: completedLaunch.stdout.trim(),
-      runId,
-      screenshot: join(evidenceRoot, "console-complete.png"),
-      expectedState: "succeeded",
-    });
-    recorder.write("console-complete.txt", completeRender.text);
-
     const beforeStop = endpoint();
     await recorder.run("native-stop", [managedKojo, "daemon", "stop", "--timeout", "60s"], {
       env: managedEnvironment,
@@ -1278,19 +1071,6 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
     const persistedRun = (JSON.parse(persistedStatus.stdout) as { readonly run: RunStatus }).run;
     assertShippedCompletedRunEvidence(persistedRun);
     recorder.write("run-after-native-replacement.json", persistedRun);
-    const replacementLaunch = await recorder.run(
-      "authenticated-console-grant-after-native-replacement",
-      [managedKojo, "ui", "--no-open"],
-      { cwd: project, env: managedEnvironment, redactOutput: true },
-    );
-    const replacementRender = await renderRun({
-      browser,
-      launchUrl: replacementLaunch.stdout.trim(),
-      runId,
-      screenshot: join(evidenceRoot, "console-after-native-replacement.png"),
-      expectedState: "succeeded",
-    });
-    recorder.write("console-after-native-replacement.txt", replacementRender.text);
     const duplicate = await recorder.run(
       "singleton-duplicate-daemon",
       [join(defaultInstallation, "bin", "kojo-launcher")],
@@ -1377,28 +1157,6 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
         },
       },
       {
-        checkId: "RELEASE-02",
-        manifest: {
-          ...commonEvidence,
-          checkId: "RELEASE-02",
-          logs: ["../RELEASE-01/vitest.log", "../RELEASE-01/records/"],
-          checks: [
-            {
-              name: "real persisted records",
-              expected: "Project, Workflow, Run, Gate, Phase, Sandbox and Artifact",
-              actual: "rendered through authenticated Console",
-              evidence: "../RELEASE-01/console-complete.png",
-            },
-            {
-              name: "replacement persistence",
-              expected: "Run, Gate, Trace, Sandbox and Artifact survive replacement",
-              actual: "rendered through a new authenticated Console session",
-              evidence: "../RELEASE-01/console-after-native-replacement.png",
-            },
-          ],
-        },
-      },
-      {
         checkId: "RELEASE-03",
         manifest: {
           ...commonEvidence,
@@ -1426,7 +1184,6 @@ export const collectShippedMacosEvidence = async (): Promise<void> => {
     }
     throw cause;
   } finally {
-    await browser?.close().catch(() => undefined);
     registry?.stop();
     if (ownsInstallation && existsSync(managedKojo)) {
       const cleanupStartedAt = Date.now();

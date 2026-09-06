@@ -32,24 +32,9 @@ import {
   zoomReset,
 } from "../services/waterfallStore.ts";
 
-/** Render the geometry from models/waterfall.ts. Data attributes expose each recorded fact to browser tests. */
+/** Render the geometry from models/waterfall.ts. Data attributes identify each recorded fact. */
 
-/**
- * How wide the axis is at zoom 1 when nothing has measured the card yet.
- *
- * **It used to be the answer rather than the fallback**, with the reason written here: *a constant
- * so a span's width is the same on every machine*. That reason was real — a screenshot of a run
- * meant the same thing everywhere — but the price turned out to be higher than the property was
- * worth. A fixed 960 plus a 176-pixel sidebar is a 1136-pixel canvas, so every card narrower than
- * that clipped the timeline and every card wider than it left the space empty. Measured with the
- * detail panel open at 1280: 382 pixels of axis unreachable, including the wall of the 41-hour
- * break — the one thing the run view exists to show.
- *
- * The property is kept where it actually mattered: **the browser tier freezes the viewport**, so
- * every fixture still draws to the same number in a test, and the spans are graded as ratios of
- * `data-canvas` rather than as absolute pixels. What changed is that a person's window now decides
- * how much room the run gets, which is what a person expects a window to do.
- */
+/** Axis width before the card has been measured. */
 const fallbackAxisWidth = 960;
 
 /**
@@ -117,8 +102,7 @@ const Span = (props: {
    * sorted by start time, so the *next* phase is later in the DOM and paints on top of the floor.
    * Measured on the shipped fixtures: `in_progress` at x=201 w=2 sits under `route` at x=201.2
    * w=8.2, and `elementFromPoint` at its centre returns `route`. The short phase was unhoverable
-   * and unclickable — and the browser suite already knew, because `realFactory.ts` pays 650 ms of
-   * real sleep to give its phases enough width to be clicked.
+   * and unclickable.
    *
    * Raising the floor is not the fix: `Waterfall.tsx` records the decision that a span's width is
    * its duration, and a wider bar would be a lie about how long the phase took. So the narrow one
@@ -208,8 +192,7 @@ const Span = (props: {
 /**
  * The waterfall of one run.
  *
- * It reads the clock through the port, never the machine, so a browser test freezes it and the
- * growing span stops growing.
+ * It reads the clock through the port to calculate the width of an active Phase.
  */
 /**
  * Everything about a view that reaches the screen, as one string.

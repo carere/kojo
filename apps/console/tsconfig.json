@@ -1,12 +1,6 @@
 {
   "extends": "../../tsconfig.options.json",
-  "include": [
-    "src/**/*.ts",
-    "src/**/*.tsx",
-    "tests/**/*.ts",
-    "vite.config.ts",
-    "playwright.config.ts"
-  ],
+  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"],
   "compilerOptions": {
     "jsx": "preserve",
     "jsxImportSource": "solid-js",

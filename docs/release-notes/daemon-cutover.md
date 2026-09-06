@@ -43,3 +43,6 @@ standalone validator, and `runtime-manifest.json`.
 Release acceptance needs one revision-bound evidence record for every check in spec #64. It also
 needs shipped evidence from macOS and systemd Linux. Valid Moon cache results are accepted. A zero-test result, an unnamed
 skip, a missing supported Host, or a different tested revision cannot satisfy that evidence.
+
+The Console UI is tested manually during active development. CI checks the Console build and
+types and retains backend API tests. Browser automation will return when the UI is stable.

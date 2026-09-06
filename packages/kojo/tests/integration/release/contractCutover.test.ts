@@ -200,9 +200,9 @@ describe("the Daemon contract cutover", () => {
       .map((match) => match[1] ?? "")
       .filter((block) => block.includes("| tee"));
 
-    expect(pipedRunBlocks).toHaveLength(5);
-    for (const block of pipedRunBlocks.slice(0, 4)) expect(block).toContain("set -o pipefail");
-    expect(pipedRunBlocks[4]).toContain(["status=$", "{PIPESTATUS[0]}"].join(""));
+    expect(pipedRunBlocks).toHaveLength(4);
+    for (const block of pipedRunBlocks.slice(0, 3)) expect(block).toContain("set -o pipefail");
+    expect(pipedRunBlocks[3]).toContain(["status=$", "{PIPESTATUS[0]}"].join(""));
   });
 
   it("uploads the hidden core release evidence from its exact collection path", () => {

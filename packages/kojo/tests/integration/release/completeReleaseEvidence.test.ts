@@ -82,7 +82,6 @@ describe("the complete breaking release evidence executable", () => {
         "contract-runtime": loaded("contract-runtime"),
         "kojo-unit": loaded("kojo-unit"),
         "kojo-integration": loaded("kojo-integration"),
-        "console-browser": loaded("console-browser"),
       },
       safetyRegression: {
         expected: "protected check fails for injected regression",
@@ -146,19 +145,10 @@ describe("the complete breaking release evidence executable", () => {
         { name: "shipped-managed-content", expected: "managed", actual: "passed", evidence: "log" },
       ],
     });
-    for (const checkId of ["RELEASE-01", "RELEASE-02", "RELEASE-03"]) {
+    for (const checkId of ["RELEASE-01", "RELEASE-03"]) {
       const name =
-        checkId === "RELEASE-01"
-          ? "fresh shipped install"
-          : checkId === "RELEASE-02"
-            ? "real persisted records"
-            : "managed tools after global removal";
-      const actual =
-        checkId === "RELEASE-01"
-          ? "installed"
-          : checkId === "RELEASE-02"
-            ? "rendered through authenticated Console"
-            : "usable";
+        checkId === "RELEASE-01" ? "fresh shipped install" : "managed tools after global removal";
+      const actual = checkId === "RELEASE-01" ? "installed" : "usable";
       writeJson(join(input, "shipped-macos", revision, checkId, "evidence-manifest.json"), {
         checkId,
         testedRevision: revision,
@@ -205,7 +195,7 @@ describe("the complete breaking release evidence executable", () => {
         "utf8",
       ),
     ) as CompleteIndex;
-    expect(index.acceptedChecks).toBe(56);
+    expect(index.acceptedChecks).toBe(52);
     for (const required of requiredReleaseChecks) {
       for (const observation of required.observations.filter(
         (candidate) => candidate.tier === "shipped-macos",
@@ -311,7 +301,7 @@ describe("the complete breaking release evidence executable", () => {
     );
     writeJson(systemdPath, systemd);
 
-    const macPath = join(input, "shipped-macos", revision, "RELEASE-02", "evidence-manifest.json");
+    const macPath = join(input, "shipped-macos", revision, "RELEASE-03", "evidence-manifest.json");
     const mac = JSON.parse(readFileSync(macPath, "utf8")) as {
       readonly environment: Readonly<Record<string, string>>;
     } & Readonly<Record<string, unknown>>;

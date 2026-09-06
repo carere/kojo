@@ -29,22 +29,14 @@
     },
     "packages/kojo": {
       // The scripts are Moon task entry points. The managed LaunchAgent starts the launcher entry
-      // through its immutable bundle. The browser tier starts its isolated Daemon and grant client
-      // from Playwright command strings. The native Host controller starts the logout fixture from
+      // through its immutable bundle. The native Host controller starts the logout fixture from
       // a real SSH/PAM session. No TypeScript module imports these programs.
       "entry": [
         "src/scripts/*.ts",
         "src/launcher/main.ts",
-        "tests/support/daemon/authenticatedConsoleServer.ts",
-        "tests/support/daemon/consoleGrant.ts",
         "tests/support/daemon/systemdLogoutFixture.ts",
         "tests/release/support/*.ts"
       ]
-    },
-    "apps/console": {
-      // The shipped release browser suite has its own native-Host configuration. CI starts both
-      // files from a shell controller, so neither is reachable from the regular browser tier.
-      "entry": ["playwright.release.config.ts", "tests/release/*.spec.ts"]
     },
     "packages/kojo-runtime": {
       // Fresh Runner-process tests load these Factory files by filesystem registration.

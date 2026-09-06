@@ -33,9 +33,12 @@ The release guard checks that removed commands do not parse, removed package exp
 and forbidden compatibility text is absent. TypeScript, Biome, Knip, package checks, unit tests, and
 integration tests grade the remaining graph.
 
+The Console UI is tested manually during active development. CI checks its build and types and
+retains backend API tests. Browser automation is paused until the UI is stable.
+
 The `Complete breaking release evidence` CI job is the final acceptance gate. It waits for core,
 native systemd, shipped systemd, and shipped macOS jobs from one tested revision. It writes one
-record for each of the 56 required check IDs under
+record for each required check ID under
 `artifacts/verification/daemon/<tested-revision>/<check-id>/`. It accepts valid Moon cache results and refuses zero loaded
 tests, an unnamed skip, a revision mismatch, a missing supported Host, or a missing protected-safety
 regression result. The release artifact also contains one index with the complete decision.
@@ -58,10 +61,10 @@ Gate, and Console commands. The controlled Workflow makes no agent call. It publ
 Artifact through one real no-sandbox Resource and suspends at one real Gate.
 
 The required artifact is named `shipped-macos-release-evidence`. Its reports are under
-`artifacts/verification/daemon/<tested-revision>/RELEASE-01/`, `RELEASE-02/`, and `RELEASE-03/`.
+`artifacts/verification/daemon/<tested-revision>/RELEASE-01/` and `RELEASE-03/`.
 They contain package hashes, the managed release manifest, tested revision, tool and Host versions,
 loaded and skipped test counts, command logs, private-path modes, endpoint and process-group
-observations, Run and Gate records, and authenticated Console screenshots. The job removes its
+observations, Run and Gate records, and unauthenticated Console API rejection. The job removes its
 isolated global Kojo and Bun before it uses the managed status, repair, Gate, stop, start, and restart
 commands. Cleanup removes only paths that the isolation preflight proved absent before this job
 created them.

@@ -49,7 +49,7 @@ const elapsedOf = (doc: RunDoc, now: number): string => {
  *
  * The panel's `Field` stacks the label above the value, which is right in a panel and wrong here —
  * the header sits above the timeline on every run and doubling its height is a real cost. Same
- * vocabulary, same `data-field` hook the browser tier already uses, laid out for a header.
+ * vocabulary, laid out for a header.
  */
 const Stamp = (props: {
   readonly name: string;
@@ -58,9 +58,7 @@ const Stamp = (props: {
   readonly absent?: string;
   readonly when?: boolean;
 }): JSX.Element => (
-  // `data-stamp`, **not** `data-field`. The panel already owns `data-field`, and a header that
-  // borrowed it made `[data-field="branch"]` match two elements on one page — a spec that had been
-  // addressing the sandbox panel's branch suddenly could not say which one it meant.
+  // Header facts use a separate attribute from panel fields.
   <span data-stamp={props.name} class="flex items-baseline gap-1.5">
     <span class="text-muted-foreground text-[10px] tracking-[0.08em] uppercase">{props.label}</span>
     <Show

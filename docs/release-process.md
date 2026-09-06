@@ -22,11 +22,17 @@ workflow result, tag, npm archive integrity, and JSR source hashes. Mutable npm 
 acceptance. A stable version permits only version metadata and Release notes after its accepted RC.
 Any code change requires another RC.
 
-Every version checks TypeScript, Biome, Knip, packages, unit tests, integration tests, and browser
-tests. Moon can reuse valid cached test results; release workflows do not force test execution.
+Every version checks TypeScript, Biome, Knip, packages, unit tests, and integration tests.
+The Console build and types are checked in CI. Test the UI manually while it is under active
+development; browser automation is paused until the UI is stable. Moon can reuse valid cached test
+results; release workflows do not force test execution.
 Beta, RC, and stable also run native systemd, shipped systemd, and shipped macOS evidence.
 The complete evidence index must accept every required check at the prepared version commit.
 Normal pull request and main CI run the core checks; they do not run full Host evidence.
+
+Automated release evidence excludes UI-01, UI-02, UI-03, and RELEASE-02 while browser testing is
+deferred. ACCESS-04 retains Artifact publication integration coverage. These UI checks are not
+reported as passed; the maintainer checks UI changes manually during development.
 
 ## Registry package sets
 
@@ -102,6 +108,10 @@ After acceptance, test another system with the exact installation command in the
 bun add -g @carere/kojo@0.1.0-alpha.1
 kojo daemon install
 ```
+
+On each test system, run `kojo ui`. Check Project and Workflow lists, Start and Stop actions,
+Run details, Gate answers, and reconnect behavior after a Daemon restart. Record the package
+version, Host, and result with each UI issue. These manual checks are separate from CI acceptance.
 
 To install the Runtime through JSR in a Factory Project:
 

@@ -18,7 +18,6 @@ const tierNames: ReadonlyArray<EvidenceTier> = [
   "contract-runtime",
   "kojo-unit",
   "kojo-integration",
-  "console-browser",
   "native-systemd",
   "shipped-systemd",
   "shipped-macos",
@@ -64,12 +63,12 @@ const input = (): CompleteEvidenceInput => ({
 });
 
 describe("complete breaking release evidence", () => {
-  it("creates one accepted revision-bound record for every spec #64 check", () => {
+  it("creates one accepted revision-bound record for every active release check", () => {
     const result = completeReleaseEvidence(input());
 
-    expect(result.requiredChecks).toBe(56);
-    expect(result.acceptedChecks).toBe(56);
-    expect(new Set(result.records.map((record) => record.checkId)).size).toBe(56);
+    expect(result.requiredChecks).toBe(52);
+    expect(result.acceptedChecks).toBe(52);
+    expect(new Set(result.records.map((record) => record.checkId)).size).toBe(52);
     expect(result.records.map((record) => record.checkId)).toEqual(
       requiredReleaseChecks.map((required) => required.checkId),
     );
@@ -183,7 +182,6 @@ describe("complete breaking release evidence", () => {
           if (observation.issueTiers !== undefined) return observation.issueTiers;
           if (observation.path.includes("/tests/unit/")) return ["U" as const];
           if (observation.path.includes("/tests/integration/")) return ["I" as const];
-          if (observation.path.includes("/tests/browser/")) return ["B" as const];
           if (observation.path.includes("/tests/host/")) return ["H" as const];
           return ["R" as const];
         }),
@@ -277,16 +275,7 @@ describe("loaded release tests", () => {
     expect(result.loaded).toBe(1);
   });
 
-  it("counts Playwright tests and rejects zero-test output", () => {
-    expect(
-      loadedTestsFromLog(
-        "console-browser",
-        revision,
-        { os: "linux" },
-        "browser.log",
-        "  13 passed (8.1s)\n",
-      ).loaded,
-    ).toBe(13);
+  it("rejects zero-test output", () => {
     expect(() =>
       loadedTestsFromLog("kojo-unit", revision, { os: "linux" }, "unit.log", "No test files found"),
     ).toThrow("loaded zero tests");

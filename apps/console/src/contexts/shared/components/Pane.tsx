@@ -5,8 +5,7 @@ import { cn } from "../lib/cn.ts";
  * The two shapes the detail panel is made of: a titled block, and a labelled fact inside it.
  *
  * Both carry what they are as a data attribute rather than only as text, on the rule the waterfall
- * already follows: the element carries the fact and the class carries the look, so the browser tier
- * grades *which* facts a panel shows without grading a heading's wording or a colour.
+ * already follows: the element carries the fact and the class carries the look.
  */
 
 export const Pane = (props: {

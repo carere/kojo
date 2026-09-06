@@ -37,10 +37,11 @@ ubiquitous language from the domain.
 - **Backend: Unit tests** exercise use cases (domain's invariants) through **in-memory** **adapters** (eg. `InMemoryTracer`). They must
   not use real **adapters** (eg. `SqliteTracer`).
 - **Backend: Integration tests** exercise real **adapters** implementations. They must not use in-memory **adapters**.
-- **Frontend: Browser / Acceptance tests** exercise user flow through the UI, using fake adapters (eg. mocked APIs / services used by the frontend).
+- **Frontend: Manual UI checks** exercise changed user flows during development. The maintainer tests
+  the Console across Projects. Automated browser tests are deferred until the UI is stable; do not
+  add browser suites or browser checks to CI or release workflows until requested.
 - Use `@effect/vitest` for Effect-based backend unit and integration tests.
-- use `@playwright/test` for frontend browser / acceptance tests.
-- Keep unit, integration, and browser tests in separate Vitest projects and Moon tasks.
+- Keep unit and integration tests in separate Vitest projects and Moon tasks.
 - Mirror bounded-context paths beneath `tests/unit/contexts` and `tests/integration/contexts` so the
   behavior and its tests stay easy to find.
 

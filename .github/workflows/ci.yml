@@ -103,22 +103,6 @@ jobs:
       - name: Public types and package build
         run: moon run kojo:check-public-types kojo:build
 
-      - name: Install Chromium for the browser tier
-        run: bun x playwright install --with-deps chromium
-        working-directory: apps/console
-
-      - name: Browser tests
-        run: |
-          moon run console:test-browser -- --reporter=list
-
-      - name: Browser failure traces
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: browser-failure-traces
-          path: apps/console/test-results
-          retention-days: 7
-
       # CLI integration tests exercise real adapters and processes.
       - name: CLI integration tests
         run: |
