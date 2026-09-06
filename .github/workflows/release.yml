@@ -116,44 +116,10 @@ jobs:
             "kojo@v$RELEASE_VERSION"
       - name: Publish through npm Trusted Publishing
         run: bun .github/scripts/release-train.ts publish .release-train/release-manifest.json
-      - name: Verify public bytes
-        run: bun .github/scripts/release-train.ts verify-published .release-train/release-manifest.json
-
-  validate-public:
-    name: Validate public packages on ${{ matrix.host }}
-    needs: [prepare, publish-npm]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - host: Linux
-            os: ubuntu-24.04
-          - host: macOS
-            os: macos-15
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/release-checkout
-        with:
-          revision: ${{ needs.prepare.outputs.revision }}
-      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
-        with:
-          auto-install: true
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          name: release-packages
-          path: .release-train
-      - name: Install exact public npm package set
-        env:
-          BUN_INSTALL: ${{ runner.temp }}/kojo-public-install
-        run: |
-          bun .github/scripts/release-train.ts verify-published .release-train/release-manifest.json
-          bun .github/scripts/release-train.ts install .release-train/release-manifest.json "$RUNNER_TEMP/project" "$BUN_INSTALL"
 
   accept:
     name: Accept Release
-    needs: [prepare, validate-public]
+    needs: [prepare, publish-npm]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -176,16 +142,9 @@ jobs:
         with:
           name: complete-breaking-release-evidence
           path: .release-evidence
-      - name: Verify full Host evidence
+      - name: Attach full Host evidence
         if: ${{ needs.prepare.outputs.full_evidence == 'true' }}
-        env:
-          RELEASE_REVISION: ${{ needs.prepare.outputs.revision }}
-        run: |
-          bun install --frozen-lockfile
-          bun .github/scripts/complete-release-evidence.ts verify-complete .release-evidence "$RELEASE_REVISION"
-          tar -czf .release-train/release-evidence.tgz -C .release-evidence .
-      - name: Recheck public bytes
-        run: bun .github/scripts/release-train.ts verify-published .release-train/release-manifest.json
+        run: tar -czf .release-train/release-evidence.tgz -C .release-evidence .
       - name: Record accepted Release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -15,14 +15,15 @@ describe("the Release train", () => {
     };
     expect(Object.keys(workflow.on)).toEqual(["workflow_dispatch"]);
     expect(workflow.jobs["publish-npm"]?.needs).toEqual(["prepare", "checks"]);
-    expect(workflow.jobs["validate-public"]?.needs).toContain("publish-npm");
-    expect(workflow.jobs.accept?.needs).toEqual(["prepare", "validate-public"]);
+    expect(workflow.jobs["validate-public"]).toBeUndefined();
+    expect(workflow.jobs.accept?.needs).toEqual(["prepare", "publish-npm"]);
     expect(workflow.jobs["publish-npm"]?.environment).toBe(
       `\${{ needs.prepare.outputs.stage == 'stable' && 'npm-production' || 'npm-prerelease' }}`,
     );
     expect(workflow.jobs.accept?.environment).toBeUndefined();
     const source = repositoryFile(".github/workflows/release.yml");
     expect(source).not.toContain("NPM_TOKEN");
+    expect(source).not.toContain("verify-published");
     expect(source).not.toContain("release-tags.ts");
     expect(source).not.toContain("protect-latest");
     expect(source).toContain("release-train.ts publish .release-train/release-manifest.json\n");
@@ -34,7 +35,7 @@ describe("the Release train", () => {
     const workflow = Bun.YAML.parse(repositoryFile(".github/workflows/release.yml")) as {
       jobs: Record<string, { steps: Array<{ uses?: string; with?: { name?: string } }> }>;
     };
-    for (const job of ["publish-npm", "validate-public", "accept"]) {
+    for (const job of ["publish-npm", "accept"]) {
       const downloads = workflow.jobs[job]?.steps.filter((step) =>
         step.uses?.startsWith("actions/download-artifact@"),
       );

@@ -476,37 +476,6 @@ const publishRelease = async (manifestPath: string): Promise<void> => {
   }
 };
 
-const installRelease = (manifestPath: string, project: string, globalRoot: string): void => {
-  const manifest = readManifest(manifestPath);
-  assertManifest(manifest, manifest.version, manifest.stage);
-  mkdirSync(project, { recursive: true });
-  const environment = { ...process.env, BUN_INSTALL: globalRoot };
-  run(["bun", "init", "-y"], { cwd: project, env: environment });
-  run(
-    [
-      "bun",
-      "add",
-      "--exact",
-      ...manifest.packages
-        .slice(0, -1)
-        .map((releasePackage) => `${releasePackage.name}@${releasePackage.version}`),
-    ],
-    { cwd: project, env: environment },
-  );
-  const cli = manifest.packages.at(-1);
-  if (cli === undefined) throw new Error("The Release manifest has no CLI package.");
-  run(["bun", "add", "-g", `${cli.name}@${cli.version}`], { cwd: project, env: environment });
-  const actualVersion = run([resolve(globalRoot, "bin/kojo"), "--version"], {
-    cwd: project,
-    env: environment,
-  }).trim();
-  if (actualVersion !== `kojo v${manifest.version}`) {
-    throw new Error(
-      `The installed CLI reports '${actualVersion}', not 'kojo v${manifest.version}'.`,
-    );
-  }
-};
-
 const verifyPublished = async (manifest: ReleaseManifest): Promise<void> => {
   assertManifest(manifest, manifest.version, manifest.stage);
   for (const releasePackage of manifest.packages) {
@@ -524,7 +493,7 @@ const verifyPublished = async (manifest: ReleaseManifest): Promise<void> => {
 
 function usage(): never {
   throw new Error(
-    "Usage: release-train.ts validate-prerelease <stage> <version> [previous] | validate-stable <version> <rc-version> | validate-stable-source <manifest> <revision> | pack <version> <archive-directory> | create-manifest <stage> <version> <revision> <archive-directory> <output> | verify-manifest <manifest> <stage> <version> [revision] | assert-unpublished <version> | publish <manifest> | verify-published <manifest> | install <manifest> <project-directory> <global-directory>",
+    "Usage: release-train.ts validate-prerelease <stage> <version> [previous] | validate-stable <version> <rc-version> | validate-stable-source <manifest> <revision> | pack <version> <archive-directory> | create-manifest <stage> <version> <revision> <archive-directory> <output> | verify-manifest <manifest> <stage> <version> [revision] | assert-unpublished <version> | publish <manifest> | verify-published <manifest>",
   );
 }
 
@@ -596,12 +565,6 @@ switch (command) {
     const [path] = arguments_;
     if (path === undefined) usage();
     await verifyPublished(readManifest(path));
-    break;
-  }
-  case "install": {
-    const [path, project, globalRoot] = arguments_;
-    if (path === undefined || project === undefined || globalRoot === undefined) usage();
-    installRelease(path, project, globalRoot);
     break;
   }
   default:

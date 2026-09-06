@@ -83,8 +83,7 @@ are separate properties.
 3. After all checks pass, obtain approval for stable publication if configured. Verify that remote
    `main` has not moved, then push the version commit and tags. Publish the checked npm archives
    directly under `alpha`, `beta`, `rc`, or `latest`, as determined by the version.
-4. Check public integrity and install the exact public npm versions on Linux and macOS.
-5. Recheck public content and create the accepted GitHub Release with its manifest.
+4. Create the GitHub Release with its manifest after both publications succeed.
    Full-evidence stages also attach the complete Host evidence archive.
 
 There is no temporary npm tag or separate tag promotion. Publication makes the version available
@@ -117,11 +116,9 @@ Do not delete or move published tags to make a failed version appear valid.
 A failure before the remote push leaves no remote version changes. Fix the issue and launch the
 workflow again. If `main` moved during validation, start a new run against current `main`.
 
-After publication, a failed public install or evidence check blocks GitHub Release acceptance.
-Inspect the failing job and its artifacts. Registry publication is not transactional across the two
-packages: one package can exist, and a channel can point to it, while the Release remains unaccepted.
-No automatic tag rollback is attempted. Publish a corrected version with a higher sequence number
-when package content must change.
+All release validation runs before publication. No registry polling or public installation test
+blocks completion after upload. Registry publication is not transactional across the two packages;
+if an upload fails, inspect the failing job before choosing a new version.
 
 The old `prerelease.yml` entry point is removed. All stages use `release.yml`.
 
