@@ -1,5 +1,14 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 import { requiresFullEvidence } from "../../packages/kojo/src/scripts/release/ReleasePolicy.ts";
 import type { ReleaseStage } from "../../packages/kojo/src/scripts/release/ReleaseVersion.ts";
@@ -9,6 +18,7 @@ import {
   assertStableFollowsCandidate,
   parseReleaseVersion,
 } from "../../packages/kojo/src/scripts/release/ReleaseVersion.ts";
+import { stageReleasePackage } from "./stage-release-package.ts";
 
 const repositoryRoot = resolve(import.meta.dir, "../..");
 const registry = (process.env.KOJO_NPM_REGISTRY ?? "https://registry.npmjs.org").replace(/\/$/, "");
@@ -48,7 +58,6 @@ interface ReleaseManifest {
     readonly policy: "core" | "full";
     readonly fullHostEvidence: "required" | "not-required";
   };
-  readonly jsr?: ReadonlyArray<unknown>;
 }
 
 interface RegistryVersion {
@@ -71,10 +80,6 @@ const assertCoordinatedVersion = (version: string): void => {
       throw new Error(
         `${releasePackage.name} declares '${declared}', but the Release train requires '${version}'.`,
       );
-    }
-    const jsrPath = resolve(repositoryRoot, "packages", releasePackage.directory, "jsr.json");
-    if (existsSync(jsrPath) && readJson<PackageJson>(jsrPath).version !== version) {
-      throw new Error(`${releasePackage.name} JSR version differs from ${version}.`);
     }
   }
 
@@ -141,7 +146,6 @@ const assertStableSource = (manifestPath: string, currentRevision: string): void
     "packages/kojo-runtime/runtime-manifest.json",
     ...publicPackages.map(({ directory }) => `packages/${directory}/package.json`),
     ...publicPackages.map(({ directory }) => `packages/${directory}/CHANGELOG.md`),
-    ...publicPackages.map(({ directory }) => `packages/${directory}/jsr.json`),
   ]);
   const unexpected = changedPaths.filter(
     (path) => !allowedFiles.has(path) && !/^docs\/release-notes\/[^/]+\.md$/.test(path),
@@ -163,20 +167,6 @@ const assertStableSource = (manifestPath: string, currentRevision: string): void
     after.version = "<release-version>";
     if (JSON.stringify(before) !== JSON.stringify(after)) {
       throw new Error(`${path} changes more than its version.`);
-    }
-    const jsrPath = `packages/${releasePackage.directory}/jsr.json`;
-    if (existsSync(resolve(repositoryRoot, jsrPath))) {
-      const jsrBefore = repositoryJsonAt<Record<string, unknown>>(
-        candidate.testedRevision,
-        jsrPath,
-      );
-      const jsrAfter = readJson<Record<string, unknown>>(resolve(repositoryRoot, jsrPath));
-      if (jsrBefore.version !== candidate.version || jsrAfter.version !== stable.version)
-        throw new Error(`${jsrPath} has incorrect versions.`);
-      jsrBefore.version = "<release-version>";
-      jsrAfter.version = "<release-version>";
-      if (JSON.stringify(jsrBefore) !== JSON.stringify(jsrAfter))
-        throw new Error(`${jsrPath} changes more than its version.`);
     }
   }
 
@@ -263,10 +253,17 @@ const packRelease = (version: string, archiveDirectory: string): void => {
     throw new Error(`Archive directory '${archiveDirectory}' is not empty.`);
   }
 
-  for (const releasePackage of publicPackages) {
-    run(["bun", "pm", "pack", "--destination", resolve(archiveDirectory), "--quiet"], {
-      cwd: resolve(repositoryRoot, "packages", releasePackage.directory),
-    });
+  const staging = mkdtempSync(resolve(tmpdir(), "kojo-release-pack-"));
+  try {
+    for (const releasePackage of publicPackages) {
+      const target = resolve(staging, releasePackage.directory);
+      stageReleasePackage(repositoryRoot, releasePackage.directory, target);
+      run(["bun", "pm", "pack", "--destination", resolve(archiveDirectory), "--quiet"], {
+        cwd: target,
+      });
+    }
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
   }
 
   const archives = readdirSync(archiveDirectory)
@@ -315,7 +312,7 @@ const createManifest = (
     .filter((entry) => entry.endsWith(".tgz"))
     .map((entry) => resolve(archiveDirectory, entry));
   if (archives.length !== publicPackages.length) {
-    throw new Error("The package directory does not contain exactly four package archives.");
+    throw new Error("The package directory does not contain exactly two package archives.");
   }
   const byName = new Map(
     archives.map((archive) => [packageJsonFromArchive(archive).name, archive]),

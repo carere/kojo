@@ -4,6 +4,7 @@ import type { BootstrapResponse } from "@carere/kojo-client-contracts/contexts/c
 import { RUNNER_PROTOCOL_VERSION } from "@carere/kojo-runner-contracts/contexts/project/contracts/frame";
 
 interface PackageManifest {
+  readonly private?: boolean;
   readonly name: string;
   readonly version: string;
   readonly dependencies?: Readonly<Record<string, string>>;
@@ -86,6 +87,7 @@ if (!sameMembers(kojoDependencies(manifests.runtime), ["@carere/kojo-runner-cont
 }
 
 for (const contract of [manifests.client, manifests.runner]) {
+  if (contract.private !== true) fail(`${contract.name} must remain private`);
   const dependencies = {
     ...contract.dependencies,
     ...contract.devDependencies,

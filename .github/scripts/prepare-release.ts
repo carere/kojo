@@ -59,7 +59,6 @@ if (predecessor !== undefined) {
 }
 // Refuse an already used version before Cocogitto creates immutable tags.
 run(["bun", ".github/scripts/release-train.ts", "assert-unpublished", version]);
-run(["bun", ".github/scripts/release-jsr.ts", "assert-unpublished", version]);
 run(["cog", "bump", "--version", version, "--include-packages"]);
 const revision = run(["git", "rev-parse", "HEAD"]);
 run([

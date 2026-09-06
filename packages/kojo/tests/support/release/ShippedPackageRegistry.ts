@@ -47,27 +47,6 @@ const packedManifest = (tarball: string): PackageManifest => {
   return JSON.parse(result.stdout) as PackageManifest;
 };
 
-const pack = (workspace: string, packagePath: string, destination: string): PackedPackage => {
-  const packageRoot = join(workspace, packagePath);
-  const packageDestination = join(destination, basename(packagePath));
-  mkdirSync(packageDestination, { recursive: true });
-  const result = spawnSync(process.execPath, ["pm", "pack", "--destination", packageDestination], {
-    cwd: packageRoot,
-    encoding: "utf8",
-    env: process.env,
-  });
-  if (result.status !== 0) {
-    throw new Error(`could not pack ${packagePath}:\n${result.stdout}\n${result.stderr}`);
-  }
-  const tarballs = readdirSync(packageDestination).filter((entry) => entry.endsWith(".tgz"));
-  if (tarballs.length !== 1) {
-    throw new Error(`${packagePath} produced ${tarballs.length} package archives, not one`);
-  }
-  const tarball = join(packageDestination, tarballs[0] ?? "");
-  const manifest = packedManifest(tarball);
-  return archivePackage(tarball, manifest);
-};
-
 const archivePackage = (tarball: string, manifest = packedManifest(tarball)): PackedPackage => {
   const bytes = readFileSync(tarball);
   return {
@@ -150,31 +129,36 @@ const packageName = (path: string): string | undefined => {
  * Serve exact `bun pm pack` output as a private scoped registry.
  *
  * The upstream proxy is only for public dependencies. Every `@carere` request must resolve from
- * the four archives built from this checkout, so a registry release cannot hide a missing package.
+ * the two archives built from this checkout, so a registry release cannot hide a missing package.
  */
 export const startShippedPackageRegistry = async (options: {
   readonly workspace: string;
   readonly destination: string;
 }): Promise<ShippedPackageRegistry> => {
-  const packagePaths = [
-    "packages/kojo",
-    "packages/kojo-runtime",
-    "packages/kojo-client-contracts",
-    "packages/kojo-runner-contracts",
-  ] as const;
   const preparedArchives = process.env.KOJO_RELEASE_ARCHIVES;
-  const packed =
-    preparedArchives === undefined
-      ? packagePaths.map((path) => pack(options.workspace, path, options.destination))
-      : readdirSync(preparedArchives)
-          .filter((path) => path.endsWith(".tgz"))
-          .map((path) => archivePackage(join(preparedArchives, path)));
-  const expectedNames = [
-    "@carere/kojo",
-    "@carere/kojo-client-contracts",
-    "@carere/kojo-runner-contracts",
-    "@carere/kojo-runtime",
-  ];
+  const archives = preparedArchives ?? join(options.destination, "packages");
+  if (preparedArchives === undefined) {
+    mkdirSync(options.destination, { recursive: true });
+    const manifest = JSON.parse(
+      readFileSync(join(options.workspace, "packages/kojo/package.json"), "utf8"),
+    );
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(options.workspace, ".github/scripts/release-train.ts"),
+        "pack",
+        manifest.version,
+        archives,
+      ],
+      { cwd: options.workspace, encoding: "utf8", env: process.env },
+    );
+    if (result.status !== 0)
+      throw new Error(`could not pack the Release:\n${result.stdout}\n${result.stderr}`);
+  }
+  const packed = readdirSync(archives)
+    .filter((path) => path.endsWith(".tgz"))
+    .map((path) => archivePackage(join(archives, path)));
+  const expectedNames = ["@carere/kojo", "@carere/kojo-runtime"];
   const actualNames = packed.map((entry) => entry.name).sort();
   if (
     actualNames.length !== expectedNames.length ||
