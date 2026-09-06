@@ -33,3 +33,15 @@ required `Test` status waits for all jobs and fails if any required job fails or
 The registration fixture now links the workspace Runtime and checks both invalid Factory state
 and completed Refresh. This fixes the observed failure; its local duration did not materially
 change (2.39 seconds before, 2.35 seconds after).
+
+## Measured sharded result
+
+[CI run 34050200060](https://github.com/carere/kojo/actions/runs/34050200060) passed all 237
+integration tests across the same 52 files. The extra test verifies shard and required-status
+wiring. All eight shards executed tests; this was not a replay of cached integration results.
+
+Integration steps spanned 134 seconds, versus 358 seconds in the immediately preceding run
+(63% less elapsed time). All CI jobs, including setup and the required `Test` gate, completed in
+168 seconds. The longest shard spent 131 seconds in its test step. Core checks completed in
+62 seconds alongside the shards. Runner load varies, so these are observed times rather than
+a guaranteed deadline. The workflow log contained no remote-cache HTTP 401 errors.
