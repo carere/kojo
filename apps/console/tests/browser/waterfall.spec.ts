@@ -534,7 +534,17 @@ test("a Run with no Phases shows an explicit empty state", async ({ page }) => {
   await expect(page.locator("[data-run-header]")).toBeVisible();
 });
 
-test("a Run catalogue row opens the Waterfall", async ({ page }) => {
+test("a Run catalogue row opens the Waterfall", async ({ page }, testInfo) => {
+  const profiler = await page.context().newCDPSession(page);
+  await profiler.send("Profiler.enable");
+  await profiler.send("Profiler.start");
+  const profileTimer = setTimeout(async () => {
+    const { profile } = await profiler.send("Profiler.stop");
+    await testInfo.attach("navigation-cpu-profile", {
+      body: JSON.stringify(profile),
+      contentType: "application/json",
+    });
+  }, 20_000);
   await page.route("**/api/v1/runs", async (route) => {
     const response = await route.fetch();
     const snapshot = (await response.json()) as { runs: ReadonlyArray<Record<string, unknown>> };
@@ -557,6 +567,7 @@ test("a Run catalogue row opens the Waterfall", async ({ page }) => {
   expect(await originalLink?.evaluate((node) => node.isConnected)).toBe(true);
   await runLink.click();
   await expect(page.locator("[data-waterfall]")).toBeVisible();
+  clearTimeout(profileTimer);
 });
 
 test("a narrow Phase wins hit testing against its wider neighbour", async ({ page }) => {
