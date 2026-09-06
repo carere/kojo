@@ -24,16 +24,25 @@ export interface Acknowledgement {
   readonly run: TriggerOutcome;
 }
 
+interface AcknowledgedEventsService {
+  readonly acks: Effect.Effect<ReadonlyArray<Acknowledgement>>;
+}
+
+const AcknowledgedEventsBase: Context.ServiceClass<
+  AcknowledgedEvents,
+  "kojo/trigger/AcknowledgedEvents",
+  AcknowledgedEventsService
+> = Context.Service<AcknowledgedEvents, AcknowledgedEventsService>()(
+  "kojo/trigger/AcknowledgedEvents",
+);
+
 /**
  * What was acknowledged, readable from a test without a tracker.
  *
  * Separate from `Trigger` for the same reason `RecordedTrace` is separate from `Tracer`: nothing
  * that produces work should be able to read back what every other source was told.
  */
-export class AcknowledgedEvents extends Context.Service<
-  AcknowledgedEvents,
-  { readonly acks: Effect.Effect<ReadonlyArray<Acknowledgement>> }
->()("kojo/trigger/AcknowledgedEvents") {}
+export class AcknowledgedEvents extends AcknowledgedEventsBase {}
 
 /**
  * A source written before the run started, and an acknowledgement nobody has to go and read.

@@ -1,7 +1,9 @@
 import { Effect, Schema } from "effect";
+import type { Activity as ActivityType } from "effect/unstable/workflow/Activity";
 import { WorkspaceError } from "../../../sandbox/models/WorkspaceError.ts";
 import { Workspace } from "../../../sandbox/ports/Workspace.ts";
 import { runBranch } from "../../../shared/models/RunBranch.ts";
+import type { Tracer } from "../../../trace/ports/Tracer.ts";
 import type { Acceptance } from "../../models/Acceptance.ts";
 import { Landing } from "../../models/Landing.ts";
 import { MergeRefused } from "../../models/MergeRefused.ts";
@@ -50,7 +52,11 @@ export const merge = (options: {
    * the repository's and no engine can know it. What the engine owes the author is the door.
    */
   readonly message?: string;
-}) =>
+}): ActivityType<
+  typeof Landing,
+  Schema.Union<readonly [typeof NotAccepted, typeof MergeRefused, typeof WorkspaceError]>,
+  CurrentRun | Tracer | Workspace
+> =>
   code(
     {
       name: options.name ?? "merge",

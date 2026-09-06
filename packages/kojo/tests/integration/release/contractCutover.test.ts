@@ -191,7 +191,7 @@ describe("the Daemon contract cutover", () => {
 
   it("propagates every piped CI test failure before evidence collection", () => {
     const workflow = readFileSync(
-      new URL("../../../../../.github/workflows/ci.yml", import.meta.url),
+      new URL("../../../../../.github/workflows/release-checks.yml", import.meta.url),
       "utf8",
     );
     const pipedRunBlocks = [...workflow.matchAll(/run: \|\n((?: {10}.*\n)+)/g)]
@@ -205,7 +205,7 @@ describe("the Daemon contract cutover", () => {
 
   it("uploads the hidden core release evidence from its exact collection path", () => {
     const workflow = readFileSync(
-      new URL("../../../../../.github/workflows/ci.yml", import.meta.url),
+      new URL("../../../../../.github/workflows/release-checks.yml", import.meta.url),
       "utf8",
     );
     const upload = namedWorkflowStep(workflow, "Upload core release evidence");
@@ -217,7 +217,7 @@ describe("the Daemon contract cutover", () => {
 
   it("uploads the hidden complete release evidence from its exact accepted path", () => {
     const workflow = readFileSync(
-      new URL("../../../../../.github/workflows/ci.yml", import.meta.url),
+      new URL("../../../../../.github/workflows/release-checks.yml", import.meta.url),
       "utf8",
     );
     const upload = namedWorkflowStep(workflow, "Upload complete breaking release evidence");
@@ -229,7 +229,7 @@ describe("the Daemon contract cutover", () => {
 
   it("installs locked dependencies before it accepts complete release evidence", () => {
     const workflow = readFileSync(
-      new URL("../../../../../.github/workflows/ci.yml", import.meta.url),
+      new URL("../../../../../.github/workflows/release-checks.yml", import.meta.url),
       "utf8",
     );
     const job = namedWorkflowJob(workflow, "complete-release-evidence");
@@ -255,7 +255,7 @@ describe("the Daemon contract cutover", () => {
 
   it("installs the exact repository tool pins for both Linux Host evidence jobs", () => {
     const workflow = readFileSync(
-      new URL("../../../../../.github/workflows/ci.yml", import.meta.url),
+      new URL("../../../../../.github/workflows/release-checks.yml", import.meta.url),
       "utf8",
     );
 

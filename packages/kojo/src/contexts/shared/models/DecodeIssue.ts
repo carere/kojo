@@ -1,4 +1,4 @@
-import { Schema, type SchemaError, SchemaIssue } from "effect";
+import { Schema, SchemaIssue } from "effect";
 
 /** Built once: the formatter walks the tree and accumulates `Pointer` paths, so we do not. */
 const toStandardIssues = SchemaIssue.makeFormatterStandardSchemaV1();
@@ -21,7 +21,7 @@ export class DecodeIssue extends Schema.Class<DecodeIssue>("DecodeIssue")({
   path: Schema.Array(Schema.String),
   message: Schema.String,
 }) {
-  static fromSchemaError(error: SchemaError.SchemaError): ReadonlyArray<DecodeIssue> {
+  static fromSchemaError(error: Schema.SchemaError): ReadonlyArray<DecodeIssue> {
     return toStandardIssues(error.issue).issues.map(
       (issue) =>
         new DecodeIssue({

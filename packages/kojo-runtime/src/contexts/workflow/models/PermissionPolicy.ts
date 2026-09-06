@@ -10,7 +10,15 @@ import { Schema } from "effect";
  * respect to the **repository**, never with respect to its own report — the always-writable list
  * below is what keeps a scout able to record its findings.
  */
-export const WriteScope = Schema.TaggedUnion({
+export const WriteScope: Schema.TaggedUnion<{
+  readonly LimitedTo: Schema.TaggedStruct<
+    "LimitedTo",
+    {
+      readonly patterns: Schema.$Array<Schema.String>;
+    }
+  >;
+  readonly Unrestricted: Schema.TaggedStruct<"Unrestricted", Record<never, never>>;
+}> = Schema.TaggedUnion({
   /** No list at all: anything the protected paths do not bar. */
   Unrestricted: {},
   /** Only these patterns. Naming a path here is also what unlocks a protected one. */

@@ -138,11 +138,11 @@ const status = Command.make(
   "status",
   {
     runId: Argument.string("run"),
-    details: Flag.boolean("details"),
-    follow: Flag.boolean("follow"),
-    wait: Flag.boolean("wait"),
+    details: Flag.boolean("details").pipe(Flag.withDefault(false)),
+    follow: Flag.boolean("follow").pipe(Flag.withDefault(false)),
+    wait: Flag.boolean("wait").pipe(Flag.withDefault(false)),
     timeout: Flag.string("timeout").pipe(Flag.optional),
-    json: Flag.boolean("json"),
+    json: Flag.boolean("json").pipe(Flag.withDefault(false)),
   },
   Effect.fn(function* ({ runId, details, follow, wait, timeout, json }) {
     const timeoutText = Option.getOrUndefined(timeout);
@@ -182,9 +182,9 @@ const cancel = Command.make(
   "cancel",
   {
     runId: Argument.string("run"),
-    wait: Flag.boolean("wait"),
+    wait: Flag.boolean("wait").pipe(Flag.withDefault(false)),
     timeout: Flag.string("timeout").pipe(Flag.optional),
-    json: Flag.boolean("json"),
+    json: Flag.boolean("json").pipe(Flag.withDefault(false)),
   },
   Effect.fn(function* ({ runId, wait, timeout, json }) {
     if (!wait && Option.isSome(timeout)) {
@@ -279,8 +279,10 @@ const resume = Command.make(
     runId: Argument.string("run"),
     actionId: Flag.string("retry-uncertain"),
     reason: Flag.string("reason"),
-    possibleDuplicationAcknowledged: Flag.boolean("acknowledge-possible-duplication"),
-    json: Flag.boolean("json"),
+    possibleDuplicationAcknowledged: Flag.boolean("acknowledge-possible-duplication").pipe(
+      Flag.withDefault(false),
+    ),
+    json: Flag.boolean("json").pipe(Flag.withDefault(false)),
   },
   Effect.fn(function* ({ runId, actionId, reason, possibleDuplicationAcknowledged, json }) {
     yield* Effect.try({

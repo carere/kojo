@@ -14,6 +14,30 @@ export interface SandboxResourceObserver {
   readonly unresolved: (kind: "sandbox" | "worktree", reason: string) => Effect.Effect<void>;
 }
 
+interface SandboxSourceService {
+  /**
+   * Build the container, and release it when the surrounding scope closes.
+   *
+   * Scoped, and that is the whole tear-down-and-rebuild decision. Idempotent by construction: the
+   * request carries the branch and nothing else that could differ between two acquisitions, so
+   * building it twice is building the same thing twice (architecture.md §4, rule 2).
+   */
+  readonly acquire: (
+    request: SandboxRequest,
+    observer?: SandboxResourceObserver,
+  ) => Effect.Effect<AcquiredSandbox, SandboxError, Scope.Scope>;
+  /** Read the worktree as it stands. An observation; the guard decides what it means. */
+  readonly worktree: (sandbox: AcquiredSandbox) => Effect.Effect<WorktreeState, SandboxError>;
+  /** How a phase inside this sandbox touches files and runs commands. */
+  readonly workspace: (sandbox: SandboxHandle) => Layer.Layer<Workspace, SandboxError>;
+}
+
+const SandboxSourceBase: Context.ServiceClass<
+  SandboxSource,
+  "kojo/sandbox/SandboxSource",
+  SandboxSourceService
+> = Context.Service<SandboxSource, SandboxSourceService>()("kojo/sandbox/SandboxSource");
+
 /**
  * Where a sandbox comes from.
  *
@@ -31,23 +55,4 @@ export interface SandboxResourceObserver {
  * `Layer` rather than a service keeps the adapter's own dependencies — a real filesystem, a process
  * spawner — inside the adapter, so `sandboxed` requires none of them and a unit test needs no disk.
  */
-export class SandboxSource extends Context.Service<
-  SandboxSource,
-  {
-    /**
-     * Build the container, and release it when the surrounding scope closes.
-     *
-     * Scoped, and that is the whole tear-down-and-rebuild decision. Idempotent by construction: the
-     * request carries the branch and nothing else that could differ between two acquisitions, so
-     * building it twice is building the same thing twice (architecture.md §4, rule 2).
-     */
-    readonly acquire: (
-      request: SandboxRequest,
-      observer?: SandboxResourceObserver,
-    ) => Effect.Effect<AcquiredSandbox, SandboxError, Scope.Scope>;
-    /** Read the worktree as it stands. An observation; the guard decides what it means. */
-    readonly worktree: (sandbox: AcquiredSandbox) => Effect.Effect<WorktreeState, SandboxError>;
-    /** How a phase inside this sandbox touches files and runs commands. */
-    readonly workspace: (sandbox: SandboxHandle) => Layer.Layer<Workspace, SandboxError>;
-  }
->()("kojo/sandbox/SandboxSource") {}
+export class SandboxSource extends SandboxSourceBase {}

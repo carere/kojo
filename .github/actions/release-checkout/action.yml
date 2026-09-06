@@ -1,0 +1,20 @@
+name: Checkout prepared Release
+description: Load the exact version commit from this workflow run's source bundle.
+inputs:
+  revision:
+    required: true
+    description: Prepared Release commit
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      with:
+        name: release-source
+        path: ${{ runner.temp }}/release-source
+    - shell: bash
+      env:
+        RELEASE_REVISION: ${{ inputs.revision }}
+      run: |
+        git fetch "$RUNNER_TEMP/release-source/source.bundle" 'refs/tags/*:refs/tags/*'
+        git checkout --detach "$RELEASE_REVISION"
+        test "$(git rev-parse HEAD)" = "$RELEASE_REVISION"

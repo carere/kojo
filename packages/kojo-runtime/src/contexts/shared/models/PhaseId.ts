@@ -1,7 +1,9 @@
 import { Schema } from "effect";
 
 /** Identifies one phase of one run. Branded so it cannot be mixed with a run or sandbox id. */
-export const PhaseId = Schema.String.pipe(Schema.brand("PhaseId"));
+export const PhaseId: Schema.brand<Schema.String, "PhaseId"> = Schema.String.pipe(
+  Schema.brand("PhaseId"),
+);
 
 export type PhaseId = typeof PhaseId.Type;
 

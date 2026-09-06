@@ -91,7 +91,7 @@ const template = Flag.choice("template", templateNames).pipe(
 const describe = (outcome: "created" | "kept", path: string): string =>
   `${outcome === "created" ? "created" : "kept   "}  ${path}`;
 
-/** `@carere/kojo-runtime@0.0.0, effect@4.0.0-beta.106` — the entries, as one line. */
+/** `@carere/kojo-runtime@0.0.0, effect@4.0.0-rc.112` — the entries, as one line. */
 const listing = (declared: ReadonlyArray<Declared>): string =>
   declared.map((entry) => `${entry.name}@${entry.specifier}`).join(", ");
 

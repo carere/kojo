@@ -1,19 +1,19 @@
 import { Schema } from "effect";
 import { AgentSessionId } from "../../agent/models/AgentSessionId.ts";
 
-/**
- * The agent half of a phase row.
- *
- * A nested block rather than six loose columns on `PhaseRecord`, because the six are present
- * together or not at all: a code phase has none of them, and an agent phase that got an answer has
- * all of them. Making that "all or nothing" a shape means nobody has to read a row where the model
- * is set and the session is null and guess what happened.
- *
- * `resumed` is on the row rather than derived from the session id, because after the fact the two
- * are not the same question. A session id says *which* conversation; `resumed` says whether this
- * turn cost a cold start — which is what someone reading a slow run wants to know.
- */
-export class AgentCallRecord extends Schema.Class<AgentCallRecord>("AgentCallRecord")({
+const AgentCallRecordBase: Schema.Class<
+  AgentCallRecord,
+  Schema.Struct<{
+    readonly agent: Schema.String;
+    readonly model: Schema.String;
+    readonly session: Schema.brand<Schema.String, "AgentSessionId">;
+    readonly resumed: Schema.Boolean;
+    readonly tokensIn: Schema.Finite;
+    readonly tokensOut: Schema.Finite;
+    readonly contextTokens: Schema.optionalKey<Schema.Finite>;
+  }>,
+  Record<never, never>
+> = Schema.Class<AgentCallRecord>("AgentCallRecord")({
   /** The roster name — who was asked, not which binary answered. */
   agent: Schema.String,
   model: Schema.String,
@@ -33,4 +33,18 @@ export class AgentCallRecord extends Schema.Class<AgentCallRecord>("AgentCallRec
    * empty context, which is the one thing it never is.
    */
   contextTokens: Schema.optionalKey(Schema.Finite),
-}) {}
+});
+
+/**
+ * The agent half of a phase row.
+ *
+ * A nested block rather than six loose columns on `PhaseRecord`, because the six are present
+ * together or not at all: a code phase has none of them, and an agent phase that got an answer has
+ * all of them. Making that "all or nothing" a shape means nobody has to read a row where the model
+ * is set and the session is null and guess what happened.
+ *
+ * `resumed` is on the row rather than derived from the session id, because after the fact the two
+ * are not the same question. A session id says *which* conversation; `resumed` says whether this
+ * turn cost a cold start — which is what someone reading a slow run wants to know.
+ */
+export class AgentCallRecord extends AgentCallRecordBase {}

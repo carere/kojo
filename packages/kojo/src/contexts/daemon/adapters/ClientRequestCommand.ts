@@ -52,11 +52,11 @@ export const status = Command.make(
   "status",
   {
     request: Flag.string("request").pipe(Flag.optional),
-    details: Flag.boolean("details"),
-    follow: Flag.boolean("follow"),
-    wait: Flag.boolean("wait"),
+    details: Flag.boolean("details").pipe(Flag.withDefault(false)),
+    follow: Flag.boolean("follow").pipe(Flag.withDefault(false)),
+    wait: Flag.boolean("wait").pipe(Flag.withDefault(false)),
     timeout: Flag.string("timeout").pipe(Flag.optional),
-    json: Flag.boolean("json"),
+    json: Flag.boolean("json").pipe(Flag.withDefault(false)),
   },
   Effect.fn(function* ({ request, details, follow, wait, timeout, json }) {
     if (follow && wait) return yield* clientExit(2, "--follow and --wait cannot be combined");

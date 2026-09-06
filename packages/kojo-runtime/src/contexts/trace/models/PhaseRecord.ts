@@ -8,24 +8,42 @@ import { RepoEffect } from "./RepoEffect.ts";
 import { Verification } from "./Verification.ts";
 
 /** The three kinds of phase a workflow is made of. A sandbox is a scope, so it is not here. */
-export const PhaseKind = Schema.Literals(["actor", "code", "agent"]);
+export const PhaseKind: Schema.Literals<readonly ["actor", "code", "agent"]> = Schema.Literals([
+  "actor",
+  "code",
+  "agent",
+]);
 export type PhaseKind = typeof PhaseKind.Type;
 
 /**
  * How a phase ended. `interrupted` is its own outcome rather than a flavour of failure, because a
  * phase interrupted at a gate did nothing wrong and must not read as a fault.
  */
-export const PhaseOutcome = Schema.Literals(["succeeded", "failed", "interrupted"]);
+export const PhaseOutcome: Schema.Literals<readonly ["succeeded", "failed", "interrupted"]> =
+  Schema.Literals(["succeeded", "failed", "interrupted"]);
 export type PhaseOutcome = typeof PhaseOutcome.Type;
 
-/**
- * Everything known about one phase, written once, on exit, on every path.
- *
- * This is the canonical wide record of the trace. A phase with no record is a phase nobody can
- * debug, and interruption is precisely when that matters — so the write happens on every exit
- * path, not at the end of the happy one.
- */
-export class PhaseRecord extends Schema.Class<PhaseRecord>("PhaseRecord")({
+const PhaseRecordBase: Schema.Class<
+  PhaseRecord,
+  Schema.Struct<{
+    readonly runId: Schema.brand<Schema.String, "RunId">;
+    readonly phaseId: Schema.brand<Schema.String, "PhaseId">;
+    readonly name: Schema.String;
+    readonly description: Schema.String;
+    readonly kind: Schema.Literals<readonly ["actor", "code", "agent"]>;
+    readonly outcome: Schema.Literals<readonly ["succeeded", "failed", "interrupted"]>;
+    readonly attempt: Schema.Finite;
+    readonly startedAt: Schema.Finite;
+    readonly endedAt: Schema.Finite;
+    readonly sandboxId: Schema.optionalKey<Schema.brand<Schema.String, "SandboxId">>;
+    readonly errorTag: Schema.optionalKey<Schema.String>;
+    readonly breaches: Schema.optionalKey<Schema.$Array<typeof PathRollback>>;
+    readonly repo: Schema.optionalKey<typeof RepoEffect>;
+    readonly agent: Schema.optionalKey<typeof AgentCallRecord>;
+    readonly verification: Schema.optionalKey<typeof Verification>;
+  }>,
+  Record<never, never>
+> = Schema.Class<PhaseRecord>("PhaseRecord")({
   runId: RunId,
   phaseId: PhaseId,
   name: Schema.String,
@@ -73,7 +91,16 @@ export class PhaseRecord extends Schema.Class<PhaseRecord>("PhaseRecord")({
    * decoding the envelope is already a verification; absent on a code phase, which grades nothing.
    */
   verification: Schema.optionalKey(Verification),
-}) {
+});
+
+/**
+ * Everything known about one phase, written once, on exit, on every path.
+ *
+ * This is the canonical wide record of the trace. A phase with no record is a phase nobody can
+ * debug, and interruption is precisely when that matters — so the write happens on every exit
+ * path, not at the end of the happy one.
+ */
+export class PhaseRecord extends PhaseRecordBase {
   get durationMillis(): number {
     return this.endedAt - this.startedAt;
   }

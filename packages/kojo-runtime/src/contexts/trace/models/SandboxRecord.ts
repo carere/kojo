@@ -10,22 +10,27 @@ import { SandboxId } from "../../shared/models/SandboxId.ts";
  * from inside the scope. A row carrying it says *this container was torn down because the run
  * stopped to wait for a human*, which is the single most valuable fact this table holds.
  */
-export const SandboxOutcome = Schema.Literals(["released", "interrupted", "failed"]);
+export const SandboxOutcome: Schema.Literals<readonly ["released", "interrupted", "failed"]> =
+  Schema.Literals(["released", "interrupted", "failed"]);
 export type SandboxOutcome = typeof SandboxOutcome.Type;
 
-/**
- * Everything known about one **acquisition** of one sandbox, written once, when it is released.
- *
- * One row per acquisition, deliberately. A run that suspends at a gate and resumes on Monday builds
- * its container twice, and both are facts: the first says how long the work ran before it stopped,
- * the second says what the rebuild cost. Reusing one row for both would hide precisely the thing
- * this design's central decision needs to be observable.
- *
- * This row **is** the sandbox's wide event. There is deliberately no `sandbox_start` /
- * `sandbox_end` pair — a pair of thin rows for one lifecycle is the pattern the whole trace design
- * exists to avoid.
- */
-export class SandboxRecord extends Schema.Class<SandboxRecord>("SandboxRecord")({
+const SandboxRecordBase: Schema.Class<
+  SandboxRecord,
+  Schema.Struct<{
+    readonly runId: Schema.brand<Schema.String, "RunId">;
+    readonly sandboxId: Schema.brand<Schema.String, "SandboxId">;
+    readonly name: Schema.String;
+    readonly provider: Schema.String;
+    readonly kind: Schema.Literals<readonly ["bind-mount", "isolated", "none"]>;
+    readonly branch: Schema.String;
+    readonly worktreePath: Schema.String;
+    readonly environment: Schema.$Record<Schema.String, Schema.String>;
+    readonly acquiredAt: Schema.Finite;
+    readonly releasedAt: Schema.Finite;
+    readonly outcome: Schema.Literals<readonly ["released", "interrupted", "failed"]>;
+  }>,
+  Record<never, never>
+> = Schema.Class<SandboxRecord>("SandboxRecord")({
   runId: RunId,
   sandboxId: SandboxId,
   /** The scope's name as the author wrote it. Two lanes of one factory are told apart by it. */
@@ -54,7 +59,21 @@ export class SandboxRecord extends Schema.Class<SandboxRecord>("SandboxRecord")(
    */
   releasedAt: Schema.Finite,
   outcome: SandboxOutcome,
-}) {
+});
+
+/**
+ * Everything known about one **acquisition** of one sandbox, written once, when it is released.
+ *
+ * One row per acquisition, deliberately. A run that suspends at a gate and resumes on Monday builds
+ * its container twice, and both are facts: the first says how long the work ran before it stopped,
+ * the second says what the rebuild cost. Reusing one row for both would hide precisely the thing
+ * this design's central decision needs to be observable.
+ *
+ * This row **is** the sandbox's wide event. There is deliberately no `sandbox_start` /
+ * `sandbox_end` pair — a pair of thin rows for one lifecycle is the pattern the whole trace design
+ * exists to avoid.
+ */
+export class SandboxRecord extends SandboxRecordBase {
   /** How long the sandbox was available to the run. Rebuild cost is the gap between two rows. */
   get lifetimeMillis(): number {
     return this.releasedAt - this.acquiredAt;

@@ -1,19 +1,17 @@
 import { Schema } from "effect";
 
-/**
- * What the worktree actually is at the moment a sandbox scope is entered — read, never assumed.
- *
- * "The branch is the durable state" is the central claim of this design, and the only thing that
- * makes it true is that somebody checks. Sandcastle's worktree refresh is best-effort and has
- * **four** silent skip paths — HEAD not on the branch, a fetch that failed, local divergence from
- * origin, and a dirty worktree — and every one of them reuses the worktree as it stands behind a log
- * line. The first is exactly the state a suspended run leaves. So Kojo reads the tree itself on
- * every acquisition instead of trusting that a refresh happened.
- *
- * Every field is an observation. What is *acceptable* is a separate question, and it lives in
- * `guards/worktreeIsUsable.ts`, so the reading cannot quietly become the policy.
- */
-export class WorktreeState extends Schema.Class<WorktreeState>("WorktreeState")({
+const WorktreeStateBase: Schema.Class<
+  WorktreeState,
+  Schema.Struct<{
+    readonly head: Schema.String;
+    readonly detached: Schema.Boolean;
+    readonly modified: Schema.Boolean;
+    readonly tracked: Schema.Boolean;
+    readonly behind: Schema.Finite;
+    readonly ahead: Schema.Finite;
+  }>,
+  Record<never, never>
+> = Schema.Class<WorktreeState>("WorktreeState")({
   /** The branch HEAD points at. Empty when HEAD is detached — see `detached`. */
   head: Schema.String,
   /** A detached HEAD names no branch, so `head` cannot carry the fact and this field does. */
@@ -32,4 +30,19 @@ export class WorktreeState extends Schema.Class<WorktreeState>("WorktreeState")(
   behind: Schema.Finite,
   /** Commits the worktree has that `origin/<branch>` does not. This is the run doing its job. */
   ahead: Schema.Finite,
-}) {}
+});
+
+/**
+ * What the worktree actually is at the moment a sandbox scope is entered — read, never assumed.
+ *
+ * "The branch is the durable state" is the central claim of this design, and the only thing that
+ * makes it true is that somebody checks. Sandcastle's worktree refresh is best-effort and has
+ * **four** silent skip paths — HEAD not on the branch, a fetch that failed, local divergence from
+ * origin, and a dirty worktree — and every one of them reuses the worktree as it stands behind a log
+ * line. The first is exactly the state a suspended run leaves. So Kojo reads the tree itself on
+ * every acquisition instead of trusting that a refresh happened.
+ *
+ * Every field is an observation. What is *acceptable* is a separate question, and it lives in
+ * `guards/worktreeIsUsable.ts`, so the reading cannot quietly become the policy.
+ */
+export class WorktreeState extends WorktreeStateBase {}

@@ -51,7 +51,27 @@ export const workflow = <
     readonly trigger?: Layer.Layer<Trigger>;
   },
   body: Body,
-) => {
+): {
+  readonly definition: Workflow.Workflow<Tag, Schema.Struct<Schema.Struct.Fields>, Success, Error>;
+  readonly layer: Layer.Layer<
+    never,
+    never,
+    | BuildInfo
+    | Tracer
+    | Exclude<
+        EffectContext<ReturnType<Body>>,
+        | CurrentRun
+        | Workflow.Execution<Tag>
+        | Scope.Scope
+        | WorkflowEngine.WorkflowEngine
+        | WorkflowEngine.WorkflowInstance
+      >
+  >;
+  readonly authoredPayloadSchema: Schema.Struct<Schema.Struct.Fields> | Schema.Top;
+  readonly authoredIdempotencyKey: (payload: unknown) => string;
+  readonly encodeEnginePayload: (payload: unknown) => Record<string, unknown>;
+  readonly trigger?: Layer.Layer<Trigger, never, never>;
+} => {
   type AuthoredPayload = Payload extends Schema.Struct.Fields
     ? Schema.Struct.Type<Payload>
     : Payload["Type"];

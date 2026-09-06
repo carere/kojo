@@ -36,7 +36,7 @@ import { DaemonExecutionRepository } from "../contexts/workflow/ports/DaemonExec
 
 /** Stable Project Runner composition entry point. Importing it cannot execute a Workflow. */
 /** @public */
-export const runnerEntryPointVersion = RUNNER_PROTOCOL_VERSION;
+export const runnerEntryPointVersion: 1 = RUNNER_PROTOCOL_VERSION;
 
 export interface BoundRegistrationRequest {
   readonly registrationVersion: 1;

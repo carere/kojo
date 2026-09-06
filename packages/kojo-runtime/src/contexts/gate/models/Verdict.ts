@@ -1,5 +1,29 @@
 import { Schema } from "effect";
 
+const VerdictBase: Schema.Class<
+  Verdict,
+  Schema.Struct<{
+    readonly choice: Schema.String;
+    readonly reason: Schema.String;
+    readonly answerer: Schema.String;
+    readonly answeredAt: Schema.Finite;
+  }>,
+  Record<never, never>
+> = Schema.Class<Verdict>("Verdict")({
+  choice: Schema.String,
+  reason: Schema.String,
+  /** Who the verdict is attributed to, and the reason a gate is worth auditing at all. */
+  answerer: Schema.String,
+  /**
+   * When the answer was given, by the answering process's clock.
+   *
+   * Carried on the verdict rather than measured when the run wakes up, because a runner picks up
+   * an answer written by another process on a poll interval. Measuring at resume would report that
+   * engine lag as human latency.
+   */
+  answeredAt: Schema.Finite,
+});
+
 /**
  * The answer to a gate — the choice the human made, and the reason they gave.
  *
@@ -13,23 +37,10 @@ import { Schema } from "effect";
  * `reason` is the answerer's own words. A rejected fix is re-prompted from it, so an empty reason
  * costs the next attempt its only clue.
  */
-export class Verdict extends Schema.Class<Verdict>("Verdict")({
-  choice: Schema.String,
-  reason: Schema.String,
-  /** Who the verdict is attributed to, and the reason a gate is worth auditing at all. */
-  answerer: Schema.String,
-  /**
-   * When the answer was given, by the answering process's clock.
-   *
-   * Carried on the verdict rather than measured when the run wakes up, because a runner picks up
-   * an answer written by another process on a poll interval. Measuring at resume would report that
-   * engine lag as human latency.
-   */
-  answeredAt: Schema.Finite,
-}) {}
+export class Verdict extends VerdictBase {}
 
 /** What a gate settles as: a verdict, or nothing because the deadline passed first. */
-export const Expired = Schema.Literal("expired");
+export const Expired: Schema.Literal<"expired"> = Schema.Literal("expired");
 
 /**
  * The one success schema the deadline race resolves to.
@@ -38,5 +49,6 @@ export const Expired = Schema.Literal("expired");
  * expiry have to inhabit one type. A struct against a string literal keeps the union unambiguous
  * to decode.
  */
-export const Settlement = Schema.Union([Verdict, Expired]);
+export const Settlement: Schema.Union<readonly [typeof Verdict, Schema.Literal<"expired">]> =
+  Schema.Union([Verdict, Expired]);
 export type Settlement = typeof Settlement.Type;

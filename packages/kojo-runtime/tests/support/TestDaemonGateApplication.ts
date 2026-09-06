@@ -1,4 +1,4 @@
-import { Clock, Effect, type SchemaError } from "effect";
+import { Clock, Effect, type Schema } from "effect";
 import { DurableDeferred, type WorkflowEngine } from "effect/unstable/workflow";
 
 import { Verdict } from "../../src/contexts/gate/models/Verdict.ts";
@@ -23,7 +23,7 @@ const deferredFor = (deferredName: string) =>
  */
 export const parseToken = (
   input: string,
-): Effect.Effect<DurableDeferred.TokenParsed, SchemaError.SchemaError> =>
+): Effect.Effect<DurableDeferred.TokenParsed, Schema.SchemaError> =>
   decodeUnknown(DurableDeferred.TokenParsed.FromString)(input);
 
 /**

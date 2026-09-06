@@ -2,6 +2,15 @@ import { Context, type Effect } from "effect";
 import type { AgentDefinition } from "../models/AgentDefinition.ts";
 import type { RosterError } from "../models/RosterError.ts";
 
+interface RosterService {
+  /** Every agent this roster defines, in the order the roster declares them. */
+  readonly names: ReadonlyArray<string>;
+  readonly definition: (name: string) => Effect.Effect<AgentDefinition, RosterError>;
+}
+
+const RosterBase: Context.ServiceClass<Roster, "kojo/agent/Roster", RosterService> =
+  Context.Service<Roster, RosterService>()("kojo/agent/Roster");
+
 /**
  * Who the agents are.
  *
@@ -15,11 +24,4 @@ import type { RosterError } from "../models/RosterError.ts";
  * not define, and that is a real failure at a real call site rather than something the loader could
  * have caught.
  */
-export class Roster extends Context.Service<
-  Roster,
-  {
-    /** Every agent this roster defines, in the order the roster declares them. */
-    readonly names: ReadonlyArray<string>;
-    readonly definition: (name: string) => Effect.Effect<AgentDefinition, RosterError>;
-  }
->()("kojo/agent/Roster") {}
+export class Roster extends RosterBase {}

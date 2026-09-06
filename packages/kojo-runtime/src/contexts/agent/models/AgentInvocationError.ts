@@ -1,10 +1,13 @@
 import { Schema } from "effect";
+import type { YieldableError } from "effect/Cause";
 
 /**
  * Why a call never produced an answer. Named, because the trace groups on it and the three read
  * very differently to whoever is looking.
  */
-export const AgentInvocationFault = Schema.Literals([
+export const AgentInvocationFault: Schema.Literals<
+  readonly ["unknown-agent", "resume-unsupported", "provider-failed"]
+> = Schema.Literals([
   /** No such agent. A roster mistake, and re-prompting cannot fix it. */
   "unknown-agent",
   /** A session was asked for and this invoker cannot re-enter one. See `AgentCapabilities`. */
@@ -14,6 +17,27 @@ export const AgentInvocationFault = Schema.Literals([
 ]);
 export type AgentInvocationFault = typeof AgentInvocationFault.Type;
 
+const AgentInvocationErrorBase: Schema.Class<
+  AgentInvocationError,
+  Schema.TaggedStruct<
+    "AgentInvocationError",
+    {
+      readonly agent: Schema.String;
+      readonly fault: Schema.Literals<
+        readonly ["unknown-agent", "resume-unsupported", "provider-failed"]
+      >;
+      readonly reason: Schema.String;
+      readonly cause: Schema.Defect;
+    }
+  >,
+  YieldableError
+> = Schema.TaggedError<AgentInvocationError>()("AgentInvocationError", {
+  agent: Schema.String,
+  fault: AgentInvocationFault,
+  reason: Schema.String,
+  cause: Schema.Defect(),
+});
+
 /**
  * The agent was never asked, or was asked and did not answer.
  *
@@ -22,12 +46,4 @@ export type AgentInvocationFault = typeof AgentInvocationFault.Type;
  * correction loop's input, and a call that never happened is not something a better prompt fixes.
  * One error meaning both would make that distinction a string comparison.
  */
-export class AgentInvocationError extends Schema.TaggedError<AgentInvocationError>()(
-  "AgentInvocationError",
-  {
-    agent: Schema.String,
-    fault: AgentInvocationFault,
-    reason: Schema.String,
-    cause: Schema.Defect(),
-  },
-) {}
+export class AgentInvocationError extends AgentInvocationErrorBase {}

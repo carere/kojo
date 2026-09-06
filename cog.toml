@@ -4,8 +4,8 @@ tag_prefix = "v"
 pre_bump_hooks = []
 pre_package_bump_hooks = ["bun ../../.github/scripts/cocogitto-package-version.ts {{version}}"]
 # A bump owns versions, changelogs, its commit, and Git tags. It does not publish packages or push
-# refs. The operator inspects the result and pushes the commit and tags atomically. Publication then
-# runs in the manual prerelease or release workflow, where Host validation and promotion can stop
+# refs. The release workflow validates the result and pushes the commit and tags atomically.
+# Publication runs in that workflow, where Host validation and promotion can stop
 # without making `latest` point to an invalid package set.
 post_bump_hooks = []
 

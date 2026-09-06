@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { canonicalPackageName } from "../models/canonicalPackageName.ts";
 import type { ResolvedPackage } from "../models/ResolvedPackage.ts";
 
 /**
@@ -33,7 +34,7 @@ const packageAt = (directory: string): ResolvedPackage | undefined => {
     const record = parsed as Record<string, unknown>;
     if (typeof record.name !== "string" || typeof record.version !== "string") return undefined;
     return {
-      name: record.name,
+      name: canonicalPackageName(record.name),
       version: record.version,
       directory: dirname(realpathSync(manifest)),
     };

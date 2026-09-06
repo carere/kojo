@@ -3,6 +3,28 @@ import { PhaseId } from "../../shared/models/PhaseId.ts";
 import { SandboxId } from "../../shared/models/SandboxId.ts";
 import { PhaseKind } from "./PhaseRecord.ts";
 
+const InFlightPhaseBase: Schema.Class<
+  InFlightPhase,
+  Schema.Struct<{
+    readonly phaseId: Schema.brand<Schema.String, "PhaseId">;
+    readonly name: Schema.String;
+    readonly kind: Schema.Literals<readonly ["actor", "code", "agent"]>;
+    readonly attempt: Schema.Finite;
+    readonly startedAt: Schema.Finite;
+    readonly sandboxId: Schema.optionalKey<Schema.brand<Schema.String, "SandboxId">>;
+  }>,
+  Record<never, never>
+> = Schema.Class<InFlightPhase>("InFlightPhase")({
+  phaseId: PhaseId,
+  name: Schema.String,
+  kind: PhaseKind,
+  /** Which attempt this is. A retried phase re-enters, so the number moves while the name does not. */
+  attempt: Schema.Finite,
+  startedAt: Schema.Finite,
+  /** The acquisition it is running inside, absent on the host — the same reading `PhaseRecord` takes. */
+  sandboxId: Schema.optionalKey(SandboxId),
+});
+
 /**
  * The phase a run is executing **right now**, held on the run row.
  *
@@ -26,13 +48,4 @@ import { PhaseKind } from "./PhaseRecord.ts";
  * `spansOf`, and in the held row `rowsOf` derives from `sandboxId` — would have to tighten from
  * *terminal* to *executing*. Whoever adds such a writer owns both.
  */
-export class InFlightPhase extends Schema.Class<InFlightPhase>("InFlightPhase")({
-  phaseId: PhaseId,
-  name: Schema.String,
-  kind: PhaseKind,
-  /** Which attempt this is. A retried phase re-enters, so the number moves while the name does not. */
-  attempt: Schema.Finite,
-  startedAt: Schema.Finite,
-  /** The acquisition it is running inside, absent on the host — the same reading `PhaseRecord` takes. */
-  sandboxId: Schema.optionalKey(SandboxId),
-}) {}
+export class InFlightPhase extends InFlightPhaseBase {}

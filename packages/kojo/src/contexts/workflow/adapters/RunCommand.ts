@@ -40,8 +40,8 @@ const list = Command.make(
     projectId: Flag.string("project").pipe(Flag.optional),
     limit: Flag.integer("limit").pipe(Flag.withDefault(50)),
     cursor: Flag.integer("cursor").pipe(Flag.optional),
-    all: Flag.boolean("all"),
-    json: Flag.boolean("json"),
+    all: Flag.boolean("all").pipe(Flag.withDefault(false)),
+    json: Flag.boolean("json").pipe(Flag.withDefault(false)),
   },
   Effect.fn(function* ({ projectId, limit, cursor, all, json }) {
     if (limit < 1) return yield* clientExit(2, "--limit must be a positive integer");

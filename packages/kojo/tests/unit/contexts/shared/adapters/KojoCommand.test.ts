@@ -85,9 +85,10 @@ describe("the kojo command", () => {
         const { outcome } = yield* runCli(argv);
         expect(Result.isFailure(outcome), argv.join(" ")).toBe(true);
         if (Result.isFailure(outcome)) {
-          expect(outcome.failure._tag, `${argv.join(" ")} did not reach its handler`).toBe(
-            "CommandFailed",
-          );
+          expect(
+            outcome.failure._tag,
+            `${argv.join(" ")} did not reach its handler: ${JSON.stringify(outcome.failure)}`,
+          ).toBe("CommandFailed");
         }
       }
     }),

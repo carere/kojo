@@ -23,8 +23,8 @@ Kojo requires Bun.
 The current release is a breaking cutover from repository-local execution to one per-user Daemon.
 See the [Daemon cutover release notes](docs/release-notes/daemon-cutover.md).
 
-Maintainers use the staged [Release process](docs/release-process.md) to move one coordinated
-package set through alpha, beta, Release Candidate, and stable validation.
+Maintainers launch the GitHub `release` workflow to create alpha, beta, Release Candidate, and stable
+versions. See the [Release process](docs/release-process.md) for inputs, evidence, and npm/JSR setup.
 
 ```bash
 bun add -g @carere/kojo

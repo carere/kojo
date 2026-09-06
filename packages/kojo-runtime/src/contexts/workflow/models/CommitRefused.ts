@@ -1,4 +1,21 @@
 import { Schema } from "effect";
+import type { YieldableError } from "effect/Cause";
+
+const CommitRefusedBase: Schema.Class<
+  CommitRefused,
+  Schema.TaggedStruct<
+    "CommitRefused",
+    {
+      readonly branch: Schema.String;
+      readonly reason: Schema.String;
+    }
+  >,
+  YieldableError
+> = Schema.TaggedError<CommitRefused>()("CommitRefused", {
+  /** The branch the run owns, which is the only branch a phase of that run may commit to. */
+  branch: Schema.String,
+  reason: Schema.String,
+});
 
 /**
  * The commit did not happen, and the workspace is as it was.
@@ -10,8 +27,4 @@ import { Schema } from "effect";
  * It is its own error rather than a flavour of `NotAccepted` because it is not a judgement about
  * the work — nobody has judged anything yet. It says the proposal could not be written down.
  */
-export class CommitRefused extends Schema.TaggedError<CommitRefused>()("CommitRefused", {
-  /** The branch the run owns, which is the only branch a phase of that run may commit to. */
-  branch: Schema.String,
-  reason: Schema.String,
-}) {}
+export class CommitRefused extends CommitRefusedBase {}

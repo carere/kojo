@@ -1,7 +1,20 @@
-import { Schema, type SchemaError, SchemaIssue } from "effect";
+import { Schema, SchemaIssue } from "effect";
 
 /** Built once: the formatter walks the tree and accumulates `Pointer` paths, so we do not. */
 const toStandardIssues = SchemaIssue.makeFormatterStandardSchemaV1();
+
+const DecodeIssueBase: Schema.Class<
+  DecodeIssue,
+  Schema.Struct<{
+    readonly path: Schema.$Array<Schema.String>;
+    readonly message: Schema.String;
+  }>,
+  Record<never, never>
+> = Schema.Class<DecodeIssue>("DecodeIssue")({
+  /** One key per level, outermost first. Empty when the fault is the whole value. */
+  path: Schema.Array(Schema.String),
+  message: Schema.String,
+});
 
 /**
  * One decode fault, with the path that produced it.
@@ -16,12 +29,8 @@ const toStandardIssues = SchemaIssue.makeFormatterStandardSchemaV1();
  * `changedFiles.0` sends an agent to the field, and feedback that says "invalid input" sends it
  * back to guessing.
  */
-export class DecodeIssue extends Schema.Class<DecodeIssue>("DecodeIssue")({
-  /** One key per level, outermost first. Empty when the fault is the whole value. */
-  path: Schema.Array(Schema.String),
-  message: Schema.String,
-}) {
-  static fromSchemaError(error: SchemaError.SchemaError): ReadonlyArray<DecodeIssue> {
+export class DecodeIssue extends DecodeIssueBase {
+  static fromSchemaError(error: Schema.SchemaError): ReadonlyArray<DecodeIssue> {
     return toStandardIssues(error.issue).issues.map(
       (issue) =>
         new DecodeIssue({

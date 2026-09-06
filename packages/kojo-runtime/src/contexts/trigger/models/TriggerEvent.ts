@@ -1,19 +1,15 @@
 import { Schema } from "effect";
 
-/**
- * One unit of work, offered to a workflow.
- *
- * An event is not a run. It is the *claim* that a run should exist for this unit of work, and the
- * same claim may arrive many times: a poller re-reads a ticket every minute, a webhook is redelivered
- * because nobody answered it in time, a person runs the command twice. `key` is what makes those
- * repetitions harmless — it is the value the run is deduplicated by, and the engine derives one
- * execution id from it, so the second event finds the first run rather than opening a second factory.
- *
- * `payload` is still encoded. It arrived from outside the process — a webhook body, a tracker's JSON,
- * a CLI argument — so it is decoded against the workflow's own payload schema when the run starts,
- * and a body that is not one is a named error rather than a run that starts on rubbish.
- */
-export class TriggerEvent extends Schema.Class<TriggerEvent>("TriggerEvent")({
+const TriggerEventBase: Schema.Class<
+  TriggerEvent,
+  Schema.Struct<{
+    readonly source: Schema.String;
+    readonly key: Schema.String;
+    readonly payload: Schema.Unknown;
+    readonly receivedAt: Schema.Finite;
+  }>,
+  Record<never, never>
+> = Schema.Class<TriggerEvent>("TriggerEvent")({
   /**
    * Which trigger produced it — `manual`, `poller/github`, `webhook/gitlab`.
    *
@@ -33,4 +29,19 @@ export class TriggerEvent extends Schema.Class<TriggerEvent>("TriggerEvent")({
   payload: Schema.Unknown,
   /** When the event was taken from its source, read from the `Clock`. */
   receivedAt: Schema.Finite,
-}) {}
+});
+
+/**
+ * One unit of work, offered to a workflow.
+ *
+ * An event is not a run. It is the *claim* that a run should exist for this unit of work, and the
+ * same claim may arrive many times: a poller re-reads a ticket every minute, a webhook is redelivered
+ * because nobody answered it in time, a person runs the command twice. `key` is what makes those
+ * repetitions harmless — it is the value the run is deduplicated by, and the engine derives one
+ * execution id from it, so the second event finds the first run rather than opening a second factory.
+ *
+ * `payload` is still encoded. It arrived from outside the process — a webhook body, a tracker's JSON,
+ * a CLI argument — so it is decoded against the workflow's own payload schema when the run starts,
+ * and a body that is not one is a named error rather than a run that starts on rubbish.
+ */
+export class TriggerEvent extends TriggerEventBase {}

@@ -24,7 +24,7 @@ export interface ResolvedPackage {
   readonly directory: string;
 }
 
-/** `effect 4.0.0-beta.106 (…/node_modules/effect)` — the version *and* the path, always both. */
+/** `effect 4.0.0-rc.112 (…/node_modules/effect)` — the version *and* the path, always both. */
 export const identify = (resolved: ResolvedPackage): string =>
   `${resolved.name} ${resolved.version} (${resolved.directory})`;
 

@@ -1,5 +1,7 @@
 import { Cause, Clock, Effect, type Schema } from "effect";
+import type { Scope } from "effect/Scope";
 import { Activity } from "effect/unstable/workflow";
+import type { WorkflowEngine, WorkflowInstance } from "effect/unstable/workflow/WorkflowEngine";
 import { present } from "../../../shared/lib/present.ts";
 import { makePhaseId } from "../../../shared/models/PhaseId.ts";
 import { InFlightPhase } from "../../../trace/models/InFlightPhase.ts";
@@ -33,7 +35,11 @@ export const code = <Success extends Schema.Top, Error extends Schema.Top, R>(
     readonly recoveryPolicy?: ActionRecoveryPolicyValue;
   },
   body: Effect.Effect<Success["Type"], Error["Type"], R>,
-) =>
+): Activity.Activity<
+  Success,
+  Error,
+  CurrentRun | Tracer | Exclude<R, Scope | WorkflowEngine | WorkflowInstance>
+> =>
   Activity.make({
     name: options.name,
     success: options.success,

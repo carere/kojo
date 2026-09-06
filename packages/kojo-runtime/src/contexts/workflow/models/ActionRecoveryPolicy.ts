@@ -7,7 +7,8 @@ export type ActionRecoveryPolicy =
   | "unresolved";
 
 /** Retained adapter contract for one authored Activity. Arbitrary effects default to unresolved. */
-export const ActionRecoveryPolicy = Context.Reference<ActionRecoveryPolicy | undefined>(
-  "kojo-runtime/workflow/ActionRecoveryPolicy",
-  { defaultValue: () => undefined },
-);
+export const ActionRecoveryPolicy: Context.Reference<ActionRecoveryPolicy | undefined> =
+  Context.Reference<ActionRecoveryPolicy | undefined>(
+    "kojo-runtime/workflow/ActionRecoveryPolicy",
+    { defaultValue: () => undefined },
+  );

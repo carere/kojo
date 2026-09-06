@@ -1,5 +1,29 @@
 import { Schema } from "effect";
+import type { YieldableError } from "effect/Cause";
 import { WorkspaceReach } from "./WorkspaceReach.ts";
+
+const WorkspaceUnreachableBase: Schema.Class<
+  WorkspaceUnreachable,
+  Schema.TaggedStruct<
+    "WorkspaceUnreachable",
+    {
+      readonly branch: Schema.String;
+      readonly worktreePath: Schema.String;
+      readonly containers: Schema.Finite;
+      readonly reach: typeof WorkspaceReach;
+    }
+  >,
+  YieldableError
+> = Schema.TaggedError<WorkspaceUnreachable>()("WorkspaceUnreachable", {
+  /** The branch the run is on, which is what survives this and what a human resumes from. */
+  branch: Schema.String,
+  /** The host path the sandbox mounted, and the thing that is actually missing. */
+  worktreePath: Schema.String,
+  /** How many containers were built and thrown away before the scope gave up. */
+  containers: Schema.Finite,
+  /** The last reading, so the evidence travels with the sentence rather than after it. */
+  reach: WorkspaceReach,
+});
 
 /**
  * Every container this scope built came back with a workspace it could not work in.
@@ -17,19 +41,7 @@ import { WorkspaceReach } from "./WorkspaceReach.ts";
  * A `Schema.TaggedError` because it travels a workflow error channel, and the engine persists what
  * it records.
  */
-export class WorkspaceUnreachable extends Schema.TaggedError<WorkspaceUnreachable>()(
-  "WorkspaceUnreachable",
-  {
-    /** The branch the run is on, which is what survives this and what a human resumes from. */
-    branch: Schema.String,
-    /** The host path the sandbox mounted, and the thing that is actually missing. */
-    worktreePath: Schema.String,
-    /** How many containers were built and thrown away before the scope gave up. */
-    containers: Schema.Finite,
-    /** The last reading, so the evidence travels with the sentence rather than after it. */
-    reach: WorkspaceReach,
-  },
-) {
+export class WorkspaceUnreachable extends WorkspaceUnreachableBase {
   /**
    * One sentence for a human: the workspace, the branch, and only then what the probe said.
    *

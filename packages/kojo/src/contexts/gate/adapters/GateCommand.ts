@@ -190,10 +190,10 @@ export const makeGateCommand = (paths: () => DaemonPaths = productionPaths) => {
     "list",
     {
       projectId: Flag.string("project").pipe(Flag.optional),
-      all: Flag.boolean("all"),
+      all: Flag.boolean("all").pipe(Flag.withDefault(false)),
       limit: Flag.integer("limit").pipe(Flag.withDefault(50)),
       cursor: Flag.integer("cursor").pipe(Flag.optional),
-      json: Flag.boolean("json"),
+      json: Flag.boolean("json").pipe(Flag.withDefault(false)),
     },
     Effect.fn(function* ({ projectId, all, limit, cursor, json }) {
       if (limit < 1) return yield* clientExit(2, "--limit must be a positive integer");
@@ -225,9 +225,9 @@ export const makeGateCommand = (paths: () => DaemonPaths = productionPaths) => {
       choice: Flag.string("choice"),
       reason: Flag.string("reason").pipe(Flag.withDefault("")),
       as: Flag.string("as").pipe(Flag.optional),
-      wait: Flag.boolean("wait"),
+      wait: Flag.boolean("wait").pipe(Flag.withDefault(false)),
       timeout: Flag.string("timeout").pipe(Flag.optional),
-      json: Flag.boolean("json"),
+      json: Flag.boolean("json").pipe(Flag.withDefault(false)),
     },
     Effect.fn(function* ({ token, choice, reason, as, wait, timeout, json }) {
       const timeoutText = Option.getOrUndefined(timeout);

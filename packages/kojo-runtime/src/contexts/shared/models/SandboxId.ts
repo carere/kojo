@@ -11,7 +11,9 @@ import { Option, Schema } from "effect";
  * Branded for the same reason `RunId` and `PhaseId` are: these three sit beside each other in the
  * same rows and the same signatures, and a silent mis-join is worse than a compile error.
  */
-export const SandboxId = Schema.String.pipe(Schema.brand("SandboxId"));
+export const SandboxId: Schema.brand<Schema.String, "SandboxId"> = Schema.String.pipe(
+  Schema.brand("SandboxId"),
+);
 
 export type SandboxId = typeof SandboxId.Type;
 

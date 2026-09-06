@@ -1,16 +1,25 @@
 import { Schema } from "effect";
 import { RunId } from "../../shared/models/RunId.ts";
 
-export const RunOutcome = Schema.Literals(["succeeded", "failed", "suspended"]);
+export const RunOutcome: Schema.Literals<readonly ["succeeded", "failed", "suspended"]> =
+  Schema.Literals(["succeeded", "failed", "suspended"]);
 export type RunOutcome = typeof RunOutcome.Type;
 
-/**
- * The record that ties a run's phases together, and the only mutable one.
- *
- * It carries what produced the run, not only what the run did: the engine version and commit are
- * stamped here because they cannot be reconstructed later.
- */
-export class RunRecord extends Schema.Class<RunRecord>("RunRecord")({
+const RunRecordBase: Schema.Class<
+  RunRecord,
+  Schema.Struct<{
+    readonly runId: Schema.brand<Schema.String, "RunId">;
+    readonly workflow: Schema.String;
+    readonly idempotencyKey: Schema.String;
+    readonly startedAt: Schema.Finite;
+    readonly engineVersion: Schema.String;
+    readonly engineCommit: Schema.String;
+    readonly configDigest: Schema.String;
+    readonly host: Schema.String;
+    readonly imageDigest: Schema.optionalKey<Schema.String>;
+  }>,
+  Record<never, never>
+> = Schema.Class<RunRecord>("RunRecord")({
   runId: RunId,
   workflow: Schema.String,
   /**
@@ -41,4 +50,12 @@ export class RunRecord extends Schema.Class<RunRecord>("RunRecord")({
    * provider in Kojo reports one yet, and a fabricated value here would be worse than a null.
    */
   imageDigest: Schema.optionalKey(Schema.String),
-}) {}
+});
+
+/**
+ * The record that ties a run's phases together, and the only mutable one.
+ *
+ * It carries what produced the run, not only what the run did: the engine version and commit are
+ * stamped here because they cannot be reconstructed later.
+ */
+export class RunRecord extends RunRecordBase {}

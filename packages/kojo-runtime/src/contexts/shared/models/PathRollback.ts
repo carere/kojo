@@ -11,7 +11,18 @@ import { Schema } from "effect";
  * is clean afterwards means the agent discarded somebody's uncommitted work — `git checkout` inside
  * a shell is exactly how that happens — and the content is not ours to reconstruct.
  */
-export const RollbackOutcome = Schema.TaggedUnion({
+export const RollbackOutcome: Schema.TaggedUnion<{
+  readonly Deleted: Schema.TaggedStruct<"Deleted", Record<never, never>>;
+  readonly LeftAsIs: Schema.TaggedStruct<"LeftAsIs", Record<never, never>>;
+  readonly NotUndone: Schema.TaggedStruct<
+    "NotUndone",
+    {
+      readonly reason: Schema.String;
+    }
+  >;
+  readonly Restored: Schema.TaggedStruct<"Restored", Record<never, never>>;
+  readonly WorkLost: Schema.TaggedStruct<"WorkLost", Record<never, never>>;
+}> = Schema.TaggedUnion({
   /** The agent created the file, and it is gone again. */
   Deleted: {},
   /** The agent edited a tracked file, and the tree holds what `HEAD` holds again. */
@@ -29,13 +40,33 @@ export const RollbackOutcome = Schema.TaggedUnion({
 });
 export type RollbackOutcome = typeof RollbackOutcome.Type;
 
+const PathRollbackBase: Schema.Class<
+  PathRollback,
+  Schema.Struct<{
+    readonly path: Schema.String;
+    readonly outcome: Schema.TaggedUnion<{
+      readonly Deleted: Schema.TaggedStruct<"Deleted", Record<never, never>>;
+      readonly LeftAsIs: Schema.TaggedStruct<"LeftAsIs", Record<never, never>>;
+      readonly NotUndone: Schema.TaggedStruct<
+        "NotUndone",
+        {
+          readonly reason: Schema.String;
+        }
+      >;
+      readonly Restored: Schema.TaggedStruct<"Restored", Record<never, never>>;
+      readonly WorkLost: Schema.TaggedStruct<"WorkLost", Record<never, never>>;
+    }>;
+  }>,
+  Record<never, never>
+> = Schema.Class<PathRollback>("PathRollback")({
+  path: Schema.String,
+  outcome: RollbackOutcome,
+});
+
 /**
  * One breached path and what became of it.
  *
  * Both the error and the phase record carry these, because the two answer different questions —
  * *why did this phase die* and *what did this run leave behind* — from the same fact.
  */
-export class PathRollback extends Schema.Class<PathRollback>("PathRollback")({
-  path: Schema.String,
-  outcome: RollbackOutcome,
-}) {}
+export class PathRollback extends PathRollbackBase {}

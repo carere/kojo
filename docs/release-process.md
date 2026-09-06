@@ -1,125 +1,129 @@
 # Release process
 
-Kojo uses one coordinated Release train for these public packages:
+Use **GitHub → Actions → release → Run workflow**. Select **main** and enter the exact new version.
+The workflow creates the version commit and tags, validates the package set, and publishes it.
+You do not need to run local version or publication commands.
+
+Select `dry_run` to run preparation and validation without changing remote commits, tags, or packages.
+A dry run does not test registry write permissions. The next run must use the same source to validate
+that version again before publication.
+
+## Stages and evidence
+
+| Stage | Example | Required accepted predecessor | Full Host evidence | npm tags after acceptance |
+| --- | --- | --- | --- | --- |
+| Alpha | `0.1.0-alpha.1` | None for the first alpha | No | `alpha`, `next` |
+| Beta | `0.1.0-beta.1` | Alpha or an earlier beta in the same version line | Yes | `beta`, `next` |
+| Release Candidate | `0.1.0-rc.1` | Beta or an earlier RC in the same version line | Yes | `rc`, `next` |
+| Stable | `0.1.0` | RC in the same version line | Yes | `latest`, `next` |
+
+The workflow selects the newest accepted predecessor. It checks that predecessor's GitHub Release,
+workflow result, tag, npm archive integrity, and JSR source hashes. Mutable npm tags do not prove
+acceptance. A stable version permits only version metadata and Release notes after its accepted RC.
+Any code change requires another RC.
+
+Every version runs TypeScript, Biome, Knip, package checks, unit tests, integration tests, and browser
+tests. Beta, RC, and stable also run native systemd, shipped systemd, and shipped macOS evidence.
+The complete evidence index must accept every required check at the prepared version commit.
+Normal pull request and main CI run the core checks; they do not run full Host evidence.
+
+## Registry package sets
+
+npm receives four coordinated packages, in dependency order:
 
 - `@carere/kojo-client-contracts`
 - `@carere/kojo-runner-contracts`
 - `@carere/kojo-runtime`
-- `@carere/kojo`
+- `@carere/kojo` (the CLI and Console)
 
-All four packages and `packages/kojo-runtime/runtime-manifest.json` use the same version. Published
-versions are immutable. Publish the packages in the order above so the CLI is last.
+JSR receives the two contract packages and `@carere/kojo-runtime`. The CLI remains on npm because
+JSR does not provide the CLI installation contract. JSR Runtime source has explicit public types;
+publication does not use `--allow-slow-types`. Kojo still requires Bun.
 
-## Release ownership
+The JSR package uses exact npm dependencies for Effect, Sandcastle, and its coordinated Runner
+contracts. It also exports the static Runtime manifest. Its manifest names JavaScript entry points
+for JSR's npm compatibility installation. The npm Runtime keeps its TypeScript entry points.
 
-Cocogitto owns the coordinated version change. It updates the four package manifests, the runtime
-manifest, and the lockfile. It also writes the root and package changelogs, makes the
-`chore(version)` commit, and makes one Release tag plus four package tags.
+## Authentication setup
 
-The GitHub workflows own package creation, publication, public Host validation, and promotion. Do
-not publish packages from a Cocogitto hook. Cocogitto does not undo a bump when a later hook fails,
-so publication must stay in the workflows where a failed candidate cannot change `latest`.
+These settings are maintained through npm, JSR, and GitHub websites:
 
-## Release stages
+- GitHub Actions secret `RELEASE_GITHUB_TOKEN`: a fine-grained user token for this repository with
+  **Contents: read and write**. Its owner must be allowed to bypass the protected `main` rule.
+  Checkout uses it to push the validated version commit and five tags atomically.
+- GitHub Actions secret `NPM_TOKEN`: a granular token with read/write access to the four npm
+  packages, used for dist-tag promotion. The initial alpha also uses it to create packages when
+  they do not yet exist. That bootstrap requires direct publication permission and bypass 2FA.
+- npm Trusted Publisher on each existing package: GitHub owner `carere`, repository `kojo`, workflow
+  filename `release.yml`, with no environment restriction. The publication job has `id-token: write`.
+  After the initial alpha creates the packages, configure these publishers before the next Release.
+- JSR: scope `carere`, the three package names above, each linked to `carere/kojo`. GitHub Actions
+  uses JSR OIDC. No JSR token secret is needed.
+- GitHub environment `npm-production`: required reviewers before stable JSR publication and npm
+  promotion. JSR has no candidate dist-tag, so stable approval must precede its publication. The
+  `npm-prerelease` environment must not require a reviewer if prereleases should run unattended.
+  Keep `NPM_TOKEN` available as a repository Actions secret because candidate cleanup also needs it.
 
-One Release line moves through these stages:
+Each npm publication uses exactly one credential method. Existing package sets use npm Trusted
+Publishing. The script exchanges GitHub OIDC for a short-lived, package-specific npm credential
+through the [npm Registry API](https://api-docs.npmjs.com/), then passes it to `bun publish`.
+An OIDC failure stops publication; it does not fall back to `NPM_TOKEN`.
 
-| Stage | Version example | Change policy | Exit gate |
-| --- | --- | --- | --- |
-| Alpha | `0.1.0-alpha.1` | Features, refactors, and breaking changes can continue. | Exact-revision CI evidence and clean public installs pass on Linux and macOS. |
-| Beta | `0.1.0-beta.1` | Feature freeze. Fix behavior, packaging, and Project usability. | Supported-Host evidence and representative Project trials pass. |
-| Release Candidate | `0.1.0-rc.1` | Code freeze. Only Release blockers can change. | The exact public package set passes all evidence and Project trials. |
-| Stable | `0.1.0` | Only version files and Release notes can differ from the accepted RC. | The public stable candidate passes Linux and macOS validation, then a human approves promotion. |
+Bun's publisher does not generate npm provenance attestations in this setup. The GitHub Release
+manifest binds tested archives to their commit and workflow run. JSR's publisher supplies its own
+GitHub provenance. Authentication and provenance are separate properties.
 
-A failed candidate does not move to the next stage. Fix the problem and publish the next sequence,
-such as `0.1.0-beta.2`. Do not reuse a published version.
+As of September 2026, bypass-2FA tokens can still publish directly. npm plans to remove that ability
+around January 2027. The initial-package bootstrap must then move to the supported staged or
+interactive approval process. See the [npm deprecation notice](https://github.blog/changelog/2026-07-08-npm-install-time-security-and-gat-bypass2fa-deprecation/).
 
-Sequence numbers identify immutable publish attempts and can have gaps. The `previous_candidate`
-input is the last accepted candidate: beta requires an accepted alpha or beta, and RC requires an
-accepted beta or RC. Alpha starts a Release line, so it has no required predecessor.
+## What the workflow does
 
-## Registry tags
+1. Prepare the coordinated version with Cocogitto in a clean checkout. This updates all package
+   versions, JSR configs, the lockfile, and the Runtime manifest. It creates the global `vVERSION`
+   tag and four `PACKAGE@vVERSION` tags. A Git bundle gives each job the exact prepared commit.
+2. Run the required checks. Pack the npm archives once. Shipped Host checks use these archives.
+   Prepare JSR source with explicit versioned dependency imports and hash the staged files.
+3. After all checks pass, verify that remote `main` has not moved, then push the version commit and
+   tags. Publish the npm archives with the `candidate` tag. Check their public integrity and protect
+   `latest` from an unaccepted version, including a partially published first package set.
+4. Install the exact public npm versions on Linux and macOS. For stable, wait for the
+   `npm-production` reviewer before JSR publication. Publish and verify the JSR source, then install
+   the JSR compatibility packages on both Hosts and import all public entries.
+5. Recheck public content, promote npm tags,
+   and create the accepted GitHub Release with its manifest. Full-evidence stages also attach the
+   complete Host evidence archive.
 
-- `alpha`, `beta`, and `rc` point to the active candidate in that stage.
-- `next` points to the active prerelease, then to the stable Release after promotion.
-- `candidate` hides a package set while its public bytes are validated.
-- `latest` points only to the promoted stable Release.
+After acceptance, test another system with the exact installation command in the workflow summary:
 
-The first publish of a new package can receive `latest` even when it uses another tag. The
-prerelease workflow removes `latest` only when it points to the prerelease that the workflow just
-published. It does not change an existing stable `latest` tag.
-
-## Candidate manifest
-
-Every candidate has `release-manifest.json`. It records the Release stage, version, tested Git
-revision, workflow run, package order, archive names, sizes, SHA-256 hashes, and registry integrity
-values. Public validation refuses a package when the registry integrity is different from the
-tested archive.
-
-An accepted prerelease is a GitHub prerelease named `v<version>` with this manifest as an asset.
-The stable workflow accepts only an RC manifest from the same Release line.
-
-## Prerelease runbook
-
-1. Start from a clean, current `main` branch. Run
-   `cog bump --version <version> --include-packages` with the next exact prerelease version.
-2. Inspect the generated version files, changelogs, `chore(version)` commit, and five tags. Push the
-   commit and all five tags in one atomic push. Cocogitto tags are lightweight, so do not use
-   `--follow-tags`.
-3. Wait for the complete CI evidence for the exact tagged revision.
-4. Run **Actions → prerelease** first as a dry run. In the workflow ref selector, select the
-   `v<version>` tag. Give it the accepted previous candidate. Leave that input empty for an alpha.
-5. Run it again with the same stage, version, and predecessor, with dry run disabled.
-6. Confirm that the workflow creates the GitHub prerelease. This means both supported Hosts
-   installed the exact public package set.
-7. Exercise the accepted candidate in representative Projects. Record any blocker before the next
-   stage.
-
-The workflow publishes dependencies before the CLI. If publishing stops after only part of the
-package set is public, abandon that version and use the next sequence. A partial package set is not
-a candidate.
-
-## Stable runbook
-
-1. Select the accepted RC that will become stable.
-2. From a clean, current `main` branch, run
-   `cog bump --version <stable-version> --include-packages`. Inspect the generated version files,
-   changelogs, commit, and tags. The stable bump can add Release notes, but it must not change code.
-3. Push the commit and all five lightweight tags in one atomic push. Wait for complete CI evidence
-   for the exact tagged revision.
-4. Run **Actions → release** first as a dry run. In the workflow ref selector, select the stable
-   `v<version>` tag. Enter both the stable version and accepted RC.
-5. Run it again with dry run disabled. The workflow publishes under `candidate`, then validates the
-   exact public bytes and clean installs on Linux and macOS.
-6. Review the validation result at the `npm-production` environment gate. Approve only when the
-   candidate manifest and both Host jobs are correct.
-7. Promotion moves `latest` and `next`, removes temporary tags, and creates the stable GitHub
-   Release. It does not republish packages.
-
-Configure the `npm-production` GitHub environment with required reviewers before the first stable
-Release. Store the npm publish token as the `NPM_TOKEN` repository secret. The token must be able to
-publish all four packages and change their distribution tags.
-
-## Recovery
-
-Do not promote when validation fails. The stable version is already immutable after it is
-published under `candidate`. Diagnose the failure, create a new patch Release line and RC, and run
-the stable process again. Keep `latest` on the last accepted stable Release.
-
-## First Release train
-
-The next action is the first Cocogitto bump from a clean, current `main` branch:
-
-```sh
-cog bump --version 0.1.0-alpha.1 --include-packages
-git push --atomic origin main \
-  v0.1.0-alpha.1 \
-  kojo-client-contracts@v0.1.0-alpha.1 \
-  kojo-runner-contracts@v0.1.0-alpha.1 \
-  kojo-runtime@v0.1.0-alpha.1 \
-  kojo@v0.1.0-alpha.1
+```bash
+bun add -g @carere/kojo@0.1.0-alpha.1
+kojo daemon install
 ```
 
-Inspect the generated commit and tags before the push. After the push, wait for complete CI
-evidence. Then run the `prerelease` workflow as a dry run with stage `alpha`, version
-`0.1.0-alpha.1`, and no previous candidate. Select `v0.1.0-alpha.1` in the workflow ref selector.
+To install the Runtime through JSR in a Factory Project:
+
+```bash
+bun x jsr@0.14.3 add --bun @carere/kojo-runtime@0.1.0-alpha.1
+```
+
+The generated `.npmrc` routes `@jsr` packages to JSR. Keep it in the Project. Factory imports retain
+`@carere/kojo-runtime/...`; the dependency is an alias for JSR's compatibility package. See
+[JSR npm compatibility](https://jsr.io/docs/npm-compatibility).
+
+## Failed runs
+
+Do not reuse a published version. If publication is partial, fix the failure and launch `release`
+with a higher sequence number. A partially published candidate is not an accepted predecessor.
+Do not delete or move published tags to make a failed version appear valid.
+
+A failure before the remote push leaves no remote version changes. Fix the issue and launch the
+workflow again. If `main` moved during validation, start a new run against current `main`.
+
+After publication, a failed install, JSR check, evidence check, or promotion blocks acceptance.
+Inspect the failing job and its artifacts. Registry publication is not transactional across npm
+and JSR: some packages can exist while the Release remains unaccepted. Dist-tag promotion restores
+its previous tag snapshot if a write fails. A failure while creating the GitHub Release can occur
+after promotion; inspect registry tags before starting a replacement version.
+
+The old `prerelease.yml` entry point is removed. All stages use `release.yml`.

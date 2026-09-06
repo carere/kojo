@@ -1,5 +1,23 @@
 import { Schema } from "effect";
+import type { YieldableError } from "effect/Cause";
 import { PathRollback } from "../../shared/models/PathRollback.ts";
+
+const PermissionBreachBase: Schema.Class<
+  PermissionBreach,
+  Schema.TaggedStruct<
+    "PermissionBreach",
+    {
+      readonly agent: Schema.String;
+      readonly scope: Schema.String;
+      readonly paths: Schema.$Array<typeof PathRollback>;
+    }
+  >,
+  YieldableError
+> = Schema.TaggedError<PermissionBreach>()("PermissionBreach", {
+  agent: Schema.String,
+  scope: Schema.String,
+  paths: Schema.Array(PathRollback),
+});
 
 /**
  * An agent changed a path it was not permitted to change.
@@ -15,8 +33,4 @@ import { PathRollback } from "../../shared/models/PathRollback.ts";
  * policy. `paths` carries the rollback outcome beside each path, because "unauthorised change
  * reverted" and "unauthorised change we could not revert" are different facts about the repository.
  */
-export class PermissionBreach extends Schema.TaggedError<PermissionBreach>()("PermissionBreach", {
-  agent: Schema.String,
-  scope: Schema.String,
-  paths: Schema.Array(PathRollback),
-}) {}
+export class PermissionBreach extends PermissionBreachBase {}

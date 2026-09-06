@@ -100,9 +100,9 @@ const startRun = Command.make(
     workflowName: Argument.string("workflow-name"),
     payload: Flag.string("payload").pipe(Flag.optional),
     payloadFile: Flag.string("payload-file").pipe(Flag.optional),
-    wait: Flag.boolean("wait"),
+    wait: Flag.boolean("wait").pipe(Flag.withDefault(false)),
     timeout: Flag.string("timeout").pipe(Flag.optional),
-    json: Flag.boolean("json"),
+    json: Flag.boolean("json").pipe(Flag.withDefault(false)),
   },
   Effect.fn(function* ({ projectId, workflowName, payload, payloadFile, wait, timeout, json }) {
     const inline = Option.getOrUndefined(payload);
@@ -246,10 +246,10 @@ const stopWorkflow = Command.make(
   {
     projectId: Argument.string("project-id"),
     workflowName: Argument.string("workflow-name"),
-    force: Flag.boolean("force"),
-    wait: Flag.boolean("wait"),
+    force: Flag.boolean("force").pipe(Flag.withDefault(false)),
+    wait: Flag.boolean("wait").pipe(Flag.withDefault(false)),
     timeout: Flag.string("timeout").pipe(Flag.optional),
-    json: Flag.boolean("json"),
+    json: Flag.boolean("json").pipe(Flag.withDefault(false)),
   },
   Effect.fn(function* ({ projectId, workflowName, force, wait, timeout, json }) {
     if (!wait && Option.isSome(timeout)) {
@@ -346,7 +346,10 @@ const list = Command.make(
       Flag.withDescription("Select one full Project ID"),
       Flag.optional,
     ),
-    json: Flag.boolean("json").pipe(Flag.withDescription("Write one JSON snapshot")),
+    json: Flag.boolean("json").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Write one JSON snapshot"),
+    ),
   },
   Effect.fn(function* ({ projectId, json }) {
     const snapshot = yield* readSnapshot(Option.getOrUndefined(projectId)).pipe(
@@ -361,7 +364,10 @@ const status = Command.make(
   {
     projectId: Argument.string("project-id"),
     workflowName: Argument.string("workflow-name"),
-    json: Flag.boolean("json").pipe(Flag.withDescription("Write one JSON snapshot")),
+    json: Flag.boolean("json").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Write one JSON snapshot"),
+    ),
   },
   Effect.fn(function* ({ projectId, workflowName, json }) {
     const snapshot = yield* readSnapshot(projectId).pipe(

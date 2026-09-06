@@ -29,12 +29,15 @@ export interface BuildInfo {
   readonly imageDigest?: string | undefined;
 }
 
-export const BuildInfo = Context.Reference<BuildInfo>("kojo/shared/BuildInfo", {
-  defaultValue: (): BuildInfo => ({
-    version: "0.0.0",
-    commit: process.env.KOJO_BUILD_COMMIT ?? "development",
-    configDigest: "unconfigured",
-    host: hostname(),
-    imageDigest: undefined,
-  }),
-});
+export const BuildInfo: Context.Reference<BuildInfo> = Context.Reference<BuildInfo>(
+  "kojo/shared/BuildInfo",
+  {
+    defaultValue: (): BuildInfo => ({
+      version: "0.0.0",
+      commit: process.env.KOJO_BUILD_COMMIT ?? "development",
+      configDigest: "unconfigured",
+      host: hostname(),
+      imageDigest: undefined,
+    }),
+  },
+);

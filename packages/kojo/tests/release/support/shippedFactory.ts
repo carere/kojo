@@ -39,7 +39,7 @@ const prepare = (): void => {
         packageManager: `bun@${Bun.version}`,
         dependencies: {
           "@carere/kojo-runtime": `file:${runtime}`,
-          effect: "4.0.0-beta.106",
+          effect: "4.0.0-rc.112",
         },
         overrides: { "@carere/kojo-runner-contracts": `file:${contracts}` },
       },

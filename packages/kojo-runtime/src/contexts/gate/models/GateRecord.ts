@@ -6,21 +6,33 @@ import { ExpiryBranch } from "./OnExpiry.ts";
 import type { Settlement } from "./Verdict.ts";
 
 /** How one asking of a gate ended. A gate still waiting has no record yet — see below. */
-export const GateOutcome = Schema.Literals(["answered", "expired"]);
+export const GateOutcome: Schema.Literals<readonly ["answered", "expired"]> = Schema.Literals([
+  "answered",
+  "expired",
+]);
 export type GateOutcome = typeof GateOutcome.Type;
 
-/**
- * Everything known about one asking of one gate, written once, when it settles.
- *
- * Written on settle rather than on request, for the same reason a phase row is written on exit: a
- * record that is inserted and then updated is two half-records, and the trace's rule is one wide
- * row per unit of work. A gate that is still waiting is the run's *mutable status*, and lives on
- * the run row beside the in-flight phase — see adr/trace/0002.
- *
- * One asking, one record. A gate asked three times by the reviewed loop leaves three, so the human
- * latency of each round is visible separately instead of averaged into one number.
- */
-export class GateRecord extends Schema.Class<GateRecord>("GateRecord")({
+const GateRecordBase: Schema.Class<
+  GateRecord,
+  Schema.Struct<{
+    readonly runId: Schema.brand<Schema.String, "RunId">;
+    readonly gate: Schema.String;
+    readonly asking: Schema.String;
+    readonly token: Schema.brand<Schema.String, "~effect/workflow/DurableDeferred/Token">;
+    readonly description: Schema.String;
+    readonly actor: Schema.String;
+    readonly choices: Schema.$Array<Schema.String>;
+    readonly requestedAt: Schema.Finite;
+    readonly deadlineAt: Schema.Finite;
+    readonly onExpiry: Schema.Literals<readonly ["fail", "reject", "escalate"]>;
+    readonly outcome: Schema.Literals<readonly ["answered", "expired"]>;
+    readonly answerer: Schema.optionalKey<Schema.String>;
+    readonly choice: Schema.optionalKey<Schema.String>;
+    readonly reason: Schema.optionalKey<Schema.String>;
+    readonly answeredAt: Schema.optionalKey<Schema.Finite>;
+  }>,
+  Record<never, never>
+> = Schema.Class<GateRecord>("GateRecord")({
   runId: RunId,
   gate: Schema.String,
   /** The durable deferred name — unique to this asking, and what makes the records distinct. */
@@ -39,7 +51,20 @@ export class GateRecord extends Schema.Class<GateRecord>("GateRecord")({
   choice: Schema.optionalKey(Schema.String),
   reason: Schema.optionalKey(Schema.String),
   answeredAt: Schema.optionalKey(Schema.Finite),
-}) {
+});
+
+/**
+ * Everything known about one asking of one gate, written once, when it settles.
+ *
+ * Written on settle rather than on request, for the same reason a phase row is written on exit: a
+ * record that is inserted and then updated is two half-records, and the trace's rule is one wide
+ * row per unit of work. A gate that is still waiting is the run's *mutable status*, and lives on
+ * the run row beside the in-flight phase — see adr/trace/0002.
+ *
+ * One asking, one record. A gate asked three times by the reviewed loop leaves three, so the human
+ * latency of each round is visible separately instead of averaged into one number.
+ */
+export class GateRecord extends GateRecordBase {
   /**
    * Human latency: request to answer. Nothing upstream measures it, and it is the metric a factory
    * lives or dies by — as a distribution across runs, not as a number on one run.
