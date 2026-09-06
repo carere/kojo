@@ -2,6 +2,25 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## kojo-runtime@v0.1.0-alpha.2 - 2026-09-06
+#### Performance Improvements
+- (**ci**) speed up alpha checks with isolated integration shards (#97) - (cab6748) - Kevin Abatan
+#### Build system
+- (**release**) publish only kojo and runtime to npm (#98) - (f5dd9cb) - Kevin Abatan
+
+- - -
+
+## kojo-runtime@v0.1.0-alpha.1 - 2026-09-06
+#### Features
+- (**release**) publish npm and JSR from GitHub Actions (#95) - (80fcd68) - Kevin Abatan
+- add one Kojo daemon per OS user - (2189abc) - Kevin Abatan, *Kojo*
+#### Bug Fixes
+- remove obsolete code and close alpha release gaps - (883f2e6) - Kevin Abatan
+#### Miscellaneous Chores
+- (**version**) v0.1.0-alpha.1 - (b477e94) - kojo release
+
+- - -
+
 ## kojo-runtime@v0.1.0-alpha.1 - 2026-09-06
 #### Features
 - (**release**) publish npm and JSR from GitHub Actions (#95) - (80fcd68) - Kevin Abatan
