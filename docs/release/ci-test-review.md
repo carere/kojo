@@ -24,6 +24,11 @@ Release ordering is checked in `tests/repository/scripts/releaseTrain.test.ts`.
 - Updated full Host evidence to consume the moved repository results. Project registration evidence
   now uses the current real-adapter tests; removed its reference to a deleted unit test.
 - The required `Test` job prints each upstream result before reporting failure.
+- Resource and CLI process fixtures use the OS temporary directory. Integration CI mounts a
+  private 2 GiB memory-backed temporary filesystem. One measured Resource capture writes more
+  than 3,000 package files and calls file sync 6,426 times; repeating it on runner disk made
+  30-second cases time out. This fixture storage still exercises real filesystem, SQLite, and
+  process adapters. Native Host release checks retain disk storage.
 
 The findings below describe the starting state. Release stage policies and native Host coverage
 remain unchanged. No timeout increase or extra shards were added; the integration distribution

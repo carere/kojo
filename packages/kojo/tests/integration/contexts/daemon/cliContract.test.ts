@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
@@ -36,7 +37,7 @@ interface Ran {
 }
 
 const paths = (): DaemonPaths => {
-  const root = mkdtempSync(join(process.cwd(), ".kojo-cli-contract-"));
+  const root = mkdtempSync(join(tmpdir(), ".kojo-cli-contract-"));
   roots.push(root);
   const installationRoot = join(root, "installation");
   const result = {

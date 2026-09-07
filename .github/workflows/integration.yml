@@ -58,6 +58,16 @@ jobs:
       - name: Build packaged Console
         run: moon run kojo:build
 
+      # These suites test process failure and real adapters, not power-loss durability.
+      # Workflow capture syncs thousands of files per fixture. Keep temporary data off the
+      # shared runner disk; native Host release tests continue to use their disk storage.
+      - name: Prepare temporary process-test storage
+        run: |
+          test_root="$RUNNER_TEMP/kojo-process-tests"
+          mkdir -p "$test_root"
+          sudo mount -t tmpfs -o "size=2G,mode=0700,uid=$(id -u),gid=$(id -g)" tmpfs "$test_root"
+          echo "TMPDIR=$test_root" >> "$GITHUB_ENV"
+
       # Each Host runs one file at a time. CI and release checks use identical cache keys.
       - name: Integration tests
         env:
