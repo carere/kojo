@@ -26,8 +26,8 @@ env:
   MOON_REMOTE_CACHE_TOKEN: ${{ secrets.MOON_REMOTE_CACHE_TOKEN }}
 
 jobs:
-  cli-integration:
-    uses: ./.github/workflows/cli-integration.yml
+  integration:
+    uses: ./.github/workflows/integration.yml
     secrets:
       MOON_REMOTE_CACHE_TOKEN: ${{ secrets.MOON_REMOTE_CACHE_TOKEN }}
     with:
@@ -35,10 +35,8 @@ jobs:
       prepared_release: true
 
   ci:
-    needs: cli-integration
-    name: Test
+    name: Core checks and packages
     runs-on: ubuntu-latest
-    # Tests start real processes and build the Console. Allow 30 minutes for slow runners.
     timeout-minutes: 30
     env:
       NO_COLOR: "1"
@@ -53,18 +51,6 @@ jobs:
         with:
           revision: ${{ inputs.revision }}
 
-      # The suites stamp repositories and commit into them. A runner has no identity of its own, and
-      # `git commit` without one fails with a message about `user.email` rather than about the test.
-      #
-      # **`init.defaultBranch` is deliberately not set here.** It was, for one day: the first CI run
-      # of the container tier failed four suites with *the workspace is on master, and the merge
-      # targets main*, because the fixtures ran a bare `git init` and took whatever the machine
-      # offered. Declaring it made CI green and moved the assumption from one machine's
-      # configuration to another's. Ticket 59 fixed the fixtures instead — every one of them now
-      # passes `--initial-branch` built from `defaultTrunk`, the same constant `kojo init` stamps as
-      # the trunk — so a runner's `master` default is no longer something this repository has an
-      # opinion about. **Leaving it unset is what keeps that true**; if it comes back, the fixtures
-      # have quietly started inheriting again.
       - name: Git identity for the fixtures
         run: |
           git config --global user.name "kojo ci"
@@ -76,78 +62,20 @@ jobs:
           auto-install: true
 
       - name: Lint conventional commits
-        uses: cocogitto/cocogitto-action@v4.2.0
+        uses: cocogitto/cocogitto-action@52d0023b4396897f1815648e553db2ab8d782f3a # v4.2.0
         with:
           command: check
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # --- the repo-wide checks, cheapest first --------------------------------------------------
-
-      - name: TypeScript build
-        run: bun tsc --build --verbose
-
-      - name: Biome check
-        run: bun biome check --verbose --no-errors-on-unmatched .
-
-      - name: Dead-code analysis
-        run: bun knip
-
-      - name: Contract JSON codec source
-        run: bun .github/scripts/check-contract-codecs.ts
-
-      # --- the tiers ------------------------------------------------------------------------------
-      # Every task is run **by name**, because a tier that is not named here is a tier nobody runs.
-      # Discover the list with `moon query tasks`; it is not hardcoded anywhere else.
-
-      # Moon reuses test results when task inputs and the execution platform match.
-      - name: Contract and runtime tests
-        run: |
-          set -o pipefail
-          mkdir -p .release-evidence/logs
-          moon run kojo-client-contracts:test -- --reporter=verbose 2>&1 | tee .release-evidence/logs/contract-runtime.log
-          moon run kojo-runner-contracts:test -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
-          moon run kojo-runtime:test -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
-          moon run kojo-runtime:test-integration -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
-
-      - name: Unit tests and package graph
-        run: |
-          set -o pipefail
-          moon run kojo:test -- --reporter=verbose 2>&1 | tee .release-evidence/logs/kojo-unit.log
-          moon run kojo:check-packages 2>&1 | tee -a .release-evidence/logs/kojo-unit.log
-
-      # Two guards that are neither a test tier nor a lint: no bare promise reaches Kojo's published
-      # declarations, and the package refuses to build without the Console in it.
-      - name: Public types and package build
-        run: moon run kojo:check-public-types kojo:build
-
-      - name: Download integration logs
-        if: ${{ inputs.full_evidence }}
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          pattern: cli-integration-*
-          path: .release-evidence/logs
-          merge-multiple: true
-
-      - name: Combine integration logs
-        if: ${{ inputs.full_evidence }}
-        run: |
-          for shard in 1 2 3 4 5 6 7 8; do
-            test -s ".release-evidence/logs/kojo-integration-$shard.log"
-          done
-          cat .release-evidence/logs/kojo-integration-{1,2,3,4,5,6,7,8}.log > .release-evidence/logs/kojo-integration.log
-
-      - name: Record core release evidence
-        if: ${{ inputs.full_evidence }}
-        run: bun .github/scripts/complete-release-evidence.ts collect-core .release-evidence/core-evidence.json "$(git rev-parse HEAD)" .release-evidence/logs
-
-      - name: Upload core release evidence
+      - uses: ./.github/actions/core-checks
+      - name: Upload core test logs
         if: ${{ inputs.full_evidence }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: core-release-evidence
-          path: .release-evidence
+          name: core-test-logs
+          path: .release-evidence/logs
           include-hidden-files: true
           if-no-files-found: error
 
@@ -165,6 +93,61 @@ jobs:
         with:
           name: release-packages
           path: .release-train
+          include-hidden-files: true
+          if-no-files-found: error
+
+  core-evidence:
+    name: Collect core release evidence
+    if: ${{ inputs.full_evidence }}
+    needs: [ci, integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Git checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Load prepared Release
+        uses: ./.github/actions/release-checkout
+        with:
+          revision: ${{ inputs.revision }}
+
+      - uses: moonrepo/setup-toolchain@261c62cb5b0f580c7be7c8cd0f023a2e96756095 # v0.6.4
+        with:
+          auto-install: true
+      - run: bun install --frozen-lockfile
+      - name: Download core test logs
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: core-test-logs
+          path: .release-evidence/logs
+      - name: Download integration logs
+        if: ${{ inputs.full_evidence }}
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: integration-*
+          path: .release-evidence/logs
+          merge-multiple: true
+
+      - name: Combine integration logs
+        if: ${{ inputs.full_evidence }}
+        run: |
+          for shard in 1 2 3 4 5 6 7 8; do
+            test -s ".release-evidence/logs/kojo-integration-$shard.log"
+          done
+          cat .release-evidence/logs/kojo-repository.log .release-evidence/logs/kojo-integration-{1,2,3,4,5,6,7,8}.log > .release-evidence/logs/kojo-integration.log
+
+      - name: Record core release evidence
+        if: ${{ inputs.full_evidence }}
+        run: bun .github/scripts/complete-release-evidence.ts collect-core .release-evidence/core-evidence.json "$(git rev-parse HEAD)" .release-evidence/logs
+
+      - name: Upload core release evidence
+        if: ${{ inputs.full_evidence }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: core-release-evidence
+          path: .release-evidence
           include-hidden-files: true
           if-no-files-found: error
 
@@ -343,7 +326,7 @@ jobs:
     if: ${{ inputs.full_evidence }}
     name: Complete breaking release evidence
     needs:
-      [ci, native-systemd-host, shipped-systemd-release, shipped-macos-release]
+      [core-evidence, native-systemd-host, shipped-systemd-release, shipped-macos-release]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

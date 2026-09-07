@@ -1,4 +1,4 @@
-name: CLI integration
+name: Integration tests
 
 on:
   workflow_call:
@@ -22,7 +22,7 @@ env:
 
 jobs:
   integration:
-    name: CLI integration (${{ matrix.shard }}/8)
+    name: Integration tests (${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -58,8 +58,18 @@ jobs:
       - name: Build packaged Console
         run: moon run kojo:build
 
+      # These suites test process failure and real adapters, not power-loss durability.
+      # Workflow capture syncs thousands of files per fixture. Keep temporary data off the
+      # shared runner disk; native Host release tests continue to use their disk storage.
+      - name: Prepare temporary process-test storage
+        run: |
+          test_root="$RUNNER_TEMP/kojo-process-tests"
+          mkdir -p "$test_root"
+          sudo mount -t tmpfs -o "size=2G,mode=0700,uid=$(id -u),gid=$(id -g)" tmpfs "$test_root"
+          echo "TMPDIR=$test_root" >> "$GITHUB_ENV"
+
       # Each Host runs one file at a time. CI and release checks use identical cache keys.
-      - name: CLI integration tests
+      - name: Integration tests
         env:
           SHARD: ${{ matrix.shard }}
         run: |
@@ -71,7 +81,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: cli-integration-${{ matrix.shard }}
+          name: integration-${{ matrix.shard }}
           path: .release-evidence/logs/kojo-integration-${{ matrix.shard }}.log
           include-hidden-files: true
           if-no-files-found: error

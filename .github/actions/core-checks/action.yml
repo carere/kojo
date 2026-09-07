@@ -1,0 +1,47 @@
+name: Core checks
+description: Shared code, contract, package, and repository checks for CI and releases.
+runs:
+  using: composite
+  steps:
+    - name: TypeScript build
+      shell: bash
+      run: bun tsc --build --verbose
+
+    - name: Biome check
+      shell: bash
+      run: bun biome check --verbose --no-errors-on-unmatched .
+
+    - name: Dead-code analysis
+      shell: bash
+      run: bun knip
+
+    - name: Contract JSON codec source
+      shell: bash
+      run: bun .github/scripts/check-contract-codecs.ts
+
+    - name: Contract and runtime tests
+      shell: bash
+      run: |
+        set -o pipefail
+        mkdir -p .release-evidence/logs
+        moon run kojo-client-contracts:test -- --reporter=verbose 2>&1 | tee .release-evidence/logs/contract-runtime.log
+        moon run kojo-runner-contracts:test -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
+        moon run kojo-runtime:test -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
+        moon run kojo-runtime:test-integration -- --reporter=verbose 2>&1 | tee -a .release-evidence/logs/contract-runtime.log
+
+    - name: Unit tests and package graph
+      shell: bash
+      run: |
+        set -o pipefail
+        moon run kojo:test -- --reporter=verbose 2>&1 | tee .release-evidence/logs/kojo-unit.log
+        moon run kojo:check-packages 2>&1 | tee -a .release-evidence/logs/kojo-unit.log
+
+    - name: Public types and package build
+      shell: bash
+      run: moon run kojo:check-public-types kojo:build
+
+    - name: Repository and release-tooling tests
+      shell: bash
+      run: |
+        set -o pipefail
+        moon run kojo:test-repository -- --reporter=verbose 2>&1 | tee .release-evidence/logs/kojo-repository.log

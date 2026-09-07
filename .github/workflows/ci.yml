@@ -1,10 +1,5 @@
 name: ci
 
-# **Both triggers, and the push one is not decoration.** A required status check called `Test` was
-# declared on `main` while this workflow ran on pull requests only, so a direct push produced no
-# status of that name and the rule gated nothing — it printed a warning on every push and stopped
-# none of them. A check that cannot fail is the same shape of lie as a test that passes while doing
-# no work, which this repository keeps a list of.
 on:
   pull_request:
     branches: [main]
@@ -25,7 +20,6 @@ jobs:
   ci:
     name: Core checks
     runs-on: ubuntu-latest
-    # Tests start real processes and build the Console. Allow 30 minutes for slow runners.
     timeout-minutes: 30
     env:
       NO_COLOR: "1"
@@ -34,21 +28,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          # pick the pr HEAD instead of the merge commit
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
-      # The suites stamp repositories and commit into them. A runner has no identity of its own, and
-      # `git commit` without one fails with a message about `user.email` rather than about the test.
-      #
-      # **`init.defaultBranch` is deliberately not set here.** It was, for one day: the first CI run
-      # of the container tier failed four suites with *the workspace is on master, and the merge
-      # targets main*, because the fixtures ran a bare `git init` and took whatever the machine
-      # offered. Declaring it made CI green and moved the assumption from one machine's
-      # configuration to another's. Ticket 59 fixed the fixtures instead — every one of them now
-      # passes `--initial-branch` built from `defaultTrunk`, the same constant `kojo init` stamps as
-      # the trunk — so a runner's `master` default is no longer something this repository has an
-      # opinion about. **Leaving it unset is what keeps that true**; if it comes back, the fixtures
-      # have quietly started inheriting again.
       - name: Git identity for the fixtures
         run: |
           git config --global user.name "kojo ci"
@@ -60,65 +41,37 @@ jobs:
           auto-install: true
 
       - name: Lint conventional commits
-        uses: cocogitto/cocogitto-action@v4.2.0
+        uses: cocogitto/cocogitto-action@52d0023b4396897f1815648e553db2ab8d782f3a # v4.2.0
         with:
           command: check
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # --- the repo-wide checks, cheapest first --------------------------------------------------
+      - uses: ./.github/actions/core-checks
 
-      - name: TypeScript build
-        run: bun tsc --build --verbose
-
-      - name: Biome check
-        run: bun biome check --verbose --no-errors-on-unmatched .
-
-      - name: Dead-code analysis
-        run: bun knip
-
-      - name: Contract JSON codec source
-        run: bun .github/scripts/check-contract-codecs.ts
-
-      # --- the tiers ------------------------------------------------------------------------------
-      # Every task is run **by name**, because a tier that is not named here is a tier nobody runs.
-      # Discover the list with `moon query tasks`; it is not hardcoded anywhere else.
-
-      - name: Contract and runtime tests
-        run: |
-          moon run kojo-client-contracts:test -- --reporter=verbose
-          moon run kojo-runner-contracts:test -- --reporter=verbose
-          moon run kojo-runtime:test -- --reporter=verbose
-          moon run kojo-runtime:test-integration -- --reporter=verbose
-
-      - name: Unit tests and package graph
-        run: |
-          moon run kojo:test -- --reporter=verbose
-          moon run kojo:check-packages
-
-      # Two guards that are neither a test tier nor a lint: no bare promise reaches Kojo's published
-      # declarations, and the package refuses to build without the Console in it.
-      - name: Public types and package build
-        run: moon run kojo:check-public-types kojo:build
-
-  cli-integration:
-    uses: ./.github/workflows/cli-integration.yml
+  integration:
+    uses: ./.github/workflows/integration.yml
     secrets:
       MOON_REMOTE_CACHE_TOKEN: ${{ secrets.MOON_REMOTE_CACHE_TOKEN }}
     with:
       revision: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
   required:
-    # Keep the branch protection status and fail it if any required job fails or is skipped.
     name: Test
     if: ${{ always() }}
-    needs: [ci, cli-integration]
+    needs: [ci, integration]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
       - name: Require every check
         env:
           CORE_RESULT: ${{ needs.ci.result }}
-          INTEGRATION_RESULT: ${{ needs.cli-integration.result }}
-        run: test "$CORE_RESULT" = success && test "$INTEGRATION_RESULT" = success
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+        run: |
+          echo "Core checks: $CORE_RESULT"
+          echo "Integration tests: $INTEGRATION_RESULT"
+          if [ "$CORE_RESULT" != success ] || [ "$INTEGRATION_RESULT" != success ]; then
+            echo "::error::A required check failed or did not run. See the job results above."
+            exit 1
+          fi

@@ -12,6 +12,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   RunDocument,
@@ -193,7 +194,7 @@ describe("real Daemon Resource lifecycle", () => {
   ] as const)(
     "runs one controlled sandbox and agent through the private Runner %s",
     async (_case, lostKind, crashMode) => {
-      const root = mkdtempSync(join(process.cwd(), ".kojo-resource-daemon-"));
+      const root = mkdtempSync(join(tmpdir(), ".kojo-resource-daemon-"));
       roots.push(root);
       const paths = pathsFor(root);
       const events = join(root, "provider-events.jsonl");
