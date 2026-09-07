@@ -10,6 +10,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   RunDocument,
@@ -34,7 +35,7 @@ const daemons: RunningDaemon[] = [];
 const packageRoot = new URL("../../../../", import.meta.url).pathname.replace(/\/$/, "");
 
 const hostPaths = (): DaemonPaths => {
-  const root = mkdtempSync(join(process.cwd(), ".kojo-runner-recovery-"));
+  const root = mkdtempSync(join(tmpdir(), ".kojo-runner-recovery-"));
   roots.push(root);
   const installationRoot = join(root, "installation");
   const paths = {

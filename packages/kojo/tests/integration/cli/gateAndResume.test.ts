@@ -9,6 +9,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -19,7 +20,7 @@ import type {
   RunDocument,
   StartRunResult,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
-import { afterEach, describe, expect, it } from "@effect/vitest";
+import { afterAll, afterEach, describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 import {
   type RunningDaemon,
@@ -27,11 +28,17 @@ import {
 } from "../../../src/contexts/daemon/adapters/DaemonOwner.ts";
 import type { DaemonPaths } from "../../../src/contexts/daemon/models/DaemonPaths.ts";
 import { SqliteProjectRepository } from "../../../src/contexts/project/adapters/SqliteProjectRepository.ts";
-import { captureWorkflowRevision } from "../../../src/contexts/workflow/services/captureRevision.ts";
 import { publishConsoleRelease } from "../../support/daemon/consoleRelease.ts";
 import { sendPreparedMutation } from "../../support/daemon/preparedMutation.ts";
 
+import { linkEngine } from "../../support/linkEngine.ts";
+import { revisionFixture } from "../../support/workflow/revisionFixture.ts";
+
+const packageRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const gateCli = fileURLToPath(new URL("../../support/daemon/gateCli.ts", import.meta.url));
+const revision = revisionFixture("gated");
+afterAll(() => revision.dispose());
+const children: Array<Pick<Bun.Subprocess, "kill" | "exited" | "exitCode">> = [];
 const roots: string[] = [];
 const daemons: RunningDaemon[] = [];
 
@@ -42,7 +49,7 @@ interface Ran {
 }
 
 const makePaths = (): DaemonPaths => {
-  const root = mkdtempSync(join(process.cwd(), ".kojo-gate-cli-"));
+  const root = mkdtempSync(join(tmpdir(), ".kojo-gate-cli-"));
   roots.push(root);
   const installationRoot = join(root, "installation");
   const paths = {
@@ -62,6 +69,7 @@ const makePaths = (): DaemonPaths => {
 const makeProject = (root: string): string => {
   const location = join(root, "project");
   mkdirSync(join(location, ".kojo", "workflows"), { recursive: true });
+  linkEngine({ root: location, packageRoot });
   writeFileSync(
     join(location, "package.json"),
     JSON.stringify({ name: "gate-cli-fixture", private: true, type: "module" }),
@@ -145,6 +153,7 @@ const runCli = async (root: string, args: ReadonlyArray<string>): Promise<Ran> =
     stdout: "pipe",
     stderr: "pipe",
   });
+  children.push(child);
   const [status, stdout, stderr] = await Promise.all([
     child.exited,
     new Response(child.stdout).text(),
@@ -189,11 +198,7 @@ const harness = async (key: string, mode: "success" | "failure" | "second" = "su
   const root = roots.at(-1) ?? "";
   const location = makeProject(root);
   mkdirSync(hostPaths.dataRoot, { recursive: true, mode: 0o700 });
-  const captured = captureWorkflowRevision({
-    project: location,
-    dataRoot: hostPaths.dataRoot,
-    workflowName: "gated",
-  });
+  const captured = revision.install(location, hostPaths.dataRoot);
   const databasePath = join(hostPaths.dataRoot, "kojo.db");
   const database = new Database(databasePath, { create: true, strict: true });
   database.run(
@@ -250,6 +255,11 @@ const harness = async (key: string, mode: "success" | "failure" | "second" = "su
 };
 
 afterEach(async () => {
+  const stopped = children.splice(0);
+  for (const child of stopped) {
+    if (child.exitCode === null) child.kill("SIGKILL");
+  }
+  await Promise.all(stopped.map((child) => child.exited));
   for (const daemon of daemons.splice(0)) await Effect.runPromise(daemon.stop);
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
