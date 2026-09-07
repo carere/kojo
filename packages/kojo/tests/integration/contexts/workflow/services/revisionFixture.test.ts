@@ -47,6 +47,7 @@ it("isolates retained content, objects, and manifest data between fixture owners
     expect(second.manifest).toEqual(manifest);
     expect(existsSync(join(secondRoot, "kojo.db"))).toBe(false);
     expect(statSync(join(secondRoot, "revisions")).mode & 0o777).toBe(0o700);
+    expect(statSync(join(secondRoot, "objects")).mode & 0o777).toBe(0o700);
     expect(statSync(join(secondRoot, "objects", hash)).mode & 0o777).toBe(0o600);
   } finally {
     fixture.dispose();

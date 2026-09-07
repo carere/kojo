@@ -15,6 +15,8 @@ export const revisionFixture = (workflowName: string) => {
       // Copy only immutable capture data. Each Daemon owns separate files, including objects;
       // no hard links, databases, Runner caches, Projects, or process state cross test cases.
       mkdirSync(join(dataRoot, "revisions"), { recursive: true, mode: 0o700 });
+      // Bun's Linux directory copy can use the default mode for a new destination.
+      mkdirSync(join(dataRoot, "objects"), { recursive: true, mode: 0o700 });
       const publishedPath = join(dataRoot, "revisions", captured.revisionId);
       cpSync(captured.publishedPath, publishedPath, { recursive: true });
       cpSync(join(root, "objects"), join(dataRoot, "objects"), { recursive: true });
