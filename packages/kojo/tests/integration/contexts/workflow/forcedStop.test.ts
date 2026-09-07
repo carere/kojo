@@ -9,6 +9,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   CancelRunResult,
@@ -33,7 +34,7 @@ const daemons: RunningDaemon[] = [];
 const packageRoot = new URL("../../../../", import.meta.url).pathname.replace(/\/$/, "");
 
 const paths = (): DaemonPaths => {
-  const root = mkdtempSync(join(process.cwd(), ".kojo-forced-stop-"));
+  const root = mkdtempSync(join(tmpdir(), ".kojo-forced-stop-"));
   roots.push(root);
   const installationRoot = join(root, "installation");
   const value = {

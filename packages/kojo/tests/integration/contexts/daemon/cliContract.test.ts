@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
-import { afterEach, describe, expect, it } from "@effect/vitest";
+import { afterAll, afterEach, describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 import {
   type RunningDaemon,
@@ -16,16 +16,19 @@ import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonP
 import { SqliteProjectRepository } from "../../../../src/contexts/project/adapters/SqliteProjectRepository.ts";
 import { SqliteExternalActionRepository } from "../../../../src/contexts/workflow/adapters/SqliteExternalActionRepository.ts";
 import { SqliteRunRepository } from "../../../../src/contexts/workflow/adapters/SqliteRunRepository.ts";
-import { captureWorkflowRevision } from "../../../../src/contexts/workflow/services/captureRevision.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
 import { linkEngine } from "../../../support/linkEngine.ts";
 import {
   externalActionId,
   externalActionInputHash,
 } from "../../../support/workflow/externalActionIdentity.ts";
+import { revisionFixture } from "../../../support/workflow/revisionFixture.ts";
 
 const clientCli = new URL("../../../support/daemon/clientCli.ts", import.meta.url).pathname;
 const packageRoot = new URL("../../../../", import.meta.url).pathname.replace(/\/$/, "");
+const revision = revisionFixture("compile");
+afterAll(() => revision.dispose());
+const children: Array<Pick<Bun.Subprocess, "kill" | "exited" | "exitCode">> = [];
 const roots: string[] = [];
 const daemons: RunningDaemon[] = [];
 const faultServers: Bun.Server<unknown>[] = [];
@@ -113,11 +116,7 @@ export const compile = workflow(
   execFileSync("git", ["-C", workflowProject, "config", "user.name", "Kojo Test"]);
   execFileSync("git", ["-C", workflowProject, "add", "."]);
   execFileSync("git", ["-C", workflowProject, "commit", "-m", "test: CLI fixture"]);
-  const captured = captureWorkflowRevision({
-    project: workflowProject,
-    dataRoot: hostPaths.dataRoot,
-    workflowName: "compile",
-  });
+  const captured = revision.install(workflowProject, hostPaths.dataRoot);
   const databasePath = join(hostPaths.dataRoot, "kojo.db");
   const database = new Database(databasePath, { create: true, strict: true });
   database.run(
@@ -251,6 +250,7 @@ const runCli = async (root: string, args: ReadonlyArray<string>): Promise<Ran> =
     stdout: "pipe",
     stderr: "pipe",
   });
+  children.push(child);
   const [status, stdout, stderr] = await Promise.all([
     child.exited,
     new Response(child.stdout).text(),
@@ -264,6 +264,7 @@ const runFollow = async (test: Awaited<ReturnType<typeof fixture>>): Promise<Ran
     [process.execPath, clientCli, test.root, "run", "status", test.following, "--follow", "--json"],
     { stdout: "pipe", stderr: "pipe" },
   );
+  children.push(child);
   const reader = child.stdout.getReader();
   let resolveFirst: (() => void) | undefined;
   const first = new Promise<void>((resolve) => {
@@ -300,6 +301,12 @@ const runFollow = async (test: Awaited<ReturnType<typeof fixture>>): Promise<Ran
 };
 
 afterEach(async () => {
+  // Hooks also run after assertion failures and test timeouts. Stop followers before the Daemon.
+  const stopped = children.splice(0);
+  for (const child of stopped) {
+    if (child.exitCode === null) child.kill("SIGKILL");
+  }
+  await Promise.all(stopped.map((child) => child.exited));
   for (const daemon of daemons.splice(0)) await Effect.runPromise(daemon.stop);
   for (const server of faultServers.splice(0)) server.stop(true);
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -390,6 +397,7 @@ describe("real CLI process over the private Daemon transport", () => {
       ],
       { stdout: "pipe", stderr: "pipe" },
     );
+    children.push(child);
     await Bun.sleep(1_000);
     expect(child.exitCode).toBeNull();
     child.kill("SIGINT");
@@ -421,6 +429,7 @@ describe("real CLI process over the private Daemon transport", () => {
       [process.execPath, clientCli, test.root, "status", "--request", requestId, "--follow"],
       { stdout: "pipe", stderr: "pipe" },
     );
+    children.push(child);
     const first = await child.stdout.getReader().read();
     expect(new TextDecoder().decode(first.value)).toContain("accepted");
     await Effect.runPromise(test.daemon.stop);

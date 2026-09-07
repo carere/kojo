@@ -13,6 +13,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import type {
@@ -43,7 +44,7 @@ class RunApiTestFault extends Data.TaggedError("RunApiTestFault")<{
 }> {}
 
 const paths = (): DaemonPaths => {
-  const root = mkdtempSync(join(process.cwd(), ".kojo-run-api-"));
+  const root = mkdtempSync(join(tmpdir(), ".kojo-run-api-"));
   roots.push(root);
   const installationRoot = join(root, "installation");
   const value = {
@@ -63,6 +64,7 @@ const paths = (): DaemonPaths => {
 const project = (root: string, runnerPid: string, holdExecution = false): string => {
   const location = join(root, "project");
   mkdirSync(join(location, ".kojo", "workflows"), { recursive: true });
+  linkEngine({ root: location, packageRoot });
   const execution = holdExecution
     ? `Effect.sync(() => writeFileSync(${JSON.stringify(runnerPid)}, String(process.pid))).pipe(Effect.andThen(Effect.never))`
     : `Effect.sync(() => {
@@ -115,6 +117,7 @@ export const example = workflow(
 const triggerProject = (root: string, acknowledgement: string): string => {
   const location = join(root, "trigger-project");
   mkdirSync(join(location, ".kojo", "workflows"), { recursive: true });
+  linkEngine({ root: location, packageRoot });
   writeFileSync(
     join(location, "package.json"),
     JSON.stringify({ name: "trigger-run-api-fixture", private: true, type: "module" }),

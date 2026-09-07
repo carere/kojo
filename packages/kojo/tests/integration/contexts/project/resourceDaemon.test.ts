@@ -18,7 +18,7 @@ import type {
   RunDocument,
   StartRunResult,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
-import { afterEach, describe, expect, it } from "@effect/vitest";
+import { afterAll, afterEach, describe, expect, it } from "@effect/vitest";
 import { Effect } from "effect";
 import {
   type RunningDaemon,
@@ -26,12 +26,14 @@ import {
 } from "../../../../src/contexts/daemon/adapters/DaemonOwner.ts";
 import type { DaemonPaths } from "../../../../src/contexts/daemon/models/DaemonPaths.ts";
 import { SqliteProjectRepository } from "../../../../src/contexts/project/adapters/SqliteProjectRepository.ts";
-import { captureWorkflowRevision } from "../../../../src/contexts/workflow/services/captureRevision.ts";
 import { publishConsoleRelease } from "../../../support/daemon/consoleRelease.ts";
 import { sendPreparedMutation } from "../../../support/daemon/preparedMutation.ts";
 import { linkEngine } from "../../../support/linkEngine.ts";
 import { findProcessAncestor, type ProcessRow } from "../../../support/processTree.ts";
+import { revisionFixture } from "../../../support/workflow/revisionFixture.ts";
 
+const revision = revisionFixture("resource");
+afterAll(() => revision.dispose());
 const roots: string[] = [];
 const daemons: RunningDaemon[] = [];
 const packageRoot = new URL("../../../../", import.meta.url).pathname.replace(/\/$/, "");
@@ -52,7 +54,7 @@ const pathsFor = (root: string): DaemonPaths => {
   return paths;
 };
 
-const controlledProject = (root: string, events: string, agentExecutable: string): string => {
+const controlledProject = (root: string): string => {
   const location = join(root, "project");
   const factory = join(location, ".kojo");
   mkdirSync(join(factory, "workflows"), { recursive: true });
@@ -78,6 +80,7 @@ const controlledProject = (root: string, events: string, agentExecutable: string
   writeFileSync(
     join(factory, "workflows", "resource.ts"),
     `import { appendFileSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentProvider } from "@ai-hero/sandcastle";
 import { Duration, Effect, Schema } from "effect";
 import * as SandcastleAgentInvoker from "@carere/kojo-runtime/contexts/agent/adapters/SandcastleAgentInvoker";
@@ -89,59 +92,59 @@ import { gate } from "@carere/kojo-runtime/contexts/workflow/services/phase/gate
 import { sandboxed } from "@carere/kojo-runtime/contexts/workflow/services/sandboxed";
 import { workflow } from "@carere/kojo-runtime/contexts/workflow/services/workflow";
 
-const event = (value: unknown) => appendFileSync(${JSON.stringify(events)}, JSON.stringify(value) + "\\n");
-const released = (path: string, key: string, identity: string, kind: string, locator: string) => {
-  const staging = path + ".provider";
-  writeFileSync(staging, JSON.stringify({ registryVersion: 1, acquisitionKey: key, providerIdentity: identity, kind, state: "released", locator }) + "\\n");
-  renameSync(staging, path);
-};
-const sandboxProvider = () => {
-  const base = noSandbox();
-  const actual = base.sandcastle as typeof base.sandcastle & { create: (options: any) => Promise<any> };
-  return {
-    ...base,
-    sandcastle: {
-      ...actual,
-      create: async (options: any) => {
-        const handle = await actual.create(options);
-        event({ event: "sandbox-acquired", key: options.env.KOJO_RESOURCE_ACQUISITION_KEY });
-        event({ event: "worktree-acquired", key: options.env.KOJO_WORKTREE_ACQUISITION_KEY });
-        return {
-          ...handle,
-          close: async () => {
-            await handle.close();
-            released(options.env.KOJO_RESOURCE_INSPECTION_FILE, options.env.KOJO_RESOURCE_ACQUISITION_KEY, options.env.KOJO_RESOURCE_PROVIDER_IDENTITY, "sandbox", handle.worktreePath);
-            released(options.env.KOJO_WORKTREE_INSPECTION_FILE, options.env.KOJO_WORKTREE_ACQUISITION_KEY, options.env.KOJO_WORKTREE_PROVIDER_IDENTITY, "worktree", handle.worktreePath);
-            event({ event: "sandbox-released", key: options.env.KOJO_RESOURCE_ACQUISITION_KEY });
-            event({ event: "worktree-released", key: options.env.KOJO_WORKTREE_ACQUISITION_KEY });
-          },
-        };
-      },
-    },
-  };
-};
-const provider = (): AgentProvider => ({
-  name: "controlled-executable",
-  env: {},
-  captureSessions: false,
-  buildPrintCommand: ({ prompt }) => ({ command: ${JSON.stringify(`${process.execPath} ${agentExecutable}`)}, stdin: prompt }),
-  parseStreamLine: (line) => line.startsWith("@session ")
-    ? [{ type: "session_id", sessionId: line.slice(9) }]
-    : line.trim() === "" ? [] : [{ type: "text", text: line + "\\n" }],
-});
-const agents = SandcastleAgentInvoker.fromConfig({ config: ".kojo/kojo.config.yaml", provider });
-const Answer = Schema.Struct({ answer: Schema.String });
-
 export const resource = workflow(
-  { name: "resource", payload: Schema.Struct({ gate: Schema.Boolean }), success: Schema.String, error: Schema.Unknown, idempotencyKey: () => "resource-daemon-run" },
+  { name: "resource", payload: Schema.Struct({ gate: Schema.Boolean, root: Schema.String }), success: Schema.String, error: Schema.Unknown, idempotencyKey: () => "resource-daemon-run" },
   (payload) => Effect.gen(function* () {
+    const event = (value: unknown) => appendFileSync(join(payload.root, "provider-events.jsonl"), JSON.stringify(value) + "\\n");
+    const released = (path: string, key: string, identity: string, kind: string, locator: string) => {
+      const staging = path + ".provider";
+      writeFileSync(staging, JSON.stringify({ registryVersion: 1, acquisitionKey: key, providerIdentity: identity, kind, state: "released", locator }) + "\\n");
+      renameSync(staging, path);
+    };
+    const sandboxProvider = () => {
+      const base = noSandbox();
+      const actual = base.sandcastle as typeof base.sandcastle & { create: (options: any) => Promise<any> };
+      return {
+        ...base,
+        sandcastle: {
+          ...actual,
+          create: async (options: any) => {
+            const handle = await actual.create(options);
+            event({ event: "sandbox-acquired", key: options.env.KOJO_RESOURCE_ACQUISITION_KEY });
+            event({ event: "worktree-acquired", key: options.env.KOJO_WORKTREE_ACQUISITION_KEY });
+            return {
+              ...handle,
+              close: async () => {
+                await handle.close();
+                released(options.env.KOJO_RESOURCE_INSPECTION_FILE, options.env.KOJO_RESOURCE_ACQUISITION_KEY, options.env.KOJO_RESOURCE_PROVIDER_IDENTITY, "sandbox", handle.worktreePath);
+                released(options.env.KOJO_WORKTREE_INSPECTION_FILE, options.env.KOJO_WORKTREE_ACQUISITION_KEY, options.env.KOJO_WORKTREE_PROVIDER_IDENTITY, "worktree", handle.worktreePath);
+                event({ event: "sandbox-released", key: options.env.KOJO_RESOURCE_ACQUISITION_KEY });
+                event({ event: "worktree-released", key: options.env.KOJO_WORKTREE_ACQUISITION_KEY });
+              },
+            };
+          },
+        },
+      };
+    };
+    const provider = (): AgentProvider => ({
+      name: "controlled-executable",
+      env: {},
+      captureSessions: false,
+      buildPrintCommand: ({ prompt }) => ({ command: ${JSON.stringify(process.execPath)} + " " + join(payload.root, "controlled-agent.ts"), stdin: prompt }),
+      parseStreamLine: (line) => line.startsWith("@session ")
+        ? [{ type: "session_id", sessionId: line.slice(9) }]
+        : line.trim() === "" ? [] : [{ type: "text", text: line + "\\n" }],
+    });
+    const agents = SandcastleAgentInvoker.fromConfig({ config: ".kojo/kojo.config.yaml", provider });
+    const Answer = Schema.Struct({ answer: Schema.String });
+
     const run = yield* CurrentRun;
     const invoke = (name: string) => agent({ name, description: "Run only the controlled executable", agent: "controlled", prompt: "answer", envelope: Answer }).pipe(
       Effect.map((answer) => answer.answer),
       Effect.tapError((cause) => Effect.sync(() => event({ event: "agent-fault", cause }))),
     );
     const lane = <A, E, R>(body: Effect.Effect<A, E, R>) => sandboxed(
-      { name: "controlled", branch: "kojo/resource-" + run.runId, provider: sandboxProvider(), cwd: ${JSON.stringify(location)}, hidden: [] },
+      { name: "controlled", branch: "kojo/resource-" + run.runId, provider: sandboxProvider(), cwd: join(payload.root, "project"), hidden: [] },
       body.pipe(Effect.provide(agents)),
     );
     if (!payload.gate) return yield* lane(invoke("controlled-agent"));
@@ -228,13 +231,9 @@ console.log("@session controlled-session");
 console.log(JSON.stringify({ answer: "controlled" }));
 `,
       );
-      const location = controlledProject(root, events, executable);
+      const location = controlledProject(root);
       mkdirSync(paths.dataRoot, { recursive: true, mode: 0o700 });
-      const captured = captureWorkflowRevision({
-        project: location,
-        dataRoot: paths.dataRoot,
-        workflowName: "resource",
-      });
+      const captured = revision.install(location, paths.dataRoot);
       const databasePath = join(paths.dataRoot, "kojo.db");
       const database = new Database(databasePath, { create: true, strict: true });
       database.run(
@@ -311,7 +310,7 @@ console.log(JSON.stringify({ answer: "controlled" }));
               kind: "workflow",
               parts: [registered.project.projectId, "resource"],
             },
-            arguments: { payload: { gate: crashMode === "gate" } },
+            arguments: { payload: { gate: crashMode === "gate", root } },
             preconditions: { mode: "no-trigger", revisionId: captured.revisionId },
           },
         );
