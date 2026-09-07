@@ -1,7 +1,7 @@
 {
   "manifestVersion": 1,
   "packageName": "@carere/kojo-runtime",
-  "packageVersion": "0.1.0-alpha.2",
+  "packageVersion": "0.1.0-alpha.3",
   "runner": "./src/runner/main.ts",
   "validator": "./src/validator/main.ts",
   "runnerProtocols": [1],

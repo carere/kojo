@@ -44,7 +44,7 @@
     },
     "packages/kojo": {
       "name": "@carere/kojo",
-      "version": "0.1.0-alpha.2",
+      "version": "0.1.0-alpha.3",
       "bin": {
         "kojo": "./src/main.ts",
       },
@@ -76,7 +76,7 @@
     },
     "packages/kojo-runtime": {
       "name": "@carere/kojo-runtime",
-      "version": "0.1.0-alpha.2",
+      "version": "0.1.0-alpha.3",
       "dependencies": {
         "@ai-hero/sandcastle": "0.12.0",
         "@carere/kojo-runner-contracts": "workspace:*",

@@ -1,6 +1,6 @@
 {
   "name": "@carere/kojo",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.3",
   "description": "Software factory builder — Effect workflows driving AI coding agents in sandboxes",
   "keywords": [
     "agent",
