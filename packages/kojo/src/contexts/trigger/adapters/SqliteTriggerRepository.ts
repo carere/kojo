@@ -21,6 +21,7 @@ interface RunRow {
   readonly workflow_name: string;
   readonly idempotency_key: string;
   readonly payload_json: string;
+  readonly request_json?: string | null;
   readonly revision_id: string;
   readonly package_graph_id: string;
   readonly state: DaemonRun["state"];
@@ -36,6 +37,9 @@ const runOf = (row: RunRow): DaemonRun => ({
   workflowName: row.workflow_name,
   idempotencyKey: row.idempotency_key,
   payload: JSON.parse(row.payload_json) as JsonValue,
+  ...(row.request_json == null
+    ? {}
+    : { request: JSON.parse(row.request_json) as DaemonRun["request"] }),
   revisionId: row.revision_id,
   packageGraphId: row.package_graph_id,
   state: row.state,
@@ -167,15 +171,16 @@ export class SqliteTriggerRepository {
               );
               this.#database.run(
                 `INSERT INTO workflow_runs (
-                   run_id, project_id, workflow_name, idempotency_key, payload_json,
+                   run_id, project_id, workflow_name, idempotency_key, payload_json, request_json,
                    revision_id, package_graph_id, state, admission_sequence, admitted_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
                 [
                   runId,
                   request.projectId,
                   request.workflowName,
                   request.idempotencyKey,
                   JSON.stringify(request.payload),
+                  request.request === undefined ? null : JSON.stringify(request.request),
                   request.revisionId,
                   request.packageGraphId,
                   sequence,

@@ -100,6 +100,11 @@ export const issues = workflow(
     payload: IssueRequest,
     success: Schema.String,
     error: Failed,
+    request: (request) => ({
+      title: `Implement ${request.repository}#${request.issue}`,
+      url: `https://github.com/${request.repository}/issues/${request.issue}`,
+      fields: { "PR branch": request.branch, "Base branch": request.base },
+    }),
     idempotencyKey: (request) =>
       `${request.repository}/${request.issue}/${request.branch}/${request.base}`,
     assets: [

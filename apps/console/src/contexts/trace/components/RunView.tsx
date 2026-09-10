@@ -21,6 +21,7 @@ import { waterfallStore } from "../services/waterfallStore.ts";
 import { Invocations } from "./Invocations.tsx";
 import { PhaseTable } from "./PhaseTable.tsx";
 import { PublishedArtifacts } from "./PublishedArtifacts.tsx";
+import { RequestFacts } from "./RequestFacts.tsx";
 import { RunOutcome } from "./RunOutcome.tsx";
 import { Waterfall } from "./Waterfall.tsx";
 
@@ -240,8 +241,8 @@ export const RunView = (props: {
           <>
             <header class="flex flex-col gap-2" data-run-header={document().run.run.runId}>
               <div class="flex flex-wrap items-center gap-3">
-                <h1 class="min-w-0 break-all font-mono text-lg font-semibold">
-                  {document().run.run.runId}
+                <h1 class="min-w-0 break-words text-lg font-semibold">
+                  {document().request?.title ?? document().run.run.runId}
                 </h1>
                 <Badge tone={statusTones[status()] ?? "neutral"}>{status()}</Badge>
                 <span class="text-muted-foreground text-sm">{document().run.run.workflow}</span>
@@ -249,9 +250,15 @@ export const RunView = (props: {
                   {elapsedOf(document(), now())}
                 </span>
               </div>
+              <Show when={document().request}>
+                {(request) => <RequestFacts request={request()} />}
+              </Show>
               <details class="rounded border border-border p-3">
                 <summary class="cursor-pointer text-sm">Technical details</summary>
                 <div class="flex flex-wrap items-baseline gap-x-5 gap-y-1" data-run-stamp>
+                  <Stamp name="run" label="Run">
+                    {document().run.run.runId}
+                  </Stamp>
                   <Show when={document().daemon}>
                     {(daemon) => (
                       <>

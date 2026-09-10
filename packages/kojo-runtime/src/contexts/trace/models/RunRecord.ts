@@ -1,5 +1,6 @@
 import { Schema } from "effect";
 import { RunId } from "../../shared/models/RunId.ts";
+import { RunRequest } from "./RunRequest.ts";
 
 export const RunOutcome: Schema.Literals<readonly ["succeeded", "failed", "suspended"]> =
   Schema.Literals(["succeeded", "failed", "suspended"]);
@@ -17,6 +18,7 @@ const RunRecordBase: Schema.Class<
     readonly configDigest: Schema.String;
     readonly host: Schema.String;
     readonly imageDigest: Schema.optionalKey<Schema.String>;
+    readonly request: Schema.optionalKey<typeof RunRequest>;
   }>,
   Record<never, never>
 > = Schema.Class<RunRecord>("RunRecord")({
@@ -44,6 +46,7 @@ const RunRecordBase: Schema.Class<
    * provider in Kojo reports one yet, and a fabricated value here would be worse than a null.
    */
   imageDigest: Schema.optionalKey(Schema.String),
+  request: Schema.optionalKey(RunRequest),
 });
 
 /**

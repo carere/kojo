@@ -93,6 +93,7 @@ export const example = workflow(
     success: Schema.Null,
     error: Schema.Never,
     idempotencyKey: () => "exact-null-run",
+    request: () => ({ title: "Compile requested revision", url: "https://github.com/example/project/issues/102", fields: { Branch: "codex/compile", Base: "main" } }),
   },
   () => code(
     {
@@ -164,6 +165,7 @@ export const tickets = workflow(
     success: Schema.String,
     error: Schema.Never,
     idempotencyKey: (payload) => payload.ticket,
+    request: (payload) => ({ title: payload.ticket, fields: { Source: "fixture" } }),
     trigger,
   },
   (payload) => code(
@@ -771,7 +773,18 @@ describe("Daemon no-Trigger Run API", () => {
     database.close(false);
     chmodSync(databasePath, 0o600);
 
-    const daemon = startDaemon(hostPaths, { automaticRefresh: false, runnerIdleMillis: 500 });
+    let releaseQueued = (): void => {};
+    const daemon = startDaemon(hostPaths, {
+      automaticRefresh: false,
+      runnerIdleMillis: 500,
+      runRestore: (runs) =>
+        Effect.gen(function* () {
+          yield* runs
+            .holdProjectDispatch(registered.project.projectId, "Check admitted request")
+            .pipe(Effect.orDie);
+          releaseQueued = () => runs.releaseProjectDispatch(registered.project.projectId);
+        }),
+    });
     daemons.push(daemon);
     const startBody: MutationEnvelope = {
       mutationVersion: 1,
@@ -821,7 +834,19 @@ describe("Daemon no-Trigger Run API", () => {
     const admitted = (await response.json()) as StartRunResult;
     expect(admitted).toMatchObject({ duplicate: false, revisionId: captured.revisionId });
 
+    const queued = (await (
+      await call(daemon, `/api/v1/runs/${admitted.runId}`)
+    ).json()) as RunDocument;
+    expect(queued.state).toBe("queued");
+    expect(queued.startedAt).toBeUndefined();
+    expect(queued.request?.title).toBe("Compile requested revision");
+    releaseQueued();
     const run = await waitForRun(daemon, admitted.runId);
+    expect(run.request).toEqual({
+      title: "Compile requested revision",
+      url: "https://github.com/example/project/issues/102",
+      fields: { Branch: "codex/compile", Base: "main" },
+    });
     expect(run).toMatchObject({
       runId: admitted.runId,
       projectId: registered.project.projectId,
@@ -1417,6 +1442,10 @@ describe("Daemon no-Trigger Run API", () => {
       `/api/v1/runs/${firstAcknowledgement.run?.runId ?? "missing"}`,
     );
     expect(durableRun.status).toBe(200);
+    expect(((await durableRun.json()) as RunDocument).request).toEqual({
+      title: "ticket-one",
+      fields: { Source: "fixture" },
+    });
     await Bun.sleep(250);
 
     const stop = await mutate(daemon, `${startPath.replace("/start", "/stop")}`, {

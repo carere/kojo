@@ -4,6 +4,7 @@ import { present } from "../../shared/lib/present.ts";
 import { BuildInfo } from "../../shared/models/BuildInfo.ts";
 import type { RunId } from "../../shared/models/RunId.ts";
 import { RunRecord } from "../../trace/models/RunRecord.ts";
+import type { RunRequest } from "../../trace/models/RunRequest.ts";
 import { Tracer } from "../../trace/ports/Tracer.ts";
 import type { Trigger } from "../../trigger/ports/Trigger.ts";
 import { CurrentRun } from "./CurrentRun.ts";
@@ -43,6 +44,10 @@ export const workflow = <
     readonly payload: Payload;
     /** Additional immutable inputs, referenced with literal relative new URL(..., import.meta.url). */
     readonly assets?: ReadonlyArray<URL>;
+    /** Public request facts, captured once. Other payload fields remain private. */
+    readonly request?: (
+      payload: Payload extends Schema.Struct.Fields ? Schema.Struct.Type<Payload> : Payload["Type"],
+    ) => RunRequest;
     readonly success: Success;
     readonly error: Error;
     /** What a run is deduplicated by. Two triggers for one unit of work must not open two runs. */
@@ -71,6 +76,7 @@ export const workflow = <
   >;
   readonly authoredPayloadSchema: Schema.Struct<Schema.Struct.Fields> | Schema.Top;
   readonly authoredIdempotencyKey: (payload: unknown) => string;
+  readonly authoredRequest?: (payload: unknown) => RunRequest;
   readonly encodeEnginePayload: (payload: unknown) => Record<string, unknown>;
   readonly trigger?: Layer.Layer<Trigger, never, never>;
 } => {
@@ -121,6 +127,7 @@ export const workflow = <
               configDigest: build.configDigest,
               host: build.host,
               ...present("imageDigest", build.imageDigest),
+              ...present("request", options.request?.(authoredPayload)),
             }),
           );
         }),
@@ -164,6 +171,9 @@ export const workflow = <
     layer,
     authoredPayloadSchema: scalar ? (options.payload as Schema.Top) : Schema.Struct(fields),
     authoredIdempotencyKey: options.idempotencyKey as (payload: unknown) => string,
+    ...(options.request === undefined
+      ? {}
+      : { authoredRequest: options.request as (payload: unknown) => RunRequest }),
     encodeEnginePayload: (payload: unknown): Record<string, unknown> =>
       scalar ? { value: payload } : (payload as Record<string, unknown>),
     ...(options.trigger === undefined ? {} : { trigger: options.trigger }),

@@ -2,6 +2,7 @@ import type {
   InvocationDocument,
   InvocationTotals,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/invocation";
+import type { RunDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 /** Model the fields consumed from GET /api/v1/runs/:runId. Unknown additive fields do not affect the view. */
 
 /** The three kinds of phase a workflow is made of. A sandbox is a scope, so it is not one. */
@@ -138,6 +139,7 @@ export interface InFlightLine {
 }
 
 export interface RunDoc {
+  readonly request?: RunDocument["request"];
   readonly invocations?: ReadonlyArray<InvocationDocument>;
   readonly invocationTotals?: InvocationTotals;
   readonly daemon?: {

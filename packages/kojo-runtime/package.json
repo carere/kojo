@@ -81,6 +81,7 @@
     "./contexts/trace/models/Occurrence": "./src/contexts/trace/models/Occurrence.ts",
     "./contexts/trace/models/PhaseRecord": "./src/contexts/trace/models/PhaseRecord.ts",
     "./contexts/trace/models/RepoEffect": "./src/contexts/trace/models/RepoEffect.ts",
+    "./contexts/trace/models/RunRequest": "./src/contexts/trace/models/RunRequest.ts",
     "./contexts/trace/models/RunRecord": "./src/contexts/trace/models/RunRecord.ts",
     "./contexts/trace/models/SandboxRecord": "./src/contexts/trace/models/SandboxRecord.ts",
     "./contexts/trace/models/Verification": "./src/contexts/trace/models/Verification.ts",

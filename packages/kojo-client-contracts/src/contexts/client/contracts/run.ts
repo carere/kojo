@@ -79,6 +79,12 @@ export interface RunSandboxDocument {
 
 /** One Daemon-owned Run observation. The authored payload is intentionally not exposed. */
 export interface RunDocument {
+  /** Authored public facts, retained at Run start. Other payload fields remain private. */
+  readonly request?: {
+    readonly title: string;
+    readonly url?: string;
+    readonly fields: Readonly<Record<string, string>>;
+  };
   readonly invocations?: ReadonlyArray<InvocationDocument>;
   readonly invocationTotals?: InvocationTotals;
   readonly runId: string;

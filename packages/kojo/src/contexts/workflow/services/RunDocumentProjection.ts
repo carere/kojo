@@ -1,5 +1,6 @@
 import { decodeRollbackOutcome } from "@carere/kojo-client-contracts/contexts/client/contracts/rollback";
 import type { RunDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
+import { decodeRunRequest } from "@carere/kojo-runner-contracts/contexts/project/contracts/runRequest";
 import type { TraceProjection } from "../../trace/models/DaemonTrace.ts";
 import type { ArtifactRepository } from "../../trace/ports/ArtifactRepository.ts";
 import { invocationDocuments } from "../../trace/services/invocationDocuments.ts";
@@ -108,6 +109,11 @@ const provenanceOf = (trace: TraceProjection): Pick<RunDocument, "provenance"> =
   };
 };
 
+const requestOf = (trace: TraceProjection): Pick<RunDocument, "request"> => {
+  const request = decodeRunRequest(trace.run?.request);
+  return request.ok ? { request: request.value } : {};
+};
+
 const activePhasesOf = (
   run: DaemonRun,
   trace: TraceProjection,
@@ -143,6 +149,7 @@ export const runDocumentOf = (
     revisionId: run.revisionId,
     packageGraphId: run.packageGraphId,
     ...provenanceOf(trace),
+    ...(run.request === undefined ? requestOf(trace) : { request: run.request }),
     ...activePhasesOf(run, trace),
     state: run.state,
     ...(!terminal(run) && run.state === "queued"

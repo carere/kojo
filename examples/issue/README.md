@@ -74,3 +74,7 @@ Unit tests exercise scheduling, source revisions, capacity, blocker refusal, rep
 acceptance through in-memory delivery and Workspace operations. The image has also been checked
 manually with a local test application and Chromium. Authenticated single-issue and graph trials
 on Zaidan remain required; this example is not yet a publication acceptance result.
+
+The Workflow declares public request facts for the Console: the issue link, PR branch, and base
+branch. They are retained at admission, including while the Run waits for capacity. Keep this
+function pure and exclude secrets; public request facts have no automatic redaction.

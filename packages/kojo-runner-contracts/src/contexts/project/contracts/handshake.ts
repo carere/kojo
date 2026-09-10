@@ -111,3 +111,6 @@ export const decodeWelcomeBody = (input: unknown): DecodeResult<WelcomeBody> => 
 
 /** Required when a Runtime sends retained live invocation observations. */
 export const invocationObservationFeature = "invocation-observations-v1";
+
+/** Run-start Trace supports an authored public request. */
+export const runRequestFeature = "run-request-v1";

@@ -7,6 +7,7 @@ import {
   decodeSuccess,
   type JsonObject,
 } from "../../shared/codecs/json.ts";
+import { decodeRunRequest } from "./runRequest.ts";
 
 export type TraceMutation =
   | { readonly kind: "invocation"; readonly record: JsonObject }
@@ -176,6 +177,7 @@ const runRecord = (input: unknown, path: DecodePath): DecodeResult<JsonObject> =
       "configDigest",
       "host",
       "imageDigest",
+      "request",
     ],
     path,
   );
@@ -195,7 +197,9 @@ const runRecord = (input: unknown, path: DecodePath): DecodeResult<JsonObject> =
   const startedAt = finite(record.value.startedAt, [...path, "startedAt"]);
   if (!startedAt.ok) return startedAt;
   const imageDigest = optional(record.value, "imageDigest", stringAt, path);
-  return imageDigest.ok ? decodeSuccess(record.value as JsonObject) : imageDigest;
+  if (!imageDigest.ok) return imageDigest;
+  const request = optional(record.value, "request", decodeRunRequest, path);
+  return request.ok ? decodeSuccess(record.value as JsonObject) : request;
 };
 
 const inFlightPhase = (input: unknown, path: DecodePath): DecodeResult<JsonObject> => {

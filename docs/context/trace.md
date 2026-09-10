@@ -15,7 +15,9 @@ _Avoid_: log, event log, history
 **Run record**:
 The record that ties a Run's Phases together and carries the Runtime version, the full captured
 Workflow Revision digest (including configuration and packages), the Host, and the image digest
-when known. Its status changes as the Run progresses.
+when known. It can also retain authored public request facts: a title, a link, and named fields.
+Admission retains the same public facts so queued Runs remain identifiable. Other payload fields
+remain private. Its status changes as the Run progresses.
 _Avoid_: session, adw
 
 **Phase record**:

@@ -7,7 +7,11 @@ import {
 } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import type { OperationReplyBody } from "@carere/kojo-runner-contracts/contexts/project/contracts/execution";
 import type { RunnerFrame } from "@carere/kojo-runner-contracts/contexts/project/contracts/frame";
-import { invocationObservationFeature } from "@carere/kojo-runner-contracts/contexts/project/contracts/handshake";
+import {
+  invocationObservationFeature,
+  runRequestFeature,
+} from "@carere/kojo-runner-contracts/contexts/project/contracts/handshake";
+import { decodeRunRequest } from "@carere/kojo-runner-contracts/contexts/project/contracts/runRequest";
 import { Cause, Duration, Effect, Exit, Option } from "effect";
 import type {
   DaemonProjectRepository,
@@ -451,6 +455,10 @@ export class TriggerSupervisor {
       if (frame.kind === "AdmitTriggerRequest") {
         try {
           const payload = decodeJsonValue(body.payload);
+          const publicRequest =
+            body.request === undefined ? undefined : decodeRunRequest(body.request);
+          if (publicRequest !== undefined && !publicRequest.ok)
+            throw new Error("the Trigger public request is invalid");
           if (
             typeof body.source !== "string" ||
             typeof body.eventId !== "string" ||
@@ -470,6 +478,7 @@ export class TriggerSupervisor {
               eventId: body.eventId,
               idempotencyKey: body.idempotencyKey,
               payload: payload.value,
+              ...(publicRequest === undefined ? {} : { request: publicRequest.value }),
               revisionId: registered.revision.revisionId,
               packageGraphId: registered.revision.packageGraphId,
               deliveredAt: body.deliveredAt,
@@ -619,7 +628,9 @@ export class TriggerSupervisor {
         hello.body.projectId !== bootstrap.projectId ||
         hello.body.packageGraphId !== bootstrap.packageGraphId ||
         !hello.body.supportedProtocols.includes(1) ||
-        hello.body.requiredFeatures.some((feature) => feature !== invocationObservationFeature)
+        hello.body.requiredFeatures.some(
+          (feature) => feature !== invocationObservationFeature && feature !== runRequestFeature,
+        )
       ) {
         throw new Error("the Trigger Runner Hello does not match its private binding");
       }
@@ -635,7 +646,7 @@ export class TriggerSupervisor {
             packageGraphId: bootstrap.packageGraphId,
             projectId: bootstrap.projectId,
             selectedProtocol: 1,
-            features: [invocationObservationFeature],
+            features: [invocationObservationFeature, runRequestFeature],
           },
         }),
       );

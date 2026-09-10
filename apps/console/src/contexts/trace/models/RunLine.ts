@@ -11,6 +11,7 @@ export interface RunLine {
     readonly projectId: string;
     readonly workflow: string;
     readonly startedAt: number;
+    readonly requestTitle?: string;
   };
   /** How the run last stopped. Absent while it has never stopped, which is *executing*. */
   readonly outcome?: "succeeded" | "failed" | "suspended" | "cancelled";

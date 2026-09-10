@@ -5,7 +5,7 @@ browser reads the Daemon HTTP API.
 
 ## Views
 
-The launch URL and home page open the Run list. Its rows show the Project, Workflow, status,
+The launch URL and home page open the Run list. Its rows show the authored request, Project, Workflow, status,
 current activity, Gate waiting state, and last recorded update. The operator can start a Workflow
 from an expandable form on that page. Stopping Workflow activity does not cancel admitted Runs.
 
@@ -30,6 +30,17 @@ uncertainty warning and retry controls. A confirmed result does not imply unreso
 
 The Console does not open SQLite and does not execute or resume Runs. It reads Daemon snapshots and
 sends explicit client commands.
+
+## Public request facts
+
+A Workflow can declare a pure `request(payload)` function that returns a title, an optional URL,
+and a map of public fields. Admission retains these selected facts with the Run, including queued
+Runs. The Run-start Trace also captures them for retained Runtimes. The Console never copies the
+whole payload. Authors must exclude secrets: request fields have no automatic redaction.
+
+The Run list uses the title; detail shows the link and fields before technical details. Links
+are limited to HTTP(S) without URL credentials. A Workflow without request facts keeps the
+Workflow name and Run identity. A later Factory edit cannot replace an admitted Run request.
 
 ## Gate answers
 

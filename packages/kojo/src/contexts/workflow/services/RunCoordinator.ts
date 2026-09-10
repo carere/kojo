@@ -13,6 +13,7 @@ import type {
   WorkflowMode,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
+import { decodeRunRequest } from "@carere/kojo-runner-contracts/contexts/project/contracts/runRequest";
 import { Data, Effect } from "effect";
 import type { DaemonGateRepository } from "../../gate/ports/DaemonGateRepository.ts";
 import { createGateToken } from "../../gate/services/createGateToken.ts";
@@ -753,6 +754,10 @@ export class RunCoordinator {
         "inspect",
         registration,
       );
+      const publicRequest =
+        inspected.request === undefined ? undefined : decodeRunRequest(inspected.request);
+      if (publicRequest !== undefined && !publicRequest.ok)
+        throw new Error("the Runner public request is invalid");
       const admittedAt = new Date(this.#now()).toISOString();
       const admission = await Effect.runPromise(
         this.#runs.admitAndActivateWorkflow({
@@ -770,6 +775,7 @@ export class RunCoordinator {
           workflowName: options.workflowName,
           idempotencyKey: inspected.idempotencyKey,
           payload: options.payload,
+          ...(publicRequest === undefined ? {} : { request: publicRequest.value }),
           revisionId: revision.revisionId,
           packageGraphId: revision.packageGraphId,
           admittedAt,

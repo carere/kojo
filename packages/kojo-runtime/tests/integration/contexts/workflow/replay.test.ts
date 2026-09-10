@@ -98,7 +98,7 @@ const execute = async (
         packageGraphId: request.packageGraphId,
         projectId: request.projectId,
         selectedProtocol: 1,
-        features: ["invocation-observations-v1"],
+        features: ["invocation-observations-v1", "run-request-v1"],
       },
     }),
   );

@@ -5,6 +5,7 @@ import { type RunLine, type RunStatus, statusOf } from "./RunLine.ts";
 /** Build Run list cells with the supplied clock before rendering them. */
 export interface RunRow {
   readonly runId: string;
+  readonly request: string;
   readonly project: string;
   readonly activity: string;
   readonly updatedAt: string;
@@ -48,6 +49,7 @@ export const runRows = (options: {
       ]);
     const common = {
       runId: line.run.runId,
+      request: line.run.requestTitle ?? line.run.workflow,
       project: options.projects?.get(line.run.projectId) ?? line.run.projectId,
       activity: line.activity ?? statusOf(line),
       updatedAt: new Date(

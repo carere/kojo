@@ -1,3 +1,4 @@
+import type { RunDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import type { DaemonRun } from "../../workflow/models/DaemonRun.ts";
 
@@ -8,6 +9,7 @@ export interface TriggerDeliveryRequest {
   readonly eventId: string;
   readonly idempotencyKey: string;
   readonly payload: JsonValue;
+  readonly request?: RunDocument["request"];
   readonly revisionId: string;
   readonly packageGraphId: string;
   readonly deliveredAt: string;

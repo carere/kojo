@@ -47,7 +47,7 @@ export const Runs = (): JSX.Element => {
       (row) =>
         (status() === "all" || row.status === status()) &&
         (query === "" ||
-          `${row.runId}\n${row.workflow}\n${row.project}\n${row.activity}\n${row.status}\n${row.queueReason}`
+          `${row.request}\n${row.runId}\n${row.workflow}\n${row.project}\n${row.activity}\n${row.status}\n${row.queueReason}`
             .toLocaleLowerCase()
             .includes(query)),
     );
