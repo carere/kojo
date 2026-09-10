@@ -186,6 +186,7 @@ const workflow = (choices: FactoryChoices) => {
       "export const review = workflow(",
       "  {",
       '    name: "review",',
+      '    assets: [new URL("../sandbox/Dockerfile", import.meta.url)],',
       "    payload: { subject: Schema.String },",
       "    success: Schema.String,",
       "    error: failures,",

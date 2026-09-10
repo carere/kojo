@@ -3,7 +3,6 @@ import type { FactoryChoices, TemplateName } from "../models/FactoryChoices.ts";
 import type { FactoryPlan } from "../models/FactoryPlan.ts";
 import { commands } from "../templates/commands.ts";
 import { dockerfile } from "../templates/dockerfile.ts";
-import { factoryManifest } from "../templates/factoryManifest.ts";
 import { hotfix } from "../templates/hotfix.ts";
 import { review } from "../templates/review.ts";
 import { authoring, operations, skill, skillsDirectory } from "../templates/skills.ts";
@@ -34,7 +33,6 @@ export const plan = (choices: FactoryChoices): FactoryPlan => {
     directories: [],
     files: [
       { path: at("README.md"), content: readme(choices, starter) },
-      { path: at("factory.json"), content: factoryManifest(starter.agents, true) },
       { path: at(".gitignore"), content: ignore() },
       { path: at(".env"), content: environment(choices) },
       { path: at("envelopes.ts"), content: starter.envelopes },

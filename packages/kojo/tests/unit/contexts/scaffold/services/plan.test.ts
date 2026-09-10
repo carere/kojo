@@ -313,20 +313,11 @@ describe("where a Run's state goes", () => {
   });
 });
 
-describe("the Factory asset declaration", () => {
-  it.each(templateNames)("%s declares retained non-source inputs", (template) => {
+describe("Factory assets", () => {
+  it.each(templateNames)("%s needs no asset declaration", (template) => {
     const stamped = plan(choicesFor(template));
-    const manifest = JSON.parse(contentAt(stamped.files, ".kojo/factory.json")) as {
-      formatVersion: number;
-      assets: ReadonlyArray<string>;
-    };
-
-    expect(manifest.formatVersion).toBe(1);
-    expect(manifest.assets).not.toContain("kojo.config.yaml");
-    expect(manifest.assets).toContain("sandbox/Dockerfile");
-    expect(manifest.assets.some((asset) => asset.startsWith("prompts/"))).toBe(true);
-    expect(manifest.assets).not.toContain(".env");
-    expect(manifest.assets.every((asset) => !asset.startsWith("data/"))).toBe(true);
+    expect(stamped.files.some((file) => file.path === ".kojo/factory.json")).toBe(false);
+    expect(stamped.files.some((file) => file.path.startsWith(".kojo/prompts/"))).toBe(true);
   });
 });
 

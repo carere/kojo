@@ -235,6 +235,7 @@ import { retainedSource } from "./version.ts";
 export const offline = workflow(
   {
     name: "offline",
+    assets: [new URL("../prompt.md", import.meta.url)],
     payload: Schema.Null,
     success: Schema.Null,
     error: Schema.Never,

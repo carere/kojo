@@ -58,3 +58,21 @@ System and user prompts can stay in separate files. The authored Workflow reads 
 the user task explicitly. The runtime adds the answer schema to the task. The generated examples
 show these reads beside the call. A Factory does not need `kojo.config.yaml`. `commands.ts` and
 `envelopes.ts` are optional helper modules; when present, the validator checks their contracts.
+
+## Factory asset references
+
+A Factory needs no `factory.json` asset declaration. Capture follows literal relative
+`new URL("../prompts/system.md", import.meta.url)` references in the selected Workflow and its
+source imports. The generated prompt reads use this form. Non-source static imports are also
+retained. Assets can contain JavaScript or TypeScript when a URL references them as data.
+
+Use the optional `assets` field in `workflow(...)` for additional inputs, such as
+`assets: [new URL("../sandbox/Dockerfile", import.meta.url)]`. List each required Docker build
+input with a literal relative URL. Keep computed paths out of asset references. `tsconfig.json`
+remains shared resolution configuration. The obsolete `factory.json` file is ignored.
+
+Capture rejects credential paths, runtime data, symbolic links, and references that leave
+`.kojo`. It does not copy unrelated Factory or Project files. Keep credentials outside authored
+prompts and assets. The capture records hashes and modes, verifies copied bytes, and checks the
+source and asset sets again before it publishes a Revision. A Run continues to read its retained
+files after the current Factory changes.

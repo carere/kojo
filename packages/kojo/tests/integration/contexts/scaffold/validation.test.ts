@@ -85,13 +85,9 @@ describe("standalone Project validation", () => {
 
   it("accepts a Workflow without a roster or helper modules", async () => {
     const fixture = await project();
-    for (const name of ["kojo.config.yaml", "commands.ts", "envelopes.ts"]) {
+    for (const name of ["factory.json", "kojo.config.yaml", "commands.ts", "envelopes.ts"]) {
       await rm(join(fixture.root, ".kojo", name));
     }
-    await writeFile(
-      join(fixture.root, ".kojo", "factory.json"),
-      JSON.stringify({ formatVersion: 1, assets: [] }),
-    );
     const diagnostics = await Effect.runPromise(standaloneValidation(fixture.root));
     expect(diagnostics.filter((finding) => finding.standing === "failed")).toEqual([]);
   });

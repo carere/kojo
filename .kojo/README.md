@@ -15,6 +15,8 @@ and stores all Run and Gate state outside the Project.
 | `commands.ts` | Defines the Project commands that phases can run. |
 | `prompts/` | Defines agent system and user prompts. |
 
+Factory assets are captured automatically. There is no asset manifest.
+
 Each agent call selects its provider and model, then reads its system and user prompts.
 
 The Factory uses `noSandbox()`. Each Run still uses its own worktree and branch. Permission checks

@@ -44,12 +44,12 @@ admitted Runs can still finish subject to availability and recovery unless cance
 _Avoid_: Invalid Workflow, Removed Workflow, Cancelled Run
 
 **Factory asset**:
-A declared non-source input retained with a Workflow Revision, such as a prompt template or roster
+A non-source Factory input retained with a Workflow Revision, such as a prompt template or Sandbox
 configuration. Its content stays fixed for every Run that uses that revision.
 _Avoid_: Artifact, live Project file, credential
 
 **Workflow Revision**:
-An immutable version of a Project Workflow, its required Factory source and declared assets, and
+An immutable version of a Project Workflow, its required Factory source and assets, and
 its exact required package content, excluding credentials and live Project files. A Run keeps its
 Workflow Revision from admission, and the revision remains available while any retained Run refers
 to it, independent of changes to the current Factory or installed packages.

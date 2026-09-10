@@ -41,6 +41,8 @@ export const workflow = <
   options: {
     readonly name: Tag;
     readonly payload: Payload;
+    /** Additional immutable inputs, referenced with literal relative new URL(..., import.meta.url). */
+    readonly assets?: ReadonlyArray<URL>;
     readonly success: Success;
     readonly error: Error;
     /** What a run is deduplicated by. Two triggers for one unit of work must not open two runs. */

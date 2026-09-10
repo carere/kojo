@@ -249,6 +249,7 @@ const workflow = (choices: FactoryChoices) => {
       "export const hotfix = workflow(",
       "  {",
       '    name: "hotfix",',
+      '    assets: [new URL("../sandbox/Dockerfile", import.meta.url)],',
       "    payload: { fault: Schema.String },",
       "    success: Schema.String,",
       "    error: failures,",

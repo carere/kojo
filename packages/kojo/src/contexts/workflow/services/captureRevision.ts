@@ -49,6 +49,7 @@ interface PackageNode {
 }
 
 interface ImportScan {
+  readonly assets: ReadonlyArray<string>;
   readonly relatives: ReadonlyArray<string>;
   readonly packages: ReadonlyArray<string>;
 }
@@ -68,6 +69,8 @@ const credentialPath = (path: string): boolean => {
   const parts = posix(path).toLowerCase().split("/");
   return parts.some(
     (part) =>
+      [".ssh", ".aws", ".azure", ".gnupg", "auth.json"].includes(part) ||
+      /\.(?:key|pem|p12|pfx|keystore)$/.test(part) ||
       part === ".npmrc" ||
       part === ".yarnrc" ||
       part === ".yarnrc.yml" ||
@@ -95,54 +98,77 @@ const scanImports = (source: string, path: string): ImportScan => {
   const specifiers = new Set(
     new Bun.Transpiler({ loader: "ts" }).scanImports(source).map((entry) => entry.path),
   );
+  const assets: string[] = [];
+  const trivia = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\n]*(?:\n|$))*`;
+  const assetReference = new RegExp(
+    String.raw`^new\b${trivia}URL\b${trivia}\(${trivia}(["'])([^"'\\\r\n]+)\1${trivia},${trivia}import${trivia}\.${trivia}meta${trivia}\.${trivia}url${trivia},?${trivia}\)`,
+  );
   let index = 0;
   const skipQuoted = (quote: string): void => {
     index += 1;
     while (index < source.length) {
-      if (source[index] === "\\") index += 2;
+      if (quote === "`" && source[index] === "$" && source[index + 1] === "{") {
+        index += 2;
+        scanCode(true);
+      } else if (source[index] === "\\") index += 2;
       else if (source[index] === quote) {
         index += 1;
         return;
       } else index += 1;
     }
   };
-  while (index < source.length) {
-    const character = source[index];
-    if (character === "/" && source[index + 1] === "/") {
-      index = source.indexOf("\n", index + 2);
-      if (index < 0) break;
-      continue;
-    }
-    if (character === "/" && source[index + 1] === "*") {
-      const end = source.indexOf("*/", index + 2);
-      index = end < 0 ? source.length : end + 2;
-      continue;
-    }
-    if (character === '"' || character === "'" || character === "`") {
-      skipQuoted(character);
-      continue;
-    }
-    const call = source.slice(index).match(/^(import|require)\b/);
-    if (call?.[1] !== undefined) {
-      let cursor = index + call[1].length;
-      while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-      if (source[cursor] === "(") {
-        cursor += 1;
-        while (/\s/.test(source[cursor] ?? "")) cursor += 1;
-        const quote = source[cursor];
-        if (quote !== '"' && quote !== "'") {
-          throw captureError(
-            "WORKFLOW_INVALID",
-            `${path} contains a computed ${call[1] === "import" ? "dynamic import" : "require"}`,
-            "Use a literal relative or package specifier.",
-          );
+  const scanCode = (interpolation = false): void => {
+    let braces = 0;
+    while (index < source.length) {
+      const character = source[index];
+      if (interpolation && character === "}") {
+        if (braces === 0) {
+          index += 1;
+          return;
         }
+        braces -= 1;
+      } else if (interpolation && character === "{") braces += 1;
+      if (character === "/" && source[index + 1] === "/") {
+        index = source.indexOf("\n", index + 2);
+        if (index < 0) break;
+        continue;
       }
-      index += call[1].length;
-      continue;
+      if (character === "/" && source[index + 1] === "*") {
+        const end = source.indexOf("*/", index + 2);
+        index = end < 0 ? source.length : end + 2;
+        continue;
+      }
+      if (character === '"' || character === "'" || character === "`") {
+        skipQuoted(character);
+        continue;
+      }
+      const asset = /[\w$]/.test(source[index - 1] ?? "")
+        ? null
+        : source.slice(index).match(assetReference);
+      if (asset?.[2] !== undefined) assets.push(asset[2]);
+      const call = source.slice(index).match(/^(import|require)\b/);
+      if (call?.[1] !== undefined) {
+        let cursor = index + call[1].length;
+        while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+        if (source[cursor] === "(") {
+          cursor += 1;
+          while (/\s/.test(source[cursor] ?? "")) cursor += 1;
+          const quote = source[cursor];
+          if (quote !== '"' && quote !== "'") {
+            throw captureError(
+              "WORKFLOW_INVALID",
+              `${path} contains a computed ${call[1] === "import" ? "dynamic import" : "require"}`,
+              "Use a literal relative or package specifier.",
+            );
+          }
+        }
+        index += call[1].length;
+        continue;
+      }
+      index += 1;
     }
-    index += 1;
-  }
+  };
+  scanCode();
 
   const relatives: string[] = [];
   const packages: string[] = [];
@@ -158,7 +184,50 @@ const scanImports = (source: string, path: string): ImportScan => {
     if (specifier.startsWith(".")) relatives.push(specifier);
     else packages.push(specifier);
   }
-  return { relatives, packages };
+  return { relatives, packages, assets };
+};
+
+const sourceFile = (path: string): boolean => /\.[cm]?[jt]sx?$/.test(path);
+
+const excludedFactoryPath = (path: string): boolean =>
+  credentialPath(path) ||
+  posix(path)
+    .split("/")
+    .some((part) => ["data", ".git", "node_modules"].includes(part));
+
+/** Validate every path component before capture can read an authored input. */
+const factoryFile = (factory: string, target: string): string => {
+  const path = relative(factory, target);
+  if (path === ".." || path.startsWith(`..${sep}`) || excludedFactoryPath(path)) {
+    throw captureError(
+      "WORKFLOW_INVALID",
+      `${target} is excluded or outside the Factory`,
+      "Reference a regular non-credential file below .kojo.",
+    );
+  }
+  try {
+    let current = factory;
+    for (const part of path.split(sep)) {
+      current = join(current, part);
+      if (lstatSync(current).isSymbolicLink()) {
+        throw captureError(
+          "WORKFLOW_INVALID",
+          `${target} is linked`,
+          "Replace symbolic links with regular Factory files.",
+        );
+      }
+    }
+    if (!statSync(target).isFile()) throw new Error("not a regular file");
+    return realpathSync(target);
+  } catch (cause) {
+    if (cause instanceof RevisionCaptureError) throw cause;
+    throw captureError(
+      "WORKFLOW_INVALID",
+      `${target} is not a readable Factory file`,
+      "Restore the referenced file or remove its code reference.",
+      cause,
+    );
+  }
 };
 
 const sourceClosure = (
@@ -166,34 +235,36 @@ const sourceClosure = (
   entry: string,
 ): {
   readonly files: ReadonlyArray<string>;
+  readonly assets: ReadonlyArray<string>;
   readonly packages: ReadonlyArray<{ readonly specifier: string; readonly from: string }>;
 } => {
   const factoryReal = realpathSync(factory);
   const pending = [entry];
   const files = new Set<string>();
+  const assets = new Set<string>();
   const packages: Array<{ readonly specifier: string; readonly from: string }> = [];
   while (pending.length > 0) {
     const current = pending.pop();
     if (current === undefined) continue;
-    const selected = realpathSync(current);
+    const selected = factoryFile(factoryReal, current);
     const pathFromFactory = relative(factoryReal, selected);
-    if (pathFromFactory === ".." || pathFromFactory.startsWith(`..${sep}`)) {
-      throw captureError(
-        "WORKFLOW_INVALID",
-        `${current} resolves outside .kojo`,
-        "Keep every relative Factory source import below `.kojo`.",
-      );
-    }
-    if (lstatSync(current).isSymbolicLink()) {
-      throw captureError(
-        "WORKFLOW_INVALID",
-        `${current} is a symbolic link`,
-        "Replace Factory source links with regular files below `.kojo`.",
-      );
-    }
     if (files.has(selected)) continue;
     files.add(selected);
+    if (!sourceFile(selected)) {
+      assets.add(selected);
+      continue;
+    }
     const scanned = scanImports(readFileSync(selected, "utf8"), posix(pathFromFactory));
+    for (const reference of scanned.assets) {
+      if (!(reference.startsWith("./") || reference.startsWith("../"))) {
+        throw captureError(
+          "WORKFLOW_INVALID",
+          `${pathFromFactory} references a non-relative Factory asset`,
+          "Use a literal relative URL below .kojo.",
+        );
+      }
+      assets.add(factoryFile(factoryReal, resolve(dirname(selected), reference)));
+    }
     for (const specifier of scanned.relatives) {
       let resolved: string;
       try {
@@ -212,6 +283,7 @@ const sourceClosure = (
   }
   return {
     files: [...files].sort(),
+    assets: [...assets].sort(),
     packages: packages.sort((left, right) =>
       `${left.specifier}\0${left.from}`.localeCompare(`${right.specifier}\0${right.from}`),
     ),
@@ -486,49 +558,10 @@ const lockEvidence = (project: string): ReadonlyArray<RevisionFile> =>
     .sort((left, right) => left.path.localeCompare(right.path));
 
 const sharedConfiguration = (factory: string): ReadonlyArray<string> =>
-  ["factory.json", "tsconfig.json"]
+  ["tsconfig.json"]
     .map((name) => join(factory, name))
     .filter(existsSync)
     .sort();
-
-const declaredAssets = (factory: string): ReadonlyArray<string> => {
-  const manifestPath = join(factory, "factory.json");
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
-    readonly formatVersion?: number;
-    readonly assets?: ReadonlyArray<unknown>;
-  };
-  if (manifest.formatVersion !== 1 || !Array.isArray(manifest.assets)) {
-    throw captureError(
-      "FACTORY_INVALID",
-      `${manifestPath} is not a format-version 1 Factory asset declaration`,
-      "Set `formatVersion` to 1 and declare an `assets` array.",
-    );
-  }
-  return manifest.assets.map((value) => {
-    if (typeof value !== "string" || value === "" || isAbsolute(value) || credentialPath(value)) {
-      throw captureError(
-        "FACTORY_INVALID",
-        `${String(value)} cannot be captured as a Factory asset`,
-        "Declare only credential-free relative asset paths below `.kojo`.",
-      );
-    }
-    const target = resolve(factory, value);
-    const real = realpathSync(target);
-    const boundary = relative(realpathSync(factory), real);
-    if (
-      boundary === ".." ||
-      boundary.startsWith(`..${sep}`) ||
-      lstatSync(target).isSymbolicLink()
-    ) {
-      throw captureError(
-        "FACTORY_INVALID",
-        `${value} leaves the Factory asset boundary or is linked`,
-        "Use a regular file below `.kojo` for each Factory asset.",
-      );
-    }
-    return real;
-  });
-};
 
 const validateCopied = (root: string, files: ReadonlyArray<RevisionFile>): void => {
   for (const file of files) {
@@ -563,10 +596,13 @@ export const captureWorkflowRevision = (options: {
     try {
       mkdirSync(stage, { recursive: true, mode: 0o700 });
       const closure = sourceClosure(factory, entry);
-      const sources = closure.files.map((path) => fileEvidence(factory, path));
-      const assetPaths = declaredAssets(factory);
+      const sourcePaths = closure.files.filter(sourceFile);
+      const sources = sourcePaths.map((path) => fileEvidence(factory, path));
+      const assetPaths = closure.assets;
       const assets = assetPaths.map((path) => fileEvidence(factory, path));
-      const sharedPaths = sharedConfiguration(factory);
+      const sharedPaths = sharedConfiguration(factory).map((path) =>
+        factoryFile(realpathSync(factory), path),
+      );
       const shared = sharedPaths.map((path) => fileEvidence(factory, path));
       const runtimeManifestPath = Bun.resolveSync(
         "@carere/kojo-runtime/runtime-manifest.json",
@@ -648,7 +684,7 @@ export const captureWorkflowRevision = (options: {
       };
       const revisionId = sha256Text(canonicalJson(manifest));
       const stagedRevision = join(stage, revisionId);
-      for (const [path, evidence] of closure.files.map(
+      for (const [path, evidence] of sourcePaths.map(
         (path, index) => [path, sources[index]] as const,
       )) {
         if (evidence !== undefined)
@@ -689,8 +725,12 @@ export const captureWorkflowRevision = (options: {
           }
         }
       }
-      const secondSources = closure.files.map((path) => fileEvidence(factory, path));
-      const secondAssets = assetPaths.map((path) => fileEvidence(factory, path));
+      const secondSources = sourceClosure(factory, entry)
+        .files.filter(sourceFile)
+        .map((path) => fileEvidence(factory, path));
+      const secondAssets = sourceClosure(factory, entry).assets.map((path) =>
+        fileEvidence(factory, path),
+      );
       const secondShared = sharedPaths.map((path) => fileEvidence(factory, path));
       if (
         canonicalJson([sources, assets, shared]) !==

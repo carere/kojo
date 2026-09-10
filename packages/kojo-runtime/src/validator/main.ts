@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
-import { readdir, readFile, realpath, stat } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { readdir, realpath } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Effect, Layer, Schema } from "effect";
 import { contractSchema } from "../contexts/agent/services/renderPrompt.ts";
@@ -65,69 +65,6 @@ const isBundle = (
   isDefinition(value.definition) &&
   Layer.isLayer(value.layer) &&
   (value.trigger === undefined || Layer.isLayer(value.trigger));
-
-const safeAsset = (asset: string): boolean => {
-  if (asset === "" || isAbsolute(asset)) return false;
-  const normal = relative(".", resolve(".", asset));
-  return normal !== ".." && !normal.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`);
-};
-
-const assetsDiagnostic = async (factory: string): Promise<ProjectDiagnostic> => {
-  const source = join(factory, "factory.json");
-  let decoded: unknown;
-  try {
-    decoded = JSON.parse(await readFile(source, "utf8")) as unknown;
-  } catch (cause) {
-    return failed(
-      "assets",
-      `${source}: ${oneLine(cause)}`,
-      "Restore `.kojo/factory.json` with `formatVersion: 1` and an `assets` array of paths relative to `.kojo`.",
-    );
-  }
-
-  if (!hasProperties(decoded) || decoded.formatVersion !== 1 || !Array.isArray(decoded.assets)) {
-    return failed(
-      "assets",
-      `${source} is not a format-version 1 Factory asset declaration`,
-      "Set `formatVersion` to 1 and `assets` to an array of relative paths.",
-    );
-  }
-
-  const assets = decoded.assets;
-  if (!assets.every((asset): asset is string => typeof asset === "string" && safeAsset(asset))) {
-    return failed(
-      "assets",
-      `${source} contains an absolute or escaping asset path`,
-      "Use only relative paths that stay below `.kojo`.",
-    );
-  }
-
-  const forbidden = assets.find(
-    (asset) => asset === ".env" || asset.startsWith("data/") || asset === "data",
-  );
-  if (forbidden !== undefined) {
-    return failed(
-      "assets",
-      `${forbidden} is credential or runtime data and cannot be a Factory asset`,
-      "Remove credentials and runtime data from `.kojo/factory.json`.",
-    );
-  }
-
-  for (const asset of assets) {
-    const target = join(factory, asset);
-    try {
-      if (!(await stat(target)).isFile()) throw new Error("not a regular file");
-    } catch (cause) {
-      return failed(
-        "assets",
-        `${target}: ${oneLine(cause)}`,
-        "Restore the declared asset or remove its declaration if no Workflow needs it.",
-      );
-    }
-  }
-
-  return ok("assets", `${assets.length} declared Factory assets are readable`);
-};
 
 const commandsDiagnostic = async (factory: string): Promise<ProjectDiagnostic> => {
   const source = join(factory, "commands.ts");
@@ -349,7 +286,6 @@ export const validateProject = async (root: string): Promise<ProjectValidation> 
   }
 
   const diagnostics = await Promise.all([
-    assetsDiagnostic(factory),
     effectDiagnostic(factory),
     commandsDiagnostic(factory),
     envelopesDiagnostic(factory),
