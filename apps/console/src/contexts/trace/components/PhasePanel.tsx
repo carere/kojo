@@ -44,8 +44,7 @@ export const PhasePanel = (props: {
     doc()?.phases.find((phase) => phase.phaseId === phaseId());
   /** The phase the run is inside right now, when it is this one. It has no record and no outcome. */
   const inFlight = () => {
-    const flying = doc()?.run.inFlight;
-    return flying?.phaseId === phaseId() ? flying : undefined;
+    return doc()?.run.activePhases?.find((phase) => phase.phaseId === phaseId());
   };
   const known = () => record() !== undefined || inFlight() !== undefined;
 
@@ -142,7 +141,7 @@ export const PhasePanel = (props: {
               when={record()?.agent}
               fallback={
                 <p data-agent="none" class="text-muted-foreground text-xs italic">
-                  Agent details are written when the call completes.
+                  Open Agent invocations for live prompts and activity.
                 </p>
               }
             >
@@ -160,17 +159,6 @@ export const PhasePanel = (props: {
                   <Field name="resumed" label="session start">
                     {agent().resumed ? "resumed" : "cold"}
                   </Field>
-                  <Field name="tokens-in" label="tokens in">
-                    {agent().tokensIn.toLocaleString("en-GB")}
-                  </Field>
-                  <Field name="tokens-out" label="tokens out">
-                    {agent().tokensOut.toLocaleString("en-GB")}
-                  </Field>
-                  <Show when={agent().contextTokens !== undefined}>
-                    <Field name="context" label="context used after the turn">
-                      {agent().contextTokens?.toLocaleString("en-GB")} tokens
-                    </Field>
-                  </Show>
                   <Show when={(record()?.verification?.corrections ?? 0) > 0}>
                     <Field name="corrections" label="correction turns">
                       {record()?.verification?.corrections}

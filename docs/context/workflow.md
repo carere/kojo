@@ -44,12 +44,12 @@ admitted Runs can still finish subject to availability and recovery unless cance
 _Avoid_: Invalid Workflow, Removed Workflow, Cancelled Run
 
 **Factory asset**:
-A declared non-source input retained with a Workflow Revision, such as a prompt template or roster
+A non-source Factory input retained with a Workflow Revision, such as a prompt template or Sandbox
 configuration. Its content stays fixed for every Run that uses that revision.
 _Avoid_: Artifact, live Project file, credential
 
 **Workflow Revision**:
-An immutable version of a Project Workflow, its required Factory source and declared assets, and
+An immutable version of a Project Workflow, its required Factory source and assets, and
 its exact required package content, excluding credentials and live Project files. A Run keeps its
 Workflow Revision from admission, and the revision remains available while any retained Run refers
 to it, independent of changes to the current Factory or installed packages.
@@ -180,5 +180,6 @@ A predicate over an Envelope's claims, evaluated after the phase produces the En
 _Avoid_: gate, validator
 
 **Acceptance**:
-Whether a completed Run is good. This is separate from whether its phases completed successfully.
+Whether completed work meets the authored checks and review policy. Review can come from a human
+or an agent. This is separate from whether its Phases completed successfully.
 _Avoid_: success, completion

@@ -1,11 +1,8 @@
 import { existsSync } from "node:fs";
-import { readdir, readFile, realpath, stat } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { readdir, realpath } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import * as BunServices from "@effect/platform-bun/BunServices";
-import { Effect, Layer, Schema } from "effect";
-import * as YamlRoster from "../contexts/agent/adapters/YamlRoster.ts";
-import { Roster } from "../contexts/agent/ports/Roster.ts";
+import { Effect, Layer, Result, Schema } from "effect";
 import { contractSchema } from "../contexts/agent/services/renderPrompt.ts";
 import { isPlaceholder } from "../contexts/workflow/models/Placeholder.ts";
 
@@ -69,71 +66,9 @@ const isBundle = (
   Layer.isLayer(value.layer) &&
   (value.trigger === undefined || Layer.isLayer(value.trigger));
 
-const safeAsset = (asset: string): boolean => {
-  if (asset === "" || isAbsolute(asset)) return false;
-  const normal = relative(".", resolve(".", asset));
-  return normal !== ".." && !normal.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`);
-};
-
-const assetsDiagnostic = async (factory: string): Promise<ProjectDiagnostic> => {
-  const source = join(factory, "factory.json");
-  let decoded: unknown;
-  try {
-    decoded = JSON.parse(await readFile(source, "utf8")) as unknown;
-  } catch (cause) {
-    return failed(
-      "assets",
-      `${source}: ${oneLine(cause)}`,
-      "Restore `.kojo/factory.json` with `formatVersion: 1` and an `assets` array of paths relative to `.kojo`.",
-    );
-  }
-
-  if (!hasProperties(decoded) || decoded.formatVersion !== 1 || !Array.isArray(decoded.assets)) {
-    return failed(
-      "assets",
-      `${source} is not a format-version 1 Factory asset declaration`,
-      "Set `formatVersion` to 1 and `assets` to an array of relative paths.",
-    );
-  }
-
-  const assets = decoded.assets;
-  if (!assets.every((asset): asset is string => typeof asset === "string" && safeAsset(asset))) {
-    return failed(
-      "assets",
-      `${source} contains an absolute or escaping asset path`,
-      "Use only relative paths that stay below `.kojo`.",
-    );
-  }
-
-  const forbidden = assets.find(
-    (asset) => asset === ".env" || asset.startsWith("data/") || asset === "data",
-  );
-  if (forbidden !== undefined) {
-    return failed(
-      "assets",
-      `${forbidden} is credential or runtime data and cannot be a Factory asset`,
-      "Remove credentials and runtime data from `.kojo/factory.json`.",
-    );
-  }
-
-  for (const asset of assets) {
-    const target = join(factory, asset);
-    try {
-      if (!(await stat(target)).isFile()) throw new Error("not a regular file");
-    } catch (cause) {
-      return failed(
-        "assets",
-        `${target}: ${oneLine(cause)}`,
-        "Restore the declared asset or remove its declaration if no Workflow needs it.",
-      );
-    }
-  }
-
-  return ok("assets", `${assets.length} declared Factory assets are readable`);
-};
-
 const commandsDiagnostic = async (factory: string): Promise<ProjectDiagnostic> => {
   const source = join(factory, "commands.ts");
+  if (!existsSync(source)) return ok("commands", "No optional commands module");
   try {
     const loaded = (await import(pathToFileURL(source).href)) as Record<string, unknown>;
     const commands = loaded.commands;
@@ -164,26 +99,9 @@ const commandsDiagnostic = async (factory: string): Promise<ProjectDiagnostic> =
   }
 };
 
-const rosterDiagnostic = async (factory: string): Promise<ProjectDiagnostic> => {
-  const source = join(factory, "kojo.config.yaml");
-  try {
-    const names = await Effect.runPromise(
-      Effect.map(Roster, (roster) => roster.names).pipe(
-        Effect.provide(YamlRoster.layer({ config: source }).pipe(Layer.provide(BunServices.layer))),
-      ),
-    );
-    return ok("roster", `${names.length} agent${names.length === 1 ? "" : "s"}; prompts read`);
-  } catch (cause) {
-    return failed(
-      "roster",
-      `${source}: ${oneLine(cause)}`,
-      "Fix the roster entry or the prompt path named above.",
-    );
-  }
-};
-
 const envelopesDiagnostic = async (factory: string): Promise<ProjectDiagnostic> => {
   const source = join(factory, "envelopes.ts");
+  if (!existsSync(source)) return ok("envelopes", "No optional envelopes module");
   try {
     const module = (await import(pathToFileURL(source).href)) as Record<string, unknown>;
     const hidden: Array<string> = [];
@@ -316,9 +234,21 @@ const workflowDiagnostic = async (factory: string): Promise<ReadonlyArray<Projec
       const decoded = await Effect.runPromise(
         Schema.decodeEffect(schema as unknown as Schema.Codec<unknown, unknown, never, never>)({
           [field]: "kojo doctor",
-        }),
+        }).pipe(Effect.result),
       );
-      const key = (definition.idempotencyKey as (value: unknown) => unknown)(decoded);
+      // This probe is not authored input. Rejection of a string says nothing about a valid
+      // structured, numeric, or refined payload. Admission validates the real payload and key.
+      if (Result.isFailure(decoded)) {
+        diagnostics.push({
+          ...ok(
+            `workflow:${name}`,
+            "declaration and Layer are valid; payload and key are checked at Run admission",
+          ),
+          triggerDeclared,
+        });
+        continue;
+      }
+      const key = (definition.idempotencyKey as (value: unknown) => unknown)(decoded.success);
       if (typeof key !== "string") throw new Error("the idempotency key is not a string");
       diagnostics.push({
         ...ok(`workflow:${name}`, "declaration, Layer, payload, and key are valid"),
@@ -368,11 +298,9 @@ export const validateProject = async (root: string): Promise<ProjectValidation> 
   }
 
   const diagnostics = await Promise.all([
-    assetsDiagnostic(factory),
     effectDiagnostic(factory),
     commandsDiagnostic(factory),
     envelopesDiagnostic(factory),
-    rosterDiagnostic(factory),
   ]);
   return {
     formatVersion: 1,

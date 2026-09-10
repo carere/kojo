@@ -4,7 +4,7 @@
 
 import { defaultTrunk } from "../../shared/models/FactoryLayout.ts";
 import type { FactoryChoices } from "../models/FactoryChoices.ts";
-import { ownedByYou, providerSource, type Starter } from "./starter.ts";
+import { agentProviderSource, ownedByYou, providerSource, type Starter } from "./starter.ts";
 
 /**
  * The lane from the design record: scout, fix, re-ask until it is right, measure, land.
@@ -81,6 +81,7 @@ const checks = (): string =>
 
 const workflow = (choices: FactoryChoices) => {
   const provider = providerSource(choices);
+  const agentProvider = agentProviderSource(choices);
 
   return {
     file: "hotfix.ts",
@@ -100,10 +101,11 @@ const workflow = (choices: FactoryChoices) => {
       "//  - Nothing irreversible happens outside a phase. A workflow body replays from the top on",
       "//    every resume; only a phase's recorded result is replayed instead of re-run.",
       "",
+      'import { readFileSync } from "node:fs";',
       'import { Duration, Effect, Schema } from "effect";',
+      ...agentProvider.imports,
       'import * as SandcastleAgentInvoker from "@carere/kojo-runtime/contexts/agent/adapters/SandcastleAgentInvoker";',
       'import { AgentInvocationError } from "@carere/kojo-runtime/contexts/agent/models/AgentInvocationError";',
-      'import { RosterError } from "@carere/kojo-runtime/contexts/agent/models/RosterError";',
       'import { GateExpired } from "@carere/kojo-runtime/contexts/gate/models/GateExpired";',
       'import { GateRejected } from "@carere/kojo-runtime/contexts/gate/models/GateRejected";',
       'import { GateUnreachable } from "@carere/kojo-runtime/contexts/gate/models/GateUnreachable";',
@@ -159,11 +161,9 @@ const workflow = (choices: FactoryChoices) => {
       " * Who actually gets called, and where.",
       " *",
       " * Provided **inside** the sandbox scope, because an agent runs in the container the phase is",
-      " * standing in and the invoker therefore has to hold that container. The roster is",
-      " * `.kojo/kojo.config.yaml`; it is decoded and its prompt files are read while this layer is",
-      " * built, so a typo in it fails naming the file before anything spawns.",
+      " * standing in. Each call selects its provider, model, and prompts.",
       " */",
-      'const agents = SandcastleAgentInvoker.fromConfig({ config: ".kojo/kojo.config.yaml" });',
+      "const agents = SandcastleAgentInvoker.layer;",
       "",
       "/**",
       " * What an agent of this factory is allowed to touch, and what it is not.",
@@ -173,7 +173,7 @@ const workflow = (choices: FactoryChoices) => {
       " * after the fact, against the repository \u2014 the change-set is fingerprinted before the call and",
       " * compared afterwards, and anything outside the scope is undone and fails the run.",
       " *",
-      " * `factoryOwnPaths` is the roster, the workflows, the envelopes, the checks, the commands and",
+      " * `factoryOwnPaths` is the workflows, the envelopes, the checks, the commands and",
       " * the prompts. An agent that can edit those can edit its own grader \u2014 and the mechanical half",
       " * of this workflow is `commands.test`, so an unguarded hotfixer can make its own suite pass.",
       " */",
@@ -202,7 +202,6 @@ const workflow = (choices: FactoryChoices) => {
       "  MergeRefused,",
       "  NotAccepted,",
       "  PermissionBreach,",
-      "  RosterError,",
       "  SandboxError,",
       "  WorkspaceError,",
       "  WorkspaceUnreachable,",
@@ -250,6 +249,7 @@ const workflow = (choices: FactoryChoices) => {
       "export const hotfix = workflow(",
       "  {",
       '    name: "hotfix",',
+      '    assets: [new URL("../sandbox/Dockerfile", import.meta.url)],',
       "    payload: { fault: Schema.String },",
       "    success: Schema.String,",
       "    error: failures,",
@@ -282,7 +282,10 @@ const workflow = (choices: FactoryChoices) => {
       '              name: "scout",',
       '              description: "Find where the fault lives; change nothing",',
       '              agent: "scout",',
-      "              prompt: payload.fault,",
+      `              model: ${JSON.stringify(choices.model)},`,
+      `              provider: ${agentProvider.expression},`,
+      '              system: readFileSync(new URL("../prompts/scout/system.md", import.meta.url), "utf8"),',
+      '              prompt: readFileSync(new URL("../prompts/scout/user.md", import.meta.url), "utf8") + "\\n\\n" + payload.fault,',
       "              envelope: Scouted,",
       "              checks: scoutedChecks,",
       "            }),",
@@ -298,7 +301,10 @@ const workflow = (choices: FactoryChoices) => {
       '              name: "fix",',
       '              description: "Write the smallest change that resolves the fault",',
       '              agent: "hotfixer",',
-      "              prompt: `${payload.fault}\\n\\nThe scout reported: ${scouted.finding}`,",
+      `              model: ${JSON.stringify(choices.model)},`,
+      `              provider: ${agentProvider.expression},`,
+      '              system: readFileSync(new URL("../prompts/hotfixer/system.md", import.meta.url), "utf8"),',
+      '              prompt: readFileSync(new URL("../prompts/hotfixer/user.md", import.meta.url), "utf8") + "\\n\\n" + `${payload.fault}\\n\\nThe scout reported: ${scouted.finding}`,',
       "              envelope: Built,",
       "              checks: builtChecks,",
       "            }),",
@@ -328,7 +334,10 @@ const workflow = (choices: FactoryChoices) => {
       '                    name: "revise",',
       '                    description: "Address the reviewer\'s objection",',
       '                    agent: "hotfixer",',
-      "                    prompt: verdict.reason,",
+      `                    model: ${JSON.stringify(choices.model)},`,
+      `                    provider: ${agentProvider.expression},`,
+      '                    system: readFileSync(new URL("../prompts/hotfixer/system.md", import.meta.url), "utf8"),',
+      '                    prompt: readFileSync(new URL("../prompts/hotfixer/user.md", import.meta.url), "utf8") + "\\n\\n" + verdict.reason,',
       "                    envelope: Built,",
       "                    checks: builtChecks,",
       "                    // `session` is what would make a revision one message rather than a cold",
@@ -400,7 +409,7 @@ const workflow = (choices: FactoryChoices) => {
       "          mechanical: judged.mechanical,",
       "          // `reviewed` only returns when somebody approved, so reaching this line is the human",
       "          // half. It carries no reason because there is no refusal to explain.",
-      '          human: new Judgement({ by: actor, accepted: true, reason: "" }),',
+      '          review: new Judgement({ by: actor, accepted: true, reason: "" }),',
       "        }),",
       "      });",
       "",

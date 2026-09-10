@@ -132,7 +132,7 @@ const usageOf = (
   const usage = iteration?.usage;
   if (usage === undefined) return { tokensIn: 0, tokensOut: 0, contextTokens: undefined };
   const tokensIn = usage.inputTokens + usage.cacheCreationInputTokens + usage.cacheReadInputTokens;
-  return { tokensIn, tokensOut: usage.outputTokens, contextTokens: tokensIn + usage.outputTokens };
+  return { tokensIn, tokensOut: usage.outputTokens, contextTokens: undefined };
 };
 
 const agentRunOf = (result: SandboxRunResult): SandboxAgentRun => {

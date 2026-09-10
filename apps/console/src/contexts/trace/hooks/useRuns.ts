@@ -25,8 +25,31 @@ export const useRuns = (): UseQueryResult<ReadonlyArray<RunLine>, Error> =>
             projectId: run.projectId,
             workflow: run.workflowName,
             startedAt: Date.parse(run.startedAt ?? run.admittedAt),
+            ...(run.request === undefined ? {} : { requestTitle: run.request.title }),
           },
           executionState: run.state,
+          activity:
+            (run.activePhases ?? []).map((phase) => phase.phasePath).join(", ") ||
+            run.executionFault?.detail ||
+            run.queueReason ||
+            run.state,
+          updatedAt: new Date(
+            Math.max(
+              Date.parse(run.finishedAt ?? run.startedAt ?? run.admittedAt),
+              ...(run.activePhases ?? []).map((phase) => Date.parse(phase.startedAt)),
+              ...(run.invocations ?? []).map((invocation) => Date.parse(invocation.lastActivityAt)),
+              ...run.phases.map((phase) => Date.parse(phase.endedAt)),
+              ...(run.progress ?? []).map((item) => Date.parse(item.observedAt)),
+              ...(run.gates ?? []).flatMap((gate) => [
+                Date.parse(gate.requestedAt),
+                ...(gate.answeredAt === undefined ? [] : [Date.parse(gate.answeredAt)]),
+              ]),
+              ...(run.cancellation === undefined
+                ? []
+                : [Date.parse(run.cancellation.confirmedAt ?? run.cancellation.requestedAt)]),
+              ...(run.recovery === undefined ? [] : [Date.parse(run.recovery.interruptedAt)]),
+            ),
+          ).toISOString(),
           ...(run.queueReason === undefined ? {} : { queueReason: run.queueReason }),
           ...(run.state === "succeeded" || run.state === "failed" || run.state === "cancelled"
             ? { outcome: run.state }

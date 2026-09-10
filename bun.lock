@@ -42,6 +42,18 @@
         "vite-plugin-solid": "2.11.14",
       },
     },
+    "examples/issue": {
+      "name": "@carere/kojo-issue-example",
+      "dependencies": {
+        "@carere/kojo-runtime": "workspace:*",
+        "effect": "4.0.0-rc.112",
+      },
+      "devDependencies": {
+        "@effect/vitest": "4.0.0-rc.112",
+        "@types/bun": "^1.3.14",
+        "vitest": "^4.1.0",
+      },
+    },
     "packages/kojo": {
       "name": "@carere/kojo",
       "version": "0.1.0-alpha.3",
@@ -153,6 +165,8 @@
     "@carere/kojo": ["@carere/kojo@workspace:packages/kojo"],
 
     "@carere/kojo-client-contracts": ["@carere/kojo-client-contracts@workspace:packages/kojo-client-contracts"],
+
+    "@carere/kojo-issue-example": ["@carere/kojo-issue-example@workspace:examples/issue"],
 
     "@carere/kojo-runner-contracts": ["@carere/kojo-runner-contracts@workspace:packages/kojo-runner-contracts"],
 

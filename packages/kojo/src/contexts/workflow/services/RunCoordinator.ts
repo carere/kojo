@@ -13,6 +13,7 @@ import type {
   WorkflowMode,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
+import { decodeRunRequest } from "@carere/kojo-runner-contracts/contexts/project/contracts/runRequest";
 import { Data, Effect } from "effect";
 import type { DaemonGateRepository } from "../../gate/ports/DaemonGateRepository.ts";
 import { createGateToken } from "../../gate/services/createGateToken.ts";
@@ -753,6 +754,10 @@ export class RunCoordinator {
         "inspect",
         registration,
       );
+      const publicRequest =
+        inspected.request === undefined ? undefined : decodeRunRequest(inspected.request);
+      if (publicRequest !== undefined && !publicRequest.ok)
+        throw new Error("the Runner public request is invalid");
       const admittedAt = new Date(this.#now()).toISOString();
       const admission = await Effect.runPromise(
         this.#runs.admitAndActivateWorkflow({
@@ -770,6 +775,7 @@ export class RunCoordinator {
           workflowName: options.workflowName,
           idempotencyKey: inspected.idempotencyKey,
           payload: options.payload,
+          ...(publicRequest === undefined ? {} : { request: publicRequest.value }),
           revisionId: revision.revisionId,
           packageGraphId: revision.packageGraphId,
           admittedAt,
@@ -1183,41 +1189,56 @@ export class RunCoordinator {
         await Effect.runPromise(this.#gates.markApplied(authority, application.wakeupId, endedAt));
       }
       if (executed.outcome === "suspended") {
-        const asking = executed.askings[0];
-        if (asking === undefined) {
-          throw new Error("the Runner suspended without creating an Asking");
-        }
-        const parts = asking.internalDeferredName.split("/");
-        const escalated = parts.at(-1) === "escalated";
-        const numberAt = escalated ? parts.length - 2 : parts.length - 1;
-        const askingNumber = Number(parts[numberAt]);
-        if (parts[0] !== "gate" || !Number.isInteger(askingNumber) || askingNumber < 1) {
-          throw new Error("the Runner returned an invalid structured Asking identity");
-        }
-        const gatePath = parts.slice(1, numberAt).join("/");
-        if (gatePath.length === 0) throw new Error("the Runner returned an empty Gate path");
-        const token = createGateToken();
-        await Effect.runPromise(
-          this.#gates.createAskingAndSuspend(authority, {
-            identity: {
-              identityVersion: 1,
-              runId: authority.runId,
-              gatePath,
-              askingNumber,
-              escalationStage: escalated ? 1 : 0,
-            },
-            token,
-            projectId: registration.projectId,
-            workflowName: registration.workflowName,
-            description: asking.description,
-            actor: asking.actor,
-            choices: asking.choices,
-            deadline: new Date(asking.deadlineAt).toISOString(),
-            expiryBranch: asking.expiryBranch,
-            internalDeferredName: asking.internalDeferredName,
-            createdAt: new Date(asking.requestedAt).toISOString(),
-          }),
+        const existing = (await Effect.runPromise(this.#gates.list)).filter(
+          (asking) => asking.identity.runId === authority.runId,
         );
+        if (executed.askings.length === 0) {
+          if (
+            !existing.some(
+              (asking) =>
+                asking.state === "unanswered" ||
+                asking.state === "recorded" ||
+                (asking.state === "expired" && asking.expiryAppliedAt === undefined),
+            )
+          )
+            throw new Error("the Runner suspended without an outstanding Asking");
+          await Effect.runPromise(this.#runs.suspend(authority, endedAt));
+        } else {
+          const requests = executed.askings.map((asking) => {
+            const parts = asking.internalDeferredName.split("/");
+            const escalated = parts.at(-1) === "escalated";
+            const numberAt = escalated ? parts.length - 2 : parts.length - 1;
+            const askingNumber = Number(parts[numberAt]);
+            if (parts[0] !== "gate" || !Number.isInteger(askingNumber) || askingNumber < 1) {
+              throw new Error("the Runner returned an invalid structured Asking identity");
+            }
+            const gatePath = parts.slice(1, numberAt).join("/");
+            if (gatePath.length === 0) throw new Error("the Runner returned an empty Gate path");
+            const token =
+              existing.find((prior) => prior.internalDeferredName === asking.internalDeferredName)
+                ?.token ?? createGateToken();
+            return {
+              identity: {
+                identityVersion: 1,
+                runId: authority.runId,
+                gatePath,
+                askingNumber,
+                escalationStage: escalated ? 1 : 0,
+              },
+              token,
+              projectId: registration.projectId,
+              workflowName: registration.workflowName,
+              description: asking.description,
+              actor: asking.actor,
+              choices: asking.choices,
+              deadline: new Date(asking.deadlineAt).toISOString(),
+              expiryBranch: asking.expiryBranch,
+              internalDeferredName: asking.internalDeferredName,
+              createdAt: new Date(asking.requestedAt).toISOString(),
+            } as const;
+          });
+          await Effect.runPromise(this.#gates.createAskingsAndSuspend(authority, requests));
+        }
         await Effect.runPromise(
           this.#projectRecovery.observeHealthy(registration.projectId, endedAt, true),
         ).catch(() => undefined);

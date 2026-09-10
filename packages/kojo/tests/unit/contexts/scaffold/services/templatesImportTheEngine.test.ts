@@ -1,3 +1,4 @@
+import { isBuiltin } from "node:module";
 import { describe, expect, it } from "@effect/vitest";
 import {
   type FactoryChoices,
@@ -23,7 +24,7 @@ import { someEngine } from "../../../../support/engineDependency.ts";
  * ready, because `doctor` checks that the *declared* dependency resolves, which it does.
  *
  * So the rule is checked rather than remembered: every bare specifier a stamped file imports is
- * either `effect`, or it begins with `runtimePackage`. Relative paths are the factory's own files
+ * a built-in module, `effect`, or begins with `runtimePackage`. Relative paths are the factory's own files
  * and are not this test's business.
  */
 const choicesFor = (template: TemplateName): FactoryChoices => ({
@@ -57,10 +58,13 @@ describe("what a stamped factory imports the engine as", () => {
     expect(bare.length).toBeGreaterThan(0);
 
     for (const { file, specifier } of bare) {
-      const allowed = specifier === "effect" || specifier.startsWith(`${runtimePackage}/`);
+      const allowed =
+        isBuiltin(specifier) ||
+        specifier === "effect" ||
+        specifier.startsWith(`${runtimePackage}/`);
       expect(
         allowed,
-        `${file.path} imports "${specifier}", which is neither effect nor the engine`,
+        `${file.path} imports "${specifier}", which is not a built-in module, effect, or the engine`,
       ).toBe(true);
     }
   });

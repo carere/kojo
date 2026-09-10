@@ -1,9 +1,14 @@
 import { chmodSync, mkdirSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
+import type { RunDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import type { OperationReplyBody } from "@carere/kojo-runner-contracts/contexts/project/contracts/execution";
 import type { RunnerFrame } from "@carere/kojo-runner-contracts/contexts/project/contracts/frame";
+import {
+  invocationObservationFeature,
+  runRequestFeature,
+} from "@carere/kojo-runner-contracts/contexts/project/contracts/handshake";
 import { decodeTraceMutation } from "@carere/kojo-runner-contracts/contexts/project/contracts/trace";
 import { Data, Effect } from "effect";
 import type { ProjectRecoveryRepository } from "../../project/ports/ProjectRecoveryRepository.ts";
@@ -43,6 +48,7 @@ export interface RunnerRegistration {
 }
 
 export interface RunnerInspection {
+  readonly request?: RunDocument["request"];
   readonly idempotencyKey: string;
   readonly enginePayload: Record<string, unknown>;
 }
@@ -259,7 +265,11 @@ export class ProjectRunnerTransport {
         hello.runnerInstanceId !== request.runnerInstanceId ||
         hello.body.connectionSecret !== request.connectionSecret ||
         hello.body.projectId !== request.projectId ||
-        hello.body.packageGraphId !== request.packageGraphId
+        hello.body.packageGraphId !== request.packageGraphId ||
+        !hello.body.supportedProtocols.includes(1) ||
+        hello.body.requiredFeatures.some(
+          (feature) => feature !== invocationObservationFeature && feature !== runRequestFeature,
+        )
       ) {
         throw projectRunnerProtocolFault(
           "the Project Runner Hello does not match its private binding",
@@ -277,7 +287,7 @@ export class ProjectRunnerTransport {
             packageGraphId: request.packageGraphId,
             projectId: request.projectId,
             selectedProtocol: 1,
-            features: [],
+            features: [invocationObservationFeature, runRequestFeature],
           },
         }),
       );

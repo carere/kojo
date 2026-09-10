@@ -1,3 +1,4 @@
+import type { RunDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 
 export type DaemonRunState =
@@ -43,6 +44,7 @@ export interface DaemonRun {
   readonly workflowName: string;
   readonly idempotencyKey: string;
   readonly payload: JsonValue;
+  readonly request?: RunDocument["request"];
   readonly revisionId: string;
   readonly packageGraphId: string;
   readonly state: DaemonRunState;

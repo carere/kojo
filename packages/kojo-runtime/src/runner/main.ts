@@ -5,6 +5,10 @@ import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { RUNNER_PROTOCOL_VERSION } from "@carere/kojo-runner-contracts/contexts/project/contracts/frame";
 import {
+  invocationObservationFeature,
+  runRequestFeature,
+} from "@carere/kojo-runner-contracts/contexts/project/contracts/handshake";
+import {
   decodeJsonValue,
   type JsonValue,
 } from "@carere/kojo-runner-contracts/contexts/shared/codecs/json";
@@ -29,6 +33,7 @@ import {
   layer as daemonArtifacts,
   type SendArtifactMutation,
 } from "../contexts/trace/adapters/DaemonArtifactPublisher.ts";
+import { RunRequest } from "../contexts/trace/models/RunRequest.ts";
 import { Tracer } from "../contexts/trace/ports/Tracer.ts";
 import { Trigger } from "../contexts/trigger/ports/Trigger.ts";
 import {
@@ -62,6 +67,7 @@ export interface BoundRegistrationRequest {
 }
 
 export interface RegisteredPayload {
+  readonly request?: RunRequest;
   readonly registrationVersion: 1;
   readonly idempotencyKey: string;
   readonly enginePayload: Record<string, unknown>;
@@ -134,6 +140,7 @@ interface LoadedBundle {
   readonly layer: Layer.Layer<never, never, unknown>;
   readonly authoredPayloadSchema: Schema.Top;
   readonly authoredIdempotencyKey: (payload: unknown) => string;
+  readonly authoredRequest?: (payload: unknown) => RunRequest;
   readonly encodeEnginePayload: (payload: unknown) => Record<string, unknown>;
   readonly trigger?: Layer.Layer<Trigger, never, unknown>;
 }
@@ -211,6 +218,9 @@ export const inspectRegisteredRevision = async (
     registrationVersion: 1,
     idempotencyKey: bundle.authoredIdempotencyKey(payload),
     enginePayload: bundle.encodeEnginePayload(payload),
+    ...(bundle.authoredRequest === undefined
+      ? {}
+      : { request: Schema.decodeSync(RunRequest)(bundle.authoredRequest(payload)) }),
   };
 };
 
@@ -337,6 +347,10 @@ export const executeRegisteredRevision = async (
     describe: (asking) => asking.description,
   });
   const tracerLayer = Layer.succeed(Tracer, {
+    invocation: (record) =>
+      Effect.promise(() =>
+        sendTraceMutation({ kind: "invocation", record: plainJson(record) }),
+      ).pipe(Effect.asVoid),
     runStarted: (record) =>
       Effect.promise(() =>
         sendTraceMutation({ kind: "run-started", record: plainJson(record) }),
@@ -445,6 +459,9 @@ export const executeRegisteredRevision = async (
     registrationVersion: 1,
     idempotencyKey: bundle.authoredIdempotencyKey(payload),
     enginePayload: bundle.encodeEnginePayload(payload),
+    ...(bundle.authoredRequest === undefined
+      ? {}
+      : { request: Schema.decodeSync(RunRequest)(bundle.authoredRequest(payload)) }),
     runId: request.runId,
     outcome:
       outcome._tag === "Suspended"
@@ -539,6 +556,9 @@ const runRegisteredTrigger = async (options: {
         eventId: event.key,
         idempotencyKey: event.key,
         payload: encodedPayload.ok ? encodedPayload.value : null,
+        ...(bundle.authoredRequest === undefined
+          ? {}
+          : { request: Schema.decodeSync(RunRequest)(bundle.authoredRequest(payload)) }),
         revisionId: options.registration.revisionId,
         packageGraphId: options.registration.packageGraphId,
         deliveredAt,
@@ -662,7 +682,7 @@ const runPrivateProtocol = async (): Promise<void> => {
           packageGraphId: binding.packageGraphId,
           projectId: binding.projectId,
           supportedProtocols: [1],
-          requiredFeatures: [],
+          requiredFeatures: [invocationObservationFeature, runRequestFeature],
         },
       }),
     );
@@ -672,7 +692,9 @@ const runPrivateProtocol = async (): Promise<void> => {
       welcome.kind !== "Welcome" ||
       welcome.body.packageGraphId !== binding.packageGraphId ||
       welcome.body.projectId !== binding.projectId ||
-      welcome.body.selectedProtocol !== 1
+      welcome.body.selectedProtocol !== 1 ||
+      !welcome.body.features.includes(invocationObservationFeature) ||
+      !welcome.body.features.includes(runRequestFeature)
     ) {
       throw new Error("the Daemon Welcome does not match the Runner binding");
     }

@@ -90,8 +90,10 @@ moon run kojo:test-repository
 moon run console:build
 ```
 
+For unpublished changes on another Project, use the [local development path](docs/local-development.md).
+
 Test the Console manually while its UI is under active development. Run `kojo ui` against a
-local Daemon, then check Project and Workflow lists, Run details, Gate answers, and reconnect
+local Daemon, then check Run start, the Run list, Run details, Gate answers, and reconnect
 behavior after a Daemon restart. CI checks the Console build and types, plus backend API tests;
 it does not run browser tests. Restore browser automation when the UI is stable.
 

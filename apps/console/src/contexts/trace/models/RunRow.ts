@@ -5,6 +5,10 @@ import { type RunLine, type RunStatus, statusOf } from "./RunLine.ts";
 /** Build Run list cells with the supplied clock before rendering them. */
 export interface RunRow {
   readonly runId: string;
+  readonly request: string;
+  readonly project: string;
+  readonly activity: string;
+  readonly updatedAt: string;
   readonly workflow: string;
   readonly status: RunStatus;
   readonly queueReason: string;
@@ -31,25 +35,38 @@ export const runRows = (options: {
   readonly runs: ReadonlyArray<RunLine>;
   readonly askings: ReadonlyArray<Asking>;
   readonly now: number;
+  readonly projects?: ReadonlyMap<string, string>;
 }): ReadonlyArray<RunRow> =>
   options.runs.map((line) => {
     const open = openGateOf(options.askings, line.run.runId);
-    if (open === undefined) {
-      return {
-        runId: line.run.runId,
-        workflow: line.run.workflow,
-        status: statusOf(line),
-        queueReason: line.queueReason ?? "—",
-        gate: nothing,
-        deadline: nothing,
-        overdue: false,
-      };
-    }
-    return {
+    const gateTimes = options.askings
+      .filter((asking) => asking.request.runId === line.run.runId)
+      .flatMap((asking) => [
+        asking.request.requestedAt,
+        asking.verdict?.answeredAt ?? 0,
+        asking.appliedAt ?? 0,
+        asking.expiredAt ?? 0,
+      ]);
+    const common = {
       runId: line.run.runId,
+      request: line.run.requestTitle ?? line.run.workflow,
+      project: options.projects?.get(line.run.projectId) ?? line.run.projectId,
+      activity: line.activity ?? statusOf(line),
+      updatedAt: new Date(
+        Math.max(
+          Date.parse(line.updatedAt ?? new Date(line.run.startedAt).toISOString()),
+          ...gateTimes,
+        ),
+      ).toISOString(),
       workflow: line.run.workflow,
       status: statusOf(line),
-      queueReason: line.queueReason ?? "—",
+      queueReason: line.queueReason ?? nothing,
+    };
+    if (open === undefined) {
+      return { ...common, gate: nothing, deadline: nothing, overdue: false };
+    }
+    return {
+      ...common,
       gate: open.request.gate,
       deadline: deadlineLabel(open.request.deadlineAt, options.now),
       deadlineAt: new Date(open.request.deadlineAt).toISOString(),

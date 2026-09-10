@@ -88,7 +88,10 @@ export interface KojoPiOptions {
 export type ParsedStreamEvents = ReturnType<AgentProvider["parseStreamLine"]>;
 
 /** One `AgentProvider` that is certain to carry storage — pi always has some. */
-export type PiAgentProvider = AgentProvider & { readonly sessionStorage: AgentSessionStorage };
+export type PiAgentProvider = AgentProvider & {
+  readonly sessionStorage: AgentSessionStorage;
+  readonly nativeSystemPrompt?: string;
+};
 
 /**
  * One argument, safe inside the single command string Sandcastle runs through a shell.
@@ -174,6 +177,7 @@ export const kojoPi = (options: KojoPiOptions): PiAgentProvider => {
 
   return {
     name: "pi",
+    ...(options.system === undefined ? {} : { nativeSystemPrompt: options.system }),
     env: options.env ?? {},
     captureSessions: options.captureSessions ?? true,
     sessionStorage: piSessionStorage(options.sessions),

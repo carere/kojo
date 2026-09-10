@@ -200,58 +200,81 @@ export class SqliteDaemonGateRepository {
     authority: RunAuthority,
     asking: CreateAsking,
   ): Effect.Effect<DaemonAsking, GateTransitionError> =>
+    this.createAskingsAndSuspend(authority, [asking]).pipe(
+      Effect.map((askings) => askings[0] as DaemonAsking),
+    );
+
+  readonly createAskingsAndSuspend = (
+    authority: RunAuthority,
+    askings: ReadonlyArray<CreateAsking>,
+  ): Effect.Effect<ReadonlyArray<DaemonAsking>, GateTransitionError> =>
     Effect.try({
       try: () =>
         this.#database
           .transaction(() => {
             this.#assertAuthority(authority);
-            const key = identityKey(asking);
-            const prior = this.#database
-              .query<AskingRow, [string]>("SELECT * FROM gate_askings WHERE identity_key = ?")
-              .get(key);
-            if (prior !== null) {
-              if (
-                prior.token !== asking.token ||
-                prior.internal_deferred_name !== asking.internalDeferredName ||
-                prior.deadline !== asking.deadline
-              ) {
+            if (askings.length === 0)
+              throw new GateTransitionError({
+                code: "ASKING_CONFLICT",
+                message: "Suspension requires at least one Asking",
+              });
+            const created: Array<DaemonAsking> = [];
+            for (const asking of askings) {
+              if (asking.identity.runId !== authority.runId)
                 throw new GateTransitionError({
-                  code: "ASKING_CONFLICT",
-                  message: "the Asking identity already has different content",
+                  code: "STALE_AUTHORITY",
+                  message: "The Asking belongs to another Run",
                 });
+              const key = identityKey(asking);
+              const prior = this.#database
+                .query<AskingRow, [string]>("SELECT * FROM gate_askings WHERE identity_key = ?")
+                .get(key);
+              if (prior !== null) {
+                if (
+                  prior.token !== asking.token ||
+                  prior.internal_deferred_name !== asking.internalDeferredName ||
+                  prior.deadline !== asking.deadline
+                ) {
+                  throw new GateTransitionError({
+                    code: "ASKING_CONFLICT",
+                    message: "the Asking identity already has different content",
+                  });
+                }
+                created.push(askingOf(prior));
+                continue;
               }
-              return askingOf(prior);
-            }
-            this.#database.run(
-              `INSERT INTO gate_askings (
+              this.#database.run(
+                `INSERT INTO gate_askings (
               identity_key, token, run_id, project_id, workflow_name, gate_path,
               asking_number, escalation_stage, description, actor, choices_json,
               deadline, expiry_branch, internal_deferred_name, created_at, state
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unanswered')`,
-              [
-                key,
-                asking.token,
-                asking.identity.runId,
-                asking.projectId,
-                asking.workflowName,
-                asking.identity.gatePath,
-                asking.identity.askingNumber,
-                asking.identity.escalationStage,
-                asking.description,
-                asking.actor,
-                JSON.stringify(asking.choices),
-                asking.deadline,
-                asking.expiryBranch,
-                asking.internalDeferredName,
-                asking.createdAt,
-              ],
-            );
+                [
+                  key,
+                  asking.token,
+                  asking.identity.runId,
+                  asking.projectId,
+                  asking.workflowName,
+                  asking.identity.gatePath,
+                  asking.identity.askingNumber,
+                  asking.identity.escalationStage,
+                  asking.description,
+                  asking.actor,
+                  JSON.stringify(asking.choices),
+                  asking.deadline,
+                  asking.expiryBranch,
+                  asking.internalDeferredName,
+                  asking.createdAt,
+                ],
+              );
+              created.push(askingOf(this.#rowByToken(asking.token)));
+            }
             this.#database.run("UPDATE workflow_runs SET state = 'suspended' WHERE run_id = ?", [
               authority.runId,
             ]);
             this.#database.run("DELETE FROM workflow_slots WHERE run_id = ?", [authority.runId]);
             this.#database.run("DELETE FROM workflow_claims WHERE run_id = ?", [authority.runId]);
-            return askingOf(this.#rowByToken(asking.token));
+            return created;
           })
           .immediate(),
       catch: fault,

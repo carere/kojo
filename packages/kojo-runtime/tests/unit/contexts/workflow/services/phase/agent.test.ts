@@ -9,6 +9,7 @@ import { EnvelopeBase } from "../../../../../../src/contexts/workflow/models/Env
 import { EnvelopeParseError } from "../../../../../../src/contexts/workflow/models/EnvelopeParseError.ts";
 import { agent } from "../../../../../../src/contexts/workflow/services/phase/agent.ts";
 import { workflow } from "../../../../../../src/contexts/workflow/services/workflow.ts";
+import { agentSelection } from "../../../../../support/agentSelection.ts";
 import { layer as inMemoryExecutionServices } from "../../../../../support/InMemoryExecutionServices.ts";
 import {
   inMemoryWorkflowEngine,
@@ -47,6 +48,7 @@ const triage = workflow(
   (payload) =>
     Effect.gen(function* () {
       const route = yield* agent({
+        ...agentSelection,
         name: "route",
         description: "Read the ticket and pick the lane it belongs in",
         agent: "router",
@@ -55,6 +57,7 @@ const triage = workflow(
       });
 
       const scouted = yield* agent({
+        ...agentSelection,
         name: "scout",
         description: "Find what the ticket touches before anything is changed",
         agent: "scout",
@@ -63,6 +66,7 @@ const triage = workflow(
       });
 
       const hotfixed = yield* agent({
+        ...agentSelection,
         name: "hotfix",
         description: "Write the fix the scout's findings point at",
         agent: "hotfixer",
@@ -80,7 +84,7 @@ const runTriage = (scripts: Record<string, InMemoryAgentInvoker.Script>) =>
       triage.definition.execute({ ticket: "KOJO-1" }),
     ).pipe(Effect.result);
     const trace = yield* InMemoryTracer.RecordedTrace;
-    return { outcome, phases: yield* trace.phases };
+    return { outcome, phases: yield* trace.phases, invocations: yield* trace.invocations };
   }).pipe(
     Effect.provide(
       selfContainedTestLayer(
@@ -177,7 +181,7 @@ describe("a workflow of agent phases", () => {
 
   it.effect("reads prose as a parse error too, through the same decode path", () =>
     Effect.gen(function* () {
-      const { outcome, phases } = yield* runTriage({
+      const { outcome, phases, invocations } = yield* runTriage({
         ...scriptedFactory,
         scout: { output: "I had a look around but I am not sure what to tell you" },
       });
@@ -195,6 +199,17 @@ describe("a workflow of agent phases", () => {
       // carries the last of those calls — re-entered, not cold.
       expect(scouted?.agent).toMatchObject({ agent: "scout", resumed: true });
       expect(scouted?.verification).toMatchObject({ corrections: 2, correctable: true });
+      const starts = invocations.filter(
+        (record) => record.activity.kind === "started" && record.activity.agent === "scout",
+      );
+      expect(starts).toHaveLength(3);
+      expect(new Set(starts.map((record) => record.invocationId)).size).toBe(3);
+      expect(new Set(starts.map((record) => record.phaseId)).size).toBe(1);
+      expect(
+        starts.map(
+          (record) => record.activity.kind === "started" && record.activity.systemDelivery,
+        ),
+      ).toEqual(["user-message", "not-sent", "not-sent"]);
       // And the phase after it never ran.
       expect(phases.map((phase) => phase.name)).toEqual(["route", "scout"]);
     }),

@@ -95,7 +95,6 @@ export const PhaseTable = (props: { readonly spans: ReadonlyArray<PhaseSpan> }):
       matchedCount={filtered().length}
       recordCount={props.spans.length}
       resourceName="Phases"
-      selectedCount={0}
     >
       <div class="flex flex-wrap gap-2 border-border border-b p-3" data-slot="filters">
         <label class="grid gap-1 text-muted-foreground text-xs">

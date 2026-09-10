@@ -1,4 +1,4 @@
-import { Effect, Layer, Option } from "effect";
+import { Clock, Effect, Layer, Option } from "effect";
 import { AgentAnswer } from "../models/AgentAnswer.ts";
 import { AgentInvocationError } from "../models/AgentInvocationError.ts";
 import type { AgentSessionId } from "../models/AgentSessionId.ts";
@@ -89,11 +89,27 @@ export const layer = (
           );
         }
         return nextAnswer(call.agent).pipe(
-          Effect.map(
-            (answer) =>
-              new AgentAnswer({
+          Effect.flatMap((answer) =>
+            Effect.gen(function* () {
+              const at = yield* Clock.currentTimeMillis;
+              const resumed = Option.isSome(call.session);
+              if (call.observe !== undefined)
+                yield* call.observe({
+                  kind: "started",
+                  at,
+                  agent: call.agent,
+                  provider: "in-memory",
+                  model: answer.model ?? call.model,
+                  system: resumed ? "" : call.system,
+                  user: call.prompt,
+                  renderedPrompt: resumed ? call.prompt : `${call.system}\n\n${call.prompt}`,
+                  systemDelivery: resumed ? "not-sent" : "user-message",
+                  redacted: false,
+                  truncated: false,
+                });
+              const result = new AgentAnswer({
                 agent: call.agent,
-                model: answer.model ?? "scripted",
+                model: answer.model ?? call.model,
                 session: Option.getOrElse(call.session, () => {
                   opened += 1;
                   return `${call.agent}-session-${opened}` as AgentSessionId;
@@ -106,11 +122,28 @@ export const layer = (
                   "output" in answer
                     ? answer.output
                     : JSON.stringify(answer.envelope, undefined, 2),
-              }),
+              });
+              if (call.observe !== undefined) {
+                yield* call.observe({ kind: "output", at, text: result.output });
+                yield* call.observe({
+                  kind: "finished",
+                  at,
+                  outcome: "succeeded",
+                  usage: {
+                    ...(answer.tokensIn === undefined ? {} : { inputTokens: answer.tokensIn }),
+                    ...(answer.tokensOut === undefined ? {} : { outputTokens: answer.tokensOut }),
+                    ...(answer.contextTokens === undefined
+                      ? {}
+                      : { contextTokens: answer.contextTokens }),
+                  },
+                });
+              }
+              return result;
+            }),
           ),
         );
       };
 
-      return { capabilities, invoke } satisfies AgentInvoker["Service"];
+      return { capabilities: () => capabilities, invoke } satisfies AgentInvoker["Service"];
     }),
   );

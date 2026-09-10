@@ -36,10 +36,8 @@ const lines = (output: string): ReadonlyArray<string> =>
  * anywhere, under any message, with nothing to compare against afterwards. Here the message is the
  * agent's, and everything else is code's.
  *
- * **The branch is not a parameter.** A run owns exactly one branch, named by its run id, and this
- * phase commits to that branch or to nothing: it reads the workspace's HEAD first and refuses when
- * it is somewhere else. That is what makes "every commit an agent produces lands on the run's
- * branch" a property of the engine rather than of the author remembering.
+ * The author can choose a branch. The default remains the Run branch. The Phase checks the exact
+ * current branch before staging any change and refuses when the worktree is elsewhere.
  *
  * `files` comes back from the index — `git diff --cached --name-only` — rather than from the
  * envelope. What the agent *claimed* it changed is a claim, and `diffMatchesClaims` is what grades
@@ -49,6 +47,8 @@ const lines = (output: string): ReadonlyArray<string> =>
 export const commit = (options: {
   /** The phase name, which keys its persistence slot and its trace row. */
   readonly name?: string;
+  /** The authored source branch. Defaults to the Run branch. */
+  readonly branch?: string;
   readonly description: string;
   /** The message the agent proposed. */
   readonly message: string;
@@ -74,9 +74,15 @@ export const commit = (options: {
     Effect.gen(function* () {
       const run = yield* CurrentRun;
       const workspace = yield* Workspace;
-      const branch = runBranch(run.runId);
+      const branch = options.branch ?? runBranch(run.runId);
 
       const refuse = (reason: string) => Effect.fail(new CommitRefused({ branch, reason }));
+
+      if (options.branch !== undefined) {
+        const checked = yield* workspace.git(["check-ref-format", "--branch", branch]);
+        if (!checked.succeeded || checked.stdout.trim() !== branch)
+          return yield* refuse(`invalid literal branch name: ${branch}`);
+      }
 
       const head = yield* workspace.git(["rev-parse", "--abbrev-ref", "HEAD"]);
       const on = head.stdout.trim();

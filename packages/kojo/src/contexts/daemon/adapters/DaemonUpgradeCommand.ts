@@ -316,8 +316,15 @@ const activateUpgrade = (
 export const daemonUpgradeCommand = Command.make(
   "upgrade",
   {
-    version: Flag.string("version"),
-    check: Flag.boolean("check").pipe(Flag.withDefault(false)),
+    version: Flag.string("version").pipe(
+      Flag.withDescription("Version of the local source package or previously checked candidate"),
+    ),
+    check: Flag.boolean("check").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription(
+        "Stage current package content and check it; omit to activate the checked candidate",
+      ),
+    ),
     approveNoRollback: Flag.string("approve-no-rollback").pipe(Flag.optional),
     force: Flag.boolean("force").pipe(Flag.withDefault(false)),
     pending: Flag.string("pending").pipe(Flag.optional),
@@ -395,6 +402,6 @@ export const daemonUpgradeCommand = Command.make(
   }),
 ).pipe(
   Command.withDescription(
-    "Stage and check one exact managed release without drain, download, package change, or Workflow execution",
+    "With --check, stage and check the local package; otherwise activate the checked candidate",
   ),
 );

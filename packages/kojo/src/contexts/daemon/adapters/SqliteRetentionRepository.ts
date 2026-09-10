@@ -261,6 +261,7 @@ export class SqliteRetentionRepository implements RetentionRepositoryPort {
       "kojo_phases",
       "kojo_gates",
       "kojo_sandboxes",
+      "kojo_invocations",
       "kojo_occurrences",
     ];
     const hasher = new Bun.CryptoHasher("sha256");
@@ -467,7 +468,13 @@ export class SqliteRetentionRepository implements RetentionRepositoryPort {
   }
 
   #deleteTrace(runId: string): void {
-    for (const table of ["kojo_occurrences", "kojo_phases", "kojo_gates", "kojo_sandboxes"]) {
+    for (const table of [
+      "kojo_invocations",
+      "kojo_occurrences",
+      "kojo_phases",
+      "kojo_gates",
+      "kojo_sandboxes",
+    ]) {
       if (this.#table(table)) this.#database.run(`DELETE FROM ${table} WHERE run_id = ?`, [runId]);
     }
     if (this.#table("kojo_runs"))

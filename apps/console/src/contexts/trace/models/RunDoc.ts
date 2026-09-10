@@ -1,3 +1,8 @@
+import type {
+  InvocationDocument,
+  InvocationTotals,
+} from "@carere/kojo-client-contracts/contexts/client/contracts/invocation";
+import type { RunDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 /** Model the fields consumed from GET /api/v1/runs/:runId. Unknown additive fields do not affect the view. */
 
 /** The three kinds of phase a workflow is made of. A sandbox is a scope, so it is not one. */
@@ -56,6 +61,7 @@ export interface RepoLine {
 
 /** One phase record: written once, on exit, on every path. */
 export interface PhaseLine {
+  readonly result?: RunDocument["phases"][number]["result"];
   readonly phaseId: string;
   readonly name: string;
   readonly description: string;
@@ -134,6 +140,10 @@ export interface InFlightLine {
 }
 
 export interface RunDoc {
+  readonly progress?: RunDocument["progress"];
+  readonly request?: RunDocument["request"];
+  readonly invocations?: ReadonlyArray<InvocationDocument>;
+  readonly invocationTotals?: InvocationTotals;
   readonly daemon?: {
     readonly projectId: string;
     readonly revisionId: string;
@@ -205,6 +215,7 @@ export interface RunDoc {
     };
     readonly outcome?: "succeeded" | "failed" | "suspended" | "cancelled";
     readonly finishedAt?: number;
+    readonly activePhases?: ReadonlyArray<InFlightLine>;
     readonly inFlight?: InFlightLine;
   };
   readonly phases: ReadonlyArray<PhaseLine>;

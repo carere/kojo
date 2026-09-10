@@ -1,0 +1,27 @@
+layer: application
+language: typescript
+
+dependsOn:
+  - kojo-runtime
+
+toolchains:
+  typescript:
+    syncProjectReferences: false
+
+tasks:
+  test:
+    command: bun node_modules/.bin/vitest run --project unit
+    inputs:
+      - .kojo/**/*
+      - tests/unit/**/*
+      - tests/support/**/*
+      - vitest.config.ts
+      - /packages/kojo-runtime/src/**/*
+  typecheck:
+    command: bun tsc --project tsconfig.json
+    inputs:
+      - .kojo/**/*
+      - tests/**/*
+      - vitest.config.ts
+      - tsconfig.json
+      - /packages/kojo-runtime/src/**/*

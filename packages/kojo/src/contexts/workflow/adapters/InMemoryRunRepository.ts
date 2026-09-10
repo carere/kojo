@@ -196,6 +196,7 @@ const service = (state: MemoryState, beforeAtomicCommit: () => void): RunReposit
         workflowName: request.workflowName,
         idempotencyKey: request.idempotencyKey,
         payload: request.payload,
+        ...(request.request === undefined ? {} : { request: request.request }),
         revisionId: request.revisionId,
         packageGraphId: request.packageGraphId,
         state: "queued",

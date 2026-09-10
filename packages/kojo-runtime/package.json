@@ -81,6 +81,9 @@
     "./contexts/trace/models/Occurrence": "./src/contexts/trace/models/Occurrence.ts",
     "./contexts/trace/models/PhaseRecord": "./src/contexts/trace/models/PhaseRecord.ts",
     "./contexts/trace/models/RepoEffect": "./src/contexts/trace/models/RepoEffect.ts",
+    "./contexts/trace/models/WorkItemProgress": "./src/contexts/trace/models/WorkItemProgress.ts",
+    "./contexts/trace/models/RunProgress": "./src/contexts/trace/models/RunProgress.ts",
+    "./contexts/trace/models/RunRequest": "./src/contexts/trace/models/RunRequest.ts",
     "./contexts/trace/models/RunRecord": "./src/contexts/trace/models/RunRecord.ts",
     "./contexts/trace/models/SandboxRecord": "./src/contexts/trace/models/SandboxRecord.ts",
     "./contexts/trace/models/Verification": "./src/contexts/trace/models/Verification.ts",
@@ -124,6 +127,7 @@
     "./contexts/workflow/services/phase/gate": "./src/contexts/workflow/services/phase/gate.ts",
     "./contexts/workflow/services/phase/merge": "./src/contexts/workflow/services/phase/merge.ts",
     "./contexts/workflow/services/phase/whereItRan": "./src/contexts/workflow/services/phase/whereItRan.ts",
+    "./contexts/workflow/services/reportProgress": "./src/contexts/workflow/services/reportProgress.ts",
     "./contexts/workflow/services/reviewed": "./src/contexts/workflow/services/reviewed.ts",
     "./contexts/workflow/services/sandboxed": "./src/contexts/workflow/services/sandboxed.ts",
     "./contexts/workflow/services/workflow": "./src/contexts/workflow/services/workflow.ts"

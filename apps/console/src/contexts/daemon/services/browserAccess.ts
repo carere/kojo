@@ -10,12 +10,7 @@ import type {
   RecordVerdictResult,
 } from "@carere/kojo-client-contracts/contexts/client/contracts/gate";
 import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
-import type { OperationReceipt } from "@carere/kojo-client-contracts/contexts/client/contracts/operation";
-import type {
-  ClientRequestSnapshot,
-  ProjectLocationResult,
-  ProjectSnapshot,
-} from "@carere/kojo-client-contracts/contexts/client/contracts/project";
+import type { ProjectSnapshot } from "@carere/kojo-client-contracts/contexts/client/contracts/project";
 import type {
   CancelRunResult,
   RetryUncertainActionResult,
@@ -267,31 +262,6 @@ export const openDaemonNotifications = async (signal: AbortSignal): Promise<Resp
 export const readProjects = (): Promise<ProjectSnapshot> =>
   authorizedRead<ProjectSnapshot>("/api/v1/projects");
 
-export const readRecentClientRequests = (): Promise<ClientRequestSnapshot> =>
-  authorizedRead<ClientRequestSnapshot>("/api/v1/client-requests");
-
-export const changeProjectLocation = async (
-  projectId: string,
-  action: "relocate" | "archive" | "restore",
-  location?: string,
-): Promise<ProjectLocationResult> => {
-  const bootstrap = await compatibility();
-  const requestId = crypto.randomUUID();
-  const receipt = await prepareAndMutate<OperationReceipt>(
-    `/api/v1/projects/${encodeURIComponent(projectId)}/actions/${action}`,
-    {
-      mutationVersion: 1,
-      requestId,
-      dataIdentity: bootstrap.dataIdentity,
-      operation: `${action}Project`,
-      target: { identityVersion: 1, kind: "project", parts: [projectId] },
-      arguments: { ...(location === undefined ? {} : { location }) },
-      preconditions: { confirm: true },
-    },
-  );
-  return receipt.result as unknown as ProjectLocationResult;
-};
-
 export const readWorkflows = (projectId?: string): Promise<WorkflowSnapshot> =>
   authorizedRead<WorkflowSnapshot>(
     projectId === undefined
@@ -350,7 +320,6 @@ const workflowMutation = async <A>(
   workflowName: string,
   action: "start" | "stop",
   payload?: JsonValue,
-  force = false,
 ): Promise<A> => {
   const bootstrap = await compatibility();
   const reviewed =
@@ -373,7 +342,7 @@ const workflowMutation = async <A>(
       dataIdentity: bootstrap.dataIdentity,
       operation: `${action}Workflow`,
       target: { identityVersion: 1, kind: "workflow", parts: [projectId, workflowName] },
-      arguments: { ...(payload === undefined ? {} : { payload }), ...(force ? { force } : {}) },
+      arguments: { ...(payload === undefined ? {} : { payload }) },
       preconditions:
         action === "start" && reviewed !== undefined
           ? {
@@ -401,12 +370,6 @@ export const stopWorkflow = (
   projectId: string,
   workflowName: string,
 ): Promise<StopWorkflowResult> => workflowMutation(projectId, workflowName, "stop");
-
-export const forceStopWorkflow = (
-  projectId: string,
-  workflowName: string,
-): Promise<StopWorkflowResult> =>
-  workflowMutation(projectId, workflowName, "stop", undefined, true);
 
 export const cancelRun = async (runId: string): Promise<CancelRunResult> => {
   const bootstrap = await compatibility();

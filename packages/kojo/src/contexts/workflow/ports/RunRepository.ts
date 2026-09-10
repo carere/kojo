@@ -1,4 +1,5 @@
 import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
+import type { RunDocument } from "@carere/kojo-client-contracts/contexts/client/contracts/run";
 import type { WorkflowMode } from "@carere/kojo-client-contracts/contexts/client/contracts/workflow";
 import type { JsonValue } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import { Context, type Effect } from "effect";
@@ -22,6 +23,7 @@ export interface AdmitRunRequest {
   readonly workflowName: string;
   readonly idempotencyKey: string;
   readonly payload: JsonValue;
+  readonly request?: RunDocument["request"];
   readonly revisionId: string;
   readonly packageGraphId: string;
   readonly admittedAt: string;

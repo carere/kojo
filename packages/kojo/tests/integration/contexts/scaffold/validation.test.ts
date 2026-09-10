@@ -1,5 +1,5 @@
 import { cpSync, existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "@effect/vitest";
@@ -72,6 +72,52 @@ afterEach(async () => {
 });
 
 describe("standalone Project validation", () => {
+  it("links unpublished source without changing the Project manifest and validates one Effect instance", async () => {
+    const fixture = await project();
+    const manifest = '{"name":"local-project","private":true}\n';
+    await writeFile(join(fixture.root, "package.json"), manifest);
+    const runtime = join(fixture.root, "node_modules", "@carere", "kojo-runtime");
+    await rm(runtime);
+    await mkdir(runtime);
+    await writeFile(join(runtime, "old-install"), "preserved");
+    const invoke = async () => {
+      const child = Bun.spawn(
+        [process.execPath, join(packageRoot, "src", "scripts", "link-runtime.ts"), fixture.root],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      const [status, output, error] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      expect(status, `${output}\n${error}`).toBe(0);
+    };
+    await invoke();
+    await invoke();
+    expect(await readFile(join(fixture.root, "package.json"), "utf8")).toBe(manifest);
+    const backups = await readdir(join(fixture.root, "node_modules", ".kojo-link-backups"));
+    expect(backups).toHaveLength(1);
+    expect(
+      await readFile(
+        join(
+          fixture.root,
+          "node_modules",
+          ".kojo-link-backups",
+          backups[0] ?? "",
+          "@carere",
+          "kojo-runtime",
+          "old-install",
+        ),
+        "utf8",
+      ),
+    ).toBe("preserved");
+    const diagnostics = await Effect.runPromise(standaloneValidation(fixture.root));
+    expect(diagnostics.filter((finding) => finding.standing === "failed")).toEqual([]);
+    expect(diagnostics.find((finding) => finding.subject === "effect")?.detail).toContain(
+      "one Effect instance",
+    );
+  });
+
   it("returns plain diagnostics without executing a Workflow", async () => {
     const fixture = await project();
     const diagnostics = await Effect.runPromise(standaloneValidation(fixture.root));
@@ -81,6 +127,31 @@ describe("standalone Project validation", () => {
     expect(diagnostics.some((finding) => finding.subject === "layers")).toBe(true);
     expect(existsSync(fixture.executed)).toBe(false);
     expect(existsSync(join(fixture.root, ".kojo", "data"))).toBe(false);
+  });
+
+  it("accepts a Workflow without a roster or helper modules", async () => {
+    const fixture = await project();
+    for (const name of ["factory.json", "kojo.config.yaml", "commands.ts", "envelopes.ts"]) {
+      await rm(join(fixture.root, ".kojo", name));
+    }
+    const diagnostics = await Effect.runPromise(standaloneValidation(fixture.root));
+    expect(diagnostics.filter((finding) => finding.standing === "failed")).toEqual([]);
+  });
+
+  it("accepts structured and non-string payloads without inventing invalid input", async () => {
+    const fixture = await project();
+    await writeFile(
+      join(fixture.root, ".kojo", "workflows", "safe.ts"),
+      [
+        'import { Effect, Schema } from "effect";',
+        'import { workflow } from "@carere/kojo-runtime/contexts/workflow/services/workflow";',
+        'export const safe = workflow({ name: "safe", payload: Schema.Struct({ issue: Schema.Number, branch: Schema.String }), success: Schema.Void, error: Schema.Never, idempotencyKey: (payload) => String(payload.issue) + "/" + payload.branch }, () => Effect.void);',
+      ].join("\n"),
+    );
+    const diagnostics = await Effect.runPromise(standaloneValidation(fixture.root));
+    expect(diagnostics.filter((finding) => finding.standing === "failed")).toEqual([]);
+    expect(diagnostics.find((finding) => finding.subject === "workflow:safe")?.standing).toBe("ok");
+    expect(existsSync(fixture.executed)).toBe(false);
   });
 
   it("diagnoses a missing Project runtime without a Daemon", async () => {

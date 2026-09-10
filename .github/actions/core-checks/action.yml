@@ -40,6 +40,10 @@ runs:
       shell: bash
       run: moon run kojo:check-public-types kojo:build
 
+    - name: Editable issue Factory
+      shell: bash
+      run: moon run issue:test issue:typecheck
+
     - name: Repository and release-tooling tests
       shell: bash
       run: |

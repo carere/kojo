@@ -30,16 +30,14 @@ export const actor = "maintainer";
  * Who actually gets called, and where.
  *
  * Provided **inside** each lane's sandbox scope, never at the top, because an agent runs in the
- * container the phase is standing in and the invoker therefore has to hold that container. The
- * roster is `.kojo/kojo.config.yaml`; it is decoded and every agent's prompt files are read while
- * this layer is built, so a typo in it fails naming the file before anything spawns.
+ * container the phase is standing in. Each call selects the provider, model, and prompts.
  */
-export const agents = SandcastleAgentInvoker.fromConfig({ config: ".kojo/kojo.config.yaml" });
+export const agents = SandcastleAgentInvoker.layer;
 
 /**
  * The paths no agent of this factory may change, whatever it was asked to do.
  *
- * `factoryOwnPaths` is Kojo's own list — the roster, the workflows, the envelopes, the checks, the
+ * `factoryOwnPaths` is Kojo's own list — the workflows, the envelopes, the checks, the
  * commands and the prompts. An agent that can edit those can edit its own grader, and in this
  * factory the mechanical half of every acceptance is `commands.ts`, so an unguarded agent can make
  * its own suite pass.

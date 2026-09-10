@@ -15,8 +15,16 @@ _Avoid_: log, event log, history
 **Run record**:
 The record that ties a Run's Phases together and carries the Runtime version, the full captured
 Workflow Revision digest (including configuration and packages), the Host, and the image digest
-when known. Its status changes as the Run progresses.
+when known. It can also retain authored public request facts: a title, a link, and named fields.
+Admission retains the same public facts so queued Runs remain identifiable. Other payload fields
+remain private. Its status changes as the Run progresses.
 _Avoid_: session, adw
+
+**Work progress**:
+Public facts supplied by authored code about a named work item. Each item has a stable key and
+increasing revision. A recorded Phase result preserves the observation across reconnect and replay.
+Waiting reasons, acceptance, and integration states are authored claims; they do not establish
+execution or acceptance authority. The Console does not infer these facts from Workflow source.
 
 **Phase record**:
 One wide record of the observations of a Phase attempt, written once on exit. Process loss can
@@ -39,7 +47,8 @@ its phase record lacks, and no question may need one to answer it.
 _Avoid_: event, log line
 
 **In-flight phase**:
-The latest observation of a Run's executing Phase, separate from its completed Phase records.
+An observation of one executing Phase attempt, separate from its completed Phase record.
+A Run can have several in-flight Phases at the same time.
 It can be stale after process loss and does not establish execution authority. See
 [docs/adr/trace/0002-in-flight-phase-lives-on-the-run-row.md](../adr/trace/0002-in-flight-phase-lives-on-the-run-row.md).
 _Avoid_: phase start, running phase event
@@ -67,3 +76,20 @@ A segment of the waterfall's time axis that is collapsed to a fixed width and la
 duration. A break replaces any span or gap that would otherwise flatten the rest of the run —
 usually a human holding a gate.
 _Avoid_: gap, elision, compressed region
+
+**Invocation observation**:
+A retained observation of one physical agent call within a Phase attempt. It identifies that call
+separately from implementation, review, and correction calls. It can contain prompts, public tool
+activity, output, and measurements received from the provider. It does not establish execution
+authority or recover activity that was never received.
+_Avoid_: Phase result, private reasoning, Run Claim
+
+**Reported charge**:
+A charge that the provider attributes to an invocation. It is unavailable when the provider does
+not report one, including subscription use without an attributable call charge.
+_Avoid_: API estimate, zero cost
+
+**API estimate**:
+An estimated API cost with an identified basis. It is separate from a reported charge. A total is
+partial when any included invocation lacks the relevant measurement.
+_Avoid_: invoice, reported charge

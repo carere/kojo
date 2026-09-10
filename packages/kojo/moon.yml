@@ -6,6 +6,11 @@ dependsOn:
   - kojo-runner-contracts
 
 tasks:
+  link-runtime:
+    command: bun src/scripts/link-runtime.ts
+    preset: utility
+    options:
+      cache: false
   tsc:
     outputs:
       - /.moon/cache/types/packages/kojo

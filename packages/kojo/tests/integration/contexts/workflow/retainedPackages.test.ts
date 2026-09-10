@@ -143,6 +143,7 @@ const fixture = (): {
       'import { dynamic } from "./support.ts";',
       `const marker = ${JSON.stringify(marker)};`,
       "void retained; void dynamic; void left; void right;",
+      'const assets = [new URL(\n  "../prompt.md",\n  /* relative to this module */ import.meta.url,\n)];',
       "const definition = Object.assign(function Safe() {}, {",
       '  _tag: "safe",',
       '  execute: () => writeFileSync(marker, "executed"),',
@@ -150,7 +151,7 @@ const fixture = (): {
       '  idempotencyKey: () => "safe",',
       "  payloadSchema: { fields: {} },",
       "});",
-      "export const safe = { definition, layer: Layer.empty };",
+      "export const safe = { definition, layer: Layer.empty, assets };",
       "",
     ].join("\n"),
   );
@@ -308,12 +309,8 @@ describe("real Workflow Revision capture", () => {
       "workflows/safe.ts",
       "workflows/support.ts",
     ]);
-    expect(safe?.revision?.manifest.assets.map((file) => file.path)).toEqual([
-      "kojo.config.yaml",
-      "prompt.md",
-    ]);
+    expect(safe?.revision?.manifest.assets.map((file) => file.path)).toEqual(["prompt.md"]);
     expect(safe?.revision?.manifest.sharedConfiguration.map((file) => file.path)).toEqual([
-      "factory.json",
       "tsconfig.json",
     ]);
     const local = safe?.revision?.manifest.packages.find((entry) => entry.name === "fixture-local");
@@ -361,7 +358,7 @@ describe("real Workflow Revision capture", () => {
       readFileSync(join(safe?.revision?.publishedPath ?? "", "manifest.json"), "utf8"),
     ).toContain(safe?.revision?.revisionId === undefined ? "never" : '"workflowName":"safe"');
     expect(
-      statSync(join(safe?.revision?.publishedPath ?? "", "factory", "shared", "factory.json"))
+      statSync(join(safe?.revision?.publishedPath ?? "", "factory", "shared", "tsconfig.json"))
         .mode & 0o777,
     ).toBe(0o600);
     await expect(Bun.file(subject.marker).exists()).resolves.toBe(false);
@@ -376,9 +373,7 @@ describe("real Workflow Revision capture", () => {
     expect(readFileSync(join(materialized.root, ".kojo", "prompt.md"), "utf8")).toBe(
       "exact prompt bytes\n",
     );
-    expect(readFileSync(join(materialized.root, ".kojo", "factory.json"), "utf8")).toContain(
-      '"formatVersion":1',
-    );
+    expect(existsSync(join(materialized.root, ".kojo", "factory.json"))).toBe(false);
     expect(realpathSync(join(materialized.root, "node_modules", "fixture-local"))).toBe(
       realpathSync(
         join(materialized.root, ".kojo-retained", "packages", local?.packageId ?? "missing"),
@@ -455,7 +450,73 @@ describe("real Workflow Revision capture", () => {
     ).not.toBe(safe?.revision?.revisionId);
   });
 
-  it("keeps credential declarations outside every revision", async () => {
+  it("retains prompt files without an asset manifest", async () => {
+    const subject = fixture();
+    rmSync(join(subject.root, ".kojo", "factory.json"));
+    writeFileSync(join(subject.root, ".kojo", ".env"), "TOKEN=secret\n");
+    mkdirSync(join(subject.root, ".kojo", "data"));
+    mkdirSync(join(subject.root, ".kojo", ".ssh"));
+    writeFileSync(join(subject.root, ".kojo", ".ssh", "id_ed25519"), "PRIVATE KEY");
+    writeFileSync(join(subject.root, ".kojo", "unrelated.txt"), "not an asset");
+    writeFileSync(join(subject.root, ".kojo", "data", "private.txt"), "runtime state");
+    const refreshed = await Effect.runPromise(
+      refreshFactory({ project: subject.root, dataRoot: subject.dataRoot }),
+    );
+    const safe = refreshed.workflows.find((workflow) => workflow.workflowName === "safe");
+    expect(safe?.availability).toBe("available");
+    expect(safe?.revision?.manifest.assets.map((file) => file.path)).toEqual(["prompt.md"]);
+    expect(safe?.revision?.manifest.assets.map((file) => file.path)).not.toContain(".env");
+    expect(safe?.revision?.manifest.assets.map((file) => file.path)).not.toContain(
+      "data/private.txt",
+    );
+  });
+
+  it("refuses a linked Factory asset", async () => {
+    const subject = fixture();
+    const prompt = join(subject.root, ".kojo", "prompt.md");
+    rmSync(prompt);
+    symlinkSync(join(subject.root, ".kojo", "commands.ts"), prompt);
+    const refreshed = await Effect.runPromise(
+      refreshFactory({ project: subject.root, dataRoot: subject.dataRoot }),
+    );
+    const safe = refreshed.workflows.find((workflow) => workflow.workflowName === "safe");
+    expect(safe?.availability).toBe("invalid");
+    expect(safe?.sourceFault).toContain("linked");
+  });
+
+  it("retains a source-like asset referenced by Workflow code", async () => {
+    const subject = fixture();
+    const source = join(subject.root, ".kojo", "workflows", "safe.ts");
+    writeFileSync(source, readFileSync(source, "utf8").replace("../prompt.md", "../setup.js"));
+    writeFileSync(join(subject.root, ".kojo", "setup.js"), "console.log('Docker setup');\n");
+    const refreshed = await Effect.runPromise(
+      refreshFactory({ project: subject.root, dataRoot: subject.dataRoot }),
+    );
+    const safe = refreshed.workflows.find((workflow) => workflow.workflowName === "safe");
+    expect(safe?.revision?.manifest.assets.map((file) => file.path)).toEqual(["setup.js"]);
+  });
+
+  it("retains an asset referenced inside a template expression", async () => {
+    const subject = fixture();
+    const source = join(subject.root, ".kojo", "workflows", "safe.ts");
+    writeFileSync(
+      source,
+      readFileSync(source, "utf8") +
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: this is authored fixture source.
+        '\nconst text = `Prompt: ${new URL("../template.md", import.meta.url)}`;\n',
+    );
+    writeFileSync(join(subject.root, ".kojo", "template.md"), "Template prompt");
+    const refreshed = await Effect.runPromise(
+      refreshFactory({ project: subject.root, dataRoot: subject.dataRoot }),
+    );
+    const safe = refreshed.workflows.find((workflow) => workflow.workflowName === "safe");
+    expect(safe?.revision?.manifest.assets.map((file) => file.path)).toEqual([
+      "prompt.md",
+      "template.md",
+    ]);
+  });
+
+  it("excludes credentials even when an obsolete manifest lists them", async () => {
     const subject = fixture();
     writeFileSync(join(subject.root, ".kojo", ".env"), "TOKEN=secret\n");
     writeFileSync(
@@ -466,8 +527,10 @@ describe("real Workflow Revision capture", () => {
     const refreshed = await Effect.runPromise(
       refreshFactory({ project: subject.root, dataRoot: subject.dataRoot }),
     );
-    expect(refreshed.factoryState).toBe("invalid");
-    expect(refreshed.fault).toContain("credential");
-    expect(refreshed.workflows.every((workflow) => workflow.revision === undefined)).toBe(true);
+    const revision = refreshed.workflows.find(
+      (workflow) => workflow.workflowName === "safe",
+    )?.revision;
+    expect(revision).toBeDefined();
+    expect(revision?.manifest.assets.some((file) => file.path === ".env")).toBe(false);
   });
 });

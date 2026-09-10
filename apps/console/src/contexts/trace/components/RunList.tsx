@@ -32,7 +32,7 @@ const statusTones: Record<RunStatus, BadgeTone> = {
 
 const columns = helper.columns([
   helper.accessor("runId", {
-    header: "Run",
+    header: "Request / Run",
     // The list is a way in, and the run view is what it is a way in to. A `Link` rather than a click
     // handler on the row: a run's URL is the thing a person pastes into a chat.
     cell: (info) => (
@@ -40,10 +40,27 @@ const columns = helper.columns([
         to="/runs/$runId"
         params={{ runId: info.row.original.runId }}
         search={{ view: "timeline" as const }}
-        class="font-mono text-xs hover:underline"
+        class="grid gap-1 hover:underline"
       >
-        {info.row.original.runId}
+        <span class="font-medium">{info.row.original.request}</span>
+        <span class="font-mono text-xs text-muted-foreground">{info.row.original.runId}</span>
       </Link>
+    ),
+  }),
+  helper.accessor("project", {
+    header: "Project",
+    cell: (info) => <span>{info.row.original.project}</span>,
+  }),
+  helper.accessor("activity", {
+    header: "Current activity",
+    cell: (info) => <span>{info.row.original.activity}</span>,
+  }),
+  helper.accessor("updatedAt", {
+    header: "Last update",
+    cell: (info) => (
+      <time dateTime={info.row.original.updatedAt}>
+        {new Date(info.row.original.updatedAt).toLocaleString()}
+      </time>
     ),
   }),
   helper.accessor("workflow", {
@@ -58,7 +75,7 @@ const columns = helper.columns([
   }),
   helper.accessor("queueReason", {
     header: "Queue reason",
-    cell: (info) => <span>{info.getValue()}</span>,
+    cell: (info) => <span>{info.row.original.queueReason}</span>,
   }),
   helper.accessor("gate", {
     header: "Open gate",

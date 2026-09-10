@@ -1,5 +1,8 @@
+import type { AgentProvider } from "@ai-hero/sandcastle";
 import { Context, type Effect, type Option } from "effect";
+import type { AgentActivity } from "../models/AgentActivity.ts";
 import type { AgentAnswer } from "../models/AgentAnswer.ts";
+import type { AgentDefinition } from "../models/AgentDefinition.ts";
 import type { AgentInvocationError } from "../models/AgentInvocationError.ts";
 import type { AgentSessionId } from "../models/AgentSessionId.ts";
 
@@ -24,10 +27,18 @@ export interface AgentCapabilities {
   readonly capture: boolean;
 }
 
+export type ProviderFor = (definition: AgentDefinition) => AgentProvider;
+
 /** One agent call. The author's program owns looping, so this is one turn and never a loop. */
 export interface AgentCall {
-  /** The roster name of the agent to call. */
+  /** The call label, independent of provider selection. */
   readonly agent: string;
+  readonly model: string;
+  readonly provider: ProviderFor;
+  /** Observe this physical call; the Phase supplies its correlation identity. */
+  readonly observe?: (activity: AgentActivity) => Effect.Effect<void>;
+  readonly system: string;
+  readonly tools?: ReadonlyArray<string>;
   readonly prompt: string;
   /**
    * `Some` re-enters that session, `None` opens a cold one.
@@ -40,7 +51,7 @@ export interface AgentCall {
 }
 
 interface AgentInvokerService {
-  readonly capabilities: AgentCapabilities;
+  readonly capabilities: (call: AgentCall) => AgentCapabilities;
   readonly invoke: (call: AgentCall) => Effect.Effect<AgentAnswer, AgentInvocationError>;
 }
 

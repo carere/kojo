@@ -76,3 +76,26 @@ export const ownedByYou = (what: string): ReadonlyArray<string> => [
   "// is kept, not replaced. The Kojo engine itself is a versioned dependency — nothing under",
   "// `.kojo/` is a copy of it, so upgrading Kojo does not mean re-applying your edits.",
 ];
+
+/** Keep the generated agent provider import and call expression together. */
+export const agentProviderSource = (
+  choices: FactoryChoices,
+): {
+  readonly imports: ReadonlyArray<string>;
+  readonly expression: string;
+} => {
+  switch (choices.agent) {
+    case "codex":
+      return {
+        imports: [],
+        expression: "SandcastleAgentInvoker.codex",
+      };
+    case "pi":
+      return {
+        imports: ['import { kojoPi } from "@carere/kojo-runtime/contexts/agent/adapters/kojoPi";'],
+        expression: "(definition) => kojoPi(definition)",
+      };
+    case "claude-code":
+      return { imports: [], expression: "SandcastleAgentInvoker.claude" };
+  }
+};

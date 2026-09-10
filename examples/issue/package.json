@@ -1,0 +1,14 @@
+{
+  "name": "@carere/kojo-issue-example",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@carere/kojo-runtime": "workspace:*",
+    "effect": "4.0.0-rc.112"
+  },
+  "devDependencies": {
+    "@effect/vitest": "4.0.0-rc.112",
+    "@types/bun": "^1.3.14",
+    "vitest": "^4.1.0"
+  }
+}

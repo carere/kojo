@@ -1,11 +1,12 @@
 import { SoluxProvider } from "@carere/solux";
 import { Link, Outlet, useNavigate } from "@tanstack/solid-router";
-import { createSignal, type JSX, Show } from "solid-js";
+import { createEffect, createSignal, For, type JSX, Show } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
 import { cancelRun, retryUncertainAction } from "../../daemon/services/browserAccess.ts";
 import { GateCard } from "../../gate/components/GateCard.tsx";
 import { useAskings } from "../../gate/hooks/useAskings.ts";
 import { type Asking, latestAskingOf } from "../../gate/models/Asking.ts";
-import { awaitingApply } from "../../gate/models/answering.ts";
+import { awaitingApply, isSettled } from "../../gate/models/answering.ts";
 import { Badge, type BadgeTone } from "../../shared/components/Badge.tsx";
 import { Notice } from "../../shared/components/Notice.tsx";
 import { refusal, retrying, settled } from "../../shared/hooks/settled.ts";
@@ -18,10 +19,14 @@ import { isTerminal, type RunStatus } from "../models/RunLine.ts";
 import type { RunViewMode } from "../models/view.ts";
 import { type PhaseSpan, spansOf } from "../models/waterfall.ts";
 import { waterfallStore } from "../services/waterfallStore.ts";
+import { Invocations } from "./Invocations.tsx";
+import { PhaseResults } from "./PhaseResults.tsx";
 import { PhaseTable } from "./PhaseTable.tsx";
 import { PublishedArtifacts } from "./PublishedArtifacts.tsx";
+import { RequestFacts } from "./RequestFacts.tsx";
 import { RunOutcome } from "./RunOutcome.tsx";
 import { Waterfall } from "./Waterfall.tsx";
+import { WorkProgress } from "./WorkProgress.tsx";
 
 /** Show the Run header, Waterfall or table, and nested detail panel. Provide one interaction store to the Waterfall and panel; keep the view choice in the URL. */
 
@@ -59,13 +64,13 @@ const Stamp = (props: {
   readonly when?: boolean;
 }): JSX.Element => (
   // Header facts use a separate attribute from panel fields.
-  <span data-stamp={props.name} class="flex items-baseline gap-1.5">
+  <span data-stamp={props.name} class="flex min-w-0 items-baseline gap-1.5">
     <span class="text-muted-foreground text-[10px] tracking-[0.08em] uppercase">{props.label}</span>
     <Show
       when={props.when ?? true}
       fallback={<span class="text-muted-foreground/70 text-xs italic">{props.absent ?? "—"}</span>}
     >
-      <span class="text-foreground/80 font-mono text-xs">{props.children}</span>
+      <span class="min-w-0 break-all text-foreground/80 font-mono text-xs">{props.children}</span>
     </Show>
   </span>
 );
@@ -148,6 +153,24 @@ export const RunView = (props: {
    * `POST` would disappear at the instant it became the only honest thing on the page.
    */
   const openGate = (): Asking | undefined => latestAskingOf(settled(gates) ?? [], props.runId);
+  const [gateCards, setGateCards] = createStore<Array<{ key: string; asking: Asking }>>([]);
+  createEffect(() =>
+    setGateCards(
+      reconcile(
+        (settled(gates) ?? [])
+          .filter(
+            (asking) =>
+              asking.request.runId === props.runId &&
+              (!isSettled(asking, doc()?.gates ?? []) || asking === openGate()),
+          )
+          .map((asking) => ({
+            key: JSON.stringify([asking.request.gate, asking.request.asking]),
+            asking,
+          })),
+        { key: "key" },
+      ),
+    ),
+  );
 
   /**
    * A click on a span is a navigation, and clicking the open one again closes the panel.
@@ -193,7 +216,7 @@ export const RunView = (props: {
   };
 
   return (
-    <main class="mx-auto flex w-full max-w-[100rem] flex-col gap-4 px-6 py-8">
+    <main class="mx-auto flex w-full max-w-[100rem] min-w-0 break-words flex-col gap-4 px-6 py-8">
       <nav class="text-muted-foreground text-xs">
         <Link to="/" class="hover:underline">
           ← every run
@@ -239,73 +262,67 @@ export const RunView = (props: {
           <>
             <header class="flex flex-col gap-2" data-run-header={document().run.run.runId}>
               <div class="flex flex-wrap items-center gap-3">
-                <h1 class="font-mono text-lg font-semibold">{document().run.run.runId}</h1>
+                <h1 class="min-w-0 break-words text-lg font-semibold">
+                  {document().request?.title ?? document().run.run.runId}
+                </h1>
                 <Badge tone={statusTones[status()] ?? "neutral"}>{status()}</Badge>
                 <span class="text-muted-foreground text-sm">{document().run.run.workflow}</span>
                 <span class="text-muted-foreground text-sm" data-elapsed>
                   {elapsedOf(document(), now())}
                 </span>
               </div>
-              {/*
-               * What produced the run, each value said with the name of what it is.
-               *
-               * **It was four unlabelled monospace tokens joined by middots** — `0.0.0 ·
-               * development · fixture-host · sha256:fixture` — and a person looking at it could not
-               * tell which was the engine and which was the factory. That is not a guess: somebody
-               * read this line and asked what each part of it was.
-               *
-               * Inline rather than the panel's stacked `Field`, because this is a header. A stacked
-               * label doubles the height of a block that sits above the timeline on every run, and
-               * how far down the page the timeline starts is something people already complain
-               * about.
-               *
-               * Two of the six were recorded and drawn nowhere: the key the run was deduplicated by,
-               * which answers *did two triggers make one run*, and the branch, which the README calls
-               * the durable state of a run.
-               */}
-              <div class="flex flex-wrap items-baseline gap-x-5 gap-y-1" data-run-stamp>
-                <Show when={document().daemon}>
-                  {(daemon) => (
-                    <>
-                      <Stamp name="project" label="Project">
-                        {daemon().projectId}
-                      </Stamp>
-                      <Stamp name="revision" label="Pinned revision">
-                        {daemon().revisionId}
-                      </Stamp>
-                      <Stamp name="graph" label="Pinned graph">
-                        {daemon().packageGraphId}
-                      </Stamp>
-                      <Stamp name="execution" label="Execution">
-                        {daemon().queueReason ?? daemon().state}
-                      </Stamp>
-                    </>
-                  )}
-                </Show>
-                <Stamp name="engine" label="engine">
-                  {document().run.run.engineVersion}
-                </Stamp>
-                <Stamp name="commit" label="commit">
-                  {document().run.run.engineCommit}
-                </Stamp>
-                <Stamp name="host" label="host">
-                  {document().run.run.host}
-                </Stamp>
-                <Stamp name="config" label="Factory revision">
-                  {document().run.run.configDigest}
-                </Stamp>
-                <Stamp name="idempotency-key" label="idempotency key">
-                  {document().run.run.idempotencyKey}
-                </Stamp>
-                <Stamp
-                  name="branch"
-                  label="branch"
-                  absent="no sandbox was acquired"
-                  when={document().sandboxes[0] !== undefined}
-                >
-                  {document().sandboxes[0]?.branch}
-                </Stamp>
-              </div>
+              <Show when={document().request}>
+                {(request) => <RequestFacts request={request()} />}
+              </Show>
+              <details class="rounded border border-border p-3">
+                <summary class="cursor-pointer text-sm">Technical details</summary>
+                <div class="flex flex-wrap items-baseline gap-x-5 gap-y-1" data-run-stamp>
+                  <Stamp name="run" label="Run">
+                    {document().run.run.runId}
+                  </Stamp>
+                  <Show when={document().daemon}>
+                    {(daemon) => (
+                      <>
+                        <Stamp name="project" label="Project">
+                          {daemon().projectId}
+                        </Stamp>
+                        <Stamp name="revision" label="Pinned revision">
+                          {daemon().revisionId}
+                        </Stamp>
+                        <Stamp name="graph" label="Pinned graph">
+                          {daemon().packageGraphId}
+                        </Stamp>
+                        <Stamp name="execution" label="Execution">
+                          {daemon().queueReason ?? daemon().state}
+                        </Stamp>
+                      </>
+                    )}
+                  </Show>
+                  <Stamp name="engine" label="engine">
+                    {document().run.run.engineVersion}
+                  </Stamp>
+                  <Stamp name="commit" label="commit">
+                    {document().run.run.engineCommit}
+                  </Stamp>
+                  <Stamp name="host" label="host">
+                    {document().run.run.host}
+                  </Stamp>
+                  <Stamp name="config" label="Factory revision">
+                    {document().run.run.configDigest}
+                  </Stamp>
+                  <Stamp name="idempotency-key" label="idempotency key">
+                    {document().run.run.idempotencyKey}
+                  </Stamp>
+                  <Stamp
+                    name="branch"
+                    label="branch"
+                    absent="no sandbox was acquired"
+                    when={document().sandboxes[0] !== undefined}
+                  >
+                    {document().sandboxes[0]?.branch}
+                  </Stamp>
+                </div>
+              </details>
             </header>
 
             <Show when={document().daemon?.executionFault}>
@@ -353,15 +370,21 @@ export const RunView = (props: {
               )}
             </Show>
 
-            <Show when={document().daemon?.uncertainty}>
+            <Show
+              when={
+                document().daemon?.uncertainty?.state === "unresolved"
+                  ? document().daemon?.uncertainty
+                  : undefined
+              }
+            >
               {(uncertainty) => (
                 <Notice
                   tone="retrying"
                   title={`External action uncertainty: ${uncertainty().state}`}
                 >
                   <p class="mt-1">
-                    Action <code>{uncertainty().actionId}</code> for Phase {uncertainty().phasePath}
-                    #{uncertainty().attempt} has no confirmed result.
+                    Action <code class="break-all">{uncertainty().actionId}</code> for Phase{" "}
+                    {uncertainty().phasePath}#{uncertainty().attempt} has no confirmed result.
                   </p>
                   <p class="mt-1 text-xs">
                     Missing output, timeout, replacement, a new Claim, and Trace absence do not
@@ -469,14 +492,17 @@ export const RunView = (props: {
              */}
             <RunOutcome doc={document()} runId={props.runId} mode={props.mode} />
 
-            <Show when={openGate()}>
-              {(waiting) => (
-                <Show when={!isTerminal(status()) || awaitingApply(waiting(), document().gates)}>
-                  <GateCard asking={waiting()} settled={document().gates} runId={props.runId} />
+            <For each={gateCards}>
+              {(card) => (
+                <Show when={!isTerminal(status()) || awaitingApply(card.asking, document().gates)}>
+                  <GateCard asking={card.asking} settled={document().gates} runId={props.runId} />
                 </Show>
               )}
-            </Show>
+            </For>
 
+            <Show when={(document().progress?.length ?? 0) > 0}>
+              <WorkProgress items={document().progress ?? []} state={status()} />
+            </Show>
             <div class="flex items-center gap-2 text-xs">
               {/*
                * Links rather than buttons, because the mode is a URL. A person pastes what they are
@@ -515,7 +541,7 @@ export const RunView = (props: {
             <SoluxProvider store={store}>
               <div class="flex flex-col gap-4">
                 {/* Keep the Waterfall visible above the detail panel in one page flow. */}
-                <div class="bg-background flex w-full min-w-0 flex-col gap-2 lg:sticky lg:top-0 lg:z-10 lg:max-h-[60vh] lg:overflow-x-hidden lg:overflow-y-auto lg:pt-2">
+                <div class="bg-background flex w-full min-w-0 flex-col gap-2 ">
                   <Show
                     when={spansOf(document(), now()).length > 0}
                     fallback={
@@ -535,6 +561,11 @@ export const RunView = (props: {
                   </Show>
                 </div>
 
+                <PhaseResults phases={document().phases} />
+                <Invocations
+                  invocations={document().invocations ?? []}
+                  totals={document().invocationTotals}
+                />
                 <PublishedArtifacts runId={props.runId} artifacts={document().artifacts ?? []} />
 
                 {/*

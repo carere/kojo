@@ -136,7 +136,7 @@ export const answeringHeadline: Record<AnsweringState, string> = {
 
 /** The second line: what that means, and what to do about it. */
 export const answeringDetail: Record<AnsweringState, string> = {
-  waiting: "This run has stopped and holds nothing. It moves the moment somebody answers.",
+  waiting: "Record a Verdict to answer this Gate. The Console shows when the Daemon applies it.",
   overdue:
     "The deadline has passed. The run takes its expiry branch when a runner next reaches it, and an answer given now may arrive too late.",
   applied: "A runner picked the answer up and the run settled this asking.",

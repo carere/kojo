@@ -2,6 +2,7 @@ import { Context, Effect, Layer } from "effect";
 import type { GateRecord } from "../../gate/models/GateRecord.ts";
 import type { RunId } from "../../shared/models/RunId.ts";
 import type { InFlightPhase } from "../models/InFlightPhase.ts";
+import type { InvocationObservation } from "../models/InvocationObservation.ts";
 import type { Occurrence } from "../models/Occurrence.ts";
 import type { PhaseRecord } from "../models/PhaseRecord.ts";
 import type { RunOutcome, RunRecord } from "../models/RunRecord.ts";
@@ -21,16 +22,11 @@ export class RecordedTrace extends Context.Service<
     readonly phases: Effect.Effect<ReadonlyArray<PhaseRecord>>;
     readonly gates: Effect.Effect<ReadonlyArray<GateRecord>>;
     readonly sandboxes: Effect.Effect<ReadonlyArray<SandboxRecord>>;
+    readonly invocations: Effect.Effect<ReadonlyArray<InvocationObservation>>;
     readonly occurrences: Effect.Effect<ReadonlyArray<Occurrence>>;
     readonly outcomes: Effect.Effect<ReadonlyMap<RunId, RunOutcome>>;
-    /**
-     * What each run is executing right now — replaced on entry, removed when the record arrives.
-     *
-     * A map rather than a list, because this is the run's status and not a record of work. A run
-     * whose phase has exited is absent from it, which is what makes "cleared when the record replaces
-     * it" checkable in a tier with no database.
-     */
-    readonly inFlight: Effect.Effect<ReadonlyMap<RunId, InFlightPhase>>;
+    /** Active Phase attempts per Run. Completion removes only its own attempt. */
+    readonly inFlight: Effect.Effect<ReadonlyMap<RunId, ReadonlyArray<InFlightPhase>>>;
   }
 >()("kojo/trace/RecordedTrace") {}
 
@@ -47,23 +43,42 @@ export const layer: Layer.Layer<RecordedTrace | Tracer> = Layer.effectContext(
     const phases: Array<PhaseRecord> = [];
     const gates: Array<GateRecord> = [];
     const sandboxes: Array<SandboxRecord> = [];
+    const invocations: InvocationObservation[] = [];
     const occurrences: Array<Occurrence> = [];
     const outcomes = new Map<RunId, RunOutcome>();
-    const inFlight = new Map<RunId, InFlightPhase>();
+    const inFlight = new Map<RunId, ReadonlyArray<InFlightPhase>>();
 
     return Context.make(Tracer, {
       runStarted: (record) => Effect.sync(() => void runs.push(record)),
-      runFinished: (runId, outcome) => Effect.sync(() => void outcomes.set(runId, outcome)),
-      phaseEntered: (runId, phase) => Effect.sync(() => void inFlight.set(runId, phase)),
+      runFinished: (runId, outcome) =>
+        Effect.sync(() => {
+          outcomes.set(runId, outcome);
+          inFlight.delete(runId);
+        }),
+      phaseEntered: (runId, phase) =>
+        Effect.sync(() => {
+          if (phases.some((record) => record.runId === runId && record.phaseId === phase.phaseId))
+            return;
+          const siblings = inFlight.get(runId) ?? [];
+          inFlight.set(runId, [
+            ...siblings.filter((item) => item.phaseId !== phase.phaseId),
+            phase,
+          ]);
+        }),
       // The record and the clearing of the status it replaces, exactly as the durable adapter does
       // both in one write. A phase that has exited must not still be drawn as one that is running.
       phase: (record) =>
         Effect.sync(() => {
           phases.push(record);
-          inFlight.delete(record.runId);
+          const siblings = (inFlight.get(record.runId) ?? []).filter(
+            (phase) => phase.phaseId !== record.phaseId,
+          );
+          if (siblings.length === 0) inFlight.delete(record.runId);
+          else inFlight.set(record.runId, siblings);
         }),
       gate: (record) => Effect.sync(() => void gates.push(record)),
       sandbox: (record) => Effect.sync(() => void sandboxes.push(record)),
+      invocation: (record) => Effect.sync(() => void invocations.push(record)),
       occurrence: (record) => Effect.sync(() => void occurrences.push(record)),
     }).pipe(
       Context.add(RecordedTrace, {
@@ -71,6 +86,7 @@ export const layer: Layer.Layer<RecordedTrace | Tracer> = Layer.effectContext(
         phases: Effect.sync(() => [...phases]),
         gates: Effect.sync(() => [...gates]),
         sandboxes: Effect.sync(() => [...sandboxes]),
+        invocations: Effect.sync(() => [...invocations]),
         occurrences: Effect.sync(() => [...occurrences]),
         outcomes: Effect.sync(() => new Map(outcomes)),
         inFlight: Effect.sync(() => new Map(inFlight)),

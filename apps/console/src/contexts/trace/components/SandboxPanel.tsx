@@ -43,8 +43,7 @@ export const SandboxPanel = (props: {
     (doc()?.phases ?? []).filter((phase) => phase.sandboxId === sandboxId());
   /** The phase the run is inside right now, when it is inside *this* acquisition. */
   const flying = () => {
-    const one = doc()?.run.inFlight;
-    return one?.sandboxId === sandboxId() ? one : undefined;
+    return doc()?.run.activePhases?.find((phase) => phase.sandboxId === sandboxId());
   };
   const known = () => record() !== undefined || inside().length > 0 || flying() !== undefined;
 

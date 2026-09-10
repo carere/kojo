@@ -12,6 +12,10 @@ import type { GateTransitionError } from "../models/GateTransitionError.ts";
 export class DaemonGateRepository extends Context.Service<
   DaemonGateRepository,
   {
+    readonly createAskingsAndSuspend: (
+      authority: RunAuthority,
+      askings: ReadonlyArray<CreateAsking>,
+    ) => Effect.Effect<ReadonlyArray<DaemonAsking>, GateTransitionError>;
     readonly createAskingAndSuspend: (
       authority: RunAuthority,
       asking: CreateAsking,
