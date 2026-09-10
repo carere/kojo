@@ -42,17 +42,22 @@ const answered = (choice: string) =>
 const landing = workflow(
   {
     name: "landing",
-    payload: { suite: Schema.Boolean, choice: Schema.String },
+    payload: {
+      suite: Schema.Boolean,
+      choice: Schema.String,
+      branch: Schema.optional(Schema.String),
+    },
     success: Landing,
     error: Schema.Union([NotAccepted, MergeRefused, WorkspaceError]),
     idempotencyKey: (payload) => `landing/${payload.suite}/${payload.choice}`,
   },
   (payload) =>
     merge({
+      ...(payload.branch === undefined ? {} : { branch: payload.branch }),
       into: target,
       acceptance: new Acceptance({
         mechanical: suite(payload.suite),
-        human: answered(payload.choice),
+        review: answered(payload.choice),
       }),
     }),
 );
@@ -76,18 +81,23 @@ const convention = "feat(kojo): land the accepted branch";
 const written = workflow(
   {
     name: "landing-written",
-    payload: { suite: Schema.Boolean, choice: Schema.String },
+    payload: {
+      suite: Schema.Boolean,
+      choice: Schema.String,
+      branch: Schema.optional(Schema.String),
+    },
     success: Landing,
     error: Schema.Union([NotAccepted, MergeRefused, WorkspaceError]),
     idempotencyKey: (payload) => `landing-written/${payload.suite}/${payload.choice}`,
   },
   (payload) =>
     merge({
+      ...(payload.branch === undefined ? {} : { branch: payload.branch }),
       into: target,
       message: convention,
       acceptance: new Acceptance({
         mechanical: suite(payload.suite),
-        human: answered(payload.choice),
+        review: answered(payload.choice),
       }),
     }),
 );
@@ -96,18 +106,20 @@ const written = workflow(
 const healthy = (branch: string): Record<string, ScriptedCommand> => ({
   "git rev-parse --abbrev-ref HEAD": { stdout: `${target}\n` },
   "git status --porcelain": { stdout: "" },
-  [`git merge --no-ff --no-edit ${branch}`]: { stdout: "Merge made by the 'ort' strategy.\n" },
+  [`git merge --no-ff --no-edit refs/heads/${branch}`]: {
+    stdout: "Merge made by the 'ort' strategy.\n",
+  },
   "git rev-parse HEAD": { stdout: "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b\n" },
   "git merge --abort": {},
 });
 
 const runLanding = (
   commands: (branch: string) => Record<string, ScriptedCommand>,
-  payload: { readonly suite: boolean; readonly choice: string },
+  payload: { readonly suite: boolean; readonly choice: string; readonly branch?: string },
 ) =>
   Effect.gen(function* () {
     const runId = (yield* landing.definition.executionId(payload)) as RunId;
-    const branch = runBranch(runId);
+    const branch = payload.branch ?? runBranch(runId);
 
     return yield* Effect.gen(function* () {
       const outcome = yield* Effect.result(
@@ -142,7 +154,7 @@ const runLanding = (
 const healthyWritten = (branch: string): Record<string, ScriptedCommand> => ({
   "git rev-parse --abbrev-ref HEAD": { stdout: `${target}\n` },
   "git status --porcelain": { stdout: "" },
-  [`git merge --no-ff --no-edit --message ${convention} ${branch}`]: {
+  [`git merge --no-ff --no-edit --message ${convention} refs/heads/${branch}`]: {
     stdout: "Merge made by the 'ort' strategy.\n",
   },
   "git rev-parse HEAD": { stdout: "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b\n" },
@@ -178,6 +190,66 @@ const runWritten = (payload: { readonly suite: boolean; readonly choice: string 
 
 const accepted = { suite: true, choice: "approve" } as const;
 
+describe("authored issue integration", () => {
+  it.effect("selects the local branch even when a tag has the same name", () =>
+    Effect.gen(function* () {
+      const { outcome, commands } = yield* runLanding(
+        (branch) => ({
+          ...healthy(branch),
+          [`git check-ref-format --branch ${branch}`]: { stdout: branch },
+          [`git merge --no-ff --no-edit ${branch}`]: {
+            exitCode: 1,
+            stderr: "ambiguous short name",
+          },
+        }),
+        { suite: true, choice: "approve", branch: "feature/child" },
+      );
+      expect(Result.isSuccess(outcome)).toBe(true);
+      expect(commands).toContain("git merge --no-ff --no-edit refs/heads/feature/child");
+    }),
+  );
+  it.effect("refuses a tag-only source", () =>
+    Effect.gen(function* () {
+      const { outcome } = yield* runLanding(
+        (branch) => ({
+          ...healthy(branch),
+          [`git check-ref-format --branch ${branch}`]: { stdout: branch },
+          [`git merge --no-ff --no-edit refs/heads/${branch}`]: {
+            exitCode: 1,
+            stderr: "not something we can merge",
+          },
+        }),
+        { suite: true, choice: "approve", branch: "tag-only" },
+      );
+      expect(Result.isFailure(outcome) && outcome.failure._tag).toBe("MergeRefused");
+    }),
+  );
+
+  it.effect("refuses an invalid selected branch before integration", () =>
+    Effect.gen(function* () {
+      const { outcome, commands } = yield* runLanding(
+        () => ({ "git check-ref-format --branch --abort": { exitCode: 128 } }),
+        { suite: true, choice: "approve", branch: "--abort" },
+      );
+      expect(Result.isFailure(outcome)).toBe(true);
+      expect(commands).toEqual(["git check-ref-format --branch --abort"]);
+    }),
+  );
+
+  it.effect("merges the selected accepted child branch", () =>
+    Effect.gen(function* () {
+      const { outcome } = yield* runLanding(
+        (branch) => ({
+          ...healthy(branch),
+          [`git check-ref-format --branch ${branch}`]: { stdout: branch },
+        }),
+        { suite: true, choice: "approve", branch: "feature/child-1" },
+      );
+      expect(Result.isSuccess(outcome) && outcome.success.branch).toBe("feature/child-1");
+    }),
+  );
+});
+
 describe("the merge an accepted run earns", () => {
   it.effect("lands the run's own branch on the target, and says which commit did it", () =>
     Effect.gen(function* () {
@@ -192,7 +264,7 @@ describe("the merge an accepted run earns", () => {
       expect(commands).toEqual([
         "git rev-parse --abbrev-ref HEAD",
         "git status --porcelain",
-        `git merge --no-ff --no-edit ${branch}`,
+        `git merge --no-ff --no-edit refs/heads/${branch}`,
         "git rev-parse HEAD",
       ]);
 
@@ -226,7 +298,7 @@ describe("the merge an accepted run earns", () => {
       expect(commands).toEqual([
         "git rev-parse --abbrev-ref HEAD",
         "git status --porcelain",
-        `git merge --no-ff --no-edit --message ${convention} ${branch}`,
+        `git merge --no-ff --no-edit --message ${convention} refs/heads/${branch}`,
         "git rev-parse HEAD",
       ]);
     }),
@@ -336,7 +408,7 @@ describe("a merge that cannot land", () => {
       const { branch, outcome, commands } = yield* runLanding(
         (known) => ({
           ...healthy(known),
-          [`git merge --no-ff --no-edit ${known}`]: {
+          [`git merge --no-ff --no-edit refs/heads/${known}`]: {
             exitCode: 1,
             stdout: "CONFLICT (content): Merge conflict in src/app.ts\n",
           },
@@ -351,7 +423,7 @@ describe("a merge that cannot land", () => {
       expect(commands).toEqual([
         "git rev-parse --abbrev-ref HEAD",
         "git status --porcelain",
-        `git merge --no-ff --no-edit ${branch}`,
+        `git merge --no-ff --no-edit refs/heads/${branch}`,
         "git merge --abort",
       ]);
     }),

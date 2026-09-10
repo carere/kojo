@@ -180,5 +180,6 @@ A predicate over an Envelope's claims, evaluated after the phase produces the En
 _Avoid_: gate, validator
 
 **Acceptance**:
-Whether a completed Run is good. This is separate from whether its phases completed successfully.
+Whether completed work meets the authored checks and review policy. Review can come from a human
+or an agent. This is separate from whether its Phases completed successfully.
 _Avoid_: success, completion

@@ -363,7 +363,7 @@ const workflow = (choices: FactoryChoices) => {
       "          // A freshly stamped factory is refused here on purpose: `commands.test` is a",
       "          // placeholder until you write the real one, so the mechanical half says no and no",
       "          // approval can outvote it.",
-      "          human: fromVerdict(judged.verdict),",
+      "          review: fromVerdict(judged.verdict),",
       "        }),",
       "      });",
       "",

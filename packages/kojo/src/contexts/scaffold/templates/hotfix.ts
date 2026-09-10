@@ -409,7 +409,7 @@ const workflow = (choices: FactoryChoices) => {
       "          mechanical: judged.mechanical,",
       "          // `reviewed` only returns when somebody approved, so reaching this line is the human",
       "          // half. It carries no reason because there is no refusal to explain.",
-      '          human: new Judgement({ by: actor, accepted: true, reason: "" }),',
+      '          review: new Judgement({ by: actor, accepted: true, reason: "" }),',
       "        }),",
       "      });",
       "",

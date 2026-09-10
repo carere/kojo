@@ -16,23 +16,24 @@ import { code } from "./code.ts";
  * Land the run's branch on the target — the one step everything else was for.
  *
  * **Acceptance is the single condition it hangs on** (D7). The conjunction of the mechanical verdict
- * and the human one is checked before a single git command runs, so a run that is not accepted
+ * and the review is checked before a single git command runs, so a run that is not accepted
  * merges *nothing*: no partial merge to unpick, no target to reset, and a branch and a trace left
  * exactly as they were for whoever comes to look. "Every phase succeeded" is not that condition,
  * and cannot be made into it — a test phase that ran a red suite succeeded.
  *
  * **A code phase, never an agent** (D6). Merging is a known invocation, it is irreversible, and it
  * is the last thing in a run that should depend on a judgement call. The author cannot hand this to
- * an agent by mistake: it takes an `Acceptance`, and only a gate and a measurement produce one.
+ * an agent by mistake: it takes an `Acceptance` built from authored checks and review.
  *
- * **The branch is not a parameter, and the workspace must be the host's.** The run owns one branch
- * and this merges that branch and no other. It runs *outside* the sandbox scope, on the host
- * workspace, because inside the scope the workspace is the worktree the branch is checked out in —
- * where the merge would be a branch into itself. Setup before, risk inside, merge after.
+ * The author can select a source branch and target. The default source remains the Run branch.
+ * Execute this Phase in the target worktree, outside the source Sandbox scope. A graph Workflow
+ * can integrate accepted child branches one at a time into its selected PR branch.
  */
 /** @public */
 export const merge = (options: {
   readonly name?: string;
+  /** The authored source branch. Defaults to the Run branch. */
+  readonly branch?: string;
   readonly description?: string;
   /** The branch the accepted work lands on. The factory's own trunk, whatever it is called. */
   readonly into: string;
@@ -70,10 +71,16 @@ export const merge = (options: {
 
       const run = yield* CurrentRun;
       const workspace = yield* Workspace;
-      const branch = runBranch(run.runId);
+      const branch = options.branch ?? runBranch(run.runId);
       const into = options.into;
 
       const refuse = (reason: string) => Effect.fail(new MergeRefused({ branch, into, reason }));
+
+      if (options.branch !== undefined) {
+        const checked = yield* workspace.git(["check-ref-format", "--branch", branch]);
+        if (!checked.succeeded || checked.stdout.trim() !== branch)
+          return yield* refuse(`invalid literal branch name: ${branch}`);
+      }
 
       const head = yield* workspace.git(["rev-parse", "--abbrev-ref", "HEAD"]);
       const on = head.stdout.trim();
@@ -112,7 +119,7 @@ export const merge = (options: {
         "--no-ff",
         "--no-edit",
         ...(options.message === undefined ? [] : ["--message", options.message]),
-        branch,
+        `refs/heads/${branch}`,
       ]);
       if (!merged.succeeded) {
         // Abort before reporting. A conflicted merge leaves the target mid-merge, which is the one

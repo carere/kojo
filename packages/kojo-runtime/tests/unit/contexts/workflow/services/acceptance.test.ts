@@ -43,12 +43,44 @@ describe("the human half of an acceptance", () => {
   });
 });
 
+describe("authored review acceptance", () => {
+  it.effect("accepts an agent review without a human Verdict", () =>
+    Effect.gen(function* () {
+      const acceptance = new Acceptance({
+        mechanical: green,
+        review: new Judgement({
+          by: "ui-reviewer",
+          accepted: true,
+          reason: "The requested UI flow passed",
+        }),
+      });
+      expect(yield* requireAcceptance(acceptance)).toBe(acceptance);
+    }),
+  );
+  it.effect("refuses an agent review failure even when checks pass", () =>
+    Effect.gen(function* () {
+      const acceptance = new Acceptance({
+        mechanical: green,
+        review: new Judgement({
+          by: "ui-reviewer",
+          accepted: false,
+          reason: "Save is unreachable",
+        }),
+      });
+      const outcome = yield* Effect.result(requireAcceptance(acceptance));
+      expect(Result.isFailure(outcome) && outcome.failure.reason).toBe(
+        "ui-reviewer: Save is unreachable",
+      );
+    }),
+  );
+});
+
 describe("what the merge hangs on", () => {
   it.effect("passes the acceptance through when both halves said yes", () =>
     Effect.gen(function* () {
       const acceptance = new Acceptance({
         mechanical: green,
-        human: fromVerdict(answered("approve")),
+        review: fromVerdict(answered("approve")),
       });
       expect(yield* requireAcceptance(acceptance)).toBe(acceptance);
     }),
@@ -58,7 +90,7 @@ describe("what the merge hangs on", () => {
     Effect.gen(function* () {
       const acceptance = new Acceptance({
         mechanical: red,
-        human: fromVerdict(answered("approve")),
+        review: fromVerdict(answered("approve")),
       });
       const outcome = yield* Effect.result(requireAcceptance(acceptance));
 

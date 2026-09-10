@@ -43,3 +43,19 @@ They do not contain production Run databases, ownership files, or answer queues.
 
 Removed commands, imports, and runtime helpers fail at their boundary. Kojo does not translate them
 to the new model because translation would keep two authorities alive.
+
+## Authored acceptance
+
+A Workflow chooses its checks and reviewer. Acceptance combines a mechanical Judgement and a review
+Judgement. Review can be automated. A Workflow that asks a human uses an exact-Run Gate and derives
+the review Judgement from that Verdict. An agent review never creates a human Verdict. This replaces
+the earlier mandatory-human acceptance policy. Existing human-reviewed Workflows retain their Gates.
+
+The issue example can accept work after checks and a separate UI agent review pass. Failed checks
+or review prevent commit and integration. The author controls repair limits and delivery; the engine
+does not impose issue scheduling or a mandatory human decision.
+
+Commit and merge Phases can select an explicit branch. Omission uses the Run branch. Commit requires
+the current worktree to be on that branch. Merge requires a clean worktree on its target branch and
+checks Acceptance before any Git command. Branch expressions are refused. A single issue can commit
+directly on its PR branch; graph integration can merge each accepted child branch into that target.

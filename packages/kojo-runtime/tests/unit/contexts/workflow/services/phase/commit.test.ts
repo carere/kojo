@@ -25,13 +25,14 @@ const author = { name: "Kojo", email: "kojo@example.invalid" } as const;
 const committing = workflow(
   {
     name: "committing",
-    payload: { subject: Schema.String },
+    payload: { subject: Schema.String, branch: Schema.optional(Schema.String) },
     success: Commit,
     error: Schema.Union([CommitRefused, WorkspaceError]),
     idempotencyKey: (payload) => `committing/${payload.subject}`,
   },
-  () =>
+  (payload) =>
     commit({
+      ...(payload.branch === undefined ? {} : { branch: payload.branch }),
       description: "Commit what the agent proposed, on the branch this run owns",
       message,
       author,
@@ -59,14 +60,19 @@ const healthy = (branch: string): Record<string, ScriptedCommand> => ({
 const runCommitting = (
   commands: (branch: string) => Record<string, ScriptedCommand>,
   subject = "one",
+  selectedBranch?: string,
 ) =>
   Effect.gen(function* () {
-    const runId = (yield* committing.definition.executionId({ subject })) as RunId;
-    const branch = runBranch(runId);
+    const payload = {
+      subject,
+      ...(selectedBranch === undefined ? {} : { branch: selectedBranch }),
+    };
+    const runId = (yield* committing.definition.executionId(payload)) as RunId;
+    const branch = selectedBranch ?? runBranch(runId);
 
     return yield* Effect.gen(function* () {
       const outcome = yield* Effect.result(
-        serviceFreeWorkflowEffect(committing.definition.execute({ subject })),
+        serviceFreeWorkflowEffect(committing.definition.execute(payload)),
       );
       const trace = yield* InMemoryTracer.RecordedTrace;
       return {
@@ -94,6 +100,33 @@ const runCommitting = (
   }).pipe(Effect.provide(inMemoryWorkflowEngine));
 
 describe("agents propose, code disposes", () => {
+  it.effect("refuses a branch expression before staging", () =>
+    Effect.gen(function* () {
+      const { outcome, commands } = yield* runCommitting(
+        () => ({ "git check-ref-format --branch @{-1}": { stdout: "some-other-branch" } }),
+        "invalid",
+        "@{-1}",
+      );
+      expect(Result.isFailure(outcome)).toBe(true);
+      expect(commands).toEqual(["git check-ref-format --branch @{-1}"]);
+    }),
+  );
+
+  it.effect("commits the accepted issue directly on the selected PR branch", () =>
+    Effect.gen(function* () {
+      const { outcome, commands } = yield* runCommitting(
+        (branch) => ({
+          ...healthy(branch),
+          [`git check-ref-format --branch ${branch}`]: { stdout: branch },
+        }),
+        "issue",
+        "feature/issue-1",
+      );
+      expect(Result.isSuccess(outcome) && outcome.success.branch).toBe("feature/issue-1");
+      expect(commands.some((command) => command.startsWith("git merge"))).toBe(false);
+    }),
+  );
+
   it.effect("performs the commit the agent asked for, on the branch the run owns", () =>
     Effect.gen(function* () {
       const { branch, outcome, phases, commands } = yield* runCommitting(healthy);

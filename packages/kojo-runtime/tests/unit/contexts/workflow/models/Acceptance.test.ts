@@ -24,7 +24,7 @@ describe("acceptance as the conjunction of two judgements", () => {
     for (const [mechanical, human, expected] of table) {
       const acceptance = new Acceptance({
         mechanical: suite(mechanical),
-        human: engineer(human),
+        review: engineer(human),
       });
       expect(acceptance.accepted).toBe(expected);
     }
@@ -37,18 +37,18 @@ describe("acceptance as the conjunction of two judgements", () => {
    * succeeded and whose reviewer approved is still not accepted when the measurement says no.
    */
   it("refuses a run a human approved when the suite was red", () => {
-    const acceptance = new Acceptance({ mechanical: suite(false), human: engineer(true) });
+    const acceptance = new Acceptance({ mechanical: suite(false), review: engineer(true) });
     expect(acceptance.accepted).toBe(false);
     expect(acceptance.refusal).toBe("the suite: 3 failed");
   });
 
   it("names both refusers when both refused, rather than the first one it found", () => {
-    const acceptance = new Acceptance({ mechanical: suite(false), human: engineer(false) });
+    const acceptance = new Acceptance({ mechanical: suite(false), review: engineer(false) });
     expect(acceptance.refusal).toBe("the suite: 3 failed; kevin: this is not what I asked for");
   });
 
   it("says nothing when there is nothing to refuse", () => {
-    expect(new Acceptance({ mechanical: suite(true), human: engineer(true) }).refusal).toBe("");
+    expect(new Acceptance({ mechanical: suite(true), review: engineer(true) }).refusal).toBe("");
   });
 
   /**
@@ -57,7 +57,7 @@ describe("acceptance as the conjunction of two judgements", () => {
    * struct that merely holds the same fields.
    */
   it("survives the round trip the engine persists it through", () => {
-    const acceptance = new Acceptance({ mechanical: suite(true), human: engineer(false) });
+    const acceptance = new Acceptance({ mechanical: suite(true), review: engineer(false) });
     const encoded = Schema.encodeSync(Acceptance)(acceptance);
     const decoded = Schema.decodeUnknownSync(Acceptance)(JSON.parse(JSON.stringify(encoded)));
 

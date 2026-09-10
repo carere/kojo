@@ -325,7 +325,7 @@ export const factory = workflow(
         ),
         acceptance: new Acceptance({
           mechanical: judged.mechanical,
-          human: fromVerdict(verdict),
+          review: fromVerdict(verdict),
         }),
       });
 
