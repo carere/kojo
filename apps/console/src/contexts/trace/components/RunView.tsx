@@ -18,6 +18,7 @@ import { isTerminal, type RunStatus } from "../models/RunLine.ts";
 import type { RunViewMode } from "../models/view.ts";
 import { type PhaseSpan, spansOf } from "../models/waterfall.ts";
 import { waterfallStore } from "../services/waterfallStore.ts";
+import { Invocations } from "./Invocations.tsx";
 import { PhaseTable } from "./PhaseTable.tsx";
 import { PublishedArtifacts } from "./PublishedArtifacts.tsx";
 import { RunOutcome } from "./RunOutcome.tsx";
@@ -523,6 +524,10 @@ export const RunView = (props: {
                   </Show>
                 </div>
 
+                <Invocations
+                  invocations={document().invocations ?? []}
+                  totals={document().invocationTotals}
+                />
                 <PublishedArtifacts runId={props.runId} artifacts={document().artifacts ?? []} />
 
                 {/*

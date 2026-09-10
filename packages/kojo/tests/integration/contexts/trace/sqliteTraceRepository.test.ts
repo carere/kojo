@@ -62,6 +62,94 @@ const publicRun = (projection: Parameters<typeof runDocumentOf>[2]) =>
   );
 
 describe("SQLite Trace repository", () => {
+  it("retains parallel invocation history, partial costs, and stale activity", async () => {
+    const { database, trace } = fixture();
+    const observe = (
+      id: string,
+      sequence: number,
+      activity: Record<string, string | number | boolean | Record<string, string | number>>,
+    ) =>
+      Effect.runPromise(
+        trace.write(authority, {
+          kind: "invocation",
+          record: {
+            runId: authority.runId,
+            phaseId: "phase",
+            phasePath: "implement",
+            attempt: 1,
+            invocationId: id,
+            sequence,
+            activity,
+          },
+        }),
+      );
+    const start = {
+      kind: "started",
+      at: 100,
+      agent: "builder",
+      provider: "controlled",
+      model: "test",
+      system: "retained system",
+      user: "retained task",
+      renderedPrompt: "retained system and task",
+      systemDelivery: "native-system",
+      redacted: false,
+      truncated: false,
+    };
+    await observe("a", 0, start);
+    await observe("b", 0, start);
+    await observe("a", 0, start);
+    await observe("a", 1, { kind: "tool-started", at: 110, name: "Read", text: "file.ts" });
+    await observe("a", 2, {
+      kind: "finished",
+      at: 120,
+      outcome: "succeeded",
+      usage: {
+        inputTokens: 20,
+        outputTokens: 5,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        contextTokens: 10,
+        reportedCostUsd: 0.1,
+        estimatedCostUsd: 0.2,
+        estimateBasis: "test rates",
+      },
+    });
+    let run = publicRun(await Effect.runPromise(trace.projection(authority.runId)));
+    expect(run.invocations?.map((call) => call.state)).toEqual(["succeeded", "executing"]);
+    expect(run.invocations?.[0]?.activities).toHaveLength(1);
+    expect(run.invocations?.[0]?.systemDelivery).toBe("native-system");
+    expect(run.invocations?.[0]?.usage?.contextTokens).toBe(10);
+    expect(run.invocationTotals).toMatchObject({
+      count: 2,
+      inputTokens: 20,
+      reportedCostUsd: 0.1,
+      reportedCostPartial: true,
+      estimatedCostUsd: 0.2,
+      estimatedCostPartial: true,
+      usagePartial: true,
+    });
+    await observe("b", 1, { kind: "finished", at: 130, outcome: "failed" });
+    await observe("repair", 0, start);
+    await observe("repair", 1, {
+      kind: "finished",
+      at: 150,
+      outcome: "succeeded",
+      usage: { inputTokens: 30, reportedCostUsd: 0.3 },
+    });
+    await observe("interrupted", 0, start);
+    database.run("UPDATE workflow_claims SET generation = 2");
+    database.run("UPDATE workflow_slots SET generation = 2");
+    run = publicRun(await Effect.runPromise(trace.projection(authority.runId)));
+    expect(run.invocations?.at(-1)?.state).toBe("interrupted");
+    expect(run.invocations?.[1]?.usage).toBeUndefined();
+    expect(run.invocationTotals?.reportedCostUsd).toBeCloseTo(0.4);
+    expect(run.invocationTotals?.inputTokens).toBe(50);
+    expect(run.invocationTotals?.reportedCostPartial).toBe(true);
+    expect(run.invocations?.[0]?.system).toBe("retained system");
+    database.close();
+  });
+
   it("persists exact Phase, Gate, and Sandbox records without null optional fields", async () => {
     const { database, trace } = fixture();
     try {

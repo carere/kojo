@@ -51,3 +51,24 @@ This revises the original single-field storage decision. Completed Phase records
 once on exit. Entry observations do not form provisional completed records and do not establish
 execution authority. Only an executing Run can display growing Waterfall spans. A fresh Run
 snapshot restores the same active observations after a Console reconnect.
+
+## Live invocation observations
+
+Issue #102 adds retained observations below the Phase attempt. Every physical agent call has an
+invocation identity. Its ordered observations contain the actual rendered prompt and received
+public provider activity. Implementation, review, and correction calls do not overwrite each other.
+Completed Phase records remain completed observations.
+
+The private Runner Trace channel stores these observations under the current Run Claim. The Run
+read model marks unfinished observations as interrupted when their Claim is no longer current or
+the Phase or Run has finished. Retained data remains readable after reconnect. Notifications ask
+clients to reload the authoritative snapshot; slow viewers do not control provider execution.
+
+The observer excludes raw transport data and private reasoning. It redacts known credential values
+and marks truncation and omission. Prompt fields are bounded. Each invocation retains at most 512
+activity events and 262,144 activity characters. Provider output needed for answer decoding is
+separate from the bounded, redacted observation.
+
+Usage is reported per invocation. Missing usage and costs remain unavailable. Token input does not
+measure current context occupancy. The Run totals include every invocation once and mark missing
+measurements as partial. Provider-reported API estimates remain separate from attributable charges.

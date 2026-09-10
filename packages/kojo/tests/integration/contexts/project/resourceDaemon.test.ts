@@ -93,7 +93,7 @@ import { sandboxed } from "@carere/kojo-runtime/contexts/workflow/services/sandb
 import { workflow } from "@carere/kojo-runtime/contexts/workflow/services/workflow";
 
 export const resource = workflow(
-  { name: "resource", payload: Schema.Struct({ gate: Schema.Boolean, root: Schema.String }), success: Schema.String, error: Schema.Unknown, idempotencyKey: () => "resource-daemon-run" },
+  { name: "resource", payload: Schema.Struct({ gate: Schema.Boolean, parallel: Schema.Boolean, root: Schema.String }), success: Schema.String, error: Schema.Unknown, idempotencyKey: () => "resource-daemon-run" },
   (payload) => Effect.gen(function* () {
     const event = (value: unknown) => appendFileSync(join(payload.root, "provider-events.jsonl"), JSON.stringify(value) + "\\n");
     const released = (path: string, key: string, identity: string, kind: string, locator: string) => {
@@ -128,10 +128,12 @@ export const resource = workflow(
     };
     const provider = (): AgentProvider => ({
       name: "controlled-executable",
-      env: {},
+      env: { TEST_API_KEY: "fixture-secret", GIT_CONFIG_GLOBAL: join(payload.root, "gitconfig") },
       captureSessions: false,
       buildPrintCommand: ({ prompt }) => ({ command: ${JSON.stringify(process.execPath)} + " " + join(payload.root, "controlled-agent.ts"), stdin: prompt }),
-      parseStreamLine: (line) => line.startsWith("@session ")
+      parseStreamLine: (line) => line.includes('"type":"tool_result"') ? [] : line.startsWith("@tool ")
+        ? [{ type: "tool_call", name: "Read", args: line.slice(6) }]
+        : line.startsWith("@session ")
         ? [{ type: "session_id", sessionId: line.slice(9) }]
         : line.trim() === "" ? [] : [{ type: "text", text: line + "\\n" }],
     });
@@ -139,7 +141,7 @@ export const resource = workflow(
     const Answer = Schema.Struct({ answer: Schema.String });
 
     const run = yield* CurrentRun;
-    const invoke = (name: string) => agent({ name, description: "Run only the controlled executable", agent: "controlled", model: "controlled", provider, system: "Controlled system", prompt: "answer", envelope: Answer }).pipe(
+    const invoke = (name: string) => agent({ name, description: "Run only the controlled executable", agent: "controlled", model: "controlled", provider, system: "Controlled system", prompt: "answer fixture-secret", envelope: Answer }).pipe(
       Effect.map((answer) => answer.answer),
       Effect.tapError((cause) => Effect.sync(() => event({ event: "agent-fault", cause }))),
     );
@@ -147,6 +149,7 @@ export const resource = workflow(
       { name: "controlled", branch: "kojo/resource-" + run.runId, provider: sandboxProvider(), cwd: join(payload.root, "project"), hidden: [] },
       body.pipe(Effect.provide(agents)),
     );
+    if (payload.parallel) return yield* lane(Effect.all([invoke("first"), Effect.sleep(300).pipe(Effect.andThen(invoke("second")))], { concurrency: 2 }).pipe(Effect.as("controlled")));
     if (!payload.gate) return yield* lane(invoke("controlled-agent"));
     return yield* lane(Effect.gen(function* () {
       yield* invoke("controlled-agent-before");
@@ -186,6 +189,7 @@ afterEach(async () => {
 describe("real Daemon Resource lifecycle", () => {
   it.each([
     ["without a lost reply", undefined, false],
+    ["with parallel live invocations", undefined, "parallel"],
     ["after a lost acquisition-intent reply", "BeginResourceAcquisition", false],
     ["after a lost acquired-provider reply", "ConfirmResourceAcquired", false],
     ["after a lost release reply", "ConfirmResourceReleased", false],
@@ -203,6 +207,9 @@ describe("real Daemon Resource lifecycle", () => {
       const events = join(root, "provider-events.jsonl");
       const executable = join(root, "controlled-agent.ts");
       const crashEvidence = join(root, "crash-evidence.json");
+      const inspectLive =
+        lostKind === undefined && (crashMode === false || crashMode === "parallel");
+      const releaseAgent = join(root, "release-agent");
       const crashes =
         crashMode === "dirty" ||
         crashMode === "unreadable" ||
@@ -210,7 +217,7 @@ describe("real Daemon Resource lifecycle", () => {
         crashMode === "bounded";
       writeFileSync(
         executable,
-        `import { appendFileSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+        `import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 const key = process.env.KOJO_RESOURCE_ACQUISITION_KEY as string;
 const identity = process.env.KOJO_RESOURCE_PROVIDER_IDENTITY as string;
 const registry = process.env.KOJO_RESOURCE_INSPECTION_FILE as string;
@@ -223,6 +230,11 @@ if (${JSON.stringify(crashes)}) {
   Atomics.wait(held, 0, 0, 60_000);
   process.exit(90);
 }
+if (${JSON.stringify(inspectLive)}) {
+  console.log('@tool {"path":"notes/hello.txt","token":"unlisted-credential"}');
+  while (!existsSync(${JSON.stringify(releaseAgent)})) await Bun.sleep(10);
+}
+console.log(JSON.stringify({ type: "tool_result", tool_use_id: "Read", content: "file content fixture-secret", is_error: false }));
 const staging = registry + ".controlled";
 writeFileSync(staging, JSON.stringify({ registryVersion: 1, acquisitionKey: key, providerIdentity: identity, kind: "agent", state: "released", locator: "controlled-session" }) + "\\n");
 renameSync(staging, registry);
@@ -270,6 +282,8 @@ console.log(JSON.stringify({ answer: "controlled" }));
         const resolved = execFileSync("which", [name], { encoding: "utf8" }).trim();
         symlinkSync(resolved, join(isolatedPath, name));
       }
+      const priorGitConfig = process.env.GIT_CONFIG_GLOBAL;
+      process.env.GIT_CONFIG_GLOBAL = join(root, "gitconfig");
       const priorPath = process.env.PATH;
       process.env.PATH = isolatedPath;
       let dropped = false;
@@ -310,12 +324,58 @@ console.log(JSON.stringify({ answer: "controlled" }));
               kind: "workflow",
               parts: [registered.project.projectId, "resource"],
             },
-            arguments: { payload: { gate: crashMode === "gate", root } },
+            arguments: {
+              payload: { gate: crashMode === "gate", parallel: crashMode === "parallel", root },
+            },
             preconditions: { mode: "no-trigger", revisionId: captured.revisionId },
           },
         );
         expect(response.status, await response.clone().text()).toBe(202);
         const admitted = (await response.json()) as StartRunResult;
+        if (inspectLive) {
+          try {
+            const deadline = Date.now() + 10_000;
+            let observed: RunDocument;
+            do {
+              observed = await (await call(daemon, `/api/v1/runs/${admitted.runId}`)).json();
+              if (
+                observed.invocations?.length === (crashMode === "parallel" ? 2 : 1) &&
+                observed.invocations.every((invocation) =>
+                  invocation.activities.some((item) => item.kind === "tool-started"),
+                )
+              )
+                break;
+              await Bun.sleep(20);
+            } while (Date.now() < deadline);
+            expect(observed.invocations).toHaveLength(crashMode === "parallel" ? 2 : 1);
+            expect(observed.activePhases, JSON.stringify(observed.phases)).toHaveLength(
+              crashMode === "parallel" ? 2 : 1,
+            );
+            expect(new Set(observed.invocations?.map((item) => item.invocationId)).size).toBe(
+              crashMode === "parallel" ? 2 : 1,
+            );
+            expect(observed.invocations?.[0]).toMatchObject({
+              provider: "controlled-executable",
+              system: "Controlled system",
+              state: "executing",
+            });
+            expect(observed.invocations?.[0]?.renderedPrompt).toContain("Controlled system");
+            expect(observed.invocations?.[0]?.renderedPrompt).not.toContain("fixture-secret");
+            expect(observed.invocations?.[0]?.renderedPrompt).toContain("[redacted]");
+            expect(observed.invocations?.[0]?.activities).toEqual(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  kind: "tool-started",
+                  text: '{"path":"notes/hello.txt","token":"[redacted]"}',
+                }),
+              ]),
+            );
+            const reloaded = await (await call(daemon, `/api/v1/runs/${admitted.runId}`)).json();
+            expect(reloaded.invocations).toEqual(observed.invocations);
+          } finally {
+            writeFileSync(releaseAgent, "continue");
+          }
+        }
         if (crashMode === "gate") {
           const askingDeadline = Date.now() + 10_000;
           let token: string | undefined;
@@ -456,6 +516,17 @@ console.log(JSON.stringify({ answer: "controlled" }));
             await Bun.sleep(20);
           }
           expect(recovery).toEqual({ state: "held", safety: "uncertain" });
+          const servingDaemon = daemons.at(-1);
+          if (servingDaemon === undefined) throw new Error("The Daemon is unavailable");
+          const interrupted = (await (
+            await call(servingDaemon, `/api/v1/runs/${admitted.runId}`)
+          ).json()) as RunDocument;
+          expect(interrupted.invocations).toHaveLength(1);
+          expect(interrupted.invocations?.[0]).toMatchObject({
+            state: "interrupted",
+            system: "Controlled system",
+          });
+          expect(interrupted.activePhases).toEqual([]);
           expect(readFileSync(join(evidence.cwd, "dirty-provider-state.txt"), "utf8")).toBe(
             "preserve me\n",
           );
@@ -519,6 +590,17 @@ console.log(JSON.stringify({ answer: "controlled" }));
           if (run.state === "succeeded" || run.state === "failed" || run.state === "held") break;
           await Bun.sleep(20);
         }
+        if (inspectLive) {
+          expect(run?.invocations).toHaveLength(crashMode === "parallel" ? 2 : 1);
+          expect(run?.invocations?.every((item) => item.state === "succeeded")).toBe(true);
+          expect(run?.invocations?.[0]?.state).toBe("succeeded");
+          expect(run?.invocations?.[0]?.usage).toBeUndefined();
+          expect(run?.invocations?.[0]?.activities).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ kind: "tool-finished", text: "file content [redacted]" }),
+            ]),
+          );
+        }
         const diagnostic = existsSync(events) ? readFileSync(events, "utf8") : "no provider events";
         const liveObserver = new Database(databasePath, { readonly: true, strict: true });
         const resourceDiagnostic = liveObserver
@@ -555,6 +637,8 @@ console.log(JSON.stringify({ answer: "controlled" }));
         expect(dropped).toBe(lostKind !== undefined);
       } finally {
         process.env.PATH = priorPath;
+        if (priorGitConfig === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+        else process.env.GIT_CONFIG_GLOBAL = priorGitConfig;
       }
 
       expect(existsSync(events)).toBe(true);
@@ -571,10 +655,12 @@ console.log(JSON.stringify({ answer: "controlled" }));
         "worktree-acquired",
         "worktree-released",
       ]) {
-        expect(actual.filter((record) => record.event === event)).toHaveLength(acquisitions);
+        expect(actual.filter((record) => record.event === event)).toHaveLength(
+          crashMode === "parallel" && event.startsWith("agent-") ? 2 : acquisitions,
+        );
       }
       expect(new Set(actual.map((event) => `${event.event}:${event.key}`)).size).toBe(
-        acquisitions * 6,
+        acquisitions * 6 + (crashMode === "parallel" ? 2 : 0),
       );
 
       const observer = new Database(databasePath, { readonly: true, strict: true });
@@ -592,7 +678,7 @@ console.log(JSON.stringify({ answer: "controlled" }));
         )
         .all();
       observer.close(false);
-      expect(leases).toHaveLength(acquisitions * 3);
+      expect(leases).toHaveLength(acquisitions * 3 + (crashMode === "parallel" ? 1 : 0));
       expect(leases.every((lease) => /^resource_[a-f0-9]{64}$/.test(lease.lease_id))).toBe(true);
       expect(leases.every((lease) => lease.state === "released")).toBe(true);
       expect(

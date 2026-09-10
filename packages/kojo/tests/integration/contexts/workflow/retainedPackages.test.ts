@@ -502,6 +502,7 @@ describe("real Workflow Revision capture", () => {
     writeFileSync(
       source,
       readFileSync(source, "utf8") +
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: this is authored fixture source.
         '\nconst text = `Prompt: ${new URL("../template.md", import.meta.url)}`;\n',
     );
     writeFileSync(join(subject.root, ".kojo", "template.md"), "Template prompt");

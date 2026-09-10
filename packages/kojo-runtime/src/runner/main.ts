@@ -4,6 +4,7 @@ import { hostname } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { RUNNER_PROTOCOL_VERSION } from "@carere/kojo-runner-contracts/contexts/project/contracts/frame";
+import { invocationObservationFeature } from "@carere/kojo-runner-contracts/contexts/project/contracts/handshake";
 import {
   decodeJsonValue,
   type JsonValue,
@@ -337,6 +338,10 @@ export const executeRegisteredRevision = async (
     describe: (asking) => asking.description,
   });
   const tracerLayer = Layer.succeed(Tracer, {
+    invocation: (record) =>
+      Effect.promise(() =>
+        sendTraceMutation({ kind: "invocation", record: plainJson(record) }),
+      ).pipe(Effect.asVoid),
     runStarted: (record) =>
       Effect.promise(() =>
         sendTraceMutation({ kind: "run-started", record: plainJson(record) }),
@@ -662,7 +667,7 @@ const runPrivateProtocol = async (): Promise<void> => {
           packageGraphId: binding.packageGraphId,
           projectId: binding.projectId,
           supportedProtocols: [1],
-          requiredFeatures: [],
+          requiredFeatures: [invocationObservationFeature],
         },
       }),
     );
@@ -672,7 +677,8 @@ const runPrivateProtocol = async (): Promise<void> => {
       welcome.kind !== "Welcome" ||
       welcome.body.packageGraphId !== binding.packageGraphId ||
       welcome.body.projectId !== binding.projectId ||
-      welcome.body.selectedProtocol !== 1
+      welcome.body.selectedProtocol !== 1 ||
+      !welcome.body.features.includes(invocationObservationFeature)
     ) {
       throw new Error("the Daemon Welcome does not match the Runner binding");
     }

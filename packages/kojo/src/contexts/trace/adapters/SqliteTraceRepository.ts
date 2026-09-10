@@ -73,6 +73,17 @@ export class SqliteTraceRepository {
       document TEXT NOT NULL,
       FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
     ) STRICT`);
+    database.run(`CREATE TABLE IF NOT EXISTS kojo_invocations (
+      run_id TEXT NOT NULL,
+      invocation_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      generation INTEGER NOT NULL,
+      runner_instance_id TEXT NOT NULL,
+      phase_id TEXT NOT NULL,
+      document TEXT NOT NULL,
+      PRIMARY KEY (run_id, invocation_id, sequence),
+      FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
+    ) STRICT`);
     database.run(`CREATE TABLE IF NOT EXISTS kojo_run_finishes (
       run_id TEXT NOT NULL,
       generation INTEGER NOT NULL,
@@ -170,6 +181,35 @@ export class SqliteTraceRepository {
                 document,
                 authority.runId,
               );
+            } else if (exact.kind === "invocation") {
+              const identity = String(record.invocationId);
+              const sequence = Number(record.sequence);
+              this.#database.run(
+                "INSERT INTO kojo_invocations (run_id, invocation_id, sequence, generation, runner_instance_id, phase_id, document) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                [
+                  authority.runId,
+                  identity,
+                  sequence,
+                  authority.generation,
+                  authority.runnerInstanceId,
+                  String(record.phaseId),
+                  document,
+                ],
+              );
+              const prior = this.#database
+                .query<
+                  DocumentRow & { generation: number; runner_instance_id: string },
+                  [string, string, number]
+                >(
+                  "SELECT document, generation, runner_instance_id FROM kojo_invocations WHERE run_id = ? AND invocation_id = ? AND sequence = ?",
+                )
+                .get(authority.runId, identity, sequence);
+              if (
+                prior?.document !== document ||
+                prior.generation !== authority.generation ||
+                prior.runner_instance_id !== authority.runnerInstanceId
+              )
+                this.#conflict("kojo_invocations");
             } else {
               this.#database.run(
                 "INSERT INTO kojo_occurrences (mutation_id, run_id, phase_id, document) VALUES (?, ?, ?, ?) ON CONFLICT(mutation_id) DO NOTHING",
@@ -193,12 +233,40 @@ export class SqliteTraceRepository {
       try: () => ({
         ...this.#runDocument(runId),
         activePhases: this.#activePhases(runId),
+        invocations: this.#invocations(runId),
         phases: this.#documents("kojo_phases", runId),
         gates: this.#documents("kojo_gates", runId),
         sandboxes: this.#documents("kojo_sandboxes", runId),
       }),
       catch: failure,
     });
+
+  #invocations(runId: string): ReadonlyArray<Record<string, JsonValue>> {
+    return this.#database
+      .query<DocumentRow & { active: number }, [string]>(`
+      SELECT i.document, EXISTS (
+        SELECT 1 FROM workflow_claims c JOIN workflow_runs r ON r.run_id = c.run_id
+        WHERE c.run_id = i.run_id AND c.generation = i.generation
+          AND c.runner_instance_id = i.runner_instance_id AND r.state = 'executing'
+          AND NOT EXISTS (SELECT 1 FROM kojo_phases p WHERE p.run_id = i.run_id AND p.phase_id = i.phase_id)
+          AND NOT EXISTS (SELECT 1 FROM kojo_run_finishes f WHERE f.run_id = i.run_id
+            AND f.generation = i.generation AND f.runner_instance_id = i.runner_instance_id)
+      ) AS active FROM kojo_invocations i WHERE i.run_id = ? ORDER BY i.rowid
+    `)
+      .all(runId)
+      .map((row) => {
+        const decoded = decodeTraceMutation({
+          kind: "invocation",
+          record: JSON.parse(row.document),
+        });
+        if (!decoded.ok || decoded.value.kind !== "invocation")
+          throw new RunStoreError({
+            code: "STORE_FAILED",
+            message: "Invalid retained invocation observation",
+          });
+        return { ...decoded.value.record, active: row.active === 1 };
+      });
+  }
 
   #activePhases(runId: string): ReadonlyArray<Record<string, JsonValue>> {
     return this.#database

@@ -9,6 +9,7 @@ import {
 } from "../../shared/codecs/json.ts";
 
 export type TraceMutation =
+  | { readonly kind: "invocation"; readonly record: JsonObject }
   | { readonly kind: "run-started"; readonly record: JsonObject }
   | {
       readonly kind: "run-finished";
@@ -397,6 +398,124 @@ const occurrence = (input: unknown, path: DecodePath): DecodeResult<JsonObject> 
   return detail.ok ? decodeSuccess(record.value as JsonObject) : detail;
 };
 
+const invocation = (input: unknown, path: DecodePath): DecodeResult<JsonObject> => {
+  const record = decodeClosedRecord(
+    input,
+    ["runId", "phaseId", "phasePath", "attempt", "invocationId", "sequence", "activity"],
+    path,
+  );
+  if (!record.ok) return record;
+  for (const key of ["runId", "phaseId", "phasePath", "invocationId"] as const) {
+    const result = identityAt(record.value[key], [...path, key]);
+    if (!result.ok) return result;
+  }
+  for (const key of ["attempt", "sequence"] as const) {
+    const value = record.value[key];
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+      return decodeFailure([...path, key], "Expected a nonnegative integer");
+  }
+  const activityPath = [...path, "activity"];
+  const activity = decodeClosedRecord(
+    record.value.activity,
+    [
+      "kind",
+      "at",
+      "agent",
+      "provider",
+      "model",
+      "system",
+      "user",
+      "renderedPrompt",
+      "systemDelivery",
+      "redacted",
+      "truncated",
+      "name",
+      "toolId",
+      "text",
+      "failed",
+      "outcome",
+      "usage",
+    ],
+    activityPath,
+  );
+  if (!activity.ok) return activity;
+  const kind = literal(
+    activity.value.kind,
+    ["started", "message", "tool-started", "tool-finished", "output", "omitted", "finished"],
+    [...activityPath, "kind"],
+  );
+  if (!kind.ok) return kind;
+  const at = finite(activity.value.at, [...activityPath, "at"]);
+  if (!at.ok) return at;
+  for (const key of [
+    "agent",
+    "provider",
+    "model",
+    "system",
+    "user",
+    "renderedPrompt",
+    "name",
+    "toolId",
+    "text",
+  ] as const) {
+    const result = optional(activity.value, key, stringAt, activityPath);
+    if (!result.ok) return result;
+  }
+  for (const key of ["redacted", "truncated", "failed"] as const) {
+    const result = optional(activity.value, key, boolean, activityPath);
+    if (!result.ok) return result;
+  }
+  if (kind.value === "started") {
+    for (const key of ["agent", "provider", "model", "system", "user", "renderedPrompt"] as const) {
+      const result = stringAt(activity.value[key], [...activityPath, key]);
+      if (!result.ok) return result;
+    }
+    const delivery = literal(
+      activity.value.systemDelivery,
+      ["user-message", "not-sent", "native-system", "native-system-and-user-message"],
+      [...activityPath, "systemDelivery"],
+    );
+    if (!delivery.ok) return delivery;
+  } else if (kind.value === "finished") {
+    const outcome = literal(
+      activity.value.outcome,
+      ["succeeded", "failed", "interrupted"],
+      [...activityPath, "outcome"],
+    );
+    if (!outcome.ok) return outcome;
+  } else {
+    const text = stringAt(activity.value.text, [...activityPath, "text"]);
+    if (!text.ok) return text;
+  }
+  if (activity.value.usage !== undefined) {
+    const keys = [
+      "inputTokens",
+      "cacheReadTokens",
+      "cacheWriteTokens",
+      "outputTokens",
+      "contextTokens",
+      "contextCapacity",
+      "reportedCostUsd",
+      "estimatedCostUsd",
+    ];
+    const usage = decodeClosedRecord(
+      activity.value.usage,
+      [...keys, "estimateBasis"],
+      [...activityPath, "usage"],
+    );
+    if (!usage.ok) return usage;
+    const basis = optional(usage.value, "estimateBasis", stringAt, [...activityPath, "usage"]);
+    if (!basis.ok) return basis;
+    for (const key of keys) {
+      const result = optional(usage.value, key, finite, [...activityPath, "usage"]);
+      if (!result.ok) return result;
+      if (typeof usage.value[key] === "number" && usage.value[key] < 0)
+        return decodeFailure([...activityPath, "usage", key], "Expected a nonnegative measurement");
+    }
+  }
+  return decodeSuccess(record.value as JsonObject);
+};
+
 /** Decode one closed Trace mutation at the private Runner boundary. */
 export const decodeTraceMutation = (input: unknown): DecodeResult<TraceMutation> => {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -426,6 +545,7 @@ export const decodeTraceMutation = (input: unknown): DecodeResult<TraceMutation>
   }
   const recordValidators = {
     "run-started": runRecord,
+    invocation,
     phase: phaseRecord,
     gate: gateRecord,
     sandbox: sandboxRecord,

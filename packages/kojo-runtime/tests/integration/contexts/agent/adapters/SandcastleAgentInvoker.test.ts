@@ -1,11 +1,13 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentProvider } from "@ai-hero/sandcastle";
+import { type AgentProvider, claudeCode } from "@ai-hero/sandcastle";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { afterAll, describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Option, Path, Result, Schema } from "effect";
+import { kojoPi } from "../../../../../src/contexts/agent/adapters/kojoPi.ts";
 import * as SandcastleAgentInvoker from "../../../../../src/contexts/agent/adapters/SandcastleAgentInvoker.ts";
+import type { AgentActivity } from "../../../../../src/contexts/agent/models/AgentActivity.ts";
 import type { AgentSessionId } from "../../../../../src/contexts/agent/models/AgentSessionId.ts";
 import {
   type AgentCall,
@@ -221,6 +223,182 @@ describe("the Sandcastle agent invoker", () => {
           expect(answer.model).toBe("direct-model");
           expect(answer.resumed).toBe(false);
           expect(answer.session).toBe("scripted-cold");
+        }),
+    ),
+  );
+
+  it.live("retains Claude public tools and available usage without private reasoning", () =>
+    withScriptedAgent(
+      (log) => recording(log, anEnvelope),
+      (fixture) =>
+        Effect.gen(function* () {
+          const observations: AgentActivity[] = [];
+          const lines = [
+            { type: "system", subtype: "init", session_id: "scripted-cold" },
+            {
+              type: "assistant",
+              message: {
+                content: [
+                  { type: "text", text: "Reading the note" },
+                  { type: "thinking", thinking: "private reasoning" },
+                  {
+                    type: "tool_use",
+                    id: "read-1",
+                    name: "Read",
+                    input: { path: "notes/hello.txt", token: 'unknown-"secret-tail' },
+                  },
+                ],
+              },
+            },
+            {
+              type: "user",
+              message: {
+                content: [
+                  { type: "tool_result", tool_use_id: "read-1", content: "hello", is_error: true },
+                ],
+              },
+            },
+            {
+              type: "result",
+              result: anEnvelope,
+              session_id: "scripted-cold",
+              total_cost_usd: 0.12,
+              usage: {
+                input_tokens: 10,
+                output_tokens: 4,
+                cache_read_input_tokens: 20,
+                cache_creation_input_tokens: 3,
+              },
+            },
+          ];
+          const processProvider = scripted(
+            "cat >/dev/null\n" +
+              lines.map((line) => `printf '%s\\n' ${quote(JSON.stringify(line))}`).join("\n"),
+          );
+          const answer = yield* fixture.agent.invoke({
+            ...fixture.selection,
+            agent: "reader",
+            prompt: "Read the note",
+            session: Option.none(),
+            provider: () => ({
+              ...claudeCode("sonnet", { captureSessions: false }),
+              buildPrintCommand: processProvider.buildPrintCommand,
+              ...(processProvider.sessionStorage === undefined
+                ? {}
+                : { sessionStorage: processProvider.sessionStorage }),
+            }),
+            observe: (activity) =>
+              Effect.sync(() => {
+                observations.push(activity);
+              }),
+          });
+          expect(answer.output).toBe(anEnvelope);
+          expect(observations.map((item) => item.kind)).toEqual([
+            "started",
+            "message",
+            "tool-started",
+            "tool-finished",
+            "output",
+            "finished",
+          ]);
+          expect(JSON.stringify(observations)).not.toContain("private reasoning");
+          expect(JSON.stringify(observations)).not.toContain("secret-tail");
+          expect(observations[2]).toMatchObject({
+            text: '{"path":"notes/hello.txt","token":"[redacted]"}',
+            redacted: true,
+          });
+          expect(observations[3]).toMatchObject({ failed: true, toolId: "read-1", text: "hello" });
+          expect(observations.at(-1)).toMatchObject({
+            usage: {
+              inputTokens: 10,
+              outputTokens: 4,
+              cacheReadTokens: 20,
+              cacheWriteTokens: 3,
+              estimatedCostUsd: 0.12,
+            },
+          });
+          const finished = observations.at(-1);
+          expect(
+            finished?.kind === "finished" ? finished.usage?.reportedCostUsd : null,
+          ).toBeUndefined();
+          expect(
+            finished?.kind === "finished" ? finished.usage?.contextTokens : null,
+          ).toBeUndefined();
+        }),
+    ),
+  );
+
+  it.live("retains pi native instructions on resume and totals completed message usage", () =>
+    withScriptedAgent(
+      (log) => recording(log, anEnvelope),
+      (fixture) =>
+        Effect.gen(function* () {
+          const observations: AgentActivity[] = [];
+          const lines = [
+            { type: "session", id: "scripted-cold" },
+            {
+              type: "agent_end",
+              messages: [
+                {
+                  role: "assistant",
+                  content: [],
+                  usage: {
+                    input: 10,
+                    output: 3,
+                    cacheRead: 20,
+                    cacheWrite: 0,
+                    cost: { total: 0.02 },
+                  },
+                },
+                {
+                  role: "assistant",
+                  content: [{ type: "text", text: anEnvelope }],
+                  usage: {
+                    input: 7,
+                    output: 8,
+                    cacheRead: 30,
+                    cacheWrite: 2,
+                    cost: { total: 0.03 },
+                  },
+                },
+              ],
+            },
+          ];
+          const processProvider = scripted(
+            "cat >/dev/null\n" +
+              lines.map((line) => `printf '%s\\n' ${quote(JSON.stringify(line))}`).join("\n"),
+          );
+          yield* fixture.agent.invoke({
+            ...fixture.selection,
+            agent: "reader",
+            prompt: "Repair the answer",
+            session: Option.some("scripted-cold" as AgentSessionId),
+            provider: () => ({
+              ...kojoPi({ model: "sonnet", system: "Native system", captureSessions: false }),
+              buildPrintCommand: processProvider.buildPrintCommand,
+              ...(processProvider.sessionStorage === undefined
+                ? {}
+                : { sessionStorage: processProvider.sessionStorage }),
+            }),
+            observe: (activity) =>
+              Effect.sync(() => {
+                observations.push(activity);
+              }),
+          });
+          expect(observations[0]).toMatchObject({
+            system: "Native system",
+            systemDelivery: "native-system",
+            renderedPrompt: "Repair the answer",
+          });
+          expect(observations.at(-1)).toMatchObject({
+            usage: {
+              inputTokens: 17,
+              outputTokens: 11,
+              cacheReadTokens: 50,
+              cacheWriteTokens: 2,
+              estimatedCostUsd: 0.05,
+            },
+          });
         }),
     ),
   );

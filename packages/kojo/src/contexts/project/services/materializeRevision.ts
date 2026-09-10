@@ -12,6 +12,7 @@ import {
   symlinkSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { invocationObservationFeature } from "@carere/kojo-runner-contracts/contexts/project/contracts/handshake";
 import { RetainedContentFault } from "../../workflow/models/RetainedContentFault.ts";
 import type {
   RevisionFile,
@@ -371,7 +372,9 @@ export const materializeRevision = (options: {
     };
     if (
       !runtimeManifest.runnerProtocols?.includes(1) ||
-      (runtimeManifest.requiredFeatures?.length ?? 0) > 0 ||
+      runtimeManifest.requiredFeatures?.some(
+        (feature) => feature !== invocationObservationFeature,
+      ) ||
       !runtimeManifest.hosts?.includes(process.platform)
     ) {
       throw fault(

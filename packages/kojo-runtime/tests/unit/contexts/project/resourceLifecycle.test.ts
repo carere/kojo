@@ -94,6 +94,7 @@ describe("controlled Resource lifecycle", () => {
       workspace: () => workspace,
     });
     const tracer = Layer.succeed(Tracer, {
+      invocation: () => Effect.void,
       runStarted: () => Effect.void,
       runFinished: () => Effect.void,
       phaseEntered: () => Effect.void,

@@ -59,3 +59,18 @@ disables all mutations. It sends no more snapshot requests until the operator se
 The Daemon binds to the local endpoint selected by its lifecycle contract. Clients authenticate
 with the per-user transport contract. Console assets and API responses are served by the same
 Daemon authority.
+
+## Agent invocations
+
+Run detail keeps each physical agent call separate. Corrections and parallel calls have distinct
+Invocation identities. Each expandable record shows retained prompts, their delivery roles, ordered
+public tool activity, visible output, usage, and cost. Snapshots update open details without closing
+them. The list uses the last retained activity time when it shows a Run's last update.
+
+The live clock applies only to executing Invocations. An interrupted Invocation without a known end
+time shows its last observed duration and states that the end time is unavailable. Provider usage
+can be absent. Fresh input, cache reads, cache writes, output, and reported context measurements stay
+separate. Reported charges and API estimates have separate totals; incomplete totals are marked
+partial. Estimates state their provider basis. The Console never treats cumulative input as current
+context use. Older Phase token counters are not shown because they cannot distinguish missing data
+from zero.

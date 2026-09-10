@@ -1,4 +1,5 @@
 import type { JsonValue } from "../../shared/codecs/json.ts";
+import type { InvocationDocument, InvocationTotals } from "./invocation.ts";
 import type { RollbackOutcome } from "./rollback.ts";
 
 export type RunExecutionState =
@@ -78,6 +79,8 @@ export interface RunSandboxDocument {
 
 /** One Daemon-owned Run observation. The authored payload is intentionally not exposed. */
 export interface RunDocument {
+  readonly invocations?: ReadonlyArray<InvocationDocument>;
+  readonly invocationTotals?: InvocationTotals;
   readonly runId: string;
   readonly projectId: string;
   readonly workflowName: string;

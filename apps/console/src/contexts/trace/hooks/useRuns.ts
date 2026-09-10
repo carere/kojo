@@ -36,6 +36,7 @@ export const useRuns = (): UseQueryResult<ReadonlyArray<RunLine>, Error> =>
             Math.max(
               Date.parse(run.finishedAt ?? run.startedAt ?? run.admittedAt),
               ...(run.activePhases ?? []).map((phase) => Date.parse(phase.startedAt)),
+              ...(run.invocations ?? []).map((invocation) => Date.parse(invocation.lastActivityAt)),
               ...run.phases.map((phase) => Date.parse(phase.endedAt)),
               ...(run.gates ?? []).flatMap((gate) => [
                 Date.parse(gate.requestedAt),

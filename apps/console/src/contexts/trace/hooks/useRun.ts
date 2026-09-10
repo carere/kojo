@@ -11,6 +11,8 @@ export const useRun = (runId: () => string): UseQueryResult<RunDoc, Error> =>
     queryFn: async () => {
       const run = await readRun(runId());
       return {
+        invocations: run.invocations ?? [],
+        ...(run.invocationTotals === undefined ? {} : { invocationTotals: run.invocationTotals }),
         daemon: {
           projectId: run.projectId,
           revisionId: run.revisionId,

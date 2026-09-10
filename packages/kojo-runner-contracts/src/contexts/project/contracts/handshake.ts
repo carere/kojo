@@ -108,3 +108,6 @@ export const decodeWelcomeBody = (input: unknown): DecodeResult<WelcomeBody> => 
     features: features.value,
   });
 };
+
+/** Required when a Runtime sends retained live invocation observations. */
+export const invocationObservationFeature = "invocation-observations-v1";

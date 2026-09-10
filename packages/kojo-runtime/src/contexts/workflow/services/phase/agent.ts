@@ -175,9 +175,21 @@ export const agent = <Envelope extends Schema.Top, R = never>(options: {
             if (Option.isSome(correction)) corrections += 1;
             failed = [];
 
-            const answer = yield* invoker.invoke(
-              invocation(Option.getOrElse(correction, () => opening)),
-            );
+            const invocationId = crypto.randomUUID();
+            let sequence = 0;
+            const answer = yield* invoker.invoke({
+              ...invocation(Option.getOrElse(correction, () => opening)),
+              observe: (activity) =>
+                tracer.invocation({
+                  runId: run.runId,
+                  phaseId: makePhaseId(run.runId, options.name, attempt),
+                  phasePath: options.name,
+                  attempt,
+                  invocationId,
+                  sequence: sequence++,
+                  activity,
+                }),
+            });
             session = Option.some(answer.session);
             call = Option.some(
               new AgentCallRecord({

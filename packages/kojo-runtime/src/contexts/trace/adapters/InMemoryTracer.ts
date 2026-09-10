@@ -2,6 +2,7 @@ import { Context, Effect, Layer } from "effect";
 import type { GateRecord } from "../../gate/models/GateRecord.ts";
 import type { RunId } from "../../shared/models/RunId.ts";
 import type { InFlightPhase } from "../models/InFlightPhase.ts";
+import type { InvocationObservation } from "../models/InvocationObservation.ts";
 import type { Occurrence } from "../models/Occurrence.ts";
 import type { PhaseRecord } from "../models/PhaseRecord.ts";
 import type { RunOutcome, RunRecord } from "../models/RunRecord.ts";
@@ -21,6 +22,7 @@ export class RecordedTrace extends Context.Service<
     readonly phases: Effect.Effect<ReadonlyArray<PhaseRecord>>;
     readonly gates: Effect.Effect<ReadonlyArray<GateRecord>>;
     readonly sandboxes: Effect.Effect<ReadonlyArray<SandboxRecord>>;
+    readonly invocations: Effect.Effect<ReadonlyArray<InvocationObservation>>;
     readonly occurrences: Effect.Effect<ReadonlyArray<Occurrence>>;
     readonly outcomes: Effect.Effect<ReadonlyMap<RunId, RunOutcome>>;
     /** Active Phase attempts per Run. Completion removes only its own attempt. */
@@ -41,6 +43,7 @@ export const layer: Layer.Layer<RecordedTrace | Tracer> = Layer.effectContext(
     const phases: Array<PhaseRecord> = [];
     const gates: Array<GateRecord> = [];
     const sandboxes: Array<SandboxRecord> = [];
+    const invocations: InvocationObservation[] = [];
     const occurrences: Array<Occurrence> = [];
     const outcomes = new Map<RunId, RunOutcome>();
     const inFlight = new Map<RunId, ReadonlyArray<InFlightPhase>>();
@@ -75,6 +78,7 @@ export const layer: Layer.Layer<RecordedTrace | Tracer> = Layer.effectContext(
         }),
       gate: (record) => Effect.sync(() => void gates.push(record)),
       sandbox: (record) => Effect.sync(() => void sandboxes.push(record)),
+      invocation: (record) => Effect.sync(() => void invocations.push(record)),
       occurrence: (record) => Effect.sync(() => void occurrences.push(record)),
     }).pipe(
       Context.add(RecordedTrace, {
@@ -82,6 +86,7 @@ export const layer: Layer.Layer<RecordedTrace | Tracer> = Layer.effectContext(
         phases: Effect.sync(() => [...phases]),
         gates: Effect.sync(() => [...gates]),
         sandboxes: Effect.sync(() => [...sandboxes]),
+        invocations: Effect.sync(() => [...invocations]),
         occurrences: Effect.sync(() => [...occurrences]),
         outcomes: Effect.sync(() => new Map(outcomes)),
         inFlight: Effect.sync(() => new Map(inFlight)),

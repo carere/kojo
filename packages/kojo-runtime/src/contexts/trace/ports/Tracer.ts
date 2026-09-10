@@ -2,12 +2,14 @@ import { Context, type Effect } from "effect";
 import type { GateRecord } from "../../gate/models/GateRecord.ts";
 import type { RunId } from "../../shared/models/RunId.ts";
 import type { InFlightPhase } from "../models/InFlightPhase.ts";
+import type { InvocationObservation } from "../models/InvocationObservation.ts";
 import type { Occurrence } from "../models/Occurrence.ts";
 import type { PhaseRecord } from "../models/PhaseRecord.ts";
 import type { RunOutcome, RunRecord } from "../models/RunRecord.ts";
 import type { SandboxRecord } from "../models/SandboxRecord.ts";
 
 interface TracerService {
+  readonly invocation: (record: InvocationObservation) => Effect.Effect<void>;
   readonly runStarted: (record: RunRecord) => Effect.Effect<void>;
   readonly runFinished: (runId: RunId, outcome: RunOutcome) => Effect.Effect<void>;
   /** Observe entry to one Phase attempt without replacing active siblings. */
@@ -27,7 +29,7 @@ interface TracerService {
   /**
    * One repetition inside a phase, written when that repetition ends.
    *
-   * The subordinate record, and the only method here that may be called many times for one unit of
+   * A subordinate record that can be called many times for one unit of
    * work. It is for the case a wide row cannot hold — a count nobody knows in advance — and it is
    * bound by the rule in `Occurrence`: no question may need one of these to answer it.
    */
@@ -42,7 +44,7 @@ const TracerBase: Context.ServiceClass<Tracer, "kojo/trace/Tracer", TracerServic
  *
  * Note the shape: there is deliberately no `event(name, data)` method. A method like that is an
  * invitation to scatter half-context lines across a phase and reassemble them later in a query.
- * Every method here takes a *completed* record — everything known about one unit of work, in one
- * call, at the moment it ends.
+ * Completion records hold the result of each unit of work. Phase entry and Invocation
+ * observations also preserve progress before completion. They do not establish execution authority.
  */
 export class Tracer extends TracerBase {}

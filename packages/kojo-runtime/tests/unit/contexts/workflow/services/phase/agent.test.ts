@@ -84,7 +84,7 @@ const runTriage = (scripts: Record<string, InMemoryAgentInvoker.Script>) =>
       triage.definition.execute({ ticket: "KOJO-1" }),
     ).pipe(Effect.result);
     const trace = yield* InMemoryTracer.RecordedTrace;
-    return { outcome, phases: yield* trace.phases };
+    return { outcome, phases: yield* trace.phases, invocations: yield* trace.invocations };
   }).pipe(
     Effect.provide(
       selfContainedTestLayer(
@@ -181,7 +181,7 @@ describe("a workflow of agent phases", () => {
 
   it.effect("reads prose as a parse error too, through the same decode path", () =>
     Effect.gen(function* () {
-      const { outcome, phases } = yield* runTriage({
+      const { outcome, phases, invocations } = yield* runTriage({
         ...scriptedFactory,
         scout: { output: "I had a look around but I am not sure what to tell you" },
       });
@@ -199,6 +199,17 @@ describe("a workflow of agent phases", () => {
       // carries the last of those calls — re-entered, not cold.
       expect(scouted?.agent).toMatchObject({ agent: "scout", resumed: true });
       expect(scouted?.verification).toMatchObject({ corrections: 2, correctable: true });
+      const starts = invocations.filter(
+        (record) => record.activity.kind === "started" && record.activity.agent === "scout",
+      );
+      expect(starts).toHaveLength(3);
+      expect(new Set(starts.map((record) => record.invocationId)).size).toBe(3);
+      expect(new Set(starts.map((record) => record.phaseId)).size).toBe(1);
+      expect(
+        starts.map(
+          (record) => record.activity.kind === "started" && record.activity.systemDelivery,
+        ),
+      ).toEqual(["user-message", "not-sent", "not-sent"]);
       // And the phase after it never ran.
       expect(phases.map((phase) => phase.name)).toEqual(["route", "scout"]);
     }),

@@ -1,5 +1,6 @@
 import type { AgentProvider } from "@ai-hero/sandcastle";
 import { Context, type Effect, type Option } from "effect";
+import type { AgentActivity } from "../models/AgentActivity.ts";
 import type { AgentAnswer } from "../models/AgentAnswer.ts";
 import type { AgentDefinition } from "../models/AgentDefinition.ts";
 import type { AgentInvocationError } from "../models/AgentInvocationError.ts";
@@ -34,6 +35,8 @@ export interface AgentCall {
   readonly agent: string;
   readonly model: string;
   readonly provider: ProviderFor;
+  /** Observe this physical call; the Phase supplies its correlation identity. */
+  readonly observe?: (activity: AgentActivity) => Effect.Effect<void>;
   readonly system: string;
   readonly tools?: ReadonlyArray<string>;
   readonly prompt: string;

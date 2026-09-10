@@ -68,3 +68,20 @@ A segment of the waterfall's time axis that is collapsed to a fixed width and la
 duration. A break replaces any span or gap that would otherwise flatten the rest of the run —
 usually a human holding a gate.
 _Avoid_: gap, elision, compressed region
+
+**Invocation observation**:
+A retained observation of one physical agent call within a Phase attempt. It identifies that call
+separately from implementation, review, and correction calls. It can contain prompts, public tool
+activity, output, and measurements received from the provider. It does not establish execution
+authority or recover activity that was never received.
+_Avoid_: Phase result, private reasoning, Run Claim
+
+**Reported charge**:
+A charge that the provider attributes to an invocation. It is unavailable when the provider does
+not report one, including subscription use without an attributable call charge.
+_Avoid_: API estimate, zero cost
+
+**API estimate**:
+An estimated API cost with an identified basis. It is separate from a reported charge. A total is
+partial when any included invocation lacks the relevant measurement.
+_Avoid_: invoice, reported charge
