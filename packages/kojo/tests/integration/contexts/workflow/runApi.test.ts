@@ -420,14 +420,16 @@ const mutate = async (
 
 const waitForRun = async (daemon: RunningDaemon, runId: string): Promise<RunDocument> => {
   const deadline = Date.now() + 10_000;
+  let last: RunDocument | undefined;
   while (Date.now() < deadline) {
     const response = await call(daemon, `/api/v1/runs/${runId}`);
     expect(response.status, await response.clone().text()).toBe(200);
     const run = (await response.json()) as RunDocument;
+    last = run;
     if (run.state === "succeeded" || run.state === "failed") return run;
     await Bun.sleep(20);
   }
-  throw new Error("the exact Run did not reach a terminal state");
+  throw new Error(`the exact Run did not reach a terminal state: ${JSON.stringify(last)}`);
 };
 
 const symbolicLinksUnder = (root: string): ReadonlyArray<string> => {

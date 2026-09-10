@@ -7,6 +7,7 @@ import {
 } from "@carere/kojo-client-contracts/contexts/shared/codecs/json";
 import type { OperationReplyBody } from "@carere/kojo-runner-contracts/contexts/project/contracts/execution";
 import type { RunnerFrame } from "@carere/kojo-runner-contracts/contexts/project/contracts/frame";
+import { invocationObservationFeature } from "@carere/kojo-runner-contracts/contexts/project/contracts/handshake";
 import { Cause, Duration, Effect, Exit, Option } from "effect";
 import type {
   DaemonProjectRepository,
@@ -616,7 +617,9 @@ export class TriggerSupervisor {
         hello.runnerInstanceId !== runnerInstanceId ||
         hello.body.connectionSecret !== connectionSecret ||
         hello.body.projectId !== bootstrap.projectId ||
-        hello.body.packageGraphId !== bootstrap.packageGraphId
+        hello.body.packageGraphId !== bootstrap.packageGraphId ||
+        !hello.body.supportedProtocols.includes(1) ||
+        hello.body.requiredFeatures.some((feature) => feature !== invocationObservationFeature)
       ) {
         throw new Error("the Trigger Runner Hello does not match its private binding");
       }
@@ -632,7 +635,7 @@ export class TriggerSupervisor {
             packageGraphId: bootstrap.packageGraphId,
             projectId: bootstrap.projectId,
             selectedProtocol: 1,
-            features: [],
+            features: [invocationObservationFeature],
           },
         }),
       );
