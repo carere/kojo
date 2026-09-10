@@ -46,6 +46,22 @@ const columns = helper.columns([
       </Link>
     ),
   }),
+  helper.accessor("project", {
+    header: "Project",
+    cell: (info) => <span>{info.row.original.project}</span>,
+  }),
+  helper.accessor("activity", {
+    header: "Current activity",
+    cell: (info) => <span>{info.row.original.activity}</span>,
+  }),
+  helper.accessor("updatedAt", {
+    header: "Last update",
+    cell: (info) => (
+      <time dateTime={info.row.original.updatedAt}>
+        {new Date(info.row.original.updatedAt).toLocaleString()}
+      </time>
+    ),
+  }),
   helper.accessor("workflow", {
     header: "Workflow",
     cell: (info) => <span>{info.row.original.workflow}</span>,
@@ -58,7 +74,7 @@ const columns = helper.columns([
   }),
   helper.accessor("queueReason", {
     header: "Queue reason",
-    cell: (info) => <span>{info.getValue()}</span>,
+    cell: (info) => <span>{info.row.original.queueReason}</span>,
   }),
   helper.accessor("gate", {
     header: "Open gate",

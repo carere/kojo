@@ -23,6 +23,8 @@ export interface RunLine {
     | "failed"
     | "cancelled";
   readonly queueReason?: string;
+  readonly activity?: string;
+  readonly updatedAt?: string;
 }
 
 /**

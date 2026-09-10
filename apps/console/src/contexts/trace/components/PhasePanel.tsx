@@ -44,8 +44,7 @@ export const PhasePanel = (props: {
     doc()?.phases.find((phase) => phase.phaseId === phaseId());
   /** The phase the run is inside right now, when it is this one. It has no record and no outcome. */
   const inFlight = () => {
-    const flying = doc()?.run.inFlight;
-    return flying?.phaseId === phaseId() ? flying : undefined;
+    return doc()?.run.activePhases?.find((phase) => phase.phaseId === phaseId());
   };
   const known = () => record() !== undefined || inFlight() !== undefined;
 

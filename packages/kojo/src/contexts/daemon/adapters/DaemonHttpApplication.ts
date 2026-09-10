@@ -687,7 +687,7 @@ export const startDaemonHttpApplication = (options: {
   consoleServer = Bun.serve({
     hostname: "127.0.0.1",
     port: options.consolePort ?? 0,
-    async fetch(request) {
+    async fetch(request, server) {
       return withOrdinaryMutation(mutationGate, request, async () => {
         const expectedHost = `127.0.0.1:${consoleServer?.port ?? 0}`;
         const origin = `http://${expectedHost}`;
@@ -787,6 +787,8 @@ export const startDaemonHttpApplication = (options: {
             return problem(401, "session-refused", "Console access is invalid or expired");
           }
           if (request.method === "GET" && url.pathname === "/api/v1/notifications") {
+            // Quiet Phases can last longer than the HTTP server's ordinary idle limit.
+            server.timeout(request, 0);
             return notifications.response(request.signal);
           }
           if (request.method === "GET" && url.pathname === "/api/v1/daemon") {
@@ -975,7 +977,7 @@ export const startDaemonHttpApplication = (options: {
   };
   const socketServer = Bun.serve({
     unix: socketPath,
-    async fetch(request) {
+    async fetch(request, server) {
       const url = new URL(request.url);
       const response = await withOrdinaryMutation(mutationGate, request, async () => {
         if (request.method === "GET" && url.pathname === "/ready") {
@@ -985,10 +987,12 @@ export const startDaemonHttpApplication = (options: {
           const grant = authority.issue(consoleOrigin);
           return noStoreJson({
             expiresAt: new Date(grant.expiresAt).toISOString(),
-            launchUrl: `${consoleOrigin}/daemon#grant=${encodeURIComponent(grant.secret)}`,
+            launchUrl: `${consoleOrigin}/runs#grant=${encodeURIComponent(grant.secret)}`,
           });
         }
         if (request.method === "GET" && url.pathname === "/api/v1/notifications") {
+          // Quiet Phases can last longer than the HTTP server's ordinary idle limit.
+          server.timeout(request, 0);
           return notifications.response(request.signal);
         }
         const revision = await revisionResponse(request, url, true);

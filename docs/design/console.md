@@ -5,10 +5,16 @@ browser reads the Daemon HTTP API.
 
 ## Views
 
-- Project and Workflow availability.
-- Run activity, status, and captured Revision.
-- Gate queue and answer form.
-- Daemon health and actionable faults.
+The launch URL and home page open the Run list. Its rows show the Project, Workflow, status,
+current activity, Gate waiting state, and last recorded update. The operator can start a Workflow
+from an expandable form on that page. Stopping Workflow activity does not cancel admitted Runs.
+
+Run detail shows Phase progress, captured Revision details, results, actionable faults, and the
+Gate answer form beside the affected Run. The navigation contains the Run list entry.
+
+An executing Run can show several active Phases. Completing one Phase does not remove its siblings.
+The Console reads these observations from the authoritative Run snapshot. Reconnect restores them;
+a non-executing Run cannot display a growing active span.
 
 ## Resource list composition
 
@@ -40,7 +46,8 @@ state. It is not proof that execution is unavailable.
 
 The Daemon sends best-effort invalidation notices when durable state changes. Each notice tells the
 Console to read an authoritative snapshot. A slow notification reader is disconnected and does not
-delay Run execution.
+delay Run execution. Notification requests have no HTTP idle timeout, so a quiet Phase does not
+force a Console reconnect. Ordinary API requests retain their timeout.
 
 Each snapshot request has a five-second limit. The Console retries an unreachable Daemon twice,
 after one second and two seconds. Thus, one reconnect attempt ends in less than twenty seconds. If

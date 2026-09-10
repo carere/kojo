@@ -42,7 +42,6 @@ export class SqliteTraceRepository {
       document TEXT NOT NULL,
       outcome TEXT CHECK(outcome IS NULL OR outcome IN ('succeeded', 'failed', 'suspended')),
       finished_at INTEGER,
-      in_flight TEXT,
       FOREIGN KEY (run_id) REFERENCES workflow_runs(run_id)
     ) STRICT`);
     database.run(`CREATE TABLE IF NOT EXISTS kojo_phases (
@@ -125,7 +124,7 @@ export class SqliteTraceRepository {
               );
               if (inserted) {
                 this.#database.run(
-                  "UPDATE kojo_runs SET outcome = ?, finished_at = ?, in_flight = NULL WHERE run_id = ?",
+                  "UPDATE kojo_runs SET outcome = ?, finished_at = ? WHERE run_id = ?",
                   [exact.outcome, Date.now(), authority.runId],
                 );
               }
@@ -140,10 +139,6 @@ export class SqliteTraceRepository {
                 String(phase.phaseId),
                 canonicalJson(exact),
               );
-              this.#database.run("UPDATE kojo_runs SET in_flight = ? WHERE run_id = ?", [
-                canonicalJson(exact.phase),
-                authority.runId,
-              ]);
               return;
             }
             const record = objectRecord(exact.record, `the ${exact.kind} Trace record`);
@@ -159,9 +154,6 @@ export class SqliteTraceRepository {
                 document,
                 authority.runId,
               );
-              this.#database.run("UPDATE kojo_runs SET in_flight = NULL WHERE run_id = ?", [
-                authority.runId,
-              ]);
             } else if (exact.kind === "gate") {
               this.#insertExact(
                 "kojo_gates",
@@ -200,12 +192,39 @@ export class SqliteTraceRepository {
     Effect.try({
       try: () => ({
         ...this.#runDocument(runId),
+        activePhases: this.#activePhases(runId),
         phases: this.#documents("kojo_phases", runId),
         gates: this.#documents("kojo_gates", runId),
         sandboxes: this.#documents("kojo_sandboxes", runId),
       }),
       catch: failure,
     });
+
+  #activePhases(runId: string): ReadonlyArray<Record<string, JsonValue>> {
+    return this.#database
+      .query<DocumentRow, [string]>(`
+      SELECT e.document FROM kojo_phase_entries e
+      JOIN workflow_claims c ON c.run_id = e.run_id
+        AND c.generation = e.generation AND c.runner_instance_id = e.runner_instance_id
+      JOIN workflow_runs r ON r.run_id = e.run_id AND r.state = 'executing'
+      WHERE e.run_id = ?
+        AND NOT EXISTS (SELECT 1 FROM kojo_phases p WHERE p.run_id = e.run_id AND p.phase_id = e.phase_id)
+        AND NOT EXISTS (SELECT 1 FROM kojo_run_finishes f WHERE f.run_id = e.run_id
+          AND f.generation = e.generation AND f.runner_instance_id = e.runner_instance_id)
+      ORDER BY e.rowid
+    `)
+      .all(runId)
+      .map((row) => {
+        const entered = decodeTraceMutation(JSON.parse(row.document));
+        if (!entered.ok || entered.value.kind !== "phase-entered") {
+          throw new RunStoreError({
+            code: "STORE_FAILED",
+            message: "the in-flight Phase is not an exact Trace observation",
+          });
+        }
+        return entered.value.phase;
+      });
+  }
 
   #runDocument(runId: string): Pick<TraceProjection, "run"> {
     const row = this.#database

@@ -38,6 +38,14 @@ export const useRun = (runId: () => string): UseQueryResult<RunDoc, Error> =>
             ? { outcome: run.state }
             : {}),
           ...(run.finishedAt === undefined ? {} : { finishedAt: Date.parse(run.finishedAt) }),
+          activePhases: (run.activePhases ?? []).map((phase) => ({
+            phaseId: `${run.runId}/${phase.phasePath}/${phase.attempt}`,
+            name: phase.phasePath,
+            kind: phase.kind,
+            attempt: phase.attempt,
+            startedAt: Date.parse(phase.startedAt),
+            ...(phase.sandboxId === undefined ? {} : { sandboxId: phase.sandboxId }),
+          })),
           ...(run.inFlight === undefined
             ? {}
             : {

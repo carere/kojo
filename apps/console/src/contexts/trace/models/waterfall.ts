@@ -203,9 +203,10 @@ export const rowsOf = (doc: RunDoc, now: number): ReadonlyArray<ScopeRow> => {
 
   // Acquisitions still held: named by a phase, with no record because nothing has released them.
   const known = new Set(rows.map((row) => row.rowId));
-  const running = [...doc.phases.map((line) => line.sandboxId), doc.run.inFlight?.sandboxId].filter(
-    (sandboxId): sandboxId is string => sandboxId !== undefined && !known.has(sandboxId),
-  );
+  const running = [
+    ...doc.phases.map((line) => line.sandboxId),
+    ...(doc.run.activePhases ?? []).map((phase) => phase.sandboxId),
+  ].filter((sandboxId): sandboxId is string => sandboxId !== undefined && !known.has(sandboxId));
 
   for (const sandboxId of new Set(running)) {
     const acquiredAt = acquiredAtOf(sandboxId);
@@ -247,25 +248,26 @@ export const spansOf = (doc: RunDoc, now: number): ReadonlyArray<PhaseSpan> => {
     ...(line.errorTag === undefined ? {} : { errorTag: line.errorTag }),
   }));
 
-  const inFlight = doc.run.inFlight;
   const exited = new Set(spans.map((span) => span.phaseId));
-  if (inFlight === undefined || isTerminal(doc) || exited.has(inFlight.phaseId)) return spans;
-
+  if (doc.daemon?.state !== "executing") return spans;
   return [
     ...spans,
-    {
-      phaseId: inFlight.phaseId,
-      name: inFlight.name,
-      kind: inFlight.kind,
-      state: "running",
-      rowId: inFlight.sandboxId ?? hostRow,
-      startedAt: inFlight.startedAt,
-      // The whole of what makes it in-flight: it ends at whatever the clock says, so it grows.
-      endedAt: Math.max(inFlight.startedAt, now),
-      attempt: inFlight.attempt,
-      corrections: 0,
-      breaches: [],
-    },
+    ...(doc.run.activePhases ?? [])
+      .filter((phase) => !exited.has(phase.phaseId))
+      .map(
+        (phase): PhaseSpan => ({
+          phaseId: phase.phaseId,
+          name: phase.name,
+          kind: phase.kind,
+          state: "running",
+          rowId: phase.sandboxId ?? hostRow,
+          startedAt: phase.startedAt,
+          endedAt: Math.max(phase.startedAt, now),
+          attempt: phase.attempt,
+          corrections: 0,
+          breaches: [],
+        }),
+      ),
   ];
 };
 

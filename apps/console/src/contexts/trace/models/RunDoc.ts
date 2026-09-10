@@ -205,6 +205,7 @@ export interface RunDoc {
     };
     readonly outcome?: "succeeded" | "failed" | "suspended" | "cancelled";
     readonly finishedAt?: number;
+    readonly activePhases?: ReadonlyArray<InFlightLine>;
     readonly inFlight?: InFlightLine;
   };
   readonly phases: ReadonlyArray<PhaseLine>;

@@ -39,7 +39,8 @@ its phase record lacks, and no question may need one to answer it.
 _Avoid_: event, log line
 
 **In-flight phase**:
-The latest observation of a Run's executing Phase, separate from its completed Phase records.
+An observation of one executing Phase attempt, separate from its completed Phase record.
+A Run can have several in-flight Phases at the same time.
 It can be stale after process loss and does not establish execution authority. See
 [docs/adr/trace/0002-in-flight-phase-lives-on-the-run-row.md](../adr/trace/0002-in-flight-phase-lives-on-the-run-row.md).
 _Avoid_: phase start, running phase event

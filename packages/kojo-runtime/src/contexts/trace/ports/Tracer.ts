@@ -10,15 +10,7 @@ import type { SandboxRecord } from "../models/SandboxRecord.ts";
 interface TracerService {
   readonly runStarted: (record: RunRecord) => Effect.Effect<void>;
   readonly runFinished: (runId: RunId, outcome: RunOutcome) => Effect.Effect<void>;
-  /**
-   * The run's *current* phase, stamped on the run row when the phase is entered.
-   *
-   * **The one method here that does not take a completed record, and the exception is principled.**
-   * adr/trace/0002: a phase record is written on exit, so a phase that has been running for four
-   * minutes has none and a live run has nothing to draw. This is not a record of work — it is the
-   * run's mutable status, on the row that is already mutable for exactly that reason — and it is
-   * *replaced*, never accumulated, so no completed unit of work gains a second row.
-   */
+  /** Observe entry to one Phase attempt without replacing active siblings. */
   readonly phaseEntered: (runId: RunId, phase: InFlightPhase) => Effect.Effect<void>;
   /** Written once, on exit, on every path. Clears the in-flight phase it replaces. */
   readonly phase: (record: PhaseRecord) => Effect.Effect<void>;

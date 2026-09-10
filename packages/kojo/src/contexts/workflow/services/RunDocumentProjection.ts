@@ -106,6 +106,23 @@ const provenanceOf = (trace: TraceProjection): Pick<RunDocument, "provenance"> =
   };
 };
 
+const activePhasesOf = (
+  run: DaemonRun,
+  trace: TraceProjection,
+): Pick<RunDocument, "activePhases" | "inFlight"> => {
+  const activePhases =
+    run.state !== "executing"
+      ? []
+      : (trace.activePhases ?? []).map((phase) => ({
+          phasePath: String(phase.name),
+          kind: phase.kind as "actor" | "code" | "agent",
+          attempt: Number(phase.attempt),
+          startedAt: new Date(Number(phase.startedAt)).toISOString(),
+          ...(typeof phase.sandboxId === "string" ? { sandboxId: phase.sandboxId } : {}),
+        }));
+  return { activePhases, ...(activePhases[0] === undefined ? {} : { inFlight: activePhases[0] }) };
+};
+
 /** Build the public Run document from durable execution, Trace, Artifact, and uncertainty state. */
 export const runDocumentOf = (
   run: DaemonRun,
@@ -120,6 +137,7 @@ export const runDocumentOf = (
   revisionId: run.revisionId,
   packageGraphId: run.packageGraphId,
   ...provenanceOf(trace),
+  ...activePhasesOf(run, trace),
   state: run.state,
   ...(!terminal(run) && run.state === "queued"
     ? { queueReason: run.queueReason ?? ("runner-starting" as const) }

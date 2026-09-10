@@ -973,6 +973,26 @@ describe("Daemon no-Trigger Run API", () => {
         const hostPaths = paths();
         const runnerPid = join(roots[0] ?? "", "shutdown-runner.pid");
         const location = project(roots[0] ?? "", runnerPid, true);
+        const sourcePath = join(location, ".kojo", "workflows", "example.ts");
+        const barrier = `${runnerPid}.release`;
+        writeFileSync(
+          sourcePath,
+          readFileSync(sourcePath, "utf8")
+            .replace("import { writeFileSync }", "import { writeFileSync, existsSync }")
+            .replace("() => code(", "() => Effect.all([code(")
+            .replace(
+              "\n  ),\n);",
+              `
+  ), code({ name: "review", description: "Review in parallel", success: Schema.Null, error: Schema.Never },
+    Effect.sync(() => writeFileSync(${JSON.stringify(`${runnerPid}.review`)}, "started")).pipe(
+      Effect.andThen(Effect.suspend(function wait() {
+        return existsSync(${JSON.stringify(barrier)}) ? Effect.succeed(null) : Effect.sleep(10).pipe(Effect.andThen(Effect.suspend(wait)));
+      })),
+    )
+  )], { concurrency: 2 }).pipe(Effect.as(null)),
+);`,
+            ),
+        );
         mkdirSync(hostPaths.dataRoot, { recursive: true, mode: 0o700 });
         const captured = captureWorkflowRevision({
           project: location,
@@ -1030,8 +1050,40 @@ describe("Daemon no-Trigger Run API", () => {
         );
         expect(response.status, await response.clone().text()).toBe(202);
         const startedDeadline = Date.now() + 10_000;
-        while (!existsSync(runnerPid) && Date.now() < startedDeadline) await Bun.sleep(10);
+        while (
+          (!existsSync(runnerPid) || !existsSync(`${runnerPid}.review`)) &&
+          Date.now() < startedDeadline
+        )
+          await Bun.sleep(10);
         expect(existsSync(runnerPid)).toBe(true);
+
+        const admitted = (await response.json()) as StartRunResult;
+        const active = (await (
+          await call(daemon, `/api/v1/runs/${admitted.runId}`)
+        ).json()) as RunDocument;
+        expect(active.state).toBe("executing");
+        expect(active.phases).toEqual([]);
+        expect(active.activePhases?.map((phase) => phase.phasePath).sort()).toEqual([
+          "compile",
+          "review",
+        ]);
+        writeFileSync(barrier, "complete review");
+        let afterReview = active;
+        while (afterReview.phases.length === 0 && Date.now() < startedDeadline) {
+          await Bun.sleep(10);
+          afterReview = (await (
+            await call(daemon, `/api/v1/runs/${admitted.runId}`)
+          ).json()) as RunDocument;
+        }
+        expect(afterReview.phases).toEqual([
+          expect.objectContaining({ phasePath: "review", outcome: "succeeded" }),
+        ]);
+        expect(afterReview.activePhases?.map((phase) => phase.phasePath)).toEqual(["compile"]);
+        // A fresh snapshot restores the same observations without a live browser connection.
+        const reconnected = (await (
+          await call(daemon, `/api/v1/runs/${admitted.runId}`)
+        ).json()) as RunDocument;
+        expect(reconnected.activePhases).toEqual(afterReview.activePhases);
 
         const unhandled: unknown[] = [];
         const captureUnhandled = (cause: unknown): void => {

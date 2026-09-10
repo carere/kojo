@@ -39,3 +39,15 @@ cannot establish that a Phase is still executing, completed, or safe to repeat. 
 Run state and recovery evidence belong to `workflow`; Resource leases belong to `project`.
 The Console must use those owners' status when execution is uncertain. This qualifies the record's
 failure guarantees without changing the Waterfall decision or claiming recovery is implemented.
+
+## Parallel Phase observations (issue #102)
+
+The Run read model carries all active Phase attempts. A single slot loses sibling observations
+when Workflows execute Phases concurrently. The Daemon retains each entry with its Run Claim
+generation and Runner identity. The read model excludes completed attempts, finished generations,
+and observations outside the current Claim. Completing one Phase does not clear a sibling.
+
+This revises the original single-field storage decision. Completed Phase records still arrive
+once on exit. Entry observations do not form provisional completed records and do not establish
+execution authority. Only an executing Run can display growing Waterfall spans. A fresh Run
+snapshot restores the same active observations after a Console reconnect.

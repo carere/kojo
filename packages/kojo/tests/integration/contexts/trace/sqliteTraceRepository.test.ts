@@ -155,6 +155,67 @@ describe("SQLite Trace repository", () => {
     }
   });
 
+  it.live("retains parallel Phases and clears only the completed attempt", () =>
+    Effect.gen(function* () {
+      const { database, trace } = fixture();
+      try {
+        for (const name of ["implement", "review"]) {
+          yield* trace.write(authority, {
+            kind: "phase-entered",
+            runId: authority.runId,
+            phase: {
+              phaseId: `${authority.runId}/${name}/1`,
+              name,
+              kind: "agent",
+              attempt: 1,
+              startedAt: 2,
+            },
+          });
+        }
+        expect(publicRun(yield* trace.projection(authority.runId))).toHaveProperty("activePhases", [
+          {
+            phasePath: "implement",
+            kind: "agent",
+            attempt: 1,
+            startedAt: "1970-01-01T00:00:00.002Z",
+          },
+          { phasePath: "review", kind: "agent", attempt: 1, startedAt: "1970-01-01T00:00:00.002Z" },
+        ]);
+        yield* trace.write(authority, {
+          kind: "phase",
+          record: {
+            runId: authority.runId,
+            phaseId: `${authority.runId}/implement/1`,
+            name: "implement",
+            description: "Implement the issue",
+            kind: "agent",
+            attempt: 1,
+            startedAt: 2,
+            endedAt: 3,
+            outcome: "succeeded",
+          },
+        });
+        // An exact transport retry cannot restore a completed observation.
+        yield* trace.write(authority, {
+          kind: "phase-entered",
+          runId: authority.runId,
+          phase: {
+            phaseId: `${authority.runId}/implement/1`,
+            name: "implement",
+            kind: "agent",
+            attempt: 1,
+            startedAt: 2,
+          },
+        });
+        expect(publicRun(yield* trace.projection(authority.runId))).toHaveProperty("activePhases", [
+          { phasePath: "review", kind: "agent", attempt: 1, startedAt: "1970-01-01T00:00:00.002Z" },
+        ]);
+      } finally {
+        database.close(false);
+      }
+    }),
+  );
+
   it("accepts an exact retry and refuses changed content or stale authority", async () => {
     const { database, trace } = fixture();
     const mutation = {
@@ -224,8 +285,14 @@ describe("SQLite Trace repository", () => {
       await Effect.runPromise(trace.write(authority, started));
       await Effect.runPromise(trace.write(authority, entered));
       await Effect.runPromise(trace.write(authority, entered));
+      expect(
+        publicRun(await Effect.runPromise(trace.projection(authority.runId))).activePhases,
+      ).toHaveLength(1);
       await Effect.runPromise(trace.write(authority, finished));
       await Effect.runPromise(trace.write(authority, finished));
+      expect(
+        publicRun(await Effect.runPromise(trace.projection(authority.runId))).activePhases,
+      ).toEqual([]);
       await expect(
         Effect.runPromise(
           trace.write(authority, {
@@ -240,6 +307,9 @@ describe("SQLite Trace repository", () => {
 
       database.run("UPDATE workflow_claims SET generation = 2 WHERE run_id = ?", [authority.runId]);
       database.run("UPDATE workflow_slots SET generation = 2 WHERE run_id = ?", [authority.runId]);
+      expect(
+        publicRun(await Effect.runPromise(trace.projection(authority.runId))).activePhases,
+      ).toEqual([]);
       await Effect.runPromise(
         trace.write({ ...authority, generation: 2 }, { ...finished, outcome: "succeeded" }),
       );

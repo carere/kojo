@@ -171,6 +171,7 @@ export interface RunDocument {
   readonly admittedAt: string;
   readonly startedAt?: string;
   readonly finishedAt?: string;
+  readonly activePhases?: ReadonlyArray<NonNullable<RunDocument["inFlight"]>>;
   readonly inFlight?: {
     readonly phasePath: string;
     readonly attempt: number;

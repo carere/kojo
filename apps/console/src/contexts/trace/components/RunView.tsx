@@ -59,13 +59,13 @@ const Stamp = (props: {
   readonly when?: boolean;
 }): JSX.Element => (
   // Header facts use a separate attribute from panel fields.
-  <span data-stamp={props.name} class="flex items-baseline gap-1.5">
+  <span data-stamp={props.name} class="flex min-w-0 items-baseline gap-1.5">
     <span class="text-muted-foreground text-[10px] tracking-[0.08em] uppercase">{props.label}</span>
     <Show
       when={props.when ?? true}
       fallback={<span class="text-muted-foreground/70 text-xs italic">{props.absent ?? "—"}</span>}
     >
-      <span class="text-foreground/80 font-mono text-xs">{props.children}</span>
+      <span class="min-w-0 break-all text-foreground/80 font-mono text-xs">{props.children}</span>
     </Show>
   </span>
 );
@@ -193,7 +193,7 @@ export const RunView = (props: {
   };
 
   return (
-    <main class="mx-auto flex w-full max-w-[100rem] flex-col gap-4 px-6 py-8">
+    <main class="mx-auto flex w-full max-w-[100rem] min-w-0 break-words flex-col gap-4 px-6 py-8">
       <nav class="text-muted-foreground text-xs">
         <Link to="/" class="hover:underline">
           ← every run
@@ -239,73 +239,61 @@ export const RunView = (props: {
           <>
             <header class="flex flex-col gap-2" data-run-header={document().run.run.runId}>
               <div class="flex flex-wrap items-center gap-3">
-                <h1 class="font-mono text-lg font-semibold">{document().run.run.runId}</h1>
+                <h1 class="min-w-0 break-all font-mono text-lg font-semibold">
+                  {document().run.run.runId}
+                </h1>
                 <Badge tone={statusTones[status()] ?? "neutral"}>{status()}</Badge>
                 <span class="text-muted-foreground text-sm">{document().run.run.workflow}</span>
                 <span class="text-muted-foreground text-sm" data-elapsed>
                   {elapsedOf(document(), now())}
                 </span>
               </div>
-              {/*
-               * What produced the run, each value said with the name of what it is.
-               *
-               * **It was four unlabelled monospace tokens joined by middots** — `0.0.0 ·
-               * development · fixture-host · sha256:fixture` — and a person looking at it could not
-               * tell which was the engine and which was the factory. That is not a guess: somebody
-               * read this line and asked what each part of it was.
-               *
-               * Inline rather than the panel's stacked `Field`, because this is a header. A stacked
-               * label doubles the height of a block that sits above the timeline on every run, and
-               * how far down the page the timeline starts is something people already complain
-               * about.
-               *
-               * Two of the six were recorded and drawn nowhere: the key the run was deduplicated by,
-               * which answers *did two triggers make one run*, and the branch, which the README calls
-               * the durable state of a run.
-               */}
-              <div class="flex flex-wrap items-baseline gap-x-5 gap-y-1" data-run-stamp>
-                <Show when={document().daemon}>
-                  {(daemon) => (
-                    <>
-                      <Stamp name="project" label="Project">
-                        {daemon().projectId}
-                      </Stamp>
-                      <Stamp name="revision" label="Pinned revision">
-                        {daemon().revisionId}
-                      </Stamp>
-                      <Stamp name="graph" label="Pinned graph">
-                        {daemon().packageGraphId}
-                      </Stamp>
-                      <Stamp name="execution" label="Execution">
-                        {daemon().queueReason ?? daemon().state}
-                      </Stamp>
-                    </>
-                  )}
-                </Show>
-                <Stamp name="engine" label="engine">
-                  {document().run.run.engineVersion}
-                </Stamp>
-                <Stamp name="commit" label="commit">
-                  {document().run.run.engineCommit}
-                </Stamp>
-                <Stamp name="host" label="host">
-                  {document().run.run.host}
-                </Stamp>
-                <Stamp name="config" label="Factory revision">
-                  {document().run.run.configDigest}
-                </Stamp>
-                <Stamp name="idempotency-key" label="idempotency key">
-                  {document().run.run.idempotencyKey}
-                </Stamp>
-                <Stamp
-                  name="branch"
-                  label="branch"
-                  absent="no sandbox was acquired"
-                  when={document().sandboxes[0] !== undefined}
-                >
-                  {document().sandboxes[0]?.branch}
-                </Stamp>
-              </div>
+              <details class="rounded border border-border p-3">
+                <summary class="cursor-pointer text-sm">Technical details</summary>
+                <div class="flex flex-wrap items-baseline gap-x-5 gap-y-1" data-run-stamp>
+                  <Show when={document().daemon}>
+                    {(daemon) => (
+                      <>
+                        <Stamp name="project" label="Project">
+                          {daemon().projectId}
+                        </Stamp>
+                        <Stamp name="revision" label="Pinned revision">
+                          {daemon().revisionId}
+                        </Stamp>
+                        <Stamp name="graph" label="Pinned graph">
+                          {daemon().packageGraphId}
+                        </Stamp>
+                        <Stamp name="execution" label="Execution">
+                          {daemon().queueReason ?? daemon().state}
+                        </Stamp>
+                      </>
+                    )}
+                  </Show>
+                  <Stamp name="engine" label="engine">
+                    {document().run.run.engineVersion}
+                  </Stamp>
+                  <Stamp name="commit" label="commit">
+                    {document().run.run.engineCommit}
+                  </Stamp>
+                  <Stamp name="host" label="host">
+                    {document().run.run.host}
+                  </Stamp>
+                  <Stamp name="config" label="Factory revision">
+                    {document().run.run.configDigest}
+                  </Stamp>
+                  <Stamp name="idempotency-key" label="idempotency key">
+                    {document().run.run.idempotencyKey}
+                  </Stamp>
+                  <Stamp
+                    name="branch"
+                    label="branch"
+                    absent="no sandbox was acquired"
+                    when={document().sandboxes[0] !== undefined}
+                  >
+                    {document().sandboxes[0]?.branch}
+                  </Stamp>
+                </div>
+              </details>
             </header>
 
             <Show when={document().daemon?.executionFault}>
@@ -360,8 +348,8 @@ export const RunView = (props: {
                   title={`External action uncertainty: ${uncertainty().state}`}
                 >
                   <p class="mt-1">
-                    Action <code>{uncertainty().actionId}</code> for Phase {uncertainty().phasePath}
-                    #{uncertainty().attempt} has no confirmed result.
+                    Action <code class="break-all">{uncertainty().actionId}</code> for Phase{" "}
+                    {uncertainty().phasePath}#{uncertainty().attempt} has no confirmed result.
                   </p>
                   <p class="mt-1 text-xs">
                     Missing output, timeout, replacement, a new Claim, and Trace absence do not

@@ -59,7 +59,7 @@ const grant = async (daemon: RunningDaemon): Promise<string> => {
   const value = (await response.json()) as { readonly launchUrl: string };
   const launch = new URL(value.launchUrl);
   expect(launch.origin).toBe(daemon.endpoint.consoleOrigin);
-  expect(launch.pathname).toBe("/daemon");
+  expect(launch.pathname).toBe("/runs");
   const secret = new URLSearchParams(launch.hash.slice(1)).get("grant");
   expect(secret).not.toBeNull();
   return secret ?? "";
@@ -126,6 +126,29 @@ describe("instance-bound browser access", () => {
     expect(accepted.headers.get("cache-control")).toBe("no-store");
     expect((await exchange(daemon, secret)).status).toBe(401);
   });
+
+  it("keeps an authenticated notification stream open while a Run is silent", async () => {
+    const daemon = start(paths());
+    const session = (await (
+      await exchange(daemon, await grant(daemon))
+    ).json()) as BrowserSessionResponse;
+    const response = await fetch(`${daemon.endpoint.consoleOrigin}/api/v1/notifications`, {
+      headers: { authorization: `Bearer ${session.credential}` },
+    });
+    expect(response.status).toBe(200);
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    try {
+      expect((await reader?.read())?.done).toBe(false);
+      const closed = reader?.read().then(
+        () => false,
+        () => false,
+      );
+      expect(await Promise.race([closed, Bun.sleep(22_000).then(() => true)])).toBe(true);
+    } finally {
+      await reader?.cancel().catch(() => {});
+    }
+  }, 25_000);
 
   it("authorizes one tab session for 12 hours and rejects cross-origin mutations", async () => {
     let time = Date.UTC(2026, 8, 1, 12);

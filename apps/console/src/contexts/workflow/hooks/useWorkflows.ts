@@ -3,7 +3,7 @@ import { type UseQueryResult, useQuery } from "@tanstack/solid-query";
 import { readWorkflows } from "../../daemon/services/browserAccess.ts";
 import { daemonPollInterval } from "../../shared/services/queryClient.ts";
 
-export const useWorkflows = (projectId: string): UseQueryResult<WorkflowSnapshot, Error> =>
+export const useWorkflows = (projectId?: string): UseQueryResult<WorkflowSnapshot, Error> =>
   useQuery(() => ({
     queryKey: ["projects", projectId, "workflows"],
     queryFn: () => readWorkflows(projectId),

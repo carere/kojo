@@ -1,12 +1,7 @@
 import { Link } from "@tanstack/solid-router";
 import type { JSX } from "solid-js";
 
-const navigation = [
-  { label: "Projects", to: "/" as const },
-  { label: "Runs", to: "/runs" as const },
-  { label: "Gate", to: "/gates" as const },
-  { label: "Daemon", to: "/daemon" as const },
-] as const;
+const navigation = [{ label: "Runs", to: "/runs" as const }] as const;
 
 export const ConsoleNavigation = (props: { readonly current: string }): JSX.Element => (
   <aside class="border-border border-b pb-4 lg:border-r lg:border-b-0 lg:pr-6">
