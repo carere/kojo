@@ -16,8 +16,8 @@ import { useNow } from "../../shared/ports/Now.tsx";
 import type { PhaseKind, PhaseState, RunDoc } from "../models/RunDoc.ts";
 import {
   defaultBreakRule,
+  lanesOfRow,
   type PhaseSpan,
-  spansOfRow,
   spanWidth,
   type Waterfall as WaterfallView,
   waterfall,
@@ -487,6 +487,7 @@ export const Waterfall = (props: {
             <For each={view().rows}>
               {(row) => (
                 <GanttRow
+                  style={{ height: `${lanesOfRow(view().spans, row.rowId).length * 44}px` }}
                   data-row={row.rowId}
                   data-scope={row.scope}
                   data-depth={row.depth}
@@ -541,9 +542,20 @@ export const Waterfall = (props: {
                         }}
                       />
                     </Show>
-                    <For each={spansOfRow(view().spans, row.rowId)}>
-                      {(span) => (
-                        <Span span={span} view={view()} store={store} onPick={props.onPickPhase} />
+                    <For each={lanesOfRow(view().spans, row.rowId)}>
+                      {(lane) => (
+                        <div class="relative h-11">
+                          <For each={lane}>
+                            {(span) => (
+                              <Span
+                                span={span}
+                                view={view()}
+                                store={store}
+                                onPick={props.onPickPhase}
+                              />
+                            )}
+                          </For>
+                        </div>
                       )}
                     </For>
                   </GanttLane>

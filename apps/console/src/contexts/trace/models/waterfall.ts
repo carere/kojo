@@ -159,7 +159,9 @@ export interface Waterfall {
 export const hostRow = "host";
 
 const isTerminal = (doc: RunDoc): boolean =>
-  doc.run.outcome === "succeeded" || doc.run.outcome === "failed";
+  doc.run.outcome === "succeeded" ||
+  doc.run.outcome === "failed" ||
+  doc.run.outcome === "cancelled";
 
 /**
  * The rows, in the order a scope tree reads: the host, then each acquisition oldest first.
@@ -544,11 +546,19 @@ export const waterfall = (doc: RunDoc, now: number, options: WaterfallOptions): 
 export const spanWidth = (view: Waterfall, span: PhaseSpan): number =>
   Math.max(view.xOf(span.endedAt) - view.xOf(span.startedAt), minimumSpanWidth);
 
-/** The spans of one row, oldest first. A row with none is still a row: the scope existed. */
-export const spansOfRow = (
+/** Place overlapping Phases on separate visual lanes within their Sandbox scope. */
+export const lanesOfRow = (
   spans: ReadonlyArray<PhaseSpan>,
   rowId: string,
-): ReadonlyArray<PhaseSpan> =>
-  spans
+): ReadonlyArray<ReadonlyArray<PhaseSpan>> => {
+  const lanes: PhaseSpan[][] = [];
+  const ordered = spans
     .filter((span) => span.rowId === rowId)
     .sort((left, right) => left.startedAt - right.startedAt);
+  for (const span of ordered) {
+    const available = lanes.find((lane) => (lane.at(-1)?.endedAt ?? 0) <= span.startedAt);
+    if (available === undefined) lanes.push([span]);
+    else available.push(span);
+  }
+  return lanes.length === 0 ? [[]] : lanes;
+};

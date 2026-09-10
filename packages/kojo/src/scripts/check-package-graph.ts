@@ -3,6 +3,8 @@ import { isAbsolute, relative, resolve } from "node:path";
 import type { BootstrapResponse } from "@carere/kojo-client-contracts/contexts/client/contracts/bootstrap";
 import { RUNNER_PROTOCOL_VERSION } from "@carere/kojo-runner-contracts/contexts/project/contracts/frame";
 
+import { invocationObservationFeature } from "@carere/kojo-runner-contracts/contexts/project/contracts/handshake";
+
 interface PackageManifest {
   readonly private?: boolean;
   readonly name: string;
@@ -139,7 +141,7 @@ if (
   runtime.bun.minimum !== "1.3.14" ||
   !sameMembers(runtime.hosts, ["darwin", "linux"]) ||
   !sameMembers(runtime.runnerProtocols.map(String), [String(RUNNER_PROTOCOL_VERSION)]) ||
-  runtime.requiredFeatures.length !== 0
+  !sameMembers(runtime.requiredFeatures, [invocationObservationFeature])
 ) {
   fail("runtime-manifest.json drifted from the static contract");
 }

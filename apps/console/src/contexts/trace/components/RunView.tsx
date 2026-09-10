@@ -342,7 +342,13 @@ export const RunView = (props: {
               )}
             </Show>
 
-            <Show when={document().daemon?.uncertainty}>
+            <Show
+              when={
+                document().daemon?.uncertainty?.state === "unresolved"
+                  ? document().daemon?.uncertainty
+                  : undefined
+              }
+            >
               {(uncertainty) => (
                 <Notice
                   tone="retrying"
@@ -504,7 +510,7 @@ export const RunView = (props: {
             <SoluxProvider store={store}>
               <div class="flex flex-col gap-4">
                 {/* Keep the Waterfall visible above the detail panel in one page flow. */}
-                <div class="bg-background flex w-full min-w-0 flex-col gap-2 lg:sticky lg:top-0 lg:z-10 lg:max-h-[60vh] lg:overflow-x-hidden lg:overflow-y-auto lg:pt-2">
+                <div class="bg-background flex w-full min-w-0 flex-col gap-2 ">
                   <Show
                     when={spansOf(document(), now()).length > 0}
                     fallback={

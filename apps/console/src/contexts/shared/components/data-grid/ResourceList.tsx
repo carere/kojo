@@ -25,7 +25,6 @@ export const ResourceList = <T,>(props: {
       matchedCount={filtered().length}
       recordCount={props.items.length}
       resourceName={props.label}
-      selectedCount={0}
     >
       <div class="flex flex-wrap gap-2 border-border border-b p-2" data-slot="filters">
         <label class="grid flex-1 gap-1 text-muted-foreground text-xs">

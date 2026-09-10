@@ -6,7 +6,6 @@ export const DataGrid = (props: {
   readonly matchedCount: number;
   readonly recordCount: number;
   readonly resourceName: string;
-  readonly selectedCount: number;
 }): JSX.Element => (
   <section
     class="overflow-hidden rounded-lg border border-border"
@@ -18,7 +17,6 @@ export const DataGrid = (props: {
       <span>
         {props.matchedCount} of {props.recordCount} {props.resourceName}
       </span>
-      <span>{props.selectedCount} selected</span>
     </footer>
   </section>
 );

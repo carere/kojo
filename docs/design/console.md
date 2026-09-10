@@ -16,20 +16,20 @@ An executing Run can show several active Phases. Completing one Phase does not r
 The Console reads these observations from the authoritative Run snapshot. Reconnect restores them;
 a non-executing Run cannot display a growing active span.
 
-## Resource list composition
+## Run list and detail
 
-Projects and Workflows use the local Zaidan Data Grid and Filters composition. Their row models use
-TanStack Table. Native controls keep the filters, row selection, links, actions, and pagination in
-the keyboard order. The table wrapper owns horizontal overflow on narrow layouts; the document does
-not scroll sideways.
+The Console has no dedicated Project catalogue, Workflow catalogue, Gate queue, or Daemon page.
+The Run start form reads Project and Workflow context. Management remains available through the CLI.
+The Run list keeps search and status filters. It has no bulk selection or column controls. Detail
+lists keep search and progressive loading when needed, with no selection counters.
 
-Two deliberate custom gaps remain. Runs use a status table because their waiting reason and live
-state are already one ordered projection. Gate uses a grouped table because waiting and settled
-Askings must remain separate while they share one filter and page. Both gaps use the same Zaidan
-table primitives, filter shape, pagination state, keyboard controls, and narrow-layout overflow.
+The Waterfall groups Phases by Sandbox acquisition. Overlapping Phases occupy separate visual lanes
+inside the same scope. The timeline scrolls within its own card on narrow screens. It does not cover
+Invocation detail while the operator scrolls the page. Only an unresolved external action shows the
+uncertainty warning and retry controls. A confirmed result does not imply unresolved work.
 
-The Console does not serve files from a terminal-owned application. It does not open SQLite and
-does not execute or resume Runs.
+The Console does not open SQLite and does not execute or resume Runs. It reads Daemon snapshots and
+sends explicit client commands.
 
 ## Gate answers
 
@@ -39,8 +39,8 @@ Gate state. The Console can reconnect and read the same state.
 
 ## Health
 
-Health reports the Daemon, store, Runner, and Project facts separately. An empty Run list is an idle
-state. It is not proof that execution is unavailable.
+Connection status and Run faults identify the affected Daemon, Runner, or Project. An empty Run
+list is an idle state. It is not proof that execution is unavailable.
 
 ## Daemon connection
 
