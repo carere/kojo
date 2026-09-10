@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AskingSnapshot } from "@carere/kojo-client-contracts/contexts/client/contracts/gate";
 import type { MutationEnvelope } from "@carere/kojo-client-contracts/contexts/client/contracts/mutation";
 import type {
   RunDocument,
@@ -456,6 +457,123 @@ afterEach(async () => {
 });
 
 describe("Daemon no-Trigger Run API", () => {
+  it("retains parallel Askings and applies each exact answer before Run completion", async () => {
+    const hostPaths = paths();
+    const location = project(roots[0] ?? "", join(roots[0] ?? "", "parallel.pid"));
+    const source = join(location, ".kojo", "workflows", "example.ts");
+    const before = readFileSync(source, "utf8");
+    writeFileSync(
+      source,
+      `import { Duration } from "effect";
+import { gate } from "@carere/kojo-runtime/contexts/workflow/services/phase/gate";
+import * as OnExpiry from "@carere/kojo-runtime/contexts/gate/models/OnExpiry";
+` +
+        before
+          .slice(0, before.indexOf("  () => code("))
+          .replace("error: Schema.Never", "error: Schema.Unknown") +
+        `
+  () => Effect.all(["layout", "copy"].map((name) => gate({ name, description: name + " review", actor: "reviewer", choices: ["approve", "reject"], deadline: Duration.hours(1), onExpiry: OnExpiry.fail(), asking: 1 })), { concurrency: 2 }).pipe(Effect.as(null)),
+);
+`,
+    );
+    mkdirSync(hostPaths.dataRoot, { recursive: true, mode: 0o700 });
+    const captured = captureWorkflowRevision({
+      project: location,
+      dataRoot: hostPaths.dataRoot,
+      workflowName: "example",
+    });
+    const databasePath = join(hostPaths.dataRoot, "kojo.db");
+    const database = new Database(databasePath, { create: true, strict: true });
+    database.run(
+      "CREATE TABLE daemon_metadata (name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT",
+    );
+    const projects = new SqliteProjectRepository(database);
+    const registered = await Effect.runPromise(
+      projects.register({
+        requestId: "seed-parallel",
+        requestBody: "seed-parallel",
+        dataIdentity: "seed-data",
+        location,
+        observedAt: new Date().toISOString(),
+        factory: {
+          state: "available",
+          refreshState: "current",
+          workflows: [
+            { workflowName: "example", availability: "available", source, revision: captured },
+          ],
+        },
+      }),
+    );
+    database.close(false);
+    chmodSync(databasePath, 0o600);
+    const daemon = startDaemon(hostPaths, { automaticRefresh: false });
+    daemons.push(daemon);
+    const response = await mutate(
+      daemon,
+      `/api/v1/projects/${registered.project.projectId}/workflows/example/actions/start`,
+      {
+        mutationVersion: 1,
+        requestId: "start-parallel",
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation: "startWorkflow",
+        target: {
+          identityVersion: 1,
+          kind: "workflow",
+          parts: [registered.project.projectId, "example"],
+        },
+        arguments: { payload: null },
+        preconditions: { mode: "no-trigger", revisionId: captured.revisionId },
+      },
+    );
+    expect(response.status, await response.clone().text()).toBe(202);
+    const admitted = (await response.json()) as StartRunResult;
+    const askings = async () =>
+      ((await (await call(daemon, "/api/v1/askings")).json()) as AskingSnapshot).askings.filter(
+        (asking) => asking.identity.runId === admitted.runId,
+      );
+    const deadline = Date.now() + 10_000;
+    let current = await askings();
+    while (current.length < 2 && Date.now() < deadline) {
+      await Bun.sleep(20);
+      current = await askings();
+    }
+    expect(current.map((asking) => asking.identity.gatePath).sort()).toEqual(["copy", "layout"]);
+    const answer = async (index: number) => {
+      const requestId = `parallel-answer-${index}`;
+      const response = await mutate(daemon, "/api/v1/gate-answers", {
+        mutationVersion: 1,
+        requestId,
+        dataIdentity: daemon.endpoint.dataIdentity,
+        operation: "recordGateVerdict",
+        target: { identityVersion: 1, kind: "gate", parts: [requestId] },
+        arguments: {
+          token: current[index]?.token ?? "missing",
+          choice: "approve",
+          reason: "controlled review passed",
+        },
+        preconditions: {},
+      });
+      expect(response.status, await response.clone().text()).toBe(200);
+    };
+    await answer(0);
+    while (
+      !(await askings()).some(
+        (asking) => asking.token === current[0]?.token && asking.state === "applied",
+      ) &&
+      Date.now() < deadline
+    )
+      await Bun.sleep(20);
+    const between = await askings();
+    expect(between.find((asking) => asking.token === current[0]?.token)?.state).toBe("applied");
+    expect(between.find((asking) => asking.token === current[1]?.token)?.state).toBe("unanswered");
+    expect(
+      ((await (await call(daemon, `/api/v1/runs/${admitted.runId}`)).json()) as RunDocument).state,
+    ).toBe("suspended");
+    await answer(1);
+    expect((await waitForRun(daemon, admitted.runId)).state).toBe("succeeded");
+    expect((await askings()).every((asking) => asking.state === "applied")).toBe(true);
+  });
+
   it("stops all current Trigger polling before historical import and restores all checkpoints in one Runner", async () => {
     const hostPaths = paths();
     const root = roots[0] ?? "";
@@ -1007,7 +1125,17 @@ describe("Daemon no-Trigger Run API", () => {
           sourcePath,
           readFileSync(sourcePath, "utf8")
             .replace("import { writeFileSync }", "import { writeFileSync, existsSync }")
-            .replace("() => code(", "() => Effect.all([code(")
+            .replace(
+              "import { workflow }",
+              'import { reportProgress } from "@carere/kojo-runtime/contexts/workflow/services/reportProgress";\nimport { workflow }',
+            )
+            .replace(
+              "() => code(",
+              `() => reportProgress("progress/initial", [
+              { key: "build", title: "Build issue", revision: 2, state: "executing", detail: "Implementation", dependencies: [] },
+              { key: "dependent", title: "Dependent issue", revision: 1, state: "waiting", waitingFor: "dependencies", detail: "Wait for accepted build changes", dependencies: ["build"] }
+            ]).pipe(Effect.andThen(Effect.all([code(`,
+            )
             .replace(
               "\n  ),\n);",
               `
@@ -1017,7 +1145,7 @@ describe("Daemon no-Trigger Run API", () => {
         return existsSync(${JSON.stringify(barrier)}) ? Effect.succeed(null) : Effect.sleep(10).pipe(Effect.andThen(Effect.suspend(wait)));
       })),
     )
-  )], { concurrency: 2 }).pipe(Effect.as(null)),
+  )], { concurrency: 2 }).pipe(Effect.as(null)))),
 );`,
             ),
         );
@@ -1091,6 +1219,15 @@ describe("Daemon no-Trigger Run API", () => {
         ).json()) as RunDocument;
         expect(active.state).toBe("executing");
         expect(active.phases).toEqual([]);
+        expect(active.progress).toEqual([
+          expect.objectContaining({ key: "build", revision: 2, state: "executing" }),
+          expect.objectContaining({
+            key: "dependent",
+            state: "waiting",
+            waitingFor: "dependencies",
+            dependencies: ["build"],
+          }),
+        ]);
         expect(active.activePhases?.map((phase) => phase.phasePath).sort()).toEqual([
           "compile",
           "review",
@@ -1112,6 +1249,7 @@ describe("Daemon no-Trigger Run API", () => {
           await call(daemon, `/api/v1/runs/${admitted.runId}`)
         ).json()) as RunDocument;
         expect(reconnected.activePhases).toEqual(afterReview.activePhases);
+        expect(reconnected.progress).toEqual(active.progress);
 
         const unhandled: unknown[] = [];
         const captureUnhandled = (cause: unknown): void => {

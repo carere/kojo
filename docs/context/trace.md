@@ -20,6 +20,12 @@ Admission retains the same public facts so queued Runs remain identifiable. Othe
 remain private. Its status changes as the Run progresses.
 _Avoid_: session, adw
 
+**Work progress**:
+Public facts supplied by authored code about a named work item. Each item has a stable key and
+increasing revision. A recorded Phase result preserves the observation across reconnect and replay.
+Waiting reasons, acceptance, and integration states are authored claims; they do not establish
+execution or acceptance authority. The Console does not infer these facts from Workflow source.
+
 **Phase record**:
 One wide record of the observations of a Phase attempt, written once on exit. Process loss can
 prevent that write; a missing record does not establish the Phase's outcome.

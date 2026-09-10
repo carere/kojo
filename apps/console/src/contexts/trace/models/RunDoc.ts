@@ -61,6 +61,7 @@ export interface RepoLine {
 
 /** One phase record: written once, on exit, on every path. */
 export interface PhaseLine {
+  readonly result?: RunDocument["phases"][number]["result"];
   readonly phaseId: string;
   readonly name: string;
   readonly description: string;
@@ -139,6 +140,7 @@ export interface InFlightLine {
 }
 
 export interface RunDoc {
+  readonly progress?: RunDocument["progress"];
   readonly request?: RunDocument["request"];
   readonly invocations?: ReadonlyArray<InvocationDocument>;
   readonly invocationTotals?: InvocationTotals;

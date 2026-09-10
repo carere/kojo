@@ -1,5 +1,6 @@
 import type { JsonValue } from "../../shared/codecs/json.ts";
 import type { InvocationDocument, InvocationTotals } from "./invocation.ts";
+import type { WorkItemProgress } from "./progress.ts";
 import type { RollbackOutcome } from "./rollback.ts";
 
 export type RunExecutionState =
@@ -79,6 +80,7 @@ export interface RunSandboxDocument {
 
 /** One Daemon-owned Run observation. The authored payload is intentionally not exposed. */
 export interface RunDocument {
+  readonly progress?: ReadonlyArray<WorkItemProgress & { readonly observedAt: string }>;
   /** Authored public facts, retained at Run start. Other payload fields remain private. */
   readonly request?: {
     readonly title: string;

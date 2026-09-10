@@ -34,3 +34,13 @@ the workflow. The run is a walk, and a walk is a waterfall.**
   `canDropEvent`, `onEventUpdate`, `addEvent` — has no meaning over immutable history and is not
   ported. Its native day-to-year scales are wrong by three orders of magnitude for phases that last
   seconds, so second, minute, and hour scales are added.
+
+## Authored progress observations (#102)
+
+The Run can also show work-item cards when its Workflow calls `reportProgress`. This is an explicit
+presentation contract, not reconstruction of TypeScript control flow. Work items do not replace
+Phase scopes or the Waterfall and do not establish scheduling or acceptance authority. The issue
+example supplies dependency and capacity waiting, accepted results, and serial integration states.
+Other Workflows can omit this contract or supply different work items. The Console retains only
+the latest authored revision per item in its current view; the underlying Phase results remain
+under normal Run retention.

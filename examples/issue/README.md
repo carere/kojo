@@ -68,6 +68,7 @@ From the Kojo source checkout:
 ```bash
 moon run issue:test issue:typecheck
 bun packages/kojo/src/main.ts doctor --root examples/issue --image <built-image>
+KOJO_TEST_DOCKER_IMAGE=<built-image> moon run kojo-runtime:test-integration -- DockerWorktrees.test.ts
 ```
 
 Unit tests exercise scheduling, source revisions, capacity, blocker refusal, repair limits, and
@@ -75,6 +76,16 @@ acceptance through in-memory delivery and Workspace operations. The image has al
 manually with a local test application and Chromium. Authenticated single-issue and graph trials
 on Zaidan remain required; this example is not yet a publication acceptance result.
 
+The optional Docker integration test uses the built image, a throwaway Git repository, and a
+public fixture file in place of credentials. It checks separate worktree writes, the read-only
+file mount, commits inside each container, serial integration, and the source revision of
+dependent work. It makes no agent calls. Without `KOJO_TEST_DOCKER_IMAGE`, this test is skipped.
+
 The Workflow declares public request facts for the Console: the issue link, PR branch, and base
 branch. They are retained at admission, including while the Run waits for capacity. Keep this
 function pure and exclude secrets; public request facts have no automatic redaction.
+
+The scheduler supplies public work progress through `reportProgress`: dependency and capacity
+waiting, implementation and UI review, accepted commits, serial integration, and failures. The
+Console also groups recorded Phase results, including check output, review findings, and PR links.
+The scheduler owns these states. Kojo does not infer an issue graph from the Factory.

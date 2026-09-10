@@ -42,11 +42,27 @@ The Run list uses the title; detail shows the link and fields before technical d
 are limited to HTTP(S) without URL credentials. A Workflow without request facts keeps the
 Workflow name and Run identity. A later Factory edit cannot replace an admitted Run request.
 
+## Supplied work progress and results
+
+`reportProgress(name, items)` records explicit public work observations as a normal, replayable
+Phase result. Each name is unique and stable on replay. Each item has a stable key and increasing,
+replay-stable revision. Items can report dependency, capacity, or human waiting; execution;
+acceptance; integration; or failure. The read model selects the highest revision per item, even
+when sibling observations arrive out of order. These facts do not schedule work or prove acceptance.
+
+The Console puts these cards beside the Run progress. It does not infer an authored graph from
+TypeScript or arbitrary Phase output. Internal progress-recording Phases do not fill the Waterfall.
+When execution stops, an old executing observation is labelled stopped. A waiting item in a
+terminal Run is labelled not completed. Completed check and review results, commit results, and
+HTTP(S) delivery links are grouped in expandable results. Open results stay open during polling.
+
 ## Gate answers
 
 The Console records an answer through the Daemon API. The Daemon validates the token and choice,
 persists the transition, and applies it through the owning Runner. The response reports the durable
-Gate state. The Console can reconnect and read the same state.
+Gate state. The Console can reconnect and read the same state. All unresolved askings on a Run
+remain visible, including parallel Gates and answers waiting for application. A newer asking
+cannot hide a sibling. Forms retain their identity while polling.
 
 ## Health
 

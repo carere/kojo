@@ -47,6 +47,64 @@ const setup = (path: string): Database => {
 };
 
 describe("SQLite Gate application", () => {
+  it("commits sibling Askings and suspension together or preserves the active Claim", async () => {
+    const root = mkdtempSync(join(tmpdir(), "kojo-gate-batch-"));
+    const database = setup(join(root, "kojo.db"));
+    try {
+      const repository = new SqliteDaemonGateRepository(database);
+      const asking = (name: string, token: string) => ({
+        identity: {
+          identityVersion: 1 as const,
+          runId: authority.runId,
+          gatePath: name,
+          askingNumber: 1,
+          escalationStage: 0,
+        },
+        token,
+        projectId: "project-1",
+        workflowName: "release",
+        description: name,
+        actor: "reviewer",
+        choices: ["approve", "reject"],
+        deadline: "2026-09-02T00:00:00.000Z",
+        expiryBranch: "fail" as const,
+        internalDeferredName: `gate/${name}/1`,
+        createdAt: "2026-09-01T20:00:00.000Z",
+      });
+      await expect(
+        Effect.runPromise(
+          repository.createAskingsAndSuspend(authority, [
+            asking("layout", "same-token"),
+            asking("copy", "same-token"),
+          ]),
+        ),
+      ).rejects.toThrow();
+      expect(await Effect.runPromise(repository.list)).toEqual([]);
+      expect(database.query("SELECT state FROM workflow_runs").get()).toEqual({
+        state: "executing",
+      });
+      expect(database.query("SELECT count(*) AS count FROM workflow_claims").get()).toEqual({
+        count: 1,
+      });
+      const siblings = await Effect.runPromise(
+        repository.createAskingsAndSuspend(authority, [
+          asking("layout", "layout-token"),
+          asking("copy", "copy-token"),
+        ]),
+      );
+      expect(siblings.map((item) => item.identity.gatePath)).toEqual(["layout", "copy"]);
+      expect(database.query("SELECT state FROM workflow_runs").get()).toEqual({
+        state: "suspended",
+      });
+      expect(database.query("SELECT count(*) AS count FROM workflow_claims").get()).toEqual({
+        count: 0,
+      });
+    } finally {
+      database.close(false);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("keeps an on-time Verdict Recorded until a later fenced Runner marks it Applied", async () => {
     const root = mkdtempSync(join(tmpdir(), "kojo-gate-application-"));
     const path = join(root, "kojo.db");

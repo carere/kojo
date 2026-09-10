@@ -1,6 +1,7 @@
 import { Effect, Layer } from "effect";
 import type { RunAuthority } from "../../workflow/models/DaemonRun.ts";
 import type {
+  CreateAsking,
   DaemonAsking,
   DeferredApplication,
   GateTransitionReceipt,
@@ -58,30 +59,51 @@ const attempt = <A>(evaluate: () => A): Effect.Effect<A, GateTransitionError> =>
           }),
   });
 
+const createAskings = (
+  state: InMemoryGateState,
+  authority: RunAuthority,
+  requests: ReadonlyArray<CreateAsking>,
+): ReadonlyArray<DaemonAsking> => {
+  if (requests.length === 0)
+    return fail("ASKING_CONFLICT", "Suspension requires at least one Asking");
+  const nextAskings = new Map(state.askings);
+  const nextTokens = new Map(state.tokens);
+  const created: Array<DaemonAsking> = [];
+  for (const request of requests) {
+    if (request.identity.runId !== authority.runId)
+      return fail("STALE_AUTHORITY", "The Asking belongs to another Run");
+    const asking: DaemonAsking = { ...request, state: "unanswered" };
+    const key = identityKey(asking);
+    const prior = nextAskings.get(key);
+    if (prior !== undefined) {
+      if (
+        prior.token !== asking.token ||
+        prior.internalDeferredName !== asking.internalDeferredName ||
+        prior.deadline !== asking.deadline
+      ) {
+        return fail("ASKING_CONFLICT", "the Asking identity already has different content");
+      }
+      created.push(prior);
+      continue;
+    }
+    if (nextTokens.has(asking.token))
+      return fail("ASKING_CONFLICT", "the Gate token already names another Asking");
+    nextAskings.set(key, asking);
+    nextTokens.set(asking.token, key);
+    created.push(asking);
+  }
+  for (const [key, asking] of nextAskings) state.askings.set(key, asking);
+  for (const [key, token] of nextTokens) state.tokens.set(key, token);
+  state.authority.set(authority.runId, authority);
+  return created;
+};
+
 export const layer = (state: InMemoryGateState = makeState()): Layer.Layer<DaemonGateRepository> =>
   Layer.succeed(DaemonGateRepository, {
     createAskingAndSuspend: (authority, request) =>
-      attempt(() => {
-        const asking: DaemonAsking = { ...request, state: "unanswered" };
-        const key = identityKey(asking);
-        const prior = state.askings.get(key);
-        if (prior !== undefined) {
-          if (
-            prior.token !== asking.token ||
-            prior.internalDeferredName !== asking.internalDeferredName ||
-            prior.deadline !== asking.deadline
-          ) {
-            return fail("ASKING_CONFLICT", "the Asking identity already has different content");
-          }
-          return prior;
-        }
-        if (state.tokens.has(asking.token))
-          return fail("ASKING_CONFLICT", "the Gate token already names another Asking");
-        state.askings.set(key, asking);
-        state.tokens.set(asking.token, key);
-        state.authority.set(authority.runId, authority);
-        return asking;
-      }),
+      attempt(() => createAskings(state, authority, [request])[0] as DaemonAsking),
+    createAskingsAndSuspend: (authority, requests) =>
+      attempt(() => createAskings(state, authority, requests)),
     recordVerdictAndSchedule: (request) =>
       attempt(() => {
         const receiptKey = JSON.stringify([request.dataIdentity, request.requestId]);

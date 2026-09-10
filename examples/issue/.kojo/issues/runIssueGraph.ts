@@ -1,4 +1,5 @@
-import { Effect, Schema } from "effect";
+import type { WorkItemProgress } from "@carere/kojo-runtime/contexts/trace/models/WorkItemProgress";
+import { Cause, Effect, Schema } from "effect";
 
 export interface Issue {
   readonly number: number;
@@ -18,6 +19,10 @@ export interface AcceptedIssue {
 export interface IssueDelivery<E, R> {
   readonly implement: (issue: Issue, revision: string) => Effect.Effect<AcceptedIssue, E, R>;
   readonly integrate: (result: AcceptedIssue) => Effect.Effect<string, E, R>;
+  readonly observe?: (
+    name: string,
+    items: ReadonlyArray<WorkItemProgress>,
+  ) => Effect.Effect<unknown, never, R>;
 }
 
 export class InvalidIssueGraph extends Schema.TaggedError<InvalidIssueGraph>()(
@@ -75,8 +80,53 @@ export const runIssueGraph = <E, R>(options: {
     if (reason !== undefined) return yield* new InvalidIssueGraph({ reason });
     const integrated = new Set<number>();
     const accepted: Array<AcceptedIssue> = [];
+    const progress = new Map<number, WorkItemProgress>();
+    const observe = (
+      issue: Issue,
+      state: WorkItemProgress["state"],
+      detail: string,
+      waitingFor?: WorkItemProgress["waitingFor"],
+      dependencies: ReadonlyArray<number> = [],
+    ): Effect.Effect<void, never, R> =>
+      Effect.gen(function* () {
+        const previous = progress.get(issue.number);
+        if (previous?.state === state && previous.detail === detail) return;
+        const item: WorkItemProgress = {
+          key: String(issue.number),
+          title: `#${issue.number} ${issue.title}`,
+          revision: (previous?.revision ?? 0) + 1,
+          state,
+          detail,
+          dependencies: dependencies.map(String),
+          url: issue.url,
+          ...(waitingFor === undefined ? {} : { waitingFor }),
+        };
+        progress.set(issue.number, item);
+        yield* options.delivery.observe?.(`progress/issue-${issue.number}/${item.revision}`, [
+          item,
+        ]) ?? Effect.void;
+      });
+    const failed =
+      (issue: Issue) =>
+      (cause: Cause.Cause<E>): Effect.Effect<void, never, R> =>
+        Cause.hasInterrupts(cause)
+          ? Effect.void
+          : observe(issue, "failed", Cause.pretty(cause).slice(0, 8000));
     let revision = options.baseRevision;
     while (integrated.size < options.issues.length) {
+      for (const issue of options.issues) {
+        if (integrated.has(issue.number)) continue;
+        const blockers = issue.blockedBy.filter((id) => !integrated.has(id));
+        yield* observe(
+          issue,
+          "waiting",
+          blockers.length > 0
+            ? `Wait for integrated changes from ${blockers.map((id) => `#${id}`).join(", ")}.`
+            : "Wait for capacity in the next implementation batch.",
+          blockers.length > 0 ? "dependencies" : "capacity",
+          blockers,
+        );
+      }
       const ready = options.issues
         .filter(
           (issue) =>
@@ -88,12 +138,43 @@ export const runIssueGraph = <E, R>(options: {
       const source = revision;
       const results = yield* Effect.forEach(
         ready,
-        (issue) => options.delivery.implement(issue, source),
+        (issue) =>
+          Effect.gen(function* () {
+            yield* observe(issue, "executing", `Implement and review from ${source}.`);
+            const result = yield* options.delivery
+              .implement(issue, source)
+              .pipe(Effect.onError(failed(issue)));
+            if (result.issue !== issue.number)
+              return yield* new InvalidIssueGraph({
+                reason: `Implementation for #${issue.number} returned #${result.issue}.`,
+              });
+            yield* observe(
+              issue,
+              "accepted",
+              `Checks and UI review accepted ${result.sha} on ${result.branch}.`,
+            );
+            return result;
+          }),
         { concurrency: options.concurrency },
       );
       for (const result of results) {
+        const issue = options.issues.find((item) => item.number === result.issue);
+        if (issue === undefined)
+          return yield* new InvalidIssueGraph({
+            reason: `Implementation returned unknown issue #${result.issue}.`,
+          });
+        if (options.mode === "graph")
+          yield* observe(issue, "integrating", `Merge accepted commit ${result.sha}.`);
         revision =
-          options.mode === "single" ? result.sha : yield* options.delivery.integrate(result);
+          options.mode === "single"
+            ? result.sha
+            : yield* options.delivery.integrate(result).pipe(Effect.onError(failed(issue)));
+        if (options.mode === "graph")
+          yield* observe(
+            issue,
+            "integrated",
+            `Accepted changes are in combined revision ${revision}.`,
+          );
         integrated.add(result.issue);
         accepted.push(result);
       }

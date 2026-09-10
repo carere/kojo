@@ -11,6 +11,7 @@ export const useRun = (runId: () => string): UseQueryResult<RunDoc, Error> =>
     queryFn: async () => {
       const run = await readRun(runId());
       return {
+        ...(run.progress === undefined ? {} : { progress: run.progress }),
         ...(run.request === undefined ? {} : { request: run.request }),
         invocations: run.invocations ?? [],
         ...(run.invocationTotals === undefined ? {} : { invocationTotals: run.invocationTotals }),
@@ -65,6 +66,7 @@ export const useRun = (runId: () => string): UseQueryResult<RunDoc, Error> =>
               }),
         },
         phases: run.phases.map((phase) => ({
+          ...(phase.result === undefined ? {} : { result: phase.result }),
           phaseId: `${run.runId}/${phase.phasePath}/${phase.attempt}`,
           name: phase.phasePath,
           description: phase.description,

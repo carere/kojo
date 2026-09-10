@@ -220,7 +220,7 @@ export const inspectRegisteredRevision = async (
     enginePayload: bundle.encodeEnginePayload(payload),
     ...(bundle.authoredRequest === undefined
       ? {}
-      : { request: Schema.decodeUnknownSync(RunRequest)(bundle.authoredRequest(payload)) }),
+      : { request: Schema.decodeSync(RunRequest)(bundle.authoredRequest(payload)) }),
   };
 };
 
@@ -461,7 +461,7 @@ export const executeRegisteredRevision = async (
     enginePayload: bundle.encodeEnginePayload(payload),
     ...(bundle.authoredRequest === undefined
       ? {}
-      : { request: Schema.decodeUnknownSync(RunRequest)(bundle.authoredRequest(payload)) }),
+      : { request: Schema.decodeSync(RunRequest)(bundle.authoredRequest(payload)) }),
     runId: request.runId,
     outcome:
       outcome._tag === "Suspended"
@@ -558,7 +558,7 @@ const runRegisteredTrigger = async (options: {
         payload: encodedPayload.ok ? encodedPayload.value : null,
         ...(bundle.authoredRequest === undefined
           ? {}
-          : { request: Schema.decodeUnknownSync(RunRequest)(bundle.authoredRequest(payload)) }),
+          : { request: Schema.decodeSync(RunRequest)(bundle.authoredRequest(payload)) }),
         revisionId: options.registration.revisionId,
         packageGraphId: options.registration.packageGraphId,
         deliveredAt,

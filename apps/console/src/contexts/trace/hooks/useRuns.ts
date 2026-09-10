@@ -39,6 +39,7 @@ export const useRuns = (): UseQueryResult<ReadonlyArray<RunLine>, Error> =>
               ...(run.activePhases ?? []).map((phase) => Date.parse(phase.startedAt)),
               ...(run.invocations ?? []).map((invocation) => Date.parse(invocation.lastActivityAt)),
               ...run.phases.map((phase) => Date.parse(phase.endedAt)),
+              ...(run.progress ?? []).map((item) => Date.parse(item.observedAt)),
               ...(run.gates ?? []).flatMap((gate) => [
                 Date.parse(gate.requestedAt),
                 ...(gate.answeredAt === undefined ? [] : [Date.parse(gate.answeredAt)]),

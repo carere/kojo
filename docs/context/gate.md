@@ -34,6 +34,11 @@ nothing about how long the first two waited. Run ID, Gate path, asking number, a
 identify one Asking.
 _Avoid_: attempt, round, instance
 
+A Run can wait for several Askings at the same time. The Daemon stores all new sibling Askings
+and suspends the Run in one transaction. If one Asking conflicts, it stores none and retains the
+active Claim. Applying one Verdict does not answer another Asking. The Run remains suspended
+while another required Asking has no applicable answer.
+
 **Gate path**:
 The stable identity of a Gate inside one Run. It combines the stable sandbox scope name, when
 present, with the authored Gate name.

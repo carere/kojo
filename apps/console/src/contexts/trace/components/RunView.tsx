@@ -1,11 +1,12 @@
 import { SoluxProvider } from "@carere/solux";
 import { Link, Outlet, useNavigate } from "@tanstack/solid-router";
-import { createSignal, type JSX, Show } from "solid-js";
+import { createEffect, createSignal, For, type JSX, Show } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
 import { cancelRun, retryUncertainAction } from "../../daemon/services/browserAccess.ts";
 import { GateCard } from "../../gate/components/GateCard.tsx";
 import { useAskings } from "../../gate/hooks/useAskings.ts";
 import { type Asking, latestAskingOf } from "../../gate/models/Asking.ts";
-import { awaitingApply } from "../../gate/models/answering.ts";
+import { awaitingApply, isSettled } from "../../gate/models/answering.ts";
 import { Badge, type BadgeTone } from "../../shared/components/Badge.tsx";
 import { Notice } from "../../shared/components/Notice.tsx";
 import { refusal, retrying, settled } from "../../shared/hooks/settled.ts";
@@ -19,11 +20,13 @@ import type { RunViewMode } from "../models/view.ts";
 import { type PhaseSpan, spansOf } from "../models/waterfall.ts";
 import { waterfallStore } from "../services/waterfallStore.ts";
 import { Invocations } from "./Invocations.tsx";
+import { PhaseResults } from "./PhaseResults.tsx";
 import { PhaseTable } from "./PhaseTable.tsx";
 import { PublishedArtifacts } from "./PublishedArtifacts.tsx";
 import { RequestFacts } from "./RequestFacts.tsx";
 import { RunOutcome } from "./RunOutcome.tsx";
 import { Waterfall } from "./Waterfall.tsx";
+import { WorkProgress } from "./WorkProgress.tsx";
 
 /** Show the Run header, Waterfall or table, and nested detail panel. Provide one interaction store to the Waterfall and panel; keep the view choice in the URL. */
 
@@ -150,6 +153,24 @@ export const RunView = (props: {
    * `POST` would disappear at the instant it became the only honest thing on the page.
    */
   const openGate = (): Asking | undefined => latestAskingOf(settled(gates) ?? [], props.runId);
+  const [gateCards, setGateCards] = createStore<Array<{ key: string; asking: Asking }>>([]);
+  createEffect(() =>
+    setGateCards(
+      reconcile(
+        (settled(gates) ?? [])
+          .filter(
+            (asking) =>
+              asking.request.runId === props.runId &&
+              (!isSettled(asking, doc()?.gates ?? []) || asking === openGate()),
+          )
+          .map((asking) => ({
+            key: JSON.stringify([asking.request.gate, asking.request.asking]),
+            asking,
+          })),
+        { key: "key" },
+      ),
+    ),
+  );
 
   /**
    * A click on a span is a navigation, and clicking the open one again closes the panel.
@@ -471,14 +492,17 @@ export const RunView = (props: {
              */}
             <RunOutcome doc={document()} runId={props.runId} mode={props.mode} />
 
-            <Show when={openGate()}>
-              {(waiting) => (
-                <Show when={!isTerminal(status()) || awaitingApply(waiting(), document().gates)}>
-                  <GateCard asking={waiting()} settled={document().gates} runId={props.runId} />
+            <For each={gateCards}>
+              {(card) => (
+                <Show when={!isTerminal(status()) || awaitingApply(card.asking, document().gates)}>
+                  <GateCard asking={card.asking} settled={document().gates} runId={props.runId} />
                 </Show>
               )}
-            </Show>
+            </For>
 
+            <Show when={(document().progress?.length ?? 0) > 0}>
+              <WorkProgress items={document().progress ?? []} state={status()} />
+            </Show>
             <div class="flex items-center gap-2 text-xs">
               {/*
                * Links rather than buttons, because the mode is a URL. A person pastes what they are
@@ -537,6 +561,7 @@ export const RunView = (props: {
                   </Show>
                 </div>
 
+                <PhaseResults phases={document().phases} />
                 <Invocations
                   invocations={document().invocations ?? []}
                   totals={document().invocationTotals}

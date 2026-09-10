@@ -7,6 +7,7 @@ import { invocationDocuments } from "../../trace/services/invocationDocuments.ts
 import { invocationTotals } from "../../trace/services/invocationTotals.ts";
 import type { DaemonRun, PhaseResult } from "../models/DaemonRun.ts";
 import type { ExternalActionIntent } from "../models/ExternalAction.ts";
+import { progressDescription, runProgress } from "./runProgress.ts";
 
 const internalPhaseDescription = "__kojo_internal_activity__";
 
@@ -142,6 +143,7 @@ export const runDocumentOf = (
   const invocations = invocationDocuments(trace.invocations ?? []);
   return {
     invocations,
+    progress: runProgress(phases),
     invocationTotals: invocationTotals(invocations),
     runId: run.runId,
     projectId: run.projectId,
@@ -191,7 +193,11 @@ export const runDocumentOf = (
     phases:
       trace.phases.length === 0
         ? phases
-            .filter((phase) => phase.description !== internalPhaseDescription)
+            .filter(
+              (phase) =>
+                phase.description !== internalPhaseDescription &&
+                phase.description !== progressDescription,
+            )
             .map((phase) => ({
               phasePath: phase.phasePath,
               attempt: phase.attempt,
@@ -202,32 +208,38 @@ export const runDocumentOf = (
               endedAt: phase.endedAt,
               result: phase.encodedResult,
             }))
-        : trace.phases.map((phase) => {
-            const result = phases.find(
-              (candidate) =>
-                candidate.phasePath === phase.name && candidate.attempt === phase.attempt,
-            );
-            const agent = agentOf(phase.agent);
-            const repo = repoOf(phase.repo);
-            const breaches = breachesOf(phase.breaches);
-            const verification = verificationOf(phase.verification);
-            return {
-              phasePath: String(phase.name),
-              attempt: Number(phase.attempt),
-              kind: phase.kind as "actor" | "code" | "agent",
-              outcome: phase.outcome as "succeeded" | "failed" | "interrupted",
-              description: String(phase.description),
-              startedAt: new Date(Number(phase.startedAt)).toISOString(),
-              endedAt: new Date(Number(phase.endedAt)).toISOString(),
-              ...(typeof phase.sandboxId === "string" ? { sandboxId: phase.sandboxId } : {}),
-              ...(typeof phase.errorTag === "string" ? { errorTag: phase.errorTag } : {}),
-              ...(agent === undefined ? {} : { agent }),
-              ...(repo === undefined ? {} : { repo }),
-              ...(breaches === undefined ? {} : { breaches }),
-              ...(verification === undefined ? {} : { verification }),
-              ...(result === undefined ? {} : { result: result.encodedResult }),
-            };
-          }),
+        : trace.phases
+            .filter(
+              (phase) =>
+                phase.description !== internalPhaseDescription &&
+                phase.description !== progressDescription,
+            )
+            .map((phase) => {
+              const result = phases.find(
+                (candidate) =>
+                  candidate.phasePath === phase.name && candidate.attempt === phase.attempt,
+              );
+              const agent = agentOf(phase.agent);
+              const repo = repoOf(phase.repo);
+              const breaches = breachesOf(phase.breaches);
+              const verification = verificationOf(phase.verification);
+              return {
+                phasePath: String(phase.name),
+                attempt: Number(phase.attempt),
+                kind: phase.kind as "actor" | "code" | "agent",
+                outcome: phase.outcome as "succeeded" | "failed" | "interrupted",
+                description: String(phase.description),
+                startedAt: new Date(Number(phase.startedAt)).toISOString(),
+                endedAt: new Date(Number(phase.endedAt)).toISOString(),
+                ...(typeof phase.sandboxId === "string" ? { sandboxId: phase.sandboxId } : {}),
+                ...(typeof phase.errorTag === "string" ? { errorTag: phase.errorTag } : {}),
+                ...(agent === undefined ? {} : { agent }),
+                ...(repo === undefined ? {} : { repo }),
+                ...(breaches === undefined ? {} : { breaches }),
+                ...(verification === undefined ? {} : { verification }),
+                ...(result === undefined ? {} : { result: result.encodedResult }),
+              };
+            }),
     gates: trace.gates.map((gate) => ({
       gate: String(gate.gate),
       asking: String(gate.asking),

@@ -1,3 +1,4 @@
+import type { WorkItemProgress } from "@carere/kojo-runtime/contexts/trace/models/WorkItemProgress";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, Exit } from "effect";
 import { runIssueGraph } from "../../../../.kojo/issues/runIssueGraph.ts";
@@ -39,12 +40,17 @@ describe("the authored issue graph", () => {
   it.effect("starts dependents from integrated blocker revisions within the capacity limit", () =>
     Effect.gen(function* () {
       const delivery = new InMemoryIssueDelivery();
+      const progress: Array<WorkItemProgress> = [];
       const result = yield* runIssueGraph({
         issues: [issue(3, [1, 2]), issue(1), issue(2), issue(4)],
         mode: "graph",
         concurrency: 2,
         baseRevision: "base",
-        delivery,
+        delivery: {
+          implement: delivery.implement,
+          integrate: delivery.integrate,
+          observe: (_name, items) => Effect.sync(() => void progress.push(...items)),
+        },
       });
       expect(delivery.maximum).toBe(2);
       expect(delivery.starts).toEqual([
@@ -55,6 +61,27 @@ describe("the authored issue graph", () => {
       ]);
       expect(delivery.merges).toEqual([1, 2, 3, 4]);
       expect(result.revision).toBe("base+1+2+3+4");
+      expect(progress.find((item) => item.key === "3")).toMatchObject({
+        state: "waiting",
+        waitingFor: "dependencies",
+        dependencies: ["1", "2"],
+      });
+      expect(progress.find((item) => item.key === "4")).toMatchObject({
+        state: "waiting",
+        waitingFor: "capacity",
+      });
+      expect(progress.filter((item) => item.key === "1").map((item) => item.state)).toEqual([
+        "waiting",
+        "executing",
+        "accepted",
+        "integrating",
+        "integrated",
+      ]);
+      expect(
+        progress.findIndex((item) => item.key === "3" && item.state === "executing"),
+      ).toBeGreaterThan(
+        progress.findIndex((item) => item.key === "2" && item.state === "integrated"),
+      );
     }),
   );
 
@@ -101,6 +128,7 @@ describe("the authored issue graph", () => {
   it.effect("does not start a dependent when integration fails", () =>
     Effect.gen(function* () {
       const delivery = new InMemoryIssueDelivery();
+      const progress: Array<WorkItemProgress> = [];
       const result = yield* Effect.exit(
         runIssueGraph({
           issues: [issue(1), issue(2, [1])],
@@ -110,11 +138,20 @@ describe("the authored issue graph", () => {
           delivery: {
             implement: delivery.implement,
             integrate: () => Effect.fail("merge conflict"),
+            observe: (_name, items) => Effect.sync(() => void progress.push(...items)),
           },
         }),
       );
       expect(Exit.isFailure(result)).toBe(true);
       expect(delivery.starts.map((start) => start.number)).toEqual([1]);
+      expect(progress.findLast((item) => item.key === "1")).toMatchObject({
+        state: "failed",
+        detail: expect.stringContaining("merge conflict"),
+      });
+      expect(progress.findLast((item) => item.key === "2")).toMatchObject({
+        state: "waiting",
+        waitingFor: "dependencies",
+      });
     }),
   );
 });

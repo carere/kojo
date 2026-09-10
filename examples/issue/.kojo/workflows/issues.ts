@@ -18,6 +18,7 @@ import { agent } from "@carere/kojo-runtime/contexts/workflow/services/phase/age
 import { code } from "@carere/kojo-runtime/contexts/workflow/services/phase/code";
 import { commit } from "@carere/kojo-runtime/contexts/workflow/services/phase/commit";
 import { merge } from "@carere/kojo-runtime/contexts/workflow/services/phase/merge";
+import { reportProgress } from "@carere/kojo-runtime/contexts/workflow/services/reportProgress";
 import { sandboxed } from "@carere/kojo-runtime/contexts/workflow/services/sandboxed";
 import { workflow } from "@carere/kojo-runtime/contexts/workflow/services/workflow";
 import { Effect, Schema } from "effect";
@@ -218,6 +219,7 @@ export const issues = workflow(
         concurrency,
         baseRevision: prepared,
         delivery: {
+          observe: (name, items) => reportProgress(name, items),
           implement: (item, revision) => {
             const issue = item;
             const branch =
