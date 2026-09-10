@@ -38,6 +38,9 @@
         "tests/release/support/*.ts"
       ]
     },
+    "examples/issue": {
+      "entry": [".kojo/workflows/issues.ts"]
+    },
     "packages/kojo-runtime": {
       // Fresh Runner-process tests load these Factory files by filesystem registration.
       "ignoreFiles": ["tests/fixtures/runner/**"]
