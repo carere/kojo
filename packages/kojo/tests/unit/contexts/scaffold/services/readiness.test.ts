@@ -18,13 +18,8 @@ describe("Daemon Project readiness", () => {
   });
 
   it("requires an authored Factory", () => {
-    expect(
-      factoryFinding({ directory: false, config: false, commands: false, workflows: [] }).standing,
-    ).toBe("failed");
-    expect(
-      factoryFinding({ directory: true, config: true, commands: true, workflows: ["review"] })
-        .standing,
-    ).toBe("ok");
+    expect(factoryFinding({ directory: false, workflows: [] }).standing).toBe("failed");
+    expect(factoryFinding({ directory: true, workflows: ["review"] }).standing).toBe("ok");
   });
 
   it("checks runtime packages without opening a database", () => {

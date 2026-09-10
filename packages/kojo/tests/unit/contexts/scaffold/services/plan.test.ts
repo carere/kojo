@@ -72,7 +72,6 @@ describe("what a stamped factory is made of", () => {
           ".kojo/README.md",
           ".kojo/.gitignore",
           ".kojo/.env",
-          ".kojo/kojo.config.yaml",
           ".kojo/envelopes.ts",
           ".kojo/checks.ts",
           ".kojo/commands.ts",
@@ -323,7 +322,7 @@ describe("the Factory asset declaration", () => {
     };
 
     expect(manifest.formatVersion).toBe(1);
-    expect(manifest.assets).toContain("kojo.config.yaml");
+    expect(manifest.assets).not.toContain("kojo.config.yaml");
     expect(manifest.assets).toContain("sandbox/Dockerfile");
     expect(manifest.assets.some((asset) => asset.startsWith("prompts/"))).toBe(true);
     expect(manifest.assets).not.toContain(".env");
@@ -331,21 +330,19 @@ describe("the Factory asset declaration", () => {
   });
 });
 
-describe("the roster and the workflow agreeing", () => {
+describe("direct agent calls", () => {
   it.each(templateNames)(
     "%s names every agent its workflow calls, with both prompts",
     (template) => {
       const stamped = plan(choicesFor(template));
       const starter = starters[template];
       const workflow = stamped.files.find((file) => file.path.startsWith(".kojo/workflows/"));
-      const config = contentAt(stamped.files, ".kojo/kojo.config.yaml");
+      expect(stamped.files.some((file) => file.path.endsWith("kojo.config.yaml"))).toBe(false);
 
-      // A workflow that calls an agent the roster does not name is a factory that fails at its first
-      // agent phase, minutes into a run. It is the cheapest thing in this ticket to get wrong.
       for (const agent of starter.agents) {
         expect(workflow?.content).toContain(`agent: "${agent.name}"`);
-        expect(config).toContain(`  ${agent.name}:`);
-        // `YamlRoster` reads both files at load, so a missing one is a factory that cannot start.
+        expect(workflow?.content).toContain(`prompts/${agent.name}/system.md`);
+        expect(workflow?.content).toContain(`prompts/${agent.name}/user.md`);
         expect(
           stamped.files.some((file) => file.path === `.kojo/prompts/${agent.name}/system.md`),
         ).toBe(true);
@@ -354,7 +351,7 @@ describe("the roster and the workflow agreeing", () => {
         ).toBe(true);
       }
 
-      expect(config).toContain('model: "claude-sonnet-4-6"');
+      expect(workflow?.content).toContain('model: "claude-sonnet-4-6"');
     },
   );
 

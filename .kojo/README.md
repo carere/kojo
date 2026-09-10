@@ -8,13 +8,14 @@ and stores all Run and Gate state outside the Project.
 
 | File | Purpose |
 |---|---|
-| `kojo.config.yaml` | Defines the agent roster. |
 | `workflows/factory.ts` | Routes one request to the hotfix, feature, or chore lane. |
 | `workflows/lane/*.ts` | Defines the lane-specific program. |
 | `envelopes.ts` | Defines agent answer schemas and lane names. |
 | `checks.ts` | Defines answer checks. |
 | `commands.ts` | Defines the Project commands that phases can run. |
 | `prompts/` | Defines agent system and user prompts. |
+
+Each agent call selects its provider and model, then reads its system and user prompts.
 
 The Factory uses `noSandbox()`. Each Run still uses its own worktree and branch. Permission checks
 protect Factory files from an agent call. Do not run `kojo init` over this hand-authored Factory.

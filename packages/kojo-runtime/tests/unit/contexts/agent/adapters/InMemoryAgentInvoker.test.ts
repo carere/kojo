@@ -3,8 +3,9 @@ import { Effect, Option, Result } from "effect";
 import * as InMemoryAgentInvoker from "../../../../../src/contexts/agent/adapters/InMemoryAgentInvoker.ts";
 import type { AgentSessionId } from "../../../../../src/contexts/agent/models/AgentSessionId.ts";
 import { AgentInvoker } from "../../../../../src/contexts/agent/ports/AgentInvoker.ts";
+import { agentSelection } from "../../../../support/agentSelection.ts";
 
-const cold = { session: Option.none<AgentSessionId>() };
+const cold = { ...agentSelection, session: Option.none<AgentSessionId>() };
 
 const invoking = (
   scripts: Record<string, InMemoryAgentInvoker.Script>,
@@ -15,6 +16,7 @@ const invoking = (
     const invoker = yield* AgentInvoker;
     return yield* Effect.result(
       invoker.invoke({
+        ...agentSelection,
         agent: call.agent,
         prompt: "do the thing",
         session: call.session ?? cold.session,
@@ -111,7 +113,10 @@ describe("the scripted invoker", () => {
   it.effect("states its capabilities so a caller can ask before it calls", () =>
     Effect.gen(function* () {
       const invoker = yield* AgentInvoker;
-      expect(invoker.capabilities).toEqual({ resume: true, capture: false });
+      expect(invoker.capabilities({ ...cold, agent: "router", prompt: "" })).toEqual({
+        resume: true,
+        capture: false,
+      });
     }).pipe(
       Effect.provide(
         InMemoryAgentInvoker.layer(

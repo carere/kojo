@@ -2,7 +2,6 @@ import { factoryDirectory, workflowsDirectory } from "../../shared/models/Factor
 import type { FactoryChoices, TemplateName } from "../models/FactoryChoices.ts";
 import type { FactoryPlan } from "../models/FactoryPlan.ts";
 import { commands } from "../templates/commands.ts";
-import { config } from "../templates/config.ts";
 import { dockerfile } from "../templates/dockerfile.ts";
 import { factoryManifest } from "../templates/factoryManifest.ts";
 import { hotfix } from "../templates/hotfix.ts";
@@ -38,7 +37,6 @@ export const plan = (choices: FactoryChoices): FactoryPlan => {
       { path: at("factory.json"), content: factoryManifest(starter.agents, true) },
       { path: at(".gitignore"), content: ignore() },
       { path: at(".env"), content: environment(choices) },
-      { path: at("kojo.config.yaml"), content: config(choices, starter.agents) },
       { path: at("envelopes.ts"), content: starter.envelopes },
       { path: at("checks.ts"), content: starter.checks(choices) },
       { path: at("commands.ts"), content: commands(choices) },

@@ -2,10 +2,7 @@ import { existsSync } from "node:fs";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import * as BunServices from "@effect/platform-bun/BunServices";
 import { Effect, Layer, Schema } from "effect";
-import * as YamlRoster from "../contexts/agent/adapters/YamlRoster.ts";
-import { Roster } from "../contexts/agent/ports/Roster.ts";
 import { contractSchema } from "../contexts/agent/services/renderPrompt.ts";
 import { isPlaceholder } from "../contexts/workflow/models/Placeholder.ts";
 
@@ -134,6 +131,7 @@ const assetsDiagnostic = async (factory: string): Promise<ProjectDiagnostic> => 
 
 const commandsDiagnostic = async (factory: string): Promise<ProjectDiagnostic> => {
   const source = join(factory, "commands.ts");
+  if (!existsSync(source)) return ok("commands", "No optional commands module");
   try {
     const loaded = (await import(pathToFileURL(source).href)) as Record<string, unknown>;
     const commands = loaded.commands;
@@ -164,26 +162,9 @@ const commandsDiagnostic = async (factory: string): Promise<ProjectDiagnostic> =
   }
 };
 
-const rosterDiagnostic = async (factory: string): Promise<ProjectDiagnostic> => {
-  const source = join(factory, "kojo.config.yaml");
-  try {
-    const names = await Effect.runPromise(
-      Effect.map(Roster, (roster) => roster.names).pipe(
-        Effect.provide(YamlRoster.layer({ config: source }).pipe(Layer.provide(BunServices.layer))),
-      ),
-    );
-    return ok("roster", `${names.length} agent${names.length === 1 ? "" : "s"}; prompts read`);
-  } catch (cause) {
-    return failed(
-      "roster",
-      `${source}: ${oneLine(cause)}`,
-      "Fix the roster entry or the prompt path named above.",
-    );
-  }
-};
-
 const envelopesDiagnostic = async (factory: string): Promise<ProjectDiagnostic> => {
   const source = join(factory, "envelopes.ts");
+  if (!existsSync(source)) return ok("envelopes", "No optional envelopes module");
   try {
     const module = (await import(pathToFileURL(source).href)) as Record<string, unknown>;
     const hidden: Array<string> = [];
@@ -372,7 +353,6 @@ export const validateProject = async (root: string): Promise<ProjectValidation> 
     effectDiagnostic(factory),
     commandsDiagnostic(factory),
     envelopesDiagnostic(factory),
-    rosterDiagnostic(factory),
   ]);
   return {
     formatVersion: 1,

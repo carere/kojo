@@ -4,7 +4,7 @@
 
 import { defaultTrunk } from "../../shared/models/FactoryLayout.ts";
 import type { FactoryChoices } from "../models/FactoryChoices.ts";
-import { ownedByYou, providerSource, type Starter } from "./starter.ts";
+import { agentProviderSource, ownedByYou, providerSource, type Starter } from "./starter.ts";
 
 /**
  * The smallest factory that is still a whole factory.
@@ -63,6 +63,7 @@ const checks = (): string =>
 
 const workflow = (choices: FactoryChoices) => {
   const provider = providerSource(choices);
+  const agentProvider = agentProviderSource(choices);
 
   return {
     file: "review.ts",
@@ -80,10 +81,11 @@ const workflow = (choices: FactoryChoices) => {
       "//  - Nothing irreversible happens outside a phase. A workflow body replays from the top on",
       "//    every resume; only a phase's recorded result is replayed instead of re-run.",
       "",
+      'import { readFileSync } from "node:fs";',
       'import { Duration, Effect, Schema } from "effect";',
+      ...agentProvider.imports,
       'import * as SandcastleAgentInvoker from "@carere/kojo-runtime/contexts/agent/adapters/SandcastleAgentInvoker";',
       'import { AgentInvocationError } from "@carere/kojo-runtime/contexts/agent/models/AgentInvocationError";',
-      'import { RosterError } from "@carere/kojo-runtime/contexts/agent/models/RosterError";',
       'import { GateExpired } from "@carere/kojo-runtime/contexts/gate/models/GateExpired";',
       'import { GateUnreachable } from "@carere/kojo-runtime/contexts/gate/models/GateUnreachable";',
       'import * as OnExpiry from "@carere/kojo-runtime/contexts/gate/models/OnExpiry";',
@@ -144,11 +146,8 @@ const workflow = (choices: FactoryChoices) => {
       " * the build that assembles this factory wires `AbsentAgentInvoker` there on purpose: it",
       " * refuses every call and says why, rather than dying on a missing service.",
       " *",
-      " * The roster is `.kojo/kojo.config.yaml` beside this file. It is decoded, and every agent's",
-      " * `prompts/<name>/{system,user}.md` is read, while this layer is being built — so a factory",
-      " * with a typo in its roster fails naming the file, before anything spawns.",
       " */",
-      'const agents = SandcastleAgentInvoker.fromConfig({ config: ".kojo/kojo.config.yaml" });',
+      "const agents = SandcastleAgentInvoker.layer;",
       "",
       "/**",
       " * What the drafter is allowed to leave behind.",
@@ -158,7 +157,7 @@ const workflow = (choices: FactoryChoices) => {
       " * after the fact, against the repository — the change-set is fingerprinted before the call and",
       " * compared afterwards, and anything outside the scope is undone and fails the run.",
       " *",
-      " * `factoryOwnPaths` is the roster, the workflows, the envelopes, the checks, the commands and",
+      " * `factoryOwnPaths` is the workflows, the envelopes, the checks, the commands and",
       " * the prompts. An agent that can edit those can edit its own grader.",
       " */",
       "const drafterMay = {",
@@ -178,7 +177,6 @@ const workflow = (choices: FactoryChoices) => {
       "  MergeRefused,",
       "  NotAccepted,",
       "  PermissionBreach,",
-      "  RosterError,",
       "  SandboxError,",
       "  WorkspaceError,",
       "  WorkspaceUnreachable,",
@@ -222,7 +220,10 @@ const workflow = (choices: FactoryChoices) => {
       '              name: "draft",',
       '              description: "Make the change this run is about",',
       '              agent: "drafter",',
-      "              prompt: payload.subject,",
+      `              model: ${JSON.stringify(choices.model)},`,
+      `              provider: ${agentProvider.expression},`,
+      '              system: readFileSync(new URL("../prompts/drafter/system.md", import.meta.url), "utf8"),',
+      '              prompt: readFileSync(new URL("../prompts/drafter/user.md", import.meta.url), "utf8") + "\\n\\n" + payload.subject,',
       "              envelope: Drafted,",
       "              checks: draftedChecks,",
       "              // One repair turn. The knob is spelled out here rather than left to its default",

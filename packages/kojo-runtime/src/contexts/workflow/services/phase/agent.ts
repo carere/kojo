@@ -5,7 +5,11 @@ import type { WorkflowEngine, WorkflowInstance } from "effect/unstable/workflow/
 import type { AgentAnswer } from "../../../agent/models/AgentAnswer.ts";
 import { AgentInvocationError } from "../../../agent/models/AgentInvocationError.ts";
 import type { AgentSessionId } from "../../../agent/models/AgentSessionId.ts";
-import { AgentInvoker } from "../../../agent/ports/AgentInvoker.ts";
+import {
+  type AgentCall,
+  AgentInvoker,
+  type ProviderFor,
+} from "../../../agent/ports/AgentInvoker.ts";
 import { contractFor } from "../../../agent/services/renderPrompt.ts";
 import { WorkspaceError } from "../../../sandbox/models/WorkspaceError.ts";
 import { decodeUnknown } from "../../../shared/lib/decode.ts";
@@ -60,8 +64,12 @@ const identifierOf = (envelope: Schema.Top): string =>
 export const agent = <Envelope extends Schema.Top, R = never>(options: {
   readonly name: string;
   readonly description: string;
-  /** The roster name of the agent to call. */
+  /** A call label. Provider and model selection belong to this call. */
   readonly agent: string;
+  readonly model: string;
+  readonly provider: ProviderFor;
+  readonly system: string;
+  readonly tools?: ReadonlyArray<string>;
   readonly prompt: string;
   readonly envelope: Envelope;
   /** The session to re-enter. Absent starts cold; the correction loop is what passes one. */
@@ -134,7 +142,16 @@ export const agent = <Envelope extends Schema.Top, R = never>(options: {
       // one can only offer a cold call carrying the correction and none of the context that earned
       // it — a different request wearing the same name. So the bound is zero there, and the phase
       // row says which of the two reasons the phase stopped correcting.
-      const correctable = invoker.capabilities.resume;
+      const invocation = (prompt: string): AgentCall => ({
+        agent: options.agent,
+        model: options.model,
+        provider: options.provider,
+        system: options.system,
+        ...(options.tools === undefined ? {} : { tools: options.tools }),
+        prompt,
+        session,
+      });
+      const correctable = invoker.capabilities(invocation(options.prompt)).resume;
       const limit = correctable ? (options.corrections ?? defaultCorrections) : 0;
 
       // **The contract is appended here, not by the author and not by the invoker.**
@@ -158,11 +175,9 @@ export const agent = <Envelope extends Schema.Top, R = never>(options: {
             if (Option.isSome(correction)) corrections += 1;
             failed = [];
 
-            const answer = yield* invoker.invoke({
-              agent: options.agent,
-              prompt: Option.getOrElse(correction, () => opening),
-              session,
-            });
+            const answer = yield* invoker.invoke(
+              invocation(Option.getOrElse(correction, () => opening)),
+            );
             session = Option.some(answer.session);
             call = Option.some(
               new AgentCallRecord({

@@ -88,7 +88,6 @@ export const readme = (choices: FactoryChoices, starter: Starter): string => {
     "",
     "| File | What it decides |",
     "|---|---|",
-    "| `kojo.config.yaml` | The roster: who the agents are, what each is for, which model each uses. |",
     `| \`workflows/${workflow.file}\` | The workflow itself — the phases, their order, where the sandbox scope sits, and where the human is asked. **This is the product.** |`,
     "| `envelopes.ts` | The shape of every answer an agent may give. Kojo renders it into the prompt, so there is no example to keep in step. |",
     "| `checks.ts` | Your definition of done: what an answer is compared against, in the repository rather than in the agent. |",

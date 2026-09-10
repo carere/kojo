@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import * as SandcastleAgentInvoker from "@carere/kojo-runtime/contexts/agent/adapters/SandcastleAgentInvoker";
 // This file is Kojo's own.
 //
 // The chore lane: the shape of the code changes and its behaviour does not.
@@ -59,7 +61,13 @@ export const chore = (options: {
           name: "tidy",
           description: "Change the shape and not the behaviour",
           agent: "tidier",
-          prompt: options.request,
+          model: "claude-sonnet-4-6",
+          provider: SandcastleAgentInvoker.claude,
+          system: readFileSync(new URL("../../prompts/tidier/system.md", import.meta.url), "utf8"),
+          prompt:
+            readFileSync(new URL("../../prompts/tidier/user.md", import.meta.url), "utf8") +
+            "\n\n" +
+            options.request,
           envelope: Built,
           checks: builtChecks,
         }),

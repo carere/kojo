@@ -6,7 +6,6 @@ export const factoryManifest = (agents: ReadonlyArray<StarterAgent>, dockerfile:
     {
       formatVersion: 1,
       assets: [
-        "kojo.config.yaml",
         ...agents.flatMap((agent) => [
           `prompts/${agent.name}/system.md`,
           `prompts/${agent.name}/user.md`,

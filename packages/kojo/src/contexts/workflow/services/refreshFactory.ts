@@ -88,7 +88,6 @@ const sharedSubjects = new Set([
   "effect",
   "envelopes",
   "factory",
-  "roster",
   "validation",
   "workflows",
 ]);

@@ -6,9 +6,11 @@ import * as BunServices from "@effect/platform-bun/BunServices";
 import { afterAll, describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Option, Path, Result, Schema } from "effect";
 import * as SandcastleAgentInvoker from "../../../../../src/contexts/agent/adapters/SandcastleAgentInvoker.ts";
-import * as YamlRoster from "../../../../../src/contexts/agent/adapters/YamlRoster.ts";
 import type { AgentSessionId } from "../../../../../src/contexts/agent/models/AgentSessionId.ts";
-import { AgentInvoker } from "../../../../../src/contexts/agent/ports/AgentInvoker.ts";
+import {
+  type AgentCall,
+  AgentInvoker,
+} from "../../../../../src/contexts/agent/ports/AgentInvoker.ts";
 import * as DaemonResourceLeaseClient from "../../../../../src/contexts/project/adapters/DaemonResourceLeaseClient.ts";
 import { acquireSandbox } from "../../../../../src/contexts/sandbox/adapters/boundary.ts";
 import { noSandbox } from "../../../../../src/contexts/sandbox/adapters/providers.ts";
@@ -35,23 +37,7 @@ afterAll(() => {
   rmSync(gitConfigurationRoot, { recursive: true, force: true });
 });
 
-/**
- * The real invoker, real Daemon adapters, the real sandbox, a real process — and no model.
- *
- * Everything here is the adapter under test, unmodified: `acquireSandbox` builds a real Sandcastle
- * sandbox on a real branch, `YamlRoster` decodes the real `kojo.config.yaml` a real `kojo init`
- * stamped, and `sandbox.run(...)` spawns a real process inside it. The only thing that is not real
- * is the **model** — the `AgentProvider` below runs a shell script.
- *
- * That is deliberate, and it is where this ticket's budget went. Five real agent calls buy the three
- * claims only a model can settle: that a real envelope decodes, that a real decode failure drives
- * the correction loop, and that permissions catch a real agent's real writes. Everything else about
- * the adapter — that the roster's identity reaches the process because `claudeCode()` cannot carry
- * it, that the prompt travels on stdin, that a session opened by one turn is re-entered by the next
- * without repeating the identity, that a missing roster entry is `unknown-agent` while a dead binary
- * is `provider-failed`, that an answer with no session is refused — is settled here, for free,
- * against the same code path.
- */
+/** The real invoker, Daemon adapters, sandbox, and process use a scripted provider. */
 
 /**
  * An `AgentProvider` that spawns a shell script and speaks Sandcastle's stream protocol.
@@ -132,6 +118,7 @@ const promptsIn = (
   });
 
 interface Fixture {
+  readonly selection: Pick<AgentCall, "model" | "system" | "provider">;
   readonly root: string;
   /** Where the scripted agent records the prompts it was handed. */
   readonly log: string;
@@ -187,15 +174,12 @@ const withScriptedAgent = <A, E>(
       environment: {},
     };
 
-    const layer = SandcastleAgentInvoker.layer({
+    const selection = {
+      model: "sonnet",
+      system: "# The drafter",
       provider: () => scripted(script(log)),
-    }).pipe(
-      Layer.provide(
-        YamlRoster.layer({
-          config: path.join(repo.root, ".kojo", "kojo.config.yaml"),
-          factoryRoot: path.join(repo.root, ".kojo"),
-        }).pipe(Layer.provide(BunServices.layer)),
-      ),
+    };
+    const layer = SandcastleAgentInvoker.layer.pipe(
       Layer.provide(Layer.succeed(Sandbox, sandbox)),
       Layer.provide(daemonExecutionAdaptersAt(repo.root)),
       Layer.orDie,
@@ -203,46 +187,38 @@ const withScriptedAgent = <A, E>(
 
     return yield* Effect.gen(function* () {
       const agent = yield* AgentInvoker;
-      return yield* use({ root: repo.root, log, agent });
+      return yield* use({ root: repo.root, log, agent, selection });
     }).pipe(Effect.provide(layer));
   }).pipe(Effect.scoped, Effect.provide(BunServices.layer));
 
 const anEnvelope = '{"_tag":"Drafted","summary":"done","files":["notes/hello.txt"]}';
 
 describe("the Sandcastle agent invoker", () => {
-  /**
-   * **The roster's identity reaches the process, because nothing else carries it.**
-   *
-   * `claudeCode()` is used as it ships — the ticket's decision — and it builds
-   * `claude --print --verbose --output-format stream-json --model X -p -`. There is no
-   * `--system-prompt` in it and no `--tools`. An agent is a system prompt, a tool allowlist and a
-   * model, so a roster entry handed to the stock provider spawns a *different agent* and succeeds
-   * while doing it. The prompt is the only door left; this asserts it is used, by reading the
-   * drafter's own stamped `system.md` and `user.md` back out of the process that really ran.
-   */
-  it.live("sends the roster's system prompt and task template into the real process", () =>
+  it.live("selects the provider, model, and prompts at the call", () =>
     withScriptedAgent(
       (log) => recording(log, anEnvelope),
       (fixture) =>
         Effect.gen(function* () {
           const answer = yield* fixture.agent.invoke({
+            ...fixture.selection,
             agent: "drafter",
+            model: "direct-model",
+            system: "DIRECT SYSTEM",
+            provider: () => scripted(recording(fixture.log, anEnvelope)),
             prompt: "Make the note say goodbye.",
             session: Option.none(),
           });
 
           const [sent = ""] = yield* promptsIn(fixture.log);
-          // From `prompts/drafter/system.md` — the identity.
-          expect(sent).toContain("# The drafter");
-          // From `prompts/drafter/user.md` — the task template.
-          expect(sent).toContain("Work in the repository you are standing in.");
+          expect(sent).toContain("DIRECT SYSTEM");
+          expect(sent).not.toContain("Work in the repository you are standing in.");
           // And the task the phase passed through.
           expect(sent).toContain("Make the note say goodbye.");
           // The identity comes first: it is who the agent is, before what it was asked.
-          expect(sent.indexOf("# The drafter")).toBeLessThan(sent.indexOf("Make the note"));
+          expect(sent.indexOf("DIRECT SYSTEM")).toBeLessThan(sent.indexOf("Make the note"));
 
           expect(answer.output).toBe(anEnvelope);
-          expect(answer.model).toBe("sonnet");
+          expect(answer.model).toBe("direct-model");
           expect(answer.resumed).toBe(false);
           expect(answer.session).toBe("scripted-cold");
         }),
@@ -261,16 +237,32 @@ describe("the Sandcastle agent invoker", () => {
       (log) => recording(log, anEnvelope),
       (fixture) =>
         Effect.gen(function* () {
-          expect(fixture.agent.capabilities.resume).toBe(true);
+          expect(
+            fixture.agent.capabilities({
+              ...fixture.selection,
+              agent: "drafter",
+              prompt: "",
+              session: Option.none(),
+            }).resume,
+          ).toBe(true);
           // `none` never pulls a transcript back, because the agent wrote it on the host already.
-          expect(fixture.agent.capabilities.capture).toBe(false);
+          expect(
+            fixture.agent.capabilities({
+              ...fixture.selection,
+              agent: "drafter",
+              prompt: "",
+              session: Option.none(),
+            }).capture,
+          ).toBe(false);
 
           const first = yield* fixture.agent.invoke({
+            ...fixture.selection,
             agent: "drafter",
             prompt: "first",
             session: Option.none(),
           });
           const second = yield* fixture.agent.invoke({
+            ...fixture.selection,
             agent: "drafter",
             prompt: "Those fields are wrong. Answer again.",
             session: Option.some(first.session),
@@ -294,6 +286,7 @@ describe("the Sandcastle agent invoker", () => {
       (fixture) =>
         Effect.gen(function* () {
           const answer = yield* fixture.agent.invoke({
+            ...fixture.selection,
             agent: "drafter",
             prompt: "anything",
             session: Option.none(),
@@ -304,27 +297,20 @@ describe("the Sandcastle agent invoker", () => {
     ),
   );
 
-  /**
-   * A name the roster does not hold is `unknown-agent`, never `provider-failed`.
-   *
-   * The difference decides where the reader goes: `unknown-agent` is a mistake in the workflow that
-   * no better prompt fixes. Nothing is spawned, so the prompt log stays empty.
-   */
-  it.live("refuses a name the roster does not define, without spawning anything", () =>
+  it.live("accepts an agent label without a roster entry", () =>
     withScriptedAgent(
       (log) => recording(log, anEnvelope),
       (fixture) =>
         Effect.gen(function* () {
-          const outcome = yield* Effect.result(
-            fixture.agent.invoke({ agent: "nobody", prompt: "hello", session: Option.none() }),
-          );
-
-          expect(Result.isFailure(outcome)).toBe(true);
-          if (Result.isFailure(outcome)) {
-            expect(outcome.failure.fault).toBe("unknown-agent");
-            expect(outcome.failure.agent).toBe("nobody");
-          }
-          expect(yield* promptsIn(fixture.log)).toEqual([]);
+          const answer = yield* fixture.agent.invoke({
+            ...fixture.selection,
+            agent: "nobody",
+            prompt: "hello",
+            session: Option.none(),
+          });
+          expect(answer.agent).toBe("nobody");
+          expect(answer.output).toBe(anEnvelope);
+          expect(yield* promptsIn(fixture.log)).toHaveLength(1);
         }),
     ),
   );
@@ -336,7 +322,12 @@ describe("the Sandcastle agent invoker", () => {
       (fixture) =>
         Effect.gen(function* () {
           const outcome = yield* Effect.result(
-            fixture.agent.invoke({ agent: "drafter", prompt: "hello", session: Option.none() }),
+            fixture.agent.invoke({
+              ...fixture.selection,
+              agent: "drafter",
+              prompt: "hello",
+              session: Option.none(),
+            }),
           );
 
           expect(Result.isFailure(outcome)).toBe(true);
@@ -361,7 +352,12 @@ describe("the Sandcastle agent invoker", () => {
       (fixture) =>
         Effect.gen(function* () {
           const outcome = yield* Effect.result(
-            fixture.agent.invoke({ agent: "drafter", prompt: "hello", session: Option.none() }),
+            fixture.agent.invoke({
+              ...fixture.selection,
+              agent: "drafter",
+              prompt: "hello",
+              session: Option.none(),
+            }),
           );
 
           expect(Result.isFailure(outcome)).toBe(true);
@@ -429,6 +425,7 @@ describe("a real answer that does not decode, and the correction that repairs it
                 turns += 1;
                 const answer = yield* fixture.agent
                   .invoke({
+                    ...fixture.selection,
                     agent: "drafter",
                     prompt: Option.getOrElse(correction, () => "Make the note say goodbye."),
                     session,

@@ -49,7 +49,7 @@ const agent = Flag.choice("agent", agentSpellings).pipe(
 const model = Flag.string("model").pipe(
   Flag.withDescription("The model every agent in the stamped roster is given"),
   Flag.withFallbackPrompt(
-    Prompt.text({ message: "Which model? (you can change it per agent in kojo.config.yaml)" }),
+    Prompt.text({ message: "Which model? (you can change it at each agent call)" }),
   ),
 );
 

@@ -9,6 +9,7 @@ import { EnvelopeBase } from "../../../../../../src/contexts/workflow/models/Env
 import { EnvelopeParseError } from "../../../../../../src/contexts/workflow/models/EnvelopeParseError.ts";
 import { agent } from "../../../../../../src/contexts/workflow/services/phase/agent.ts";
 import { workflow } from "../../../../../../src/contexts/workflow/services/workflow.ts";
+import { agentSelection } from "../../../../../support/agentSelection.ts";
 import { layer as inMemoryExecutionServices } from "../../../../../support/InMemoryExecutionServices.ts";
 import {
   inMemoryWorkflowEngine,
@@ -47,6 +48,7 @@ const triage = workflow(
   (payload) =>
     Effect.gen(function* () {
       const route = yield* agent({
+        ...agentSelection,
         name: "route",
         description: "Read the ticket and pick the lane it belongs in",
         agent: "router",
@@ -55,6 +57,7 @@ const triage = workflow(
       });
 
       const scouted = yield* agent({
+        ...agentSelection,
         name: "scout",
         description: "Find what the ticket touches before anything is changed",
         agent: "scout",
@@ -63,6 +66,7 @@ const triage = workflow(
       });
 
       const hotfixed = yield* agent({
+        ...agentSelection,
         name: "hotfix",
         description: "Write the fix the scout's findings point at",
         agent: "hotfixer",

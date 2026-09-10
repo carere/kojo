@@ -20,6 +20,7 @@ import { code } from "../../../../../../src/contexts/workflow/services/phase/cod
 import { gate } from "../../../../../../src/contexts/workflow/services/phase/gate.ts";
 import { sandboxed } from "../../../../../../src/contexts/workflow/services/sandboxed.ts";
 import { workflow } from "../../../../../../src/contexts/workflow/services/workflow.ts";
+import { agentSelection } from "../../../../../support/agentSelection.ts";
 import {
   buildInfoLayer,
   layer as inMemoryExecutionServices,
@@ -84,6 +85,7 @@ const survey = workflow(
         Effect.gen(function* () {
           yield* step("compile");
           return yield* agent({
+            ...agentSelection,
             name: "scout",
             description: "Say what is in the container",
             agent: "scout",

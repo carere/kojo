@@ -135,11 +135,11 @@ export const resource = workflow(
         ? [{ type: "session_id", sessionId: line.slice(9) }]
         : line.trim() === "" ? [] : [{ type: "text", text: line + "\\n" }],
     });
-    const agents = SandcastleAgentInvoker.fromConfig({ config: ".kojo/kojo.config.yaml", provider });
+    const agents = SandcastleAgentInvoker.layer;
     const Answer = Schema.Struct({ answer: Schema.String });
 
     const run = yield* CurrentRun;
-    const invoke = (name: string) => agent({ name, description: "Run only the controlled executable", agent: "controlled", prompt: "answer", envelope: Answer }).pipe(
+    const invoke = (name: string) => agent({ name, description: "Run only the controlled executable", agent: "controlled", model: "controlled", provider, system: "Controlled system", prompt: "answer", envelope: Answer }).pipe(
       Effect.map((answer) => answer.answer),
       Effect.tapError((cause) => Effect.sync(() => event({ event: "agent-fault", cause }))),
     );

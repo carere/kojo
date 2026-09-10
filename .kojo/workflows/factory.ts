@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import * as SandcastleAgentInvoker from "@carere/kojo-runtime/contexts/agent/adapters/SandcastleAgentInvoker";
 // This file is Kojo's own factory, and it is the one used to develop Kojo.
 //
 // Start it with `kojo workflow start <project-id> factory --payload '{"request":"..."}'`.
@@ -19,7 +21,6 @@
 //    branch below is *read in a phase* rather than read here.
 
 import { AgentInvocationError } from "@carere/kojo-runtime/contexts/agent/models/AgentInvocationError";
-import { RosterError } from "@carere/kojo-runtime/contexts/agent/models/RosterError";
 import { GateExpired } from "@carere/kojo-runtime/contexts/gate/models/GateExpired";
 import { GateRejected } from "@carere/kojo-runtime/contexts/gate/models/GateRejected";
 import { GateUnreachable } from "@carere/kojo-runtime/contexts/gate/models/GateUnreachable";
@@ -103,7 +104,6 @@ const failures = Schema.Union([
   MergeRefused,
   NotAccepted,
   PermissionBreach,
-  RosterError,
   SandboxError,
   WorkspaceError,
   WorkspaceUnreachable,
@@ -215,7 +215,13 @@ export const factory = workflow(
             name: "route",
             description: "Read the request and name the lane that fits it",
             agent: "router",
-            prompt: payload.request,
+            model: "claude-sonnet-4-6",
+            provider: SandcastleAgentInvoker.claude,
+            system: readFileSync(new URL("../prompts/router/system.md", import.meta.url), "utf8"),
+            prompt:
+              readFileSync(new URL("../prompts/router/user.md", import.meta.url), "utf8") +
+              "\n\n" +
+              payload.request,
             envelope: Routed,
             // No checks. The decoder already refuses any lane that is not one of the three, and a
             // check that re-asserted it would grade nothing. See `envelopes.ts`.

@@ -83,6 +83,19 @@ describe("standalone Project validation", () => {
     expect(existsSync(join(fixture.root, ".kojo", "data"))).toBe(false);
   });
 
+  it("accepts a Workflow without a roster or helper modules", async () => {
+    const fixture = await project();
+    for (const name of ["kojo.config.yaml", "commands.ts", "envelopes.ts"]) {
+      await rm(join(fixture.root, ".kojo", name));
+    }
+    await writeFile(
+      join(fixture.root, ".kojo", "factory.json"),
+      JSON.stringify({ formatVersion: 1, assets: [] }),
+    );
+    const diagnostics = await Effect.runPromise(standaloneValidation(fixture.root));
+    expect(diagnostics.filter((finding) => finding.standing === "failed")).toEqual([]);
+  });
+
   it("diagnoses a missing Project runtime without a Daemon", async () => {
     const root = await mkdtemp(join(tmpdir(), "kojo-validator-missing-"));
     roots.push(root);

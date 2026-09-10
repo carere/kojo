@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import * as SandcastleAgentInvoker from "@carere/kojo-runtime/contexts/agent/adapters/SandcastleAgentInvoker";
 // This file is Kojo's own.
 //
 // The hotfix lane: something is already broken, and waiting is the expensive part.
@@ -69,7 +71,13 @@ export const hotfix = (options: {
           name: "fix",
           description: "Write the smallest change that resolves the break",
           agent: "fixer",
-          prompt: options.request,
+          model: "claude-opus-4-8",
+          provider: SandcastleAgentInvoker.claude,
+          system: readFileSync(new URL("../../prompts/fixer/system.md", import.meta.url), "utf8"),
+          prompt:
+            readFileSync(new URL("../../prompts/fixer/user.md", import.meta.url), "utf8") +
+            "\n\n" +
+            options.request,
           envelope: Built,
           checks: builtChecks,
         }),
@@ -127,17 +135,26 @@ export const hotfix = (options: {
                 name: "revise",
                 description: "Address the maintainer's objection",
                 agent: "fixer",
+                model: "claude-opus-4-8",
+                provider: SandcastleAgentInvoker.claude,
+                system: readFileSync(
+                  new URL("../../prompts/fixer/system.md", import.meta.url),
+                  "utf8",
+                ),
                 // The objection, and what the agent is being objected to. Both, because this call is
                 // **cold**: `session` is what would make a revision one message rather than a fresh
                 // start — give `Built` a field for the session the invoker returned and thread it
                 // through here — and until that exists the previous answer has to travel in the text
                 // or the fixer is asked to address a complaint about work it cannot see.
-                prompt: [
-                  verdict.reason,
-                  "",
-                  `Your previous answer was: ${fix.summary}`,
-                  `It changed: ${fix.changedFiles.join(", ")}`,
-                ].join("\n"),
+                prompt:
+                  readFileSync(new URL("../../prompts/fixer/user.md", import.meta.url), "utf8") +
+                  "\n\n" +
+                  [
+                    verdict.reason,
+                    "",
+                    `Your previous answer was: ${fix.summary}`,
+                    `It changed: ${fix.changedFiles.join(", ")}`,
+                  ].join("\n"),
                 envelope: Built,
                 checks: builtChecks,
               }),

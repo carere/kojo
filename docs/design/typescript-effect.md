@@ -42,3 +42,19 @@ or export failures. They are not compatibility redirects.
 
 The package graph has no barrels. Type declarations must not leak `Effect<any, any, any>`. Knip
 must report no dead compatibility surface.
+
+## Agent selection at the call
+
+Each `agent(...)` call supplies an agent label, `model`, `provider`, `system`, and `prompt`.
+The label identifies the work. It does not select an entry from a roster. The provider function
+receives the call definition and returns a Sandcastle agent provider. For example,
+`SandcastleAgentInvoker.claude` selects Claude Code with the call's model. A Factory can use
+`(definition) => kojoPi(definition)` for pi, or a different provider for another call.
+
+Provide `SandcastleAgentInvoker.layer` inside the sandbox scope. Session capabilities depend on
+both the selected provider and that Sandbox. A correction reuses the call's provider and model.
+
+System and user prompts can stay in separate files. The authored Workflow reads them and builds
+the user task explicitly. The runtime adds the answer schema to the task. The generated examples
+show these reads beside the call. A Factory does not need `kojo.config.yaml`. `commands.ts` and
+`envelopes.ts` are optional helper modules; when present, the validator checks their contracts.

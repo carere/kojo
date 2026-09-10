@@ -81,8 +81,6 @@ export const diagnose = (options: {
         }),
         factoryFinding({
           directory: yield* exists(at()),
-          config: yield* exists(at("kojo.config.yaml")),
-          commands: yield* exists(at("commands.ts")),
           workflows,
         }),
         dependencyFinding({

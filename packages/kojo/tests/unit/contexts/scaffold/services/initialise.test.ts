@@ -35,7 +35,7 @@ describe("stamping a factory into a repository", () => {
       const { initialised, files, directories } = yield* run(request());
 
       expect(initialised.stamped.every((file) => file.outcome === "created")).toBe(true);
-      expect(files.has("/repo/.kojo/kojo.config.yaml")).toBe(true);
+      expect(files.has("/repo/.kojo/kojo.config.yaml")).toBe(false);
       expect(files.has("/repo/.kojo/workflows/review.ts")).toBe(true);
       expect(files.has("/repo/.kojo/prompts/drafter/system.md")).toBe(true);
       expect(directories.has("/repo/.kojo/data")).toBe(false);

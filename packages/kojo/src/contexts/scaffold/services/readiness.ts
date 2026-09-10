@@ -40,8 +40,6 @@ export const repositoryFinding = (evidence: RepositoryEvidence): Finding => {
 
 export interface FactoryEvidence {
   readonly directory: boolean;
-  readonly config: boolean;
-  readonly commands: boolean;
   readonly workflows: ReadonlyArray<string>;
 }
 
@@ -49,8 +47,6 @@ export const factoryFinding = (evidence: FactoryEvidence): Finding => {
   if (!evidence.directory)
     return failed("factory", `no \`${factoryDirectory}/\` here`, "Run `kojo init` to stamp one.");
   const missing = [
-    ...(evidence.config ? [] : ["kojo.config.yaml"]),
-    ...(evidence.commands ? [] : ["commands.ts"]),
     ...(evidence.workflows.length === 0 ? [`${workflowsDirectory}/ holds no Workflow`] : []),
   ];
   return missing.length === 0

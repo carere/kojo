@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import * as SandcastleAgentInvoker from "@carere/kojo-runtime/contexts/agent/adapters/SandcastleAgentInvoker";
 // This file is Kojo's own.
 //
 // The feature lane: new behaviour, or a change to behaviour that somebody will have to understand
@@ -62,7 +64,13 @@ export const feature = (options: {
           name: "plan",
           description: "Write down how this will be made, before anybody makes it",
           agent: "planner",
-          prompt: options.request,
+          model: "claude-opus-4-8",
+          provider: SandcastleAgentInvoker.claude,
+          system: readFileSync(new URL("../../prompts/planner/system.md", import.meta.url), "utf8"),
+          prompt:
+            readFileSync(new URL("../../prompts/planner/user.md", import.meta.url), "utf8") +
+            "\n\n" +
+            options.request,
           envelope: Planned,
           checks: plannedChecks,
         }),
@@ -95,13 +103,19 @@ export const feature = (options: {
           name: "build",
           description: "Build what the plan describes",
           agent: "builder",
-          prompt: [
-            options.request,
-            "",
-            `The plan is at: ${plan.artifacts.join(", ")}`,
-            "",
-            `The planner's own summary of it: ${plan.approach}`,
-          ].join("\n"),
+          model: "claude-opus-4-8",
+          provider: SandcastleAgentInvoker.claude,
+          system: readFileSync(new URL("../../prompts/builder/system.md", import.meta.url), "utf8"),
+          prompt:
+            readFileSync(new URL("../../prompts/builder/user.md", import.meta.url), "utf8") +
+            "\n\n" +
+            [
+              options.request,
+              "",
+              `The plan is at: ${plan.artifacts.join(", ")}`,
+              "",
+              `The planner's own summary of it: ${plan.approach}`,
+            ].join("\n"),
           envelope: Built,
           checks: builtChecks,
         }),

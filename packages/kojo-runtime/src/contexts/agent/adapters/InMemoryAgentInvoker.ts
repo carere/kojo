@@ -93,7 +93,7 @@ export const layer = (
             (answer) =>
               new AgentAnswer({
                 agent: call.agent,
-                model: answer.model ?? "scripted",
+                model: answer.model ?? call.model,
                 session: Option.getOrElse(call.session, () => {
                   opened += 1;
                   return `${call.agent}-session-${opened}` as AgentSessionId;
@@ -111,6 +111,6 @@ export const layer = (
         );
       };
 
-      return { capabilities, invoke } satisfies AgentInvoker["Service"];
+      return { capabilities: () => capabilities, invoke } satisfies AgentInvoker["Service"];
     }),
   );
