@@ -497,6 +497,31 @@ describe("real CLI process over the private Daemon transport", () => {
     expect(lines.map((line) => line.run.state)).toEqual(["suspended", "succeeded"]);
   });
 
+  it("distinguishes stopping Workflow activity from cancelling one admitted Run", async () => {
+    const test = await fixture();
+    const stopped = await runCli(test.root, ["workflow", "stop", "project-a", "compile"]);
+    expect(stopped.status, stopped.stderr).toBe(0);
+    expect(stopped.stdout).toContain("admitted Runs remain eligible");
+    const retained = await runCli(test.root, ["run", "status", test.following, "--json"]);
+    expect(retained.status, retained.stderr).toBe(0);
+    expect(JSON.parse(retained.stdout).run.state).toBe("suspended");
+    const cancelled = await runCli(test.root, [
+      "run",
+      "cancel",
+      test.following,
+      "--wait",
+      "--timeout",
+      "5s",
+      "--json",
+    ]);
+    expect(cancelled.status, cancelled.stderr).toBe(0);
+    const inspected = await runCli(test.root, ["run", "status", test.following, "--json"]);
+    expect(inspected.status, inspected.stderr).toBe(0);
+    expect(JSON.parse(inspected.stdout).run.state).toBe("cancelled");
+    const other = await runCli(test.root, ["run", "status", test.succeeded, "--json"]);
+    expect(JSON.parse(other.stdout).run.state).toBe("succeeded");
+  });
+
   it("returns exact usage, failure, wait-timeout, and success exits from real processes", async () => {
     const test = await fixture();
     const conflict = await runCli(test.root, [

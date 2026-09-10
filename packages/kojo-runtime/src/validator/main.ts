@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { readdir, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { Effect, Layer, Schema } from "effect";
+import { Effect, Layer, Result, Schema } from "effect";
 import { contractSchema } from "../contexts/agent/services/renderPrompt.ts";
 import { isPlaceholder } from "../contexts/workflow/models/Placeholder.ts";
 
@@ -234,9 +234,21 @@ const workflowDiagnostic = async (factory: string): Promise<ReadonlyArray<Projec
       const decoded = await Effect.runPromise(
         Schema.decodeEffect(schema as unknown as Schema.Codec<unknown, unknown, never, never>)({
           [field]: "kojo doctor",
-        }),
+        }).pipe(Effect.result),
       );
-      const key = (definition.idempotencyKey as (value: unknown) => unknown)(decoded);
+      // This probe is not authored input. Rejection of a string says nothing about a valid
+      // structured, numeric, or refined payload. Admission validates the real payload and key.
+      if (Result.isFailure(decoded)) {
+        diagnostics.push({
+          ...ok(
+            `workflow:${name}`,
+            "declaration and Layer are valid; payload and key are checked at Run admission",
+          ),
+          triggerDeclared,
+        });
+        continue;
+      }
+      const key = (definition.idempotencyKey as (value: unknown) => unknown)(decoded.success);
       if (typeof key !== "string") throw new Error("the idempotency key is not a string");
       diagnostics.push({
         ...ok(`workflow:${name}`, "declaration, Layer, payload, and key are valid"),
